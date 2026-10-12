@@ -1,8 +1,9 @@
-//! `exm chat` 交互面板 —— 终端最简形态（区别于桌面端与 WebUI）
+//! `exm`（裸命令）/ `exm chat` 交互面板 —— 终端最简形态（区别于桌面端与 WebUI）
 //!
-//! 版式与主流 Agent CLI 对齐：**字符画横幅 → 运行信息面板 → 对话流 → 输入框**。
-//! 本形态刻意保持零图形、零额外依赖：所有设置与运维动作都通过 `/` 命令完成
-//! （会话 / 交互目标 / 编成 / 模型 / 配置 / 记忆 / 技能 / 定时 / 审批 / 检查点 / 体检）。
+//! 版式三段：**字符画横幅 → 输入框 → 输入框下一行小字摘要**；完整运行状态不常驻，
+//! 由 `/status` 按需调出。本形态刻意保持零图形、零额外依赖：所有设置与运维动作都通过
+//! `/` 命令完成（会话 / 交互目标 / 编成 / 模型 / 配置 / 记忆 / 技能 / 定时 / 审批 /
+//! 检查点 / 体检）。
 //!
 //! 命令实现直接复用既有 CLI 子命令函数（`group_cmd` / `platform_cmd` / `memory_cmd` /
 //! `persona_cmd` / `config_cmd` / `doctor`），保证面板与命令行口径完全一致。
@@ -187,7 +188,7 @@ impl Panel {
         println!(
             "  {}",
             dim(format!(
-                "群体协作智能体系统   v{VERSION}   ｜   终端面板（最简形态）"
+                "群体协作智能体系统   v{VERSION}   ｜   /help 查看命令"
             ))
         );
         println!();
@@ -301,7 +302,9 @@ impl Panel {
         }
     }
 
-    /// 常驻状态栏：按面板宽度**自适应装填**芯片（装不下就丢弃靠后的），保证永不换行
+    /// 输入框下方的小字摘要行：常驻的唯一信息面，按面板宽度自适应装填芯片。
+    ///
+    /// 完整运行状态不常驻（那会占掉大半个屏），要看用 `/status`。
     fn print_status_bar(&self, core: &Arc<Core>, state: &PanelState) {
         let cfg = core.config();
         let reg = core.registry();
@@ -330,7 +333,8 @@ impl Panel {
         let sep = dim(" │ ");
         let kept = fit_chips(candidates.to_vec(), self.width, disp_width(&sep));
         if !kept.is_empty() {
-            println!("{}", kept.join(&sep));
+            // 整行压暗：这是脚注性质的补充信息，不该抢输入框的视觉重心
+            println!("  {}", dim(kept.join(&sep)));
         }
     }
 
@@ -351,10 +355,6 @@ impl Panel {
 
     fn print_input_bottom(&self) {
         println!("{}", self.rule_bottom());
-    }
-
-    fn echo_user(&self, text: &str) {
-        println!("{} {}", self.accent_bold("❯"), text);
     }
 
     fn print_round_footer(&self, core: &Arc<Core>, state: &PanelState, ms: u64) {
@@ -411,9 +411,9 @@ impl Panel {
             }
             "workspace" | "pwd" => println!("{}", self.workspace.display()),
             "clear" | "cls" => {
+                // 只重绘横幅：常驻版式里没有状态面板，别把它又请回来
                 self.clear();
                 self.print_banner();
-                self.print_status(core, state);
             }
             "status" => self.print_status(core, state),
             "quiet" => {
@@ -1085,7 +1085,8 @@ fn spawn_interrupt_listener(core: Arc<Core>, itr: Arc<Interrupt>) {
     });
 }
 
-/// 非交互版式预览：只渲染横幅 + 信息面板 + 输入框，用于确认终端渲染与 ANSI 支持
+/// 非交互版式预览：只渲染横幅 + 输入框 + 小字摘要，用于确认终端渲染与 ANSI 支持。
+/// 完整运行状态面板刻意不在此渲染——它由 `/status` 按需调出。
 pub fn run_preview(core: &Arc<Core>, quiet: bool) -> anyhow::Result<()> {
     let workspace = core.config().workspace_root.clone();
     let panel = Panel::new(workspace, prefs_root(core), quiet);
@@ -1096,17 +1097,18 @@ pub fn run_preview(core: &Arc<Core>, quiet: bool) -> anyhow::Result<()> {
         session_title: session.title.clone(),
         turns: 0,
     };
-    panel.print_status(core, &state);
-    println!("{}", dim(" 输入任务直接对话；所有设置走 / 命令（/help 查看）。"));
-    println!();
-    panel.print_status_bar(core, &state);
     panel.print_input_top();
     println!("{} {}", panel.prompt(), dim("（此处输入任务，Enter 发送）"));
     panel.print_input_bottom();
+    panel.print_status_bar(core, &state);
     println!();
     println!(
         "{}",
-        dim("—— 版式预览结束（未进入交互）；直接运行 `exm chat` 进入面板。")
+        dim("—— 版式预览结束（未进入交互）")
+    );
+    println!(
+        "{}",
+        dim("  `exm` / `exmachina` 裸命令即进面板；完整运行状态用 /status 调出。")
     );
     // 预览用会话立即清理，不留垃圾
     let _ = core.delete_session(&session.id);
@@ -1135,29 +1137,31 @@ pub async fn run_panel(core: Arc<Core>, quiet: bool) -> anyhow::Result<()> {
         session_title: session.title.clone(),
         turns: 0,
     };
-    panel.print_status(&core, &state);
-    println!("{}", dim(" 输入任务直接对话；所有设置走 / 命令（/help 查看）。"));
+    // 版式刻意保持最简：字符画横幅 → 输入框 → 输入框下一行小字摘要。
+    // 完整运行状态不常驻，要看得用 /status（与 /clear 重绘同理）。
 
     let itr = Arc::new(Interrupt::new(&state.session_id));
     spawn_interrupt_listener(core.clone(), itr.clone());
 
     let stdin = std::io::stdin();
     loop {
-        println!();
-        panel.print_status_bar(&core, &state);
         panel.print_input_top();
         print!("{}", panel.prompt());
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         if stdin.lock().read_line(&mut line)? == 0 {
-            println!();
+            // Ctrl+D / EOF：收口输入框与信息行
             panel.print_input_bottom();
+            panel.print_status_bar(&core, &state);
+            println!();
             break;
         }
-        println!();
+        // 输入内容已由终端回显在框内，无需再 echo 一遍
         panel.print_input_bottom();
+        panel.print_status_bar(&core, &state);
         let text = line.trim().to_string();
         if text.is_empty() {
+            println!();
             continue;
         }
         if text.starts_with('/') {
@@ -1168,10 +1172,9 @@ pub async fn run_panel(core: Arc<Core>, quiet: bool) -> anyhow::Result<()> {
                 }
                 Err(e) => println!("{} {}", err("命令失败："), e),
             }
+            println!();
             continue;
         }
-        panel.echo_user(&text);
-        println!();
         let started = std::time::Instant::now();
         itr.busy.store(true, Ordering::SeqCst);
         let result = chat::run_round(&core, &state.session_id, &text, panel.quiet).await;
