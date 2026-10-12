@@ -11,15 +11,11 @@
   <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-dark.svg">
   <img src="./docs/logo.svg" alt="EXMACHINA" width="132" height="132">
 </picture>
-
-```text
-███████╗  ██╗  ██╗  ███╗   ███╗   █████╗    ██████╗  ██╗  ██╗  ██╗  ███╗   ██╗   █████╗ 
-██╔════╝  ╚██╗██╔╝  ████╗ ████║  ██╔══██╗  ██╔════╝  ██║  ██║  ██║  ████╗  ██║  ██╔══██╗
-█████╗     ╚███╔╝   ██╔████╔██║  ███████║  ██║       ███████║  ██║  ██╔██╗ ██║  ███████║
-██╔══╝     ██╔██╗   ██║╚██╔╝██║  ██╔══██║  ██║       ██╔══██║  ██║  ██║╚██╗██║  ██╔══██║
-███████╗  ██╔╝ ██╗  ██║ ╚═╝ ██║  ██║  ██║  ╚██████╗  ██║  ██║  ██║  ██║ ╚████║  ██║  ██║
-╚══════╝  ╚═╝  ╚═╝  ╚═╝     ╚═╝  ╚═╝  ╚═╝   ╚═════╝  ╚═╝  ╚═╝  ╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝
-```
+<br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/wordmark-dark.svg">
+  <img src="./docs/wordmark.svg" alt="EXMACHINA" width="600">
+</picture>
 
 ![阶段](https://img.shields.io/badge/%E9%98%B6%E6%AE%B5-%E5%BC%80%E5%8F%91%E4%B8%AD%20%7C%20pre--alpha-orange)
 ![Rust](https://img.shields.io/badge/Rust-stable-dea584?logo=rust&logoColor=white)
