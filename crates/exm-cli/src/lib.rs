@@ -32,8 +32,9 @@ struct Cli {
     #[arg(long, global = true, default_value = ".")]
     workspace: PathBuf,
 
+    /// 子命令可省略：`exm` / `exmachina` 裸命令即进入终端交互面板
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -46,7 +47,7 @@ enum Commands {
     },
     /// 体检：配置 / 编成 / 记忆 / 通道 / WebUI
     Doctor,
-    /// 与指挥体对话（进程内直挂 core）
+    /// 与指挥体对话（进程内直挂 core）；省略子命令时裸命令等价于 `exm chat`
     Chat {
         /// 任务输入；缺省进入终端交互面板（TTY：横幅 + 对话流 + 输入框 + `/` 命令）
         text: Option<String>,
@@ -461,7 +462,14 @@ pub fn run() -> anyhow::Result<()> {
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace.clone();
-    match cli.command {
+    // 裸命令 `exm` / `exmachina` 等价于 `exm chat`（无参数）：直接进终端交互面板
+    let command = cli.command.unwrap_or(Commands::Chat {
+        text: None,
+        session: None,
+        quiet: false,
+        preview: false,
+    });
+    match command {
         Commands::Install { quick } => {
             let root = normalize_root(&workspace);
             install::run_install(&root, quick)
