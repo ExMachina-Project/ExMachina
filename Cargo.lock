@@ -562,6 +562,7 @@ dependencies = [
  "exm-core",
  "exm-gateway",
  "owo-colors",
+ "serde",
  "serde_json",
  "tokio",
 ]
