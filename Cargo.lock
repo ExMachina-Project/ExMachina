@@ -555,20 +555,21 @@ dependencies = [
 
 [[package]]
 name = "exm-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
  "exm-core",
  "exm-gateway",
  "owo-colors",
+ "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
 name = "exm-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -594,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "exm-gateway"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
