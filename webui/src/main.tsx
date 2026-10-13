@@ -3,51 +3,87 @@ import { createRoot } from "react-dom/client";
 import { ConfigProvider, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import App from "./App";
-import { accentOf, useTheme } from "./theme";
+import { accentColor, themeOf, useTheme, type ThemeKey } from "./theme";
 import "./styles.css";
 
+/** antd 原生 token 表：与 styles.css 的色阶同源，避免 antd 件与自绘面板两种底色。
+ *  antd token 无法直接读 CSS 变量，因此这里按主题硬编码一份（与 CSS 里的色阶保持一致）。 */
+const ANTD_TOKENS: Record<ThemeKey, Record<string, string>> = {
+  midnight: {
+    colorBgBase: "#0a0b0f",
+    colorBgContainer: "#101218",
+    colorBgElevated: "#171a22",
+    colorBgLayout: "#0a0b0f",
+    colorBorder: "#232936",
+    colorBorderSecondary: "#1e222c",
+    colorText: "#d4dae5",
+    colorTextSecondary: "#8b95a7",
+    colorTextTertiary: "#5c6678",
+    colorSuccess: "#34d399",
+    colorWarning: "#fbbf24",
+    colorError: "#f87171",
+  },
+  minimal: {
+    colorBgBase: "#fafafa",
+    colorBgContainer: "#ffffff",
+    colorBgElevated: "#ffffff",
+    colorBgLayout: "#fafafa",
+    colorBorder: "#d4d4d8",
+    colorBorderSecondary: "#e4e4e7",
+    colorText: "#3f3f46",
+    colorTextSecondary: "#71717a",
+    colorTextTertiary: "#a1a1aa",
+    colorSuccess: "#059669",
+    colorWarning: "#b45309",
+    colorError: "#dc2626",
+  },
+  graphite: {
+    colorBgBase: "#18181b",
+    colorBgContainer: "#1f1f23",
+    colorBgElevated: "#27272a",
+    colorBgLayout: "#18181b",
+    colorBorder: "#3f3f46",
+    colorBorderSecondary: "#2e2e33",
+    colorText: "#d4d4d8",
+    colorTextSecondary: "#a1a1aa",
+    colorTextTertiary: "#71717a",
+    colorSuccess: "#4ade80",
+    colorWarning: "#fbbf24",
+    colorError: "#f87171",
+  },
+};
+
 function Root(): React.ReactElement {
+  const preset = useTheme((s) => s.preset);
   const accent = useTheme((s) => s.accent);
-  const color = accentOf(accent).color;
-  document.documentElement.dataset.theme = accent;
+  const mode = themeOf(preset).mode;
+  const color = accentColor(preset, accent);
+  const tokens = ANTD_TOKENS[preset];
   return (
     <ConfigProvider
       locale={zhCN}
       theme={{
-        algorithm: antdTheme.darkAlgorithm,
+        algorithm: mode === "light" ? antdTheme.defaultAlgorithm : antdTheme.darkAlgorithm,
         token: {
-          // 扁平化科技感：纯黑底 + 纯色强调 —— 全部纯色，零渐变零辉光
-          // （bg/text 与 styles.css 的 HUD 变量同源，避免 antd 件与面板底色两种黑）
+          // 高级极简：克制的纯色强调 + 中性色阶 + 统一圆角/阴影/动效节奏
           colorPrimary: color,
           colorInfo: color,
-          colorBgBase: "#000000",
-          colorBgContainer: "#020c0e",
-          colorBgElevated: "#04161a",
-          colorBgLayout: "#000000",
-          colorBorder: "#0a4a4d",
-          colorBorderSecondary: "#0a4a4d",
-          colorText: "#d9e4e7",
-          // 与 styles.css 的 --muted 保持一致（antd token 无法直接读 CSS 变量）
-          colorTextSecondary: "#8a9aa0",
-          colorTextTertiary: "#5a6a72",
           colorLink: color,
-          colorSuccess: "#00e676",
-          colorWarning: "#ffea00",
-          colorError: "#ff1744",
-          // 直角纪律：所有 antd 组件圆角归零，精致感交给 1px 边框/明度差/动效
-          borderRadius: 0,
-          borderRadiusLG: 0,
-          borderRadiusSM: 0,
-          borderRadiusXS: 0,
-          borderRadiusOuter: 0,
-          // 动效令牌：快进慢出（仪表指针质感），全局统一节奏
+          ...tokens,
+          // 圆角纪律：全局统一 8px，小件 6px，浮层 12px
+          borderRadius: 8,
+          borderRadiusLG: 12,
+          borderRadiusSM: 6,
+          borderRadiusXS: 4,
+          borderRadiusOuter: 10,
+          // 动效令牌：快进慢出，全局统一节奏
           motionDurationFast: "0.12s",
           motionDurationMid: "0.2s",
-          motionDurationSlow: "0.32s",
+          motionDurationSlow: "0.3s",
           motionEaseOut: "cubic-bezier(0.22, 1, 0.36, 1)",
           motionEaseInOut: "cubic-bezier(0.65, 0, 0.35, 1)",
           fontFamily:
-            '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+            '"Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif',
         },
       }}
     >
