@@ -24,7 +24,7 @@ import {
 import { api } from "./api";
 import { useExm } from "./store";
 import { LANGS, useLang, useT, type TKey } from "./i18n/core";
-import { ACCENTS, accentOf, useTheme } from "./theme";
+import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
 import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
@@ -126,6 +126,8 @@ export default function App(): React.ReactElement {
   const init = useExm((s) => s.init);
   const accent = useTheme((s) => s.accent);
   const setAccent = useTheme((s) => s.setAccent);
+  const preset = useTheme((s) => s.preset);
+  const setPreset = useTheme((s) => s.setPreset);
   const initial = parseHash();
   const [view, setViewState] = useState<ViewKey>(initial.view);
   /** 切视图并同步 hash（app-shell-routing） */
@@ -155,6 +157,7 @@ export default function App(): React.ReactElement {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const [themeOpen, setThemeOpen] = useState(false);
+  const [accentOpen, setAccentOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   /** 移动端侧栏抽屉（≤860px 时侧栏覆盖呈现） */
   const [navOpen, setNavOpen] = useState(false);
@@ -235,9 +238,7 @@ export default function App(): React.ReactElement {
             <span className="brand-led" />
             <span className="brand-name">EX·MACHINA</span>
           </div>
-          <div className="brand-sub">
-            {t("brand.sub")}<span className="cursor-blink">▊</span>
-          </div>
+          <div className="brand-sub">{t("brand.sub")}</div>
         </div>
         <Menu
           mode="inline"
@@ -259,13 +260,41 @@ export default function App(): React.ReactElement {
           }}
         />
         <AsciiDivider className="sider-divider" />
+        {/* 主题预设：决定明暗与中性色阶 */}
         <div className={`theme-switcher ${themeOpen ? "open" : ""}`}>
           <button className="theme-toggle" onClick={() => setThemeOpen(!themeOpen)}>
             <span className="theme-label">{t("theme.label")}</span>
-            <span className="theme-current" style={{ color: accentOf(accent).color }}>
+            <span className="theme-current">{t(`theme.preset.${preset}` as TKey)}</span>
+            <span className={`theme-caret ${themeOpen ? "up" : ""}`}>▸</span>
+          </button>
+          <div className="theme-panel">
+            {THEMES.map((th) => (
+              <button
+                key={th.key}
+                className={`theme-option ${preset === th.key ? "active" : ""}`}
+                onClick={() => {
+                  setPreset(th.key as ThemeKey);
+                  setThemeOpen(false);
+                }}
+              >
+                <span
+                  className="theme-swatch"
+                  style={{ background: th.mode === "light" ? "#ffffff" : "#101218" }}
+                />
+                <span>{t(`theme.preset.${th.key}` as TKey)}</span>
+                <span className="label-en">[{th.key.toUpperCase()}]</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        {/* 强调色：交互与状态点缀（同一键在不同主题下取不同明度） */}
+        <div className={`theme-switcher ${accentOpen ? "open" : ""}`}>
+          <button className="theme-toggle" onClick={() => setAccentOpen(!accentOpen)}>
+            <span className="theme-label">{t("theme.accentLabel")}</span>
+            <span className="theme-current" style={{ color: accentColor(preset, accent) }}>
               {t(`theme.accent.${accent}` as TKey)}
             </span>
-            <span className={`theme-caret ${themeOpen ? "up" : ""}`}>▸</span>
+            <span className={`theme-caret ${accentOpen ? "up" : ""}`}>▸</span>
           </button>
           <div className="theme-panel">
             {ACCENTS.map((a) => (
@@ -274,10 +303,10 @@ export default function App(): React.ReactElement {
                 className={`theme-option ${accent === a.key ? "active" : ""}`}
                 onClick={() => {
                   setAccent(a.key);
-                  setThemeOpen(false);
+                  setAccentOpen(false);
                 }}
               >
-                <span className="theme-swatch" style={{ background: a.color }} />
+                <span className="theme-swatch" style={{ background: accentColor(preset, a.key) }} />
                 <span>{t(`theme.accent.${a.key}` as TKey)}</span>
                 <span className="label-en">[{a.key.toUpperCase()}]</span>
               </button>

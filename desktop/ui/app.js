@@ -194,6 +194,62 @@ const sfx = (() => {
   };
 })();
 
+// ────────────────────────────── 主题：预设 + 强调色 ──────────────────────────────
+// 与 Web 控制台同一套语汇：预设写 <html data-theme>（CSS 接管色阶），
+// 强调色走内联 CSS 变量（--accent / --accent-rgb / --accent-fg）。均为本地偏好。
+const THEMES = [
+  { key: "midnight", mode: "dark", name: "精炼暗色", sub: "蓝调中性 · 高级暗色", preview: "#101218" },
+  { key: "minimal", mode: "light", name: "极简浅色", sub: "近白底 · 主流极简", preview: "#ffffff" },
+  { key: "graphite", mode: "dark", name: "极简暗色", sub: "中性石墨 · 无蓝调", preview: "#1f1f23" },
+];
+const ACCENTS = [
+  { key: "cyan", name: "电光青", colors: { midnight: "#22d3ee", minimal: "#0891b2", graphite: "#22d3ee" } },
+  { key: "blue", name: "靛蓝", colors: { midnight: "#7c8cff", minimal: "#2563eb", graphite: "#818cf8" } },
+  { key: "green", name: "翠绿", colors: { midnight: "#34d399", minimal: "#059669", graphite: "#4ade80" } },
+  { key: "red", name: "绯红", colors: { midnight: "#f87171", minimal: "#dc2626", graphite: "#f87171" } },
+  { key: "yellow", name: "琥珀", colors: { midnight: "#fbbf24", minimal: "#b45309", graphite: "#fbbf24" } },
+];
+const theme = (() => {
+  const presetOf = (k) => THEMES.find((t) => t.key === k) ?? THEMES[0];
+  const accentOf = (k) => ACCENTS.find((a) => a.key === k) ?? ACCENTS[0];
+  const load = (k, fb) => { try { return localStorage.getItem(k) ?? fb; } catch { return fb; } };
+  let preset = presetOf(load("exm.preset", "midnight")).key;
+  let accent = load("exm.accent", "");
+  if (!ACCENTS.some((a) => a.key === accent)) accent = preset === "graphite" ? "cyan" : "blue";
+
+  const apply = () => {
+    const root = document.documentElement;
+    const mode = presetOf(preset).mode;
+    const hex = accentOf(accent).colors[preset];
+    const n = parseInt(hex.slice(1), 16);
+    root.dataset.theme = preset;
+    root.dataset.mode = mode;
+    root.style.colorScheme = mode;
+    root.style.setProperty("--accent", hex);
+    root.style.setProperty("--accent-rgb", `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`);
+    root.style.setProperty("--accent-fg", mode === "light" ? "#ffffff" : "#0a0b0f");
+  };
+  apply();
+  return {
+    apply,
+    get preset() { return preset; },
+    get accent() { return accent; },
+    accentColor: (k) => accentOf(k).colors[preset],
+    setPreset(k) {
+      if (!THEMES.some((t) => t.key === k)) return;
+      preset = k;
+      try { localStorage.setItem("exm.preset", k); } catch { /* 忽略 */ }
+      apply();
+    },
+    setAccent(k) {
+      if (!ACCENTS.some((a) => a.key === k)) return;
+      accent = k;
+      try { localStorage.setItem("exm.accent", k); } catch { /* 忽略 */ }
+      apply();
+    },
+  };
+})();
+
 // ────────────────────────────── WS 事件流 ──────────────────────────────
 
 let ws = null;
@@ -495,42 +551,11 @@ liveEl.style.display = "none";
 // 几何唯一定义在 **mark.js**（400 口径，随 index.html 的 <head> 先于本文件加载），
 // 这里只消费全局的 markBody() / brandMark() / markBodyIn512() / fillMarks()，不再定义。
 //
-// 之所以把定义搬出去：本文件里曾写过两份（brandMark 与 captureDisc 各抄一份）、
+// 之所以把定义搬出去：本文件里曾写过两份（brandMark 与旧版捕获盘各抄一份）、
 // index.html 里又手抄一份，三份互相追不上，于是出过两次事故——
-//   · brandMark / captureDisc 的四弧整体偏了 10°，而标题栏、启动画面、图标都是正对的；
+//   · brandMark / 旧版捕获盘的四弧整体偏了 10°，而标题栏、启动画面、图标都是正对的；
 //   · index.html 那份把一条弧的终点抄错，顶部缺口整段糊没，徽记只剩三个缺口。
 // 结论：徽记只留一处定义，任何位置要画徽记都用 <span data-mark="尺寸">。
-
-/** 空态捕获盘：四弧徽记 + 径向刻度环 + 扫描扇 + 准星（HUD「目标捕获」母题的完整表达） */
-function captureDisc(size = 360) {
-  const P = (deg, r) => {
-    const a = ((deg - 90) * Math.PI) / 180;
-    return [256 + Math.cos(a) * r, 256 + Math.sin(a) * r];
-  };
-  let ticks = "";
-  for (let i = 0; i < 72; i++) {
-    const deg = i * 5, major = deg % 30 === 0;
-    const [x1, y1] = P(deg, 218), [x2, y2] = P(deg, major ? 240 : 230);
-    ticks += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke-width="${major ? 4 : 2}"/>`;
-  }
-  return `<svg class="mark-svg capture-disc" width="${size}" height="${size}" viewBox="0 0 512 512" aria-hidden="true">
-    <g fill="none" stroke="currentColor" opacity="0.9">
-      <circle cx="256" cy="256" r="218" stroke-width="2"/>
-      <circle cx="256" cy="256" r="188" stroke-width="1" stroke-dasharray="2 12" opacity="0.7"/>
-    </g>
-    <g class="ring-rot rev" fill="none" stroke="currentColor">${ticks}</g>
-    <g class="ring-rot" fill="none" stroke="currentColor">
-      <path d="M 256 256 L 256 38 A 218 218 0 0 1 365 62 Z" fill="currentColor" stroke="none" opacity="0.16"/>
-    </g>
-    <g fill="none" stroke="currentColor" opacity="0.85">
-      <line x1="256" y1="14" x2="256" y2="54" stroke-width="2"/>
-      <line x1="256" y1="458" x2="256" y2="498" stroke-width="2"/>
-      <line x1="14" y1="256" x2="54" y2="256" stroke-width="2"/>
-      <line x1="458" y1="256" x2="498" y2="256" stroke-width="2"/>
-    </g>
-    ${markBodyIn512()}
-  </svg>`;
-}
 
 // 列表 stagger 入场：递增延迟（默认 36ms，封顶 10 档——长列表尾部不拖尾，全部动画只走合成器）
 function staggerIn(els, { step = 36, cap = 10 } = {}) {
@@ -830,7 +855,7 @@ function welcomeEl() {
     : "未选定";
   el.innerHTML = `
     <div class="welcome-mark">${brandMark("", 360)}</div>
-    <div class="welcome-capture">${captureDisc(196)}</div>
+    <div class="welcome-capture">${brandMark("", 88)}</div>
     <h1>有什么可以帮你？</h1>
     <p>对话交由当前对象（智能体或智能体组）协作完成；侧栏「编码」进入工作台、「任务」看派发与台账</p>
     <div class="welcome-readout">
@@ -2371,6 +2396,53 @@ function approvalRow(it, refresh) {
 }
 
 // —— 版本：本机版本 + 更新检查 + 一键更新（映射里被引用但此前从未实现，这里补齐）——
+// —— 外观：主题预设 + 强调色（本地偏好，写入 localStorage，随 <html data-theme> 生效） ——
+function renderSetAppearance(body) {
+  const themeCard = setCard("主题");
+  themeCard.appendChild(Object.assign(document.createElement("div"), {
+    className: "set-hint",
+    textContent: "选择界面主题预设。精炼暗色为默认；极简浅色 / 极简暗色采用主流极简主义配色。",
+  }));
+  const grid = document.createElement("div");
+  grid.className = "theme-grid";
+  for (const th of THEMES) {
+    const card = document.createElement("button");
+    card.className = `theme-card${theme.preset === th.key ? " on" : ""}`;
+    const preview = document.createElement("div");
+    preview.className = "theme-card-preview";
+    preview.style.background = th.preview;
+    // 预览里放一枚强调色圆点，直观看到「该主题下的强调色」
+    const dot = document.createElement("span");
+    dot.style.cssText = `width:20px;height:20px;border-radius:999px;background:${ACCENTS.find((a) => a.key === theme.accent)?.colors[th.key] ?? "#7c8cff"}`;
+    preview.appendChild(dot);
+    card.appendChild(preview);
+    card.appendChild(Object.assign(document.createElement("div"), { className: "theme-card-name", textContent: th.name }));
+    card.appendChild(Object.assign(document.createElement("div"), { className: "theme-card-sub", textContent: th.sub }));
+    card.addEventListener("click", () => { sfx.play("click"); theme.setPreset(th.key); renderSettings(); });
+    grid.appendChild(card);
+  }
+  themeCard.appendChild(grid);
+  body.appendChild(themeCard);
+
+  const accentCard = setCard("强调色");
+  accentCard.appendChild(Object.assign(document.createElement("div"), {
+    className: "set-hint",
+    textContent: "强调色只用于交互与状态点缀；同一色在不同主题下自动取不同明度以保证对比度。",
+  }));
+  const row = document.createElement("div");
+  row.className = "accent-row";
+  for (const a of ACCENTS) {
+    const d = document.createElement("button");
+    d.className = `accent-dot${theme.accent === a.key ? " on" : ""}`;
+    d.style.background = a.colors[theme.preset];
+    d.title = a.name;
+    d.addEventListener("click", () => { sfx.play("click"); theme.setAccent(a.key); renderSettings(); });
+    row.appendChild(d);
+  }
+  accentCard.appendChild(row);
+  body.appendChild(accentCard);
+}
+
 function renderSetVersion(body) {
   const card = setCard("版本与更新");
   const info = document.createElement("div");
