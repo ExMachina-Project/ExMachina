@@ -4,6 +4,34 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>EXMACHINA</title>
+    <!-- 主题引导：先于样式表生效，避免首帧闪烁（与 app.js 的 theme 模块同源） -->
+    <script>
+      (function () {
+        try {
+          var modes = { midnight: "dark", minimal: "light", graphite: "dark" };
+          var accents = {
+            cyan:   { midnight: "#22d3ee", minimal: "#0891b2", graphite: "#22d3ee" },
+            blue:   { midnight: "#7c8cff", minimal: "#2563eb", graphite: "#818cf8" },
+            green:  { midnight: "#34d399", minimal: "#059669", graphite: "#4ade80" },
+            red:    { midnight: "#f87171", minimal: "#dc2626", graphite: "#f87171" },
+            yellow: { midnight: "#fbbf24", minimal: "#b45309", graphite: "#fbbf24" }
+          };
+          var p = localStorage.getItem("exm.preset");
+          if (!modes[p]) p = "midnight";
+          var a = localStorage.getItem("exm.accent");
+          if (!accents[a]) a = p === "graphite" ? "cyan" : "blue";
+          var hex = accents[a][p];
+          var n = parseInt(hex.slice(1), 16);
+          var r = document.documentElement;
+          r.dataset.theme = p;
+          r.dataset.mode = modes[p];
+          r.style.colorScheme = modes[p];
+          r.style.setProperty("--accent", hex);
+          r.style.setProperty("--accent-rgb", ((n >> 16) & 255) + ", " + ((n >> 8) & 255) + ", " + (n & 255));
+          r.style.setProperty("--accent-fg", modes[p] === "light" ? "#ffffff" : "#0a0b0f");
+        } catch (e) { /* localStorage 不可用时回落默认主题 */ }
+      })();
+    </script>
     <!-- 徽记几何唯一定义（400 口径）：必须在 app.js 之前加载，启动画面才能首帧就有图形 -->
     <script src="mark.js"></script>
     <link rel="stylesheet" href="style.css" />
