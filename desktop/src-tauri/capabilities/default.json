@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "无边框主窗（decorations=false）的拖拽移动：data-tauri-drag-region 走内部 startDragging IPC，无 ACL 授权时被静默拒绝（最小化/最大化/关闭因走自有 #[tauri::command] 不受影响，故历史上只表现为「拖不动」）。仅授予这一条，其余维持零 ACL。",
+  "windows": ["main"],
+  "permissions": [
+    "core:window:allow-start-dragging"
+  ]
+}
