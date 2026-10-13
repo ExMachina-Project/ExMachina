@@ -272,6 +272,15 @@ pub struct CronBody {
     /// 一次性触发时间（ISO8601）
     #[serde(default)]
     pub at: Option<String>,
+    /// 任务类型：cron | at | queue；缺省按 cron/at 有无推断（见 `exm_core::types::job_kind`）
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// 预约任务（at）：投递到的已有会话 id；空 = 按 session_title 新建/复用
+    #[serde(default)]
+    pub target_session: Option<String>,
+    /// 连续任务（queue）：按序执行的任务 id 列表
+    #[serde(default)]
+    pub steps: Vec<String>,
     #[serde(default)]
     pub group: Option<String>,
     #[serde(default)]
@@ -332,10 +341,19 @@ pub async fn create_cron(State(st): State<AppState>, Json(b): Json<CronBody>) ->
     if b.name.trim().is_empty() || b.prompt.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name/prompt 不能为空" }))).into_response();
     }
-    if b.cron.is_none() && b.at.is_none() {
+    // 连续任务（queue）靠 steps 驱动，无 cron/at；其余类型维持「二选一」约束
+    let is_queue = matches!(b.kind.as_deref(), Some("queue"));
+    if !is_queue && b.cron.is_none() && b.at.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "需要 cron 五段表达式或 at 一次性时间" })),
+        )
+            .into_response();
+    }
+    if is_queue && b.steps.iter().all(|s| s.trim().is_empty()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "连续任务（queue）需要至少一个步骤任务 id" })),
         )
             .into_response();
     }
@@ -354,6 +372,9 @@ pub async fn create_cron(State(st): State<AppState>, Json(b): Json<CronBody>) ->
         prompt: b.prompt.clone(),
         cron: b.cron,
         at: b.at,
+        kind: b.kind,
+        target_session: b.target_session,
+        steps: b.steps,
         group: b.group,
         session_title: b.session_title,
         enabled: b.enabled.unwrap_or(true),
@@ -522,6 +543,9 @@ fn build_heartbeat_job(core: &exm_core::Core, minute_key: &str) -> exm_core::typ
         prompt: cfg.automation.heartbeat_prompt.clone(),
         cron: None,
         at: None,
+        kind: None,
+        target_session: None,
+        steps: Vec::new(),
         group,
         session_title: Some(session_title),
         enabled: true,
@@ -2142,6 +2166,9 @@ mod cron_notify_tests {
             prompt: "生成报表".into(),
             cron: Some("0 9 * * *".into()),
             at: None,
+            kind: None,
+            target_session: None,
+            steps: Vec::new(),
             group: None,
             session_title: None,
             enabled: true,
