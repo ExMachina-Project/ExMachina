@@ -921,19 +921,33 @@ impl SkillDef {
 
 // ---------------------------------------------------------------- 自动化（cron/心跳，docs/10）
 
-/// 定时任务：五段 cron 表达式或一次性 `at`（ISO8601）；到期由网关调度器唤醒智能体执行
+/// 定时任务：五段 cron 表达式或一次性 `at`（ISO8601）；到期由网关调度器唤醒智能体执行。
+///
+/// 三种任务类型（`kind`）共用一张表与一套启停/运行记录：
+/// - `cron`  定时任务：按五段 cron 周期触发
+/// - `at`    预约任务：到点把 `prompt` 投递到指定会话（额度用尽后挂起续跑是典型用法）
+/// - `queue` 连续任务：按 `steps` 顺序逐个执行被引用任务的定义（同会话或不同会话皆可）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CronJob {
     pub id: String,
     pub name: String,
     pub prompt: String,
+    /// 任务类型：cron | at | queue；缺省（存量数据）按 cron / at 有无推断——见 `job_kind`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// 五段 cron：分 时 日 月 周（`*` 数字 `a-b` `a,b` `c-d/n` `*/n`）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
     /// 一次性触发时间（ISO8601）；触发后自动停用
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
+    /// 预约任务：投递到的已有会话 id（空 = 沿用 session_title 新建/复用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session: Option<String>,
+    /// 连续任务：按序执行的任务 id 列表（每步复用被引用任务的定义）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
     /// 执行组；None = 运行时激活组
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
@@ -954,6 +968,28 @@ pub struct CronJob {
     pub notify_channels: Vec<String>,
     #[serde(default)]
     pub created_at: String,
+}
+
+/// 任务类型常量（与 `CronJob.kind` 同口径，前端亦按此三值渲染）
+pub const KIND_CRON: &str = "cron";
+pub const KIND_AT: &str = "at";
+pub const KIND_QUEUE: &str = "queue";
+
+/// 任务类型：显式 `kind` 优先；存量数据（无 kind）按 cron / at 有无推断。
+/// 连续任务必须显式声明 kind=queue（它既无 cron 也无 at 时无法靠推断得出）。
+pub fn job_kind(job: &CronJob) -> &str {
+    match job.kind.as_deref() {
+        Some(k) if !k.is_empty() => k,
+        _ => {
+            if job.cron.is_some() {
+                KIND_CRON
+            } else if job.at.is_some() {
+                KIND_AT
+            } else {
+                KIND_CRON
+            }
+        }
+    }
 }
 
 fn default_true() -> bool {
