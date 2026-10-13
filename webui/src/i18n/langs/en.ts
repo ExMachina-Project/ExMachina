@@ -106,9 +106,6 @@ export const en: Partial<Dict> = {
   "chat.role.system": "System",
   "chat.switchedSingle": "Switched to agent: {id}",
   "chat.switchedGroup": "Switched to group: {id}",
-  "chat.transcribed": "Speech transcribed",
-  "chat.transcribeFailed": "Transcription failed: {err}",
-  "chat.micDenied": "Microphone unavailable",
   "chat.target": "Target",
   "chat.groupLabel": "Agent Groups",
   "chat.singlesLabel": "Agents",
@@ -138,8 +135,6 @@ export const en: Partial<Dict> = {
   "chat.streaming": "Streaming",
   "chat.attachAlt": "Attachment {n}",
   "chat.inputPlaceholder": "Task the orchestrator… (Enter to send, Shift+Enter for newline)",
-  "chat.stopRecord": "Stop recording and transcribe",
-  "chat.startRecord": "Voice input (transcribed to text)",
   "chat.attachTip": "Attach images (multimodal input, up to 4)",
   "groups.back": "Back to groups",
   "groups.activeTag": "Active",
@@ -436,7 +431,6 @@ export const en: Partial<Dict> = {
   "models.followGlobalShort": "Follow global",
   "models.noModel": "no model",
   "api.unauthorized": "401 access key required",
-  "api.transcribeFailed": "Transcription failed ({status})",
   "api.synthFailed": "Synthesis failed ({status})",
 
   // ── Groups ──

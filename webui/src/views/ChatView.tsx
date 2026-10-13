@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
-import { AudioOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, MessageOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SendOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, MessageOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SendOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { agentIdEn } from "../models";
 import { useExm } from "../store";
@@ -126,7 +126,6 @@ export function ChatView(): React.ReactElement {
   /** 会话类型过滤（2.2）：all / normal / channel */
   const [sessionKind, setSessionKind] = useState("all");
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
-  const [recording, setRecording] = useState(false);
   const [usage, setUsage] = useState<{
     estimate: number;
     budget: number;
@@ -134,47 +133,9 @@ export function ChatView(): React.ReactElement {
     /** provider 上报的真实用量可用（否则为字符估算） */
     measured?: boolean;
   } | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   /** 上箭头召回的游标（null = 未处于召回态） */
   const recallIdxRef = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-
-  const chunksRef = useRef<Blob[]>([]);
-
-  // 语音输入：MediaRecorder → 网关转写 → 文本入输入框
-  const toggleRecord = async () => {
-    if (recording) {
-      recorderRef.current?.stop();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const rec = new MediaRecorder(stream, { mimeType: "audio/webm" });
-      rec.ondataavailable = (ev) => {
-        if (ev.data.size > 0) chunksRef.current.push(ev.data);
-      };
-      rec.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        setRecording(false);
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        chunksRef.current = [];
-        if (blob.size === 0) return;
-        try {
-          const tr = await api.transcribe(blob);
-          if (tr) setText((prev) => (prev ? `${prev} ${tr}` : tr));
-          message.success(t("chat.transcribed"));
-        } catch (e) {
-          message.error(t("chat.transcribeFailed", { err: String(e) }));
-        }
-      };
-      chunksRef.current = [];
-      rec.start();
-      recorderRef.current = rec;
-      setRecording(true);
-    } catch {
-      message.error(t("chat.micDenied"));
-    }
-  };
 
   // 附件压缩：Canvas 缩到 ≤1280px、JPEG 82%（控制多模态请求体尺寸）
   const addImage = (file: File) => {
@@ -717,15 +678,6 @@ export function ChatView(): React.ReactElement {
               const recalled = userMsgs[idx]?.statements.map((st) => st.text).join("\n") ?? "";
               setText(recalled);
             }}
-          />
-          <Button
-            size="small"
-            type={recording ? "primary" : "text"}
-            className="mic-btn"
-            danger={recording}
-            title={recording ? t("chat.stopRecord") : t("chat.startRecord")}
-            icon={recording ? <PauseCircleOutlined /> : <AudioOutlined />}
-            onClick={() => void toggleRecord()}
           />
           <label className="attach-btn" title={t("chat.attachTip")}>
             <PaperClipOutlined />
