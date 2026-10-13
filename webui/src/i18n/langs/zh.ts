@@ -104,9 +104,6 @@ export const zh = {
   "chat.role.system": "系统",
   "chat.switchedSingle": "已切换到智能体：{id}",
   "chat.switchedGroup": "已切换到组：{id}",
-  "chat.transcribed": "语音已转写",
-  "chat.transcribeFailed": "转写失败：{err}",
-  "chat.micDenied": "无法访问麦克风",
   "chat.target": "交互目标",
   "chat.groupLabel": "智能体组",
   "chat.singlesLabel": "智能体",
@@ -136,8 +133,6 @@ export const zh = {
   "chat.streaming": "输出中",
   "chat.attachAlt": "附件{n}",
   "chat.inputPlaceholder": "向指挥体下达任务…（Enter 发送，Shift+Enter 换行）",
-  "chat.stopRecord": "停止录音并转写",
-  "chat.startRecord": "语音输入（转写为文字）",
   "chat.attachTip": "附加图片（多模态输入，最多 4 张）",
   "groups.back": "返回组列表",
   "groups.activeTag": "交互中",
@@ -435,7 +430,6 @@ export const zh = {
   "models.followGlobalShort": "跟随全局",
   "models.noModel": "未指定模型",
   "api.unauthorized": "401 需要访问密钥",
-  "api.transcribeFailed": "转写失败 ({status})",
   "api.synthFailed": "合成失败 ({status})",
 
   // ── 智能体组页 ──
