@@ -99,7 +99,7 @@ const S = {
   effort: (() => { try { return localStorage.getItem("exm.effort") ?? "default"; } catch { return "default"; } })(),
   // default=端点默认 | low | medium | high（模型推理预算，全局生效，本地记忆 + 启动时重设）
   images: [],          // data URL 附件
-  view: "chat",        // chat | settings（设置视图：模型/组/通道/定时/安全，直连环口 API）
+  view: "chat",        // chat | settings | code | tasks（设置视图：模型/组/通道/智能连结/任务/安全，直连环口 API）
   settingsTab: "model",
   graph: null,         // TaskGraph（任务派发图：指挥体 → 子个体）
   reports: [],         // 子个体回执 {agent, summary, confidence, nodeId}
@@ -191,6 +191,62 @@ const sfx = (() => {
       return on;
     },
     get enabled() { return on; },
+  };
+})();
+
+// ────────────────────────────── 主题：预设 + 强调色 ──────────────────────────────
+// 与 Web 控制台同一套语汇：预设写 <html data-theme>（CSS 接管色阶），
+// 强调色走内联 CSS 变量（--accent / --accent-rgb / --accent-fg）。均为本地偏好。
+const THEMES = [
+  { key: "midnight", mode: "dark", name: "精炼暗色", sub: "蓝调中性 · 高级暗色", preview: "#101218" },
+  { key: "minimal", mode: "light", name: "极简浅色", sub: "近白底 · 主流极简", preview: "#ffffff" },
+  { key: "graphite", mode: "dark", name: "极简暗色", sub: "中性石墨 · 无蓝调", preview: "#1f1f23" },
+];
+const ACCENTS = [
+  { key: "cyan", name: "电光青", colors: { midnight: "#22d3ee", minimal: "#0891b2", graphite: "#22d3ee" } },
+  { key: "blue", name: "靛蓝", colors: { midnight: "#7c8cff", minimal: "#2563eb", graphite: "#818cf8" } },
+  { key: "green", name: "翠绿", colors: { midnight: "#34d399", minimal: "#059669", graphite: "#4ade80" } },
+  { key: "red", name: "绯红", colors: { midnight: "#f87171", minimal: "#dc2626", graphite: "#f87171" } },
+  { key: "yellow", name: "琥珀", colors: { midnight: "#fbbf24", minimal: "#b45309", graphite: "#fbbf24" } },
+];
+const theme = (() => {
+  const presetOf = (k) => THEMES.find((t) => t.key === k) ?? THEMES[0];
+  const accentOf = (k) => ACCENTS.find((a) => a.key === k) ?? ACCENTS[0];
+  const load = (k, fb) => { try { return localStorage.getItem(k) ?? fb; } catch { return fb; } };
+  let preset = presetOf(load("exm.preset", "midnight")).key;
+  let accent = load("exm.accent", "");
+  if (!ACCENTS.some((a) => a.key === accent)) accent = preset === "graphite" ? "cyan" : "blue";
+
+  const apply = () => {
+    const root = document.documentElement;
+    const mode = presetOf(preset).mode;
+    const hex = accentOf(accent).colors[preset];
+    const n = parseInt(hex.slice(1), 16);
+    root.dataset.theme = preset;
+    root.dataset.mode = mode;
+    root.style.colorScheme = mode;
+    root.style.setProperty("--accent", hex);
+    root.style.setProperty("--accent-rgb", `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`);
+    root.style.setProperty("--accent-fg", mode === "light" ? "#ffffff" : "#0a0b0f");
+  };
+  apply();
+  return {
+    apply,
+    get preset() { return preset; },
+    get accent() { return accent; },
+    accentColor: (k) => accentOf(k).colors[preset],
+    setPreset(k) {
+      if (!THEMES.some((t) => t.key === k)) return;
+      preset = k;
+      try { localStorage.setItem("exm.preset", k); } catch { /* 忽略 */ }
+      apply();
+    },
+    setAccent(k) {
+      if (!ACCENTS.some((a) => a.key === k)) return;
+      accent = k;
+      try { localStorage.setItem("exm.accent", k); } catch { /* 忽略 */ }
+      apply();
+    },
   };
 })();
 
@@ -495,42 +551,11 @@ liveEl.style.display = "none";
 // 几何唯一定义在 **mark.js**（400 口径，随 index.html 的 <head> 先于本文件加载），
 // 这里只消费全局的 markBody() / brandMark() / markBodyIn512() / fillMarks()，不再定义。
 //
-// 之所以把定义搬出去：本文件里曾写过两份（brandMark 与 captureDisc 各抄一份）、
+// 之所以把定义搬出去：本文件里曾写过两份（brandMark 与旧版捕获盘各抄一份）、
 // index.html 里又手抄一份，三份互相追不上，于是出过两次事故——
-//   · brandMark / captureDisc 的四弧整体偏了 10°，而标题栏、启动画面、图标都是正对的；
+//   · brandMark / 旧版捕获盘的四弧整体偏了 10°，而标题栏、启动画面、图标都是正对的；
 //   · index.html 那份把一条弧的终点抄错，顶部缺口整段糊没，徽记只剩三个缺口。
 // 结论：徽记只留一处定义，任何位置要画徽记都用 <span data-mark="尺寸">。
-
-/** 空态捕获盘：四弧徽记 + 径向刻度环 + 扫描扇 + 准星（HUD「目标捕获」母题的完整表达） */
-function captureDisc(size = 360) {
-  const P = (deg, r) => {
-    const a = ((deg - 90) * Math.PI) / 180;
-    return [256 + Math.cos(a) * r, 256 + Math.sin(a) * r];
-  };
-  let ticks = "";
-  for (let i = 0; i < 72; i++) {
-    const deg = i * 5, major = deg % 30 === 0;
-    const [x1, y1] = P(deg, 218), [x2, y2] = P(deg, major ? 240 : 230);
-    ticks += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke-width="${major ? 4 : 2}"/>`;
-  }
-  return `<svg class="mark-svg capture-disc" width="${size}" height="${size}" viewBox="0 0 512 512" aria-hidden="true">
-    <g fill="none" stroke="currentColor" opacity="0.9">
-      <circle cx="256" cy="256" r="218" stroke-width="2"/>
-      <circle cx="256" cy="256" r="188" stroke-width="1" stroke-dasharray="2 12" opacity="0.7"/>
-    </g>
-    <g class="ring-rot rev" fill="none" stroke="currentColor">${ticks}</g>
-    <g class="ring-rot" fill="none" stroke="currentColor">
-      <path d="M 256 256 L 256 38 A 218 218 0 0 1 365 62 Z" fill="currentColor" stroke="none" opacity="0.16"/>
-    </g>
-    <g fill="none" stroke="currentColor" opacity="0.85">
-      <line x1="256" y1="14" x2="256" y2="54" stroke-width="2"/>
-      <line x1="256" y1="458" x2="256" y2="498" stroke-width="2"/>
-      <line x1="14" y1="256" x2="54" y2="256" stroke-width="2"/>
-      <line x1="458" y1="256" x2="498" y2="256" stroke-width="2"/>
-    </g>
-    ${markBodyIn512()}
-  </svg>`;
-}
 
 // 列表 stagger 入场：递增延迟（默认 36ms，封顶 10 档——长列表尾部不拖尾，全部动画只走合成器）
 function staggerIn(els, { step = 36, cap = 10 } = {}) {
@@ -830,7 +855,7 @@ function welcomeEl() {
     : "未选定";
   el.innerHTML = `
     <div class="welcome-mark">${brandMark("", 360)}</div>
-    <div class="welcome-capture">${captureDisc(196)}</div>
+    <div class="welcome-capture">${brandMark("", 88)}</div>
     <h1>有什么可以帮你？</h1>
     <p>对话交由当前对象（智能体或智能体组）协作完成；侧栏「编码」进入工作台、「任务」看派发与台账</p>
     <div class="welcome-readout">
@@ -1084,7 +1109,7 @@ function renderRight() {
 }
 
 // ────────────────────────────── 设置视图（原生，直连环口 API） ──────────────────────────────
-// 桌面端不依赖任何 webui：模型与提供商 / 组与个体 / 通道 / 定时任务 / 安全 全部壳内直管。
+// 桌面端不依赖任何 webui：模型与提供商 / 组与个体 / 通道 / 智能连结 / 任务 / 安全 全部壳内直管。
 // 一切核心功能在 exm-core，桌面端与 webui、channel 一样只是连结核心的客户端。
 
 // 启动画面：最少展示 1.6s（品牌瞬间），网关就绪/初始化完成后淡出移除
@@ -1103,7 +1128,7 @@ function hideSplash() {
   }, wait);
 }
 
-const SETTINGS_TABS = [["model", "模型"], ["single", "智能体"], ["group", "智能体组"], ["channel", "通道"], ["cron", "定时任务"], ["approval", "审批"], ["memory", "记忆"], ["skills", "技能"], ["audit", "审计"], ["config", "配置"], ["version", "版本"]];
+const SETTINGS_TABS = [["model", "模型"], ["single", "智能体"], ["group", "智能体组"], ["nexus", "智能连结"], ["channel", "通道"], ["cron", "任务"], ["approval", "审批"], ["memory", "记忆"], ["skills", "技能"], ["audit", "审计"], ["config", "配置"], ["appearance", "外观"], ["version", "版本"]];
 
 function showView(v) {
   // 编码页有未保存修改时，切走前先确认（切文件在 openFile、换目录在 applyWorkspace 各自拦截）
@@ -1169,7 +1194,7 @@ function renderSettings() {
   // 内容区
   const body = $("sp-body");
   body.innerHTML = "";
-  ({ model: renderSetModel, group: renderSetGroup, single: renderSetSingles, channel: renderSetChannel, cron: renderSetCron, approval: renderSetApprovals, memory: renderSetMemory, skills: renderSetSkills, audit: renderSetAudit, config: renderSetConfig, version: renderSetVersion }[S.settingsTab] ?? renderSetModel)(body);
+  ({ model: renderSetModel, group: renderSetGroup, single: renderSetSingles, channel: renderSetChannel, nexus: renderSetNexus, cron: renderSetTasks, approval: renderSetApprovals, memory: renderSetMemory, skills: renderSetSkills, audit: renderSetAudit, config: renderSetConfig, appearance: renderSetAppearance, version: renderSetVersion }[S.settingsTab] ?? renderSetModel)(body);
 }
 
 // —— 表单小件 ——
@@ -1717,16 +1742,29 @@ function renderSetChannel(body) {
   }
 }
 
-// —— 定时任务 ——
-function renderSetCron(body) {
-  const list = setCard("定时任务");
+// —— 任务（自动化）：多类型任务清单 ——
+// 后端当前支持「周期任务」(cron 五段表达式) 与「单次任务」(at ISO 时间)，均推送给当前组执行。
+// 后续扩展任务类型时，只需在 TASK_TYPES 增项，并在 taskTypeOf / 表单分支里补齐字段即可。
+const TASK_TYPES = {
+  cron: { label: "周期任务", hint: "cron 表达式，如 0 9 * * 1-5" },
+  once: { label: "单次任务", hint: "ISO 时间，触发后自动停用" },
+};
+function taskTypeOf(j) { return j.cron ? "cron" : "once"; }
+
+function renderSetTasks(body) {
+  const list = setCard("任务");
+  list.appendChild(Object.assign(document.createElement("div"), {
+    className: "set-hint",
+    textContent: "按周期（cron）或单次时间，把提示词推送给当前组执行。任务类型可扩展，后续将支持更多触发方式。",
+  }));
   req("/cron").then((jobs) => {
-    if (!jobs.length) list.appendChild(Object.assign(document.createElement("div"), { className: "set-hint", textContent: "暂无定时任务——按 cron 表达式或单次时间推送提示词给当前组。" }));
+    if (!jobs.length) list.appendChild(Object.assign(document.createElement("div"), { className: "set-hint", textContent: "暂无任务——在下方新增一个周期或单次任务。" }));
     for (const j of jobs) {
+      const type = taskTypeOf(j);
       const row = document.createElement("div");
       row.className = "set-row";
-      row.innerHTML = `<div class="set-row-main"><b>${esc(j.name)}</b>${j.enabled ? "" : '<span class="tag-dim">已停用</span>'}
-        <div class="set-sub">${esc(j.cron ? `cron: ${j.cron}` : `单次: ${j.at ?? ""}`)} · 上次 ${esc(j.lastStatus || "未运行")}</div>
+      row.innerHTML = `<div class="set-row-main"><b>${esc(j.name)}</b><span class="tag-dim">${esc(TASK_TYPES[type].label)}</span>${j.enabled ? "" : '<span class="tag-dim">已停用</span>'}
+        <div class="set-sub">${esc(j.cron ? `cron: ${j.cron}` : `单次: ${j.at ?? ""}`)} · 上次 ${esc(j.lastStatus || "未运行")}${j.nextRunAt ? ` · 下次 ${esc(String(j.nextRunAt).slice(0, 16).replace("T", " "))}` : ""}</div>
         <div class="set-sub">${esc((j.prompt ?? "").slice(0, 80))}</div></div>`;
       const ops = document.createElement("div");
       ops.className = "set-ops";
@@ -1737,32 +1775,157 @@ function renderSetCron(body) {
         if (await settingsSave(req(`/cron/${j.id}/run`, { method: "POST", body: JSON.stringify({}) }), "已触发")) renderSettings();
       }, "set-btn"));
       ops.appendChild(mkBtn("删除", async () => {
-        if (!confirm(`删除定时任务「${j.name}」？`)) return;
+        if (!confirm(`删除任务「${j.name}」？`)) return;
         if (await settingsSave(req(`/cron/${j.id}`, { method: "DELETE" }), "已删除")) renderSettings();
       }, "set-btn danger"));
       row.appendChild(ops);
       list.appendChild(row);
     }
     body.appendChild(list);
-    body.appendChild(cronCreateForm());
-  }).catch((e) => body.appendChild(Object.assign(document.createElement("div"), { className: "set-hint", textContent: `定时任务加载失败：${e}` })));
+    body.appendChild(taskCreateForm());
+  }).catch((e) => body.appendChild(Object.assign(document.createElement("div"), { className: "set-hint", textContent: `任务加载失败：${e}` })));
 
-  function cronCreateForm() {
-    const c = setCard("新增定时任务");
+  function taskCreateForm() {
+    const c = setCard("新增任务");
+    const type = mkSelect([["cron", TASK_TYPES.cron.label], ["once", TASK_TYPES.once.label]], "cron");
     const name = mkInput("", { placeholder: "任务名称，如 每日站会摘要" });
     const prompt = mkInput("", { placeholder: "推送给组的提示词" });
     const cron = mkInput("", { placeholder: "cron 表达式，如 0 9 * * 1-5" });
-    const at = mkInput("", { placeholder: "单次执行时间（可选，ISO 格式，填了则忽略 cron）" });
+    const at = mkInput("", { placeholder: "ISO 时间，如 2026-01-01T09:00" });
+    c.appendChild(mkField("任务类型", type));
     c.appendChild(mkField("名称", name));
     c.appendChild(mkField("提示词", prompt));
-    c.appendChild(mkField("cron 表达式", cron));
-    c.appendChild(mkField("单次时间", at));
+    const cronFld = mkField("cron 表达式", cron);
+    const atFld = mkField("单次时间", at);
+    c.appendChild(cronFld);
+    c.appendChild(atFld);
+    // 类型切换只显隐对应字段：新增任务类型时在此挂载各自的字段组
+    const sync = () => {
+      cronFld.classList.toggle("hidden", type.value !== "cron");
+      atFld.classList.toggle("hidden", type.value !== "once");
+    };
+    type.addEventListener("change", sync);
+    sync();
     c.appendChild(mkBtn("创建", async () => {
       if (!name.value.trim() || !prompt.value.trim()) return toast("名称与提示词必填", false);
       const payload = { name: name.value.trim(), prompt: prompt.value.trim() };
-      if (cron.value.trim()) payload.cron = cron.value.trim();
-      if (at.value.trim()) payload.at = at.value.trim();
-      if (await settingsSave(req("/cron", { method: "POST", body: JSON.stringify(payload) }), "定时任务已创建")) renderSettings();
+      if (type.value === "cron") {
+        if (!cron.value.trim()) return toast("请填写 cron 表达式", false);
+        payload.cron = cron.value.trim();
+      } else {
+        if (!at.value.trim()) return toast("请填写单次执行时间", false);
+        payload.at = at.value.trim();
+      }
+      if (await settingsSave(req("/cron", { method: "POST", body: JSON.stringify(payload) }), "任务已创建")) renderSettings();
+    }));
+    return c;
+  }
+}
+
+// —— 智能连结（实验性）：外部连结体管理 ——
+// 与 WebUI 的「智能连结」页同口径：远程 EXMACHINA 网关 / 本机 CLI 智能体（opencode/codex/claude/自定义）。
+// 数据源 GET /nexus/links；新增 POST /nexus/links（upsert，热生效）；删除 DELETE /nexus/links/:id。
+const NEXUS_KINDS = [
+  ["exmachina", "EXMACHINA 网关"],
+  ["opencode", "OpenCode"],
+  ["codex", "Codex"],
+  ["claude", "Claude Code"],
+  ["custom", "自定义命令"],
+];
+function nexusKindLabel(k) { return (NEXUS_KINDS.find(([v]) => v === k) ?? [k, k])[1]; }
+
+function renderSetNexus(body) {
+  const list = setCard("连结体");
+  list.appendChild(Object.assign(document.createElement("div"), {
+    className: "set-hint",
+    textContent: "把外部智能体接入编成：远程 EXMACHINA 网关，或 opencode / codex / claude 等本机 CLI 智能体。编成中声明为连结体代理的个体派发任务，即由对端连结体执行并回流。（实验性功能）",
+  }));
+  const wrap = document.createElement("div");
+  list.appendChild(wrap);
+  body.appendChild(list);
+  body.appendChild(nexusForm(null));
+
+  const reload = () => req("/nexus/links").then((r) => render(r.links ?? [])).catch((e) => {
+    wrap.innerHTML = "";
+    wrap.appendChild(Object.assign(document.createElement("div"), { className: "set-hint", textContent: `连结体加载失败：${e}` }));
+  });
+  const render = (links) => {
+    wrap.innerHTML = "";
+    if (!links.length) {
+      wrap.appendChild(Object.assign(document.createElement("div"), { className: "set-hint", textContent: "暂无连结体——在下方添加一个远程网关或本机 CLI 智能体。" }));
+      return;
+    }
+    for (const l of links) {
+      const row = document.createElement("div");
+      row.className = "set-row";
+      const target = l.endpoint || l.command || "";
+      row.innerHTML = `<div class="set-row-main"><b>${esc(l.name)}</b><span class="tag-dim">${esc(nexusKindLabel(l.kind))}</span>${l.enabled ? "" : '<span class="tag-dim">已停用</span>'}
+        <div class="set-sub mono">${esc(l.id)}${target ? ` · ${esc(target)}` : ""}</div></div>`;
+      const ops = document.createElement("div");
+      ops.className = "set-ops";
+      ops.appendChild(mkBtn("编辑", () => openNexusEditor(l), "set-btn"));
+      ops.appendChild(mkBtn("删除", async () => {
+        if (!confirm(`删除连结体「${l.name}」？`)) return;
+        if (await settingsSave(req(`/nexus/links/${l.id}`, { method: "DELETE" }), "连结体已删除")) reload();
+      }, "set-btn danger"));
+      row.appendChild(ops);
+      wrap.appendChild(row);
+    }
+  };
+  reload();
+
+  function openNexusEditor(l) {
+    showModal(`编辑连结体 · ${l.name}`, (mb) => {
+      // 就地重建表单并回填：编辑走同一 upsert 端点（同 id 覆盖，密钥留空则沿用旧值）
+      const form = nexusForm(l, () => { closeModal(); reload(); });
+      mb.appendChild(form);
+    });
+  }
+
+  /** 连结体表单：link 为 null 时是新增，否则为编辑（回填字段）。onDone 用于编辑态收尾。 */
+  function nexusForm(link, onDone) {
+    const editing = link != null;
+    const c = setCard(editing ? "编辑连结体" : "添加连结体");
+    const id = mkInput(link?.id ?? "", { placeholder: "如 nexus-home" });
+    if (editing) id.disabled = true;
+    const name = mkInput(link?.name ?? "", { placeholder: "如：家里那台机器" });
+    const kind = mkSelect(NEXUS_KINDS, link?.kind ?? "exmachina");
+    const endpoint = mkInput(link?.endpoint ?? "", { placeholder: "http://192.168.2.10:4173" });
+    const apiKey = mkInput("", { type: "password", placeholder: editing ? "留空沿用已保存密钥" : "对端访问密钥（可留空）" });
+    const command = mkInput(link?.command ?? "", { placeholder: "my-agent --task" });
+    c.appendChild(mkField("连结体 ID", id));
+    c.appendChild(mkField("显示名", name));
+    c.appendChild(mkField("类型", kind));
+    const epFld = mkField("网关地址", endpoint);
+    const keyFld = mkField("访问密钥", apiKey);
+    const cmdFld = mkField("命令行", command);
+    c.appendChild(epFld);
+    c.appendChild(keyFld);
+    c.appendChild(cmdFld);
+    // 类型决定字段：exmachina 走网关地址+密钥；custom 走命令行；其余 CLI 智能体无需额外字段
+    const sync = () => {
+      const k = kind.value;
+      epFld.classList.toggle("hidden", k !== "exmachina");
+      keyFld.classList.toggle("hidden", k !== "exmachina");
+      cmdFld.classList.toggle("hidden", k !== "custom");
+    };
+    kind.addEventListener("change", sync);
+    sync();
+    c.appendChild(mkBtn(editing ? "保存" : "添加", async () => {
+      const lid = id.value.trim();
+      if (!lid || !name.value.trim()) return toast("连结体 ID 与显示名必填", false);
+      const payload = {
+        id: lid,
+        name: name.value.trim(),
+        kind: kind.value,
+        endpoint: endpoint.value.trim(),
+        apiKey: apiKey.value.trim(),
+        command: command.value.trim(),
+        enabled: link?.enabled ?? true,
+      };
+      if (await settingsSave(req("/nexus/links", { method: "POST", body: JSON.stringify(payload) }), "连结体已保存（热生效）")) {
+        if (onDone) onDone(); else renderSettings();
+      }
     }));
     return c;
   }
@@ -2371,6 +2534,53 @@ function approvalRow(it, refresh) {
 }
 
 // —— 版本：本机版本 + 更新检查 + 一键更新（映射里被引用但此前从未实现，这里补齐）——
+// —— 外观：主题预设 + 强调色（本地偏好，写入 localStorage，随 <html data-theme> 生效） ——
+function renderSetAppearance(body) {
+  const themeCard = setCard("主题");
+  themeCard.appendChild(Object.assign(document.createElement("div"), {
+    className: "set-hint",
+    textContent: "选择界面主题预设。精炼暗色为默认；极简浅色 / 极简暗色采用主流极简主义配色。",
+  }));
+  const grid = document.createElement("div");
+  grid.className = "theme-grid";
+  for (const th of THEMES) {
+    const card = document.createElement("button");
+    card.className = `theme-card${theme.preset === th.key ? " on" : ""}`;
+    const preview = document.createElement("div");
+    preview.className = "theme-card-preview";
+    preview.style.background = th.preview;
+    // 预览里放一枚强调色圆点，直观看到「该主题下的强调色」
+    const dot = document.createElement("span");
+    dot.style.cssText = `width:20px;height:20px;border-radius:999px;background:${ACCENTS.find((a) => a.key === theme.accent)?.colors[th.key] ?? "#7c8cff"}`;
+    preview.appendChild(dot);
+    card.appendChild(preview);
+    card.appendChild(Object.assign(document.createElement("div"), { className: "theme-card-name", textContent: th.name }));
+    card.appendChild(Object.assign(document.createElement("div"), { className: "theme-card-sub", textContent: th.sub }));
+    card.addEventListener("click", () => { sfx.play("click"); theme.setPreset(th.key); renderSettings(); });
+    grid.appendChild(card);
+  }
+  themeCard.appendChild(grid);
+  body.appendChild(themeCard);
+
+  const accentCard = setCard("强调色");
+  accentCard.appendChild(Object.assign(document.createElement("div"), {
+    className: "set-hint",
+    textContent: "强调色只用于交互与状态点缀；同一色在不同主题下自动取不同明度以保证对比度。",
+  }));
+  const row = document.createElement("div");
+  row.className = "accent-row";
+  for (const a of ACCENTS) {
+    const d = document.createElement("button");
+    d.className = `accent-dot${theme.accent === a.key ? " on" : ""}`;
+    d.style.background = a.colors[theme.preset];
+    d.title = a.name;
+    d.addEventListener("click", () => { sfx.play("click"); theme.setAccent(a.key); renderSettings(); });
+    row.appendChild(d);
+  }
+  accentCard.appendChild(row);
+  body.appendChild(accentCard);
+}
+
 function renderSetVersion(body) {
   const card = setCard("版本与更新");
   const info = document.createElement("div");
