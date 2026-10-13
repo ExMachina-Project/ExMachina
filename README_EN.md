@@ -7,14 +7,15 @@
 
 <div align="center">
 
-```text
-███████╗  ██╗  ██╗  ███╗   ███╗   █████╗    ██████╗  ██╗  ██╗  ██╗  ███╗   ██╗   █████╗ 
-██╔════╝  ╚██╗██╔╝  ████╗ ████║  ██╔══██╗  ██╔════╝  ██║  ██║  ██║  ████╗  ██║  ██╔══██╗
-█████╗     ╚███╔╝   ██╔████╔██║  ███████║  ██║       ███████║  ██║  ██╔██╗ ██║  ███████║
-██╔══╝     ██╔██╗   ██║╚██╔╝██║  ██╔══██║  ██║       ██╔══██║  ██║  ██║╚██╗██║  ██╔══██║
-███████╗  ██╔╝ ██╗  ██║ ╚═╝ ██║  ██║  ██║  ╚██████╗  ██║  ██║  ██║  ██║ ╚████║  ██║  ██║
-╚══════╝  ╚═╝  ╚═╝  ╚═╝     ╚═╝  ╚═╝  ╚═╝   ╚═════╝  ╚═╝  ╚═╝  ╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-dark.svg">
+  <img src="./docs/logo.svg" alt="EXMACHINA" width="132" height="132">
+</picture>
+<br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/wordmark-dark.svg">
+  <img src="./docs/wordmark.svg" alt="EXMACHINA" width="600">
+</picture>
 
 ![Stage](https://img.shields.io/badge/stage-pre--alpha-orange)
 ![Rust](https://img.shields.io/badge/Rust-stable-dea584?logo=rust&logoColor=white)

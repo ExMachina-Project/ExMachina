@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod group_cmd;
 pub mod install;
 pub mod memory_cmd;
+pub mod panel;
 pub mod persona_cmd;
 pub mod platform_cmd;
 pub mod render;
@@ -31,8 +32,9 @@ struct Cli {
     #[arg(long, global = true, default_value = ".")]
     workspace: PathBuf,
 
+    /// 子命令可省略：`exm` / `exmachina` 裸命令即进入终端交互面板
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -45,9 +47,9 @@ enum Commands {
     },
     /// 体检：配置 / 编成 / 记忆 / 通道 / WebUI
     Doctor,
-    /// 与指挥体对话（进程内直挂 core）
+    /// 与指挥体对话（进程内直挂 core）；省略子命令时裸命令等价于 `exm chat`
     Chat {
-        /// 任务输入；缺省进入交互模式
+        /// 任务输入；缺省进入终端交互面板（TTY：横幅 + 对话流 + 输入框 + `/` 命令）
         text: Option<String>,
         /// 继续既有会话
         #[arg(short, long)]
@@ -55,6 +57,9 @@ enum Commands {
         /// 仅输出最终结果
         #[arg(short, long)]
         quiet: bool,
+        /// 只渲染面板版式（横幅 / 信息面板 / 输入框）后退出，不进交互
+        #[arg(long)]
+        preview: bool,
     },
     /// 列出指挥体与全部子个体
     Agents {
@@ -428,9 +433,25 @@ enum MemoryAction {
     Stats,
 }
 
+/// 规范化工作区根目录：`canonicalize` 后去掉 Windows verbatim 前缀。
+///
+/// Windows 上 `canonicalize` 会返回 `\\?\D:\...`（UNC 则为 `\\?\UNC\srv\share`），
+/// 这个前缀一旦进了 config.json 或 `doctor` / 面板的输出，跨端（桌面端、WebUI）比对
+/// 就会处处对不上，可读性也差。故在 CLI 入口统一剥掉。
+fn normalize_root(ws: &PathBuf) -> PathBuf {
+    let root = ws.canonicalize().unwrap_or_else(|_| ws.clone());
+    let s = root.to_string_lossy().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        root
+    }
+}
+
 fn build_core(workspace: &PathBuf) -> anyhow::Result<Arc<Core>> {
-    let root = workspace.canonicalize().unwrap_or_else(|_| workspace.clone());
-    Ok(Arc::new(Core::create(&root)?))
+    Ok(Arc::new(Core::create(&normalize_root(workspace))?))
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -441,22 +462,41 @@ pub fn run() -> anyhow::Result<()> {
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace.clone();
-    match cli.command {
+    // 裸命令 `exm` / `exmachina` 等价于 `exm chat`（无参数）：直接进终端交互面板
+    let command = cli.command.unwrap_or(Commands::Chat {
+        text: None,
+        session: None,
+        quiet: false,
+        preview: false,
+    });
+    match command {
         Commands::Install { quick } => {
-            let root = workspace.canonicalize().unwrap_or(workspace);
+            let root = normalize_root(&workspace);
             install::run_install(&root, quick)
         }
         Commands::Doctor => {
-            let root = workspace.canonicalize().unwrap_or(workspace);
+            let root = normalize_root(&workspace);
             doctor::run_doctor(&root)
         }
-        Commands::Chat { text, session, quiet } => {
+        Commands::Chat { text, session, quiet, preview } => {
             let core = build_core(&workspace)?;
+            if preview {
+                return panel::run_preview(&core, quiet);
+            }
             match text {
                 Some(t) => {
                     chat::run_chat(core, &t, &chat::ChatOptions { session, quiet }).await
                 }
-                None => chat::run_interactive(core, quiet).await,
+                None => {
+                    // TTY：进入终端交互面板（字符画横幅 + 对话流 + 输入框 + `/` 命令）
+                    // 非 TTY（管道 / 重定向）：退回逐行交互，避免控制字符污染日志
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() {
+                        panel::run_panel(core, quiet).await
+                    } else {
+                        chat::run_interactive(core, quiet).await
+                    }
+                }
             }
         }
         Commands::Agents { capability } => {
@@ -583,7 +623,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             exm_core::remote::WorkerSession::run(&url, &token, &worker_id, core).await
         }
         Commands::Config { action } => {
-            let root = workspace.canonicalize().unwrap_or(workspace);
+            let root = normalize_root(&workspace);
             match action {
                 ConfigAction::List => config_cmd::run_config_list(&root),
                 ConfigAction::Get { key } => config_cmd::run_config_get(&root, &key),
@@ -729,5 +769,39 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 PersonaAction::Reset { identifier } => persona_cmd::run_reset(&core, &identifier),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows canonicalize 会带 `\\?\` 前缀，若漏剥会一路渗进 config.json 与 doctor 输出
+    #[test]
+    fn 工作区根目录_剥离_win_verbatim_前缀() {
+        let ws = PathBuf::from(r"\\?\D:\Projects\ExMachina");
+        let out = normalize_root(&ws);
+        assert!(
+            !out.to_string_lossy().contains(r"\\?\"),
+            "普通盘符前缀未剥除：{}",
+            out.display()
+        );
+        assert_eq!(out, PathBuf::from(r"D:\Projects\ExMachina"));
+    }
+
+    /// UNC 共享盘的 verbatim 前缀剥除后要还原成 `\\srv\share` 形态
+    #[test]
+    fn 工作区根目录_剥离_unc_verbatim_前缀() {
+        let ws = PathBuf::from(r"\\?\UNC\srv\share\ExMachina");
+        let out = normalize_root(&ws);
+        assert_eq!(out, PathBuf::from(r"\\srv\share\ExMachina"));
+        assert!(!out.to_string_lossy().contains("UNC"));
+    }
+
+    /// 非 Windows 原生路径原样返回，不能误伤
+    #[test]
+    fn 工作区根目录_不动普通路径() {
+        let ws = PathBuf::from("/home/dev/ExMachina");
+        assert_eq!(normalize_root(&ws), ws);
     }
 }

@@ -1,4 +1,7 @@
 //! `exm chat` —— 进程内直挂 core 的一等交互
+//!
+//! 单发（`exm chat "任务"`）与交互面板（`exm chat` 进 TTY 面板）共用同一轮渲染
+//! `run_round`：订阅 CoreEvent → 流式呈现指挥体/子个体/思维链/工具/回流 → 等待收束。
 
 use crate::render::*;
 use exm_core::types::{CoreEvent, TaskGraph};
@@ -12,44 +15,28 @@ pub struct ChatOptions {
     pub quiet: bool,
 }
 
-pub async fn run_chat(core: Arc<Core>, text: &str, opts: &ChatOptions) -> anyhow::Result<()> {
-    let session = match &opts.session {
-        Some(id) => core
-            .store
-            .get_session(id)?
-            .ok_or_else(|| anyhow::anyhow!("会话不存在: {id}"))?,
-        None => core.create_session(text.chars().take(30).collect::<String>().as_str())?,
-    };
-
-    let channel_label = if core.is_mock() {
-        "测试替身（EXM_LLM_MOCK=1）".to_string()
-    } else {
-        let cfg = core.config();
-        if cfg.active_profile.is_empty() {
-            cfg.llm.base_url.clone()
-        } else {
-            format!("{}（{}）", cfg.active_profile, cfg.llm.base_url)
-        }
-    };
-    println!("{}", dim(format!("会话 {}｜LLM 通道：{}", session.id, channel_label)));
-    println!("{}", render_role("user", None, &[exm_core::types::Statement::new(exm_core::types::SpeechTag::要求, text)]));
-    println!();
-
+/// 订阅事件流并渲染一轮对话（CLI 单发 / 交互面板共用）。
+///
+/// 事件渲染循环与任务执行并行；`run.finished` / `run.error` 到达即返回。
+pub async fn run_round(
+    core: &Arc<Core>,
+    session_id: &str,
+    text: &str,
+    quiet: bool,
+) -> anyhow::Result<()> {
     let mut rx = core.subscribe();
     let mut last_graph: Option<TaskGraph> = None;
     let mut current_unit = String::new();
     let mut orch_streaming = false;
     let mut thinking_streaming = false;
-    let session_id = session.id.clone();
-    let quiet = opts.quiet;
+    let sid = session_id.to_string();
     let orch_id_fallback = core.orchestrator_id();
 
-    // 事件渲染循环与任务执行并行
     let render_task = tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(evt) => {
-                    if evt.session_id != session_id {
+                    if evt.session_id != sid {
                         continue;
                     }
                     match evt.kind.as_str() {
@@ -156,7 +143,7 @@ pub async fn run_chat(core: Arc<Core>, text: &str, opts: &ChatOptions) -> anyhow
                             let cmd = evt.payload.get("command").and_then(|v| v.as_str()).unwrap_or("");
                             let id = evt.payload.get("approvalId").and_then(|v| v.as_str()).unwrap_or("");
                             println!("{}", err(format!("  ⏸ 待人工审批 [{id}]：{cmd}")));
-                            println!("{}", dim("     到 WebUI「审批」页或聊天里决定；批准后系统代执行并把输出回灌。"));
+                            println!("{}", dim("     用 /approvals 查看、/approve <id> 批准、/deny <id> 拒绝（批准后系统代执行并把输出回灌）。"));
                         }
                         "graph.updated" => {
                             if let Ok(g) = serde_json::from_value::<TaskGraph>(evt.payload.clone()) {
@@ -264,14 +251,39 @@ pub async fn run_chat(core: Arc<Core>, text: &str, opts: &ChatOptions) -> anyhow
         }
     });
 
-    core.chat(&session.id, text).await?;
+    core.chat(session_id, text).await?;
     // 等待渲染循环收到 run.finished 并退出
     let _ = tokio::time::timeout(std::time::Duration::from_secs(600), render_task).await;
     Ok(())
 }
 
-/// 交互模式：逐轮对话
+pub async fn run_chat(core: Arc<Core>, text: &str, opts: &ChatOptions) -> anyhow::Result<()> {
+    let session = match &opts.session {
+        Some(id) => core
+            .store
+            .get_session(id)?
+            .ok_or_else(|| anyhow::anyhow!("会话不存在: {id}"))?,
+        None => core.create_session(text.chars().take(30).collect::<String>().as_str())?,
+    };
 
+    let channel_label = if core.is_mock() {
+        "测试替身（EXM_LLM_MOCK=1）".to_string()
+    } else {
+        let cfg = core.config();
+        if cfg.active_profile.is_empty() {
+            cfg.llm.base_url.clone()
+        } else {
+            format!("{}（{}）", cfg.active_profile, cfg.llm.base_url)
+        }
+    };
+    println!("{}", dim(format!("会话 {}｜LLM 通道：{}", session.id, channel_label)));
+    println!("{}", render_role("user", None, &[exm_core::types::Statement::new(exm_core::types::SpeechTag::要求, text)]));
+    println!();
+
+    run_round(&core, &session.id, text, opts.quiet).await
+}
+
+/// 交互模式（非 TTY 兜底：管道 / 重定向场景的逐行对话）
 pub async fn run_interactive(core: Arc<Core>, quiet: bool) -> anyhow::Result<()> {
     use std::io::{BufRead, Write};
     let session = core.create_session("CLI 交互会话")?;
@@ -290,6 +302,16 @@ pub async fn run_interactive(core: Arc<Core>, quiet: bool) -> anyhow::Result<()>
         }
         if t == "exit" || t == "quit" {
             break;
+        }
+        // `/` 命令走面板那套实现：管道里输入 /help 才会真的出帮助，
+        // 而不是被当成普通任务发给模型
+        if t.starts_with('/') {
+            match crate::panel::handle_line(&core, t, quiet, &session.id).await {
+                Ok(true) => break,
+                Ok(false) => continue,
+                Err(e) => eprintln!("{} {}", "命令失败：".red(), e),
+            }
+            continue;
         }
         run_chat(
             core.clone(),
