@@ -9,6 +9,13 @@ description = "EXMACHINA 桌面端：自带本地网关（单端口交付），�
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 修复 indexmap 1.9.x + schemars 0.8.x(tauri 传递依赖) 的 E0107 编译错误：
+# indexmap 1.9.x 的特性无 default(std)，其 build.rs 靠 autocfg 探测 sysroot 决定
+# has_std；探测失败时 IndexMap 变为 <K, V, S>（S 无默认值），而 schemars 0.8.22 的
+# preserve_order 分支写死 `indexmap::IndexMap<K, V>` → 报 struct takes 3 generic arguments。
+# 在两个特性解析单元（普通依赖 / 构建依赖）里都为 indexmap-1.x 显式开启 std，
+# build.rs 即短路 emit("has_std")，不再依赖探测。
+indexmap = { version = "1", features = ["std"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -17,6 +24,10 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 见 [build-dependencies.indexmap] 注释：为全图 indexmap-1.x 显式补 std，
+# 修 schemars 0.8.x 的 IndexMap<K, V> E0107；此处直接依赖本身不被使用，
+# 仅用于把特性统一进普通依赖解析单元。
+indexmap = { version = "1", features = ["std"] }
 # 事件桥（D11）：壳内订阅网关 WS 事件流 → 原生通知（审批/定时推送/任务完成）
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "native-tls"] }
