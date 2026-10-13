@@ -1282,7 +1282,7 @@ impl Orchestrator {
     async fn plan(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<OrchestratorPlan> {
         // 组感知：规划提示统一取组内主智能体的职责提示词；内置组即指挥体
         let primary = self.registry.primary().ok_or_else(|| {
-            anyhow::anyhow!("当前组未设置主智能体（exm group info 查看；用 agent_manage 或 exm agent create 创建）")
+            anyhow::anyhow!("当前组未设置主智能体（ exm group info 查看；用 agent_manage 或 exm agent create 创建）")
         })?;
         let mut system_prompt = self.registry.load_prompt(&primary.prompt_file).unwrap_or_else(|_| {
             format!("# {}\n\n你是本组的主智能体，直接对接用户并调度组内个体。", primary.name)
