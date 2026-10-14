@@ -664,10 +664,6 @@ impl Panel {
                         Some(id) => group_cmd::run_agent_remove(core, id, args.kv.get("group").map(|s| s.as_str()))?,
                         None => println!("{}", warn("用法：/agent remove <identifier>")),
                     },
-                    "primary" => match rest.get(1) {
-                        Some(id) => group_cmd::run_agent_set_primary(core, id, args.kv.get("group").map(|s| s.as_str()))?,
-                        None => println!("{}", warn("用法：/agent primary <identifier>")),
-                    },
                     "optimize" => match rest.get(1) {
                         Some(id) => platform_cmd::run_agent_optimize(core, id).await?,
                         None => println!("{}", warn("用法：/agent optimize <identifier>")),
@@ -1716,7 +1712,6 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("/agents [关键词]", "组内个体编成清单（可按能力过滤）"),
             ("/agent create <名称> --id <identifier> --desc <职责> [--tier orchestrator|unit]", "新建个体"),
             ("/agent remove <identifier>", "删除个体"),
-            ("/agent primary <identifier>", "设为组内主智能体"),
             ("/agent optimize|adaptation|reset-adaptation <identifier>", "经验优化：教训 → 行为改进要点"),
             ("/persona get|set|reset <identifier> [文本]", "人设（说话风格）"),
         ],
