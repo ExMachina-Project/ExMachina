@@ -117,7 +117,7 @@ EXMACHINA takes a different path: turning "accomplish something complex" into an
 
 ## WebUI Console
 
-14 panels with 5 accent themes: Chat (target switching, streaming, voice, images), Groups (roster + default model), Units, Providers, Task Graph (session-labeled DAG), Three Ledgers, Memory (deep db or memory.md file mode), Skills, Automations, Approvals, Channels, Events, Settings.
+14 panels, 3 theme presets × 5 accents: Chat (target switching, streaming, images, TTS), Agents (roster, persona, adaptation), Groups (roster + default model), Nexus (experimental links), Task Graph (session-labeled DAG), Three Ledgers, Models (providers, key pools, capability models), Memory (deep db or memory.md file mode), Skills, Automations (cron / one-off / queue), Approvals, Channels, Events (timeline + tool audit), Settings (backend-schema driven).
 
 ## Documentation
 

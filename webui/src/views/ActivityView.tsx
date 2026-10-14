@@ -170,27 +170,22 @@ function EventsPane(): React.ReactElement {
   }, [sid, load]);
 
   return (
-    <div className="pane-wrap">
-      <PageHeader
-        en="EVENTS"
-        title={t("activity.title")}
-        desc={t("activity.desc")}
-        actions={
-          <>
-            <Select
-              showSearch
-              value={sid || undefined}
-              placeholder={t("activity.pickSession")}
-              style={{ minWidth: 280 }}
-              onChange={(v) => setSid(v)}
-              options={sessions.map((s) => ({ value: s.id, label: `${s.title}（${s.id.slice(0, 8)}…）` }))}
-            />
-            <Button icon={<ReloadOutlined />} onClick={() => void load(sid)}>
-              {t("common.refresh")}
-            </Button>
-          </>
-        }
-      />
+    // 内层不再重复页头：标题与说明由 ActivityView 外层的 PageHeader 统一承担，
+    // 此处只留会话选择与刷新（此前同一段说明在一屏内出现两次）
+    <div className="pane-body">
+      <div className="pane-toolbar">
+        <Select
+          showSearch
+          value={sid || undefined}
+          placeholder={t("activity.pickSession")}
+          style={{ minWidth: 220, flex: "1 1 220px", maxWidth: 420 }}
+          onChange={(v) => setSid(v)}
+          options={sessions.map((s) => ({ value: s.id, label: `${s.title}（${s.id.slice(0, 8)}…）` }))}
+        />
+        <Button icon={<ReloadOutlined />} onClick={() => void load(sid)}>
+          {t("common.refresh")}
+        </Button>
+      </div>
 
       <Card size="small" className="hud activity-live" title={t("activity.liveTitle")}>
         {timeline.length === 0 ? (
