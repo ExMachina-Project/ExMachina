@@ -1445,111 +1445,124 @@ function renderSetGroup(body) {
         `个体 ${ov.agents} · 编成 ${ov.playbooks} · 会话 ${ov.sessions} · 记忆 组 ${ov.memory.group} / 共享 ${ov.memory.shared}`;
     }).catch(() => { const e = row.querySelector(".set-overview"); if (e) e.textContent = ""; });
 
-    // 组内个体：行式管理（设主 / 人格 / 提示词 / 移除）
+    // 组内个体：行式管理（人格 / 提示词 / 移除）——主智能体固定排最前，不可更换亦不可移除
     req(`/groups/${g.id}/agents`).then((agents) => {
       const box = row.querySelector(".set-agents");
       box.innerHTML = "";
-      for (const a of agents) {
+      const ordered = [...agents].sort((a, b) => {
+        const pa = g.primary === a.identifier ? 0 : 1;
+        const pb = g.primary === b.identifier ? 0 : 1;
+        return pa - pb || String(a.identifier).localeCompare(String(b.identifier));
+      });
+      for (const a of ordered) {
         const isPrimary = g.primary === a.identifier;
         const ar = document.createElement("div");
         ar.className = "agent-row";
         ar.innerHTML = `<span class="agent-name">@${esc(a.identifier)}</span><span class="agent-desc">${esc(a.name || "")} · ${esc(a.domain || "")}</span>
           <span class="agent-ops">
-            ${isPrimary ? '<i class="pri">主</i>' : `<button class="set-btn" data-op="pri">设主</button>`}
+            ${isPrimary ? '<i class="pri">主</i>' : ""}
             <button class="set-btn" data-op="persona">人格</button>
             <button class="set-btn" data-op="prompt">提示词</button>
-            <button class="set-btn danger" data-op="rm">移除</button>
+            ${isPrimary ? "" : '<button class="set-btn danger" data-op="rm">移除</button>'}
           </span>`;
-        const edit = document.createElement("div");
-        ar.appendChild(edit);
-        ar.querySelector('[data-op="pri"]')?.addEventListener("click", async () => {
-          if (await settingsSave(req(`/groups/${g.id}/primary`, { method: "POST", body: JSON.stringify({ identifier: a.identifier }) }), `主智能体 → @${a.identifier}`)) renderSettings();
-        });
-        ar.querySelector('[data-op="persona"]').addEventListener("click", () => personaCard(edit, a.identifier, { kind: "group-agent", gid: g.id }));
-        ar.querySelector('[data-op="prompt"]').addEventListener("click", () => promptCard(edit, { kind: "group-agent", gid: g.id, identifier: a.identifier }));
-        ar.querySelector('[data-op="rm"]').addEventListener("click", async () => {
+        ar.querySelector('[data-op="persona"]').addEventListener("click", () => personaModal(a.identifier, { kind: "group-agent", gid: g.id }));
+        ar.querySelector('[data-op="prompt"]').addEventListener("click", () => promptModal({ kind: "group-agent", gid: g.id, identifier: a.identifier }));
+        ar.querySelector('[data-op="rm"]')?.addEventListener("click", async () => {
           if (!confirm(`从组移除 @${a.identifier}？`)) return;
           if (await settingsSave(req(`/groups/${g.id}/agents/${a.identifier}`, { method: "DELETE" }), "已移除")) renderSettings();
         });
         box.appendChild(ar);
       }
-      // 组内新增个体（可选编成模板）；内置组编成受保护（服务端拒绝），仅自定义组开放
-      if (g.builtin) {
-        box.appendChild(Object.assign(document.createElement("div"), { className: "set-hint", textContent: "内置组编成受保护——新建自定义组后即可添加个体。" }));
-        return;
+      // 空态：内置组编成受保护，自定义组引导走右上「＋ 添加个体」
+      if (!agents.length) {
+        box.appendChild(Object.assign(document.createElement("div"), {
+          className: "set-hint",
+          textContent: g.builtin ? "内置组编成受保护——新建自定义组后即可添加个体。" : "组内暂无个体——点右上「＋ 添加个体」新增。",
+        }));
       }
-      const add = document.createElement("div");
-      add.className = "agent-add";
-      const nameI = mkInput("", { placeholder: "名称" });
-      const idI = mkInput("", { placeholder: "标识（如 coder-1）" });
-      const domI = mkInput("", { placeholder: "负责域（可选）" });
-      const tpl = mkSelect([["", "模板（可选）"], ...templates.filter((t) => t.kind === "unit").map((t) => [t.id, t.name])], "");
-      add.appendChild(nameI); add.appendChild(idI); add.appendChild(domI); add.appendChild(tpl);
-      add.appendChild(mkBtn("添加个体", async () => {
-        if (!nameI.value.trim() || !idI.value.trim()) return toast("名称与标识必填", false);
-        const payload = { name: nameI.value.trim(), identifier: idI.value.trim(), description: nameI.value.trim(), domain: domI.value.trim(), group: g.id };
-        if (tpl.value) payload.template = tpl.value;
-        if (await settingsSave(req("/agents", { method: "POST", body: JSON.stringify(payload) }), "个体已添加")) renderSettings();
-      }, "set-btn"));
-      box.appendChild(add);
     }).catch(() => {});
   }
   body.appendChild(list);
 
-  // 组设置卡：模型 + 能力槽位（组级覆盖）
-  function groupSettingsCard(row, g, templates) {
-    const main = row.querySelector(".set-row-main");
-    const old = main.querySelector(".group-settings");
-    if (old) { old.remove(); return; }
-    const card = document.createElement("div");
-    card.className = "group-settings";
-    const modelI = mkInput(g.model ?? "", { placeholder: "档案ID 或 档案ID/模型名（空 = 跟随全局）" });
-    card.appendChild(mkField("组默认模型", modelI));
-    req("/llm/capabilities").then(async (gc) => {
-      const cap = g.capabilities ?? {};
-      const s1 = mkInput(cap.speech ?? gc.speech ?? "", { placeholder: "档案ID 或 档案ID/模型名" });
-      const s2 = mkInput(cap.transcribe ?? gc.transcribe ?? "", { placeholder: "同上" });
-      const s3 = mkInput(cap.visionRelay ?? gc.visionRelay ?? "", { placeholder: "同上" });
-      const s4 = mkInput(cap.embedding ?? gc.embedding ?? "", { placeholder: "同上" });
-      card.appendChild(mkField("语音合成", s1));
-      card.appendChild(mkField("语音转写", s2));
-      card.appendChild(mkField("视觉转述", s3));
-      card.appendChild(mkField("语义嵌入", s4));
-      card.appendChild(mkBtn("保存组设置", async () => {
-        const caps = {};
-        if (s1.value.trim()) caps.speech = s1.value.trim();
-        if (s2.value.trim()) caps.transcribe = s2.value.trim();
-        if (s3.value.trim()) caps.visionRelay = s3.value.trim();
-        if (s4.value.trim()) caps.embedding = s4.value.trim();
-        const ok1 = await settingsSave(req(`/groups/${g.id}/model`, { method: "PUT", body: JSON.stringify({ model: modelI.value.trim() }) }), "组模型已保存");
-        const ok2 = await settingsSave(req(`/groups/${g.id}/capabilities`, { method: "PUT", body: JSON.stringify(caps) }), "组能力已保存");
-        if (ok1 && ok2) { await refreshContext(); renderSettings(); }
-      }));
-    }).catch(() => {});
-    main.appendChild(card);
+  // 组设置模态：模型 + 能力槽位（组级覆盖）
+  function groupSettingsModal(g) {
+    formModal(`组设置 · ${g.name}`, (c) => {
+      const modelI = mkInput(g.model ?? "", { placeholder: "档案ID 或 档案ID/模型名（空 = 跟随全局）" });
+      c.appendChild(mkField("组默认模型", modelI));
+      const capInputs = {};
+      for (const [label, key] of [["语音合成（TTS）", "speech"], ["语音转写（STT）", "transcribe"], ["视觉转述", "visionRelay"], ["语义嵌入", "embedding"]]) {
+        const i = mkInput((g.capabilities ?? {})[key] ?? "", { placeholder: "档案ID 或 档案ID/模型名（空 = 跟随全局）" });
+        capInputs[key] = i;
+        c.appendChild(mkField(label, i));
+      }
+      modalBar({
+        okText: "保存",
+        onSubmit: async () => {
+          const caps = {};
+          for (const [key, i] of Object.entries(capInputs)) if (i.value.trim()) caps[key] = i.value.trim();
+          const ok1 = await settingsSave(req(`/groups/${g.id}/model`, { method: "PUT", body: JSON.stringify({ model: modelI.value.trim() }) }), "组模型已保存");
+          const ok2 = await settingsSave(req(`/groups/${g.id}/capabilities`, { method: "PUT", body: JSON.stringify(caps) }), "组能力已保存");
+          if (ok1 && ok2) { await refreshContext(); renderSettings(); return true; }
+          return false;
+        },
+      });
+    });
   }
 
-  // 新建组（可选编成模板）
-  const create = setCard("新建智能体组");
-  const name = mkInput("", { placeholder: "组名称，如 前端小组" });
-  const desc = mkInput("", { placeholder: "一句话描述（可选）" });
-  const gtpl = mkSelect([["", "编成模板（可选）"], ...templates.map((t) => [t.id, `${t.name}（${t.kind === "group" ? "组" : "个体"}）`])], "");
-  create.appendChild(mkField("名称", name));
-  create.appendChild(mkField("描述", desc));
-  create.appendChild(mkField("模板", gtpl));
-  create.appendChild(mkBtn("创建", async () => {
-    if (!name.value.trim()) return toast("组名称不能为空", false);
-    const payload = { name: name.value.trim() };
-    if (desc.value.trim()) payload.description = desc.value.trim();
-    if (gtpl.value) payload.template = gtpl.value;
-    if (await settingsSave(req("/groups", { method: "POST", body: JSON.stringify(payload) }), "组已创建")) { await refreshContext(); renderSettings(); }
-  }));
-  body.appendChild(create);
+  // 添加个体模态（可选编成模板）
+  function addAgentModal(g) {
+    formModal(`添加个体 · ${g.name}`, (c) => {
+      const nameI = mkInput("", { placeholder: "名称，如 前端工程师" });
+      const idI = mkInput("", { placeholder: "标识（如 coder-1）" });
+      const domI = mkInput("", { placeholder: "负责域（可选）" });
+      const tpl = mkSelect([["", "模板（可选）"], ...templates.filter((t) => t.kind === "unit").map((t) => [t.id, t.name])], "");
+      c.appendChild(mkField("名称", nameI));
+      c.appendChild(mkField("标识", idI));
+      c.appendChild(mkField("负责域", domI));
+      c.appendChild(mkField("编成模板", tpl));
+      modalBar({
+        okText: "添加",
+        onSubmit: async () => {
+          if (!nameI.value.trim() || !idI.value.trim()) { toast("名称与标识必填", false); return false; }
+          const payload = { name: nameI.value.trim(), identifier: idI.value.trim(), description: nameI.value.trim(), domain: domI.value.trim(), group: g.id };
+          if (tpl.value) payload.template = tpl.value;
+          const ok = await settingsSave(req("/agents", { method: "POST", body: JSON.stringify(payload) }), "个体已添加");
+          if (ok) renderSettings();
+          return ok;
+        },
+      });
+    });
+  }
+
+  // 新建组模态（可选编成模板）
+  function groupCreateModal() {
+    formModal("新建智能体组", (c) => {
+      const name = mkInput("", { placeholder: "组名称，如 前端小组" });
+      const desc = mkInput("", { placeholder: "一句话描述（可选）" });
+      const gtpl = mkSelect([["", "编成模板（可选）"], ...templates.map((t) => [t.id, `${t.name}（${t.kind === "group" ? "组" : "个体"}）`])], "");
+      c.appendChild(mkField("名称", name));
+      c.appendChild(mkField("描述", desc));
+      c.appendChild(mkField("模板", gtpl));
+      modalBar({
+        okText: "创建",
+        onSubmit: async () => {
+          if (!name.value.trim()) { toast("组名称不能为空", false); return false; }
+          const payload = { name: name.value.trim() };
+          if (desc.value.trim()) payload.description = desc.value.trim();
+          if (gtpl.value) payload.template = gtpl.value;
+          const ok = await settingsSave(req("/groups", { method: "POST", body: JSON.stringify(payload) }), "组已创建");
+          if (ok) { await refreshContext(); renderSettings(); }
+          return ok;
+        },
+      });
+    });
+  }
 }
 
-// —— 智能体（单体）：对齐 SinglesView——档案卡 + 模型/描述/人格/提示词/删除/设为对话目标 ——
+// —— 智能体：对齐 SinglesView——档案卡 + 模型/描述/人格/提示词/删除/设为对话目标 ——
 function renderSetSingles(body) {
-  const list = setCard("智能体（单体，可直接作为对话目标）");
+  const list = setCard("智能体（可直接作为对话目标）");
+  cardAction(list, "＋ 新建智能体", () => singleCreateModal());
   const box = document.createElement("div");
   list.appendChild(box);
   const render = async () => {
