@@ -1,6 +1,6 @@
-//! 单体智能体与交互目标（docs/09 §8）：
-//! 目标 = 智能体组（集体协作）| 单体智能体（独立工作，不属于任何组）。
-//! 用户可切换到某个组或某个单体，但组的成员不提供单体切换（组内个体按协作设计）。
+//! 智能体与交互目标（docs/09 §8）：
+//! 目标 = 智能体组（集体协作）| 智能体（独立工作，不属于任何组）。
+//! 用户可切换到某个组或某个智能体，但组的成员不提供智能体切换（组内个体按协作设计）。
 
 use crate::AppState;
 use axum::extract::{Path, State};
@@ -47,7 +47,7 @@ pub struct TargetBody {
     pub id: Option<String>,
 }
 
-/// 切换交互目标：mode=group 回到激活组；mode=single 切到指定单体
+/// 切换交互目标：mode=group 回到激活组；mode=single 切到指定智能体
 pub async fn set_target(State(st): State<AppState>, Json(b): Json<TargetBody>) -> impl IntoResponse {
     let result = match b.mode.as_str() {
         "group" => st.core.registry().set_active_single(None).map(|_| json!({ "mode": "group" })),
@@ -106,7 +106,7 @@ pub async fn create_single(State(st): State<AppState>, Json(b): Json<SingleBody>
     let def = AgentDefinition {
         name: b.name,
         identifier: b.identifier,
-        domain: b.domain.unwrap_or_else(|| "单体".into()),
+        domain: b.domain.unwrap_or_else(|| "通用".into()),
         tier: exm_core::types::Tier::Orchestrator,
         description: b.description,
         capabilities: vec![],
@@ -134,8 +134,8 @@ pub async fn delete_single(State(st): State<AppState>, Path(id): Path<String>) -
     }
 }
 
-/// 更新单体智能体可编辑字段（name/domain/description/capabilities/tools/model_hint）。
-/// 与 /api/agents/:identifier 共用 registry::update_agent（单体优先命中）；identifier 不可改。
+/// 更新智能体可编辑字段（name/domain/description/capabilities/tools/model_hint）。
+/// 与 /api/agents/:identifier 共用 registry::update_agent（智能体优先命中）；identifier 不可改。
 pub async fn update_single(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -153,7 +153,7 @@ pub struct SinglePersonaBody {
     pub persona: String,
 }
 
-/// 单体智能体人设读取（与组内个体同语义；无自定义文件回落默认人设）
+/// 智能体人设读取（与组内个体同语义；无自定义文件回落默认人设）
 pub async fn get_single_persona(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.registry().single_persona(&id) {
         Ok(persona) => {
@@ -170,7 +170,7 @@ pub async fn get_single_persona(State(st): State<AppState>, Path(id): Path<Strin
     }
 }
 
-/// 保存单体智能体人设（agents/singles/personas/<id>.md）
+/// 保存智能体人设（agents/singles/personas/<id>.md）
 pub async fn put_single_persona(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -182,7 +182,7 @@ pub async fn put_single_persona(
     }
 }
 
-/// 重置单体智能体人设为默认
+/// 重置智能体人设为默认
 pub async fn delete_single_persona(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.registry().single_reset_persona(&id) {
         Ok(_) => Json(json!({ "ok": true, "custom": false })).into_response(),
@@ -210,7 +210,7 @@ pub fn routes() -> Router<AppState> {
 
 // ---------------------------------------------------------------- 系统提示词（PROMPT.md）读写
 
-/// 单体系统提示词读取（GET /api/singles/:id/prompt）
+/// 智能体系统提示词读取（GET /api/singles/:id/prompt）
 pub async fn get_single_prompt(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let Some(def) = st.core.registry().single(&id) else {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "智能体不存在" }))).into_response();
@@ -230,7 +230,7 @@ pub struct PromptBody {
     pub prompt: String,
 }
 
-/// 单体系统提示词保存（PUT /api/singles/:id/prompt）：热生效，下一轮对话即装载
+/// 智能体系统提示词保存（PUT /api/singles/:id/prompt）：热生效，下一轮对话即装载
 pub async fn put_single_prompt(
     State(st): State<AppState>,
     Path(id): Path<String>,

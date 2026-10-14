@@ -1025,7 +1025,7 @@ impl ToolGateway {
     /// 派发时的运行时工具白名单（8.2 口径）：
     /// - 个体 = 编成 JSON 的 tools 清单（未授权工具不在其工具面，不可见亦不可调用）
     /// - 组主智能体 = 额外获得组内个体管理工具（自定义组）与记忆三工具（默认授权）
-    /// - 单体（tier=orchestrator 且不在组内）按编成清单，可经 tools 显式授权记忆工具
+    /// - 智能体（tier=orchestrator 且不在组内）按编成清单，可经 tools 显式授权记忆工具
     pub fn runtime_allowlist(
         def: &AgentDefinition,
         group_meta: Option<&crate::types::GroupMeta>,

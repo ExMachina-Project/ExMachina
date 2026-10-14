@@ -174,7 +174,7 @@ EXMACHINA 换了一条路：把"完成一件复杂事"拆成一个**可被审计
 
 ## 核心概念
 
-- **交互目标**——你对话的对象：某个**智能体组**（集群协作）或某个**智能体**（单体服务）。
+- **交互目标**——你对话的对象：某个**智能体组**（集群协作）或某个**智能体**（不经调度直接服务）。
   切换目标即切换会话上下文，在 WebUI「对话」页左栏完成。
 - **指挥体 / 子个体**——组模式下，主智能体（指挥体）收拢目标、分解 DAG、派发、裁决、收束；
   子个体在各自职责域内执行并契约回流。
@@ -240,9 +240,9 @@ flowchart LR
 | `worker --url <ws://hub:4173/worker>` | 以本机算力接入中心网关（边缘执行节点） |
 | `model list/add/use/remove/test` | 提供商档案（`use` 设全局默认，热生效） |
 | `group list/create/switch/info/delete/export/import` | 智能体组：组建、切换、导入导出组包 |
-| `agent create/remove/set-primary` | 组内个体管理（首个个体自动成为主智能体） |
+| `agent create/remove` | 组内个体管理（首个个体自动成为主智能体，主智能体由系统固定不可更换） |
 | `agent optimize/adaptation/reset-adaptation` | 经验优化：教训提炼为个体行为改进要点 |
-| `persona get/set/reset` | SOUL（灵魂·人格层）编辑：单体位于 `entities/agents/<id>/SOUL.md`，默认智械人格开箱即用 |
+| `persona get/set/reset` | SOUL（灵魂·人格层）编辑：智能体位于 `entities/agents/<id>/SOUL.md`，默认智械人格开箱即用 |
 | `skill list/add/remove` | 技能包（任务目标命中触发词即随派发携带） |
 | `cron list/add/run/enable/disable/remove/runs` | 定时任务（网关常驻时自动调度） |
 | `approval list/approve/deny` | 终端命令审批（高危命令拦截与决定） |
@@ -291,14 +291,14 @@ flowchart LR
 | `/new` `/resume` `/sessions` `/session` `/del` | 会话新建 / 恢复最近 / 列表 / 切换 / 删除 |
 | `/tasks` `/stop` `/undo` `/fork` | 任务图 / 终止本轮（同 Ctrl+C）/ 撤销轮次（联动回滚文件）/ 派生分支 |
 | `/target` `/target group\|single <id>` `/singles` | 当前交互目标与全部可选目标 / 切组（经调度）/ 切实体（不经调度）/ 智能体清单 |
-| `/groups` `/group` `/agents` `/agent` `/persona` | 组清单、建组、组详情 / 个体编成、建删个体、主智能体、人设、经验优化 |
+| `/groups` `/group` `/agents` `/agent` `/persona` | 组清单、建组、组详情 / 个体编成、建删个体、人设、经验优化 |
 | `/model` `/config` | 模型档案（列 / 切 / 测 / 增 / 删）与配置读写（含 schema） |
 | `/memory` | 记忆检索 / 固化 / 固定 / 统计 / 衰减 / 重建 / 渲染 |
 | `/skills` `/cron` `/approvals` `/approve` `/deny` | 技能包 / 定时任务 / 执行审批 |
 | `/checkpoints` `/restore` `/doctor` | 文件检查点与回滚 / 体检 |
 | `/clear` `/status` `/quiet` `/theme` | 重绘横幅 / **完整运行状态面板（按需调出，不常驻）** / 静默模式 / 强调色（五套主题） |
 
-**交互目标**分两类：`组`（集群协作，经指挥体调度）与`智能体`（单体服务，不经调度），
+**交互目标**分两类：`组`（集群协作，经指挥体调度）与`智能体`（不经调度直接服务），
 用 `/target group <id>` / `/target single <id>` 互切；输入框下方小字行的 `TARGET` 芯片
 始终反映当前口径。`/quiet` 与 `/theme` 会落盘，下次进入面板自动沿用。
 
