@@ -71,8 +71,9 @@ enum Commands {
     Tasks {
         session_id: String,
     },
-    /// 起网关（HTTP REST + WebSocket），供 WebUI / 第三方渠道接入
-    Serve {
+    /// 起网关（HTTP REST + WebSocket + WebUI 托管），供浏览器 / 第三方渠道接入
+    #[command(alias = "serve")]
+    Gateway {
         #[arg(short, long, default_value_t = 4173)]
         port: u16,
         /// 监听地址，默认 `0.0.0.0`（公网可访问）；本地严格隔离用 `127.0.0.1`
@@ -228,7 +229,7 @@ enum SkillAction {
 enum CronAction {
     /// 列出定时任务
     List,
-    /// 创建定时任务（--cron 五段表达式 或 --at 一次性时间）
+    /// 创建定时任务（--kind cron|at|queue；缺省按 --cron/--at 推断）
     Add {
         name: String,
         #[arg(long)]
@@ -237,6 +238,15 @@ enum CronAction {
         cron: Option<String>,
         #[arg(long)]
         at: Option<String>,
+        /// 任务类型：cron（周期）/ at（一次性）/ queue（连续，按步骤 id 顺序执行）
+        #[arg(long)]
+        kind: Option<String>,
+        /// 一次性任务的投递会话 id（留空 = 按 session_title 新建或复用）
+        #[arg(long)]
+        target_session: Option<String>,
+        /// 连续任务的步骤任务 id（逗号分隔；--kind queue 时必填）
+        #[arg(long, value_delimiter = ',')]
+        steps: Vec<String>,
         /// 执行组；缺省为运行时激活组
         #[arg(long)]
         group: Option<String>,
@@ -538,7 +548,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Commands::Serve { port, host } => {
+        Commands::Gateway { port, host } => {
             let core = build_core(&workspace)?;
             let host_ref = if host.is_empty() { None } else { Some(host.as_str()) };
             exm_gateway::serve(core, port, host_ref).await
@@ -659,8 +669,19 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let core = build_core(&workspace)?;
             match action {
                 CronAction::List => platform_cmd::run_cron_list(&core),
-                CronAction::Add { name, prompt, cron, at, group, session_title } => {
-                    platform_cmd::run_cron_add(&core, &name, &prompt, cron, at, group, session_title)
+                CronAction::Add { name, prompt, cron, at, kind, target_session, steps, group, session_title } => {
+                    platform_cmd::run_cron_add(
+                        &core,
+                        &name,
+                        &prompt,
+                        cron,
+                        at,
+                        group,
+                        session_title,
+                        kind,
+                        target_session,
+                        steps,
+                    )
                 }
                 CronAction::Run { id } => platform_cmd::run_cron_now(&core, &id).await,
                 CronAction::Enable { id } => platform_cmd::run_cron_enable(&core, &id, true),

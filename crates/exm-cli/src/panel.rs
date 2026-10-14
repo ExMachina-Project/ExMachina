@@ -182,8 +182,19 @@ impl Panel {
 
     fn print_banner(&self) {
         println!();
-        for r in banner_rows() {
-            println!("  {}", self.accent(&r));
+        let rows = banner_rows();
+        let banner_w = disp_width(&rows[0]) + 2; // 含左侧两格缩进
+        if self.width >= banner_w {
+            for r in &rows {
+                println!("  {}", self.accent(r));
+            }
+        } else {
+            // 窄终端（<64 列）放不下整幅字标：折行会把版式撑破，
+            // 此时只留文字标识，不画字标
+            println!(
+                "  {}",
+                self.accent(&format!("EX·MACHINA{}", " ".repeat(banner_w.saturating_sub(12))))
+            );
         }
         println!(
             "  {}",
@@ -320,7 +331,16 @@ impl Panel {
             }
         };
         // 状态栏只放模型名（档案前缀在信息面板里给全，这里省列宽）
-        let model = cfg.llm.model.clone();
+        // 未配置模型时给出显式占位，避免出现「MODEL  │」这种标签悬空的空芯片
+        let model = if cfg.llm.model.trim().is_empty() {
+            if exm_core::config::mock_enabled_from_env() {
+                "mock（测试替身）".to_string()
+            } else {
+                "未配置".to_string()
+            }
+        } else {
+            cfg.llm.model.clone()
+        };
         let tokens = core.session_tokens_estimate(&state.session_id);
 
         let candidates = [
@@ -835,9 +855,19 @@ impl Panel {
                                 args.kv.get("at").cloned(),
                                 args.kv.get("group").cloned(),
                                 args.kv.get("session-title").cloned(),
+                                args.kv.get("kind").cloned(),
+                                args.kv.get("target-session").cloned(),
+                                args.kv
+                                    .get("steps")
+                                    .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                                    .unwrap_or_default(),
                             )?;
                         }
-                        None => println!("{}", warn("用法：/cron add <名称> --prompt <提示词> [--cron \"分 时 日 月 周\"] [--at <ISO8601>]")),
+                        None => println!(
+                            "{}",
+                            warn("用法：/cron add <名称> --prompt <提示词> [--cron \"分 时 日 月 周\"] [--at <ISO8601>]\
+                                  \n       连续任务：--kind queue --steps id1,id2")
+                        ),
                     },
                     "run" => match rest.get(1) {
                         Some(id) => platform_cmd::run_cron_now(core, id).await?,
@@ -1188,26 +1218,29 @@ pub async fn run_panel(core: Arc<Core>, quiet: bool) -> anyhow::Result<()> {
 
 // ---------------------------------------------------------------- 辅助
 
-/// 字符画字母表：EXMACHINA（每字母 5 列 × 5 行，等宽块元素）
-const BANNER_LETTERS: [[&str; 5]; 9] = [
+/// 字符画字母表：EXMACHINA（每字母 6 列 × 7 行，双线笔画）
+///
+/// 字形口径对齐 `docs/wordmark.svg`（终端横幅与字标同一套视觉语汇）：
+/// 笔画取两格宽，与字标的粗板式笔画同量级；单线细字模在终端里过于轻飘。
+const BANNER_LETTERS: [[&str; 7]; 9] = [
     // E
-    ["█████", "█    ", "████ ", "█    ", "█████"],
+    ["██████", "██    ", "██    ", "██████", "██    ", "██    ", "██████"],
     // X
-    ["█   █", " █ █ ", "  █  ", " █ █ ", "█   █"],
+    ["██  ██", "██  ██", " ████ ", "  ██  ", " ████ ", "██  ██", "██  ██"],
     // M
-    ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
+    ["██████", "██  ██", "██  ██", "██ █ █", "██  ██", "██  ██", "██  ██"],
     // A
-    [" ███ ", "█   █", "█████", "█   █", "█   █"],
+    [" ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
     // C
-    [" ████", "█    ", "█    ", "█    ", " ████"],
+    [" ████ ", "██  ██", "██    ", "██    ", "██    ", "██  ██", " ████ "],
     // H
-    ["█   █", "█   █", "█████", "█   █", "█   █"],
+    ["██  ██", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
     // I
-    ["█████", "  █  ", "  █  ", "  █  ", "█████"],
+    ["██████", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "██████"],
     // N
-    ["█   █", "██  █", "█ █ █", "█  ██", "█   █"],
+    ["██  ██", "███ ██", "████ █", "██ ███", "██  ██", "██  ██", "██  ██"],
     // A
-    [" ███ ", "█   █", "█████", "█   █", "█   █"],
+    [" ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
 ];
 
 /// 非 TTY（管道 / 重定向）逐行模式下复用同一套 `/` 命令实现。
@@ -1234,9 +1267,9 @@ pub async fn handle_line(core: &Arc<Core>, line: &str, quiet: bool, session_id: 
     Ok(matches!(panel.dispatch(core, &mut state, line).await?, Flow::Exit))
 }
 
-/// 由字母表拼出横幅 5 行（保证各行列宽严格一致）
+/// 由字母表拼出横幅 7 行（保证各行列宽严格一致）
 fn banner_rows() -> Vec<String> {
-    let mut rows = vec![String::new(); 5];
+    let mut rows = vec![String::new(); BANNER_LETTERS[0].len()];
     for (i, letter) in BANNER_LETTERS.iter().enumerate() {
         for (r, line) in letter.iter().enumerate() {
             if i > 0 {
@@ -1811,9 +1844,9 @@ mod tests {
     #[test]
     fn 横幅_各行列宽严格一致() {
         let rows = banner_rows();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 7, "字标口径为 7 行");
         let w = disp_width(&rows[0]);
-        assert_eq!(w, 53, "EXMACHINA = 9 字母 × 5 列 + 8 个间隔");
+        assert_eq!(w, 62, "EXMACHINA = 9 字母 × 6 列 + 8 个间隔");
         for r in &rows {
             assert_eq!(disp_width(r), w, "行宽不一致：{r}");
         }

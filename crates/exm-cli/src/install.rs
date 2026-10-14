@@ -109,12 +109,12 @@ pub fn run_install(workspace_root: &std::path::Path, quick: bool) -> anyhow::Res
         println!();
         println!("{}", warn("注意：尚未配置模型——对话前请先完成模型接入（下列任一步）"));
         println!("  {}  {}", dim("·"), "exm model add <id> --name <名称> --base-url <url> --api-key <key> --model <模型名>".cyan());
-        println!("  {}  {}", dim("·"), "exm serve  # 打开「提供商」页图形化配置".cyan());
+        println!("  {}  {}", dim("·"), "exm gateway  # 打开「提供商」页图形化配置".cyan());
     }
     println!();
     println!("{}", "下一步".bold().to_string());
     println!("  {}  {}{}", dim("1."), "exm chat \"分析当前项目的架构风险\"".cyan(), dim("   # 终端直接对话"));
-    println!("  {}  {}{}", dim("2."), "exm serve".cyan(), dim("                        # 起网关（WebUI/第三方渠道接入）"));
+    println!("  {}  {}{}", dim("2."), "exm gateway".cyan(), dim("                       # 起网关（WebUI/第三方渠道接入）"));
     println!("  {}  {}{}", dim("3."), "exm doctor".cyan(), dim("                       # 体检：配置/编成/记忆/端口"));
     println!("{}", dim("提示：`exm` 与 `exmachina` 是同一命令的两个入口名，行为完全一致（docs/07 §2）"));
     Ok(())

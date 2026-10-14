@@ -12,6 +12,8 @@
     "dev:webui": "npm run dev -w @exmachina/webui",
     "test": "cargo test --workspace",
     "check": "cargo check --workspace",
+    "check:i18n": "node scripts/i18n-check.mjs",
+    "gateway": "cargo run -p exm-gateway --release",
     "serve": "cargo run -p exm-gateway --release",
     "exm": "cargo run -p exm-cli --release --bin exm --",
     "e2e": "cargo run -p exm-gateway --example e2e"

@@ -19,7 +19,7 @@ const CRON_TEMPLATES: { expr: string; labelKey: "cron.tpl.daily" | "cron.tpl.wee
 
 export function AutomationsView(): React.ReactElement {
   const t = useT();
-  const { groups, activeGroup } = useExm();
+  const { groups, activeGroup, sessions } = useExm();
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(false);
@@ -45,13 +45,22 @@ export function AutomationsView(): React.ReactElement {
 
   const submit = async () => {
     const v = await form.validateFields();
-    const oneOff = v.mode === "at";
+    const mode = (v.mode ?? "cron") as string;
+    const oneOff = mode === "at";
+    const queue = mode === "queue";
     try {
       await api.createCron({
         name: v.name,
         prompt: v.prompt,
-        cron: oneOff ? undefined : (v.cron as string | undefined),
+        kind: mode,
+        cron: oneOff || queue ? undefined : (v.cron as string | undefined),
         at: oneOff ? (v.at as string | undefined) : undefined,
+        // 连续任务：按序执行的任务 id 列表（后端要求至少一项）
+        steps: queue
+          ? ((v.steps ?? []) as string[]).map((s) => s.trim()).filter(Boolean)
+          : undefined,
+        // 一次性任务可投递到已有会话；留空则按 sessionTitle 新建/复用
+        targetSession: oneOff ? (v.targetSession || undefined) : undefined,
         group: v.group || undefined,
         sessionTitle: v.sessionTitle || undefined,
         notifyChannels: ((v.notifyChannels ?? []) as string[]).map((s) => s.trim()).filter(Boolean),
@@ -120,14 +129,34 @@ export function AutomationsView(): React.ReactElement {
             },
             {
               title: t("cron.colSchedule"),
-              render: (_, j) => (
-                <Space direction="vertical" size={2}>
-                  {j.cron ? <Tag color="cyan">cron[{j.cron}]</Tag> : <Tag color="purple">{t("cron.oneOff", { at: j.at ?? "" })}</Tag>}
-                  {j.enabled && j.nextRunAt && (
-                    <span className="dim mono">{t("cron.nextRun", { at: new Date(j.nextRunAt).toLocaleString() })}</span>
-                  )}
-                </Space>
-              ),
+              render: (_, j) => {
+                // 任务类型（v0.4.0 三类型）：缺省按 cron/at 有无推断，与后端 job_kind 同口径
+                const kind = j.kind ?? (j.cron ? "cron" : "at");
+                return (
+                  <Space direction="vertical" size={2}>
+                    {kind === "queue" ? (
+                      <Tag color="gold">{t("cron.kind.queue")}</Tag>
+                    ) : kind === "at" ? (
+                      <Tag color="purple">{t("cron.oneOff", { at: j.at ?? "" })}</Tag>
+                    ) : (
+                      <Tag color="cyan">cron[{j.cron ?? ""}]</Tag>
+                    )}
+                    {kind === "queue" && j.steps && j.steps.length > 0 && (
+                      <span className="mono dim">
+                        {t("cron.f.stepsShort")}: {j.steps.join(" → ")}
+                      </span>
+                    )}
+                    {kind === "at" && j.targetSession && (
+                      <span className="mono dim">
+                        → {j.targetSession.slice(0, 8)}…
+                      </span>
+                    )}
+                    {j.enabled && j.nextRunAt && (
+                      <span className="dim mono">{t("cron.nextRun", { at: new Date(j.nextRunAt).toLocaleString() })}</span>
+                    )}
+                  </Space>
+                );
+              },
             },
             {
               title: t("cron.colGroup"),
@@ -205,14 +234,47 @@ export function AutomationsView(): React.ReactElement {
               options={[
                 { value: "cron", label: t("cron.mode.cron") },
                 { value: "at", label: t("cron.mode.at") },
+                { value: "queue", label: t("cron.mode.queue") },
               ]}
             />
           </Form.Item>
           <Form.Item noStyle shouldUpdate={(a, b) => a.mode !== b.mode}>
             {({ getFieldValue }) =>
               getFieldValue("mode") === "at" ? (
-                <Form.Item name="at" label={t("cron.f.at")} rules={[{ required: true }]}>
-                  <Input placeholder="2026-09-13T09:00:00Z" />
+                <>
+                  <Form.Item name="at" label={t("cron.f.at")} rules={[{ required: true }]}>
+                    <Input placeholder="2026-09-13T09:00:00Z" />
+                  </Form.Item>
+                  <Form.Item name="targetSession" label={t("cron.f.targetSession")} extra={t("cron.f.targetSessionExtra")}>
+                    <Select
+                      allowClear
+                      showSearch
+                      placeholder={t("cron.f.targetSessionPh")}
+                      options={sessions.map((s) => ({ value: s.id, label: `${s.title}（${s.id.slice(0, 8)}…）` }))}
+                    />
+                  </Form.Item>
+                </>
+              ) : getFieldValue("mode") === "queue" ? (
+                /* 连续任务：按序执行的步骤任务 id（后端要求至少一项） */
+                <Form.Item
+                  name="steps"
+                  label={t("cron.f.steps")}
+                  extra={t("cron.f.stepsExtra")}
+                  rules={[
+                    {
+                      validator: (_, value: string[]) =>
+                        Array.isArray(value) && value.map((s) => s.trim()).filter(Boolean).length > 0
+                          ? Promise.resolve()
+                          : Promise.reject(new Error(t("cron.f.stepsRequired"))),
+                    },
+                  ]}
+                >
+                  <Select
+                    mode="tags"
+                    allowClear
+                    placeholder={t("cron.f.stepsPh")}
+                    tokenSeparators={[",", " ", "\n"]}
+                  />
                 </Form.Item>
               ) : (
                 <>

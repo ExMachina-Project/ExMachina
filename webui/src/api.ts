@@ -36,8 +36,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(tr("api.unauthorized"));
   }
   if (!resp.ok && resp.status !== 202) {
-    const body = await resp.text();
-    throw new Error(`${init?.method ?? "GET"} ${path} -> ${resp.status} ${body.slice(0, 200)}`);
+    const raw = await resp.text();
+    // 全站错误契约：{"error": "中文说明"}（业务错误与提取器拒绝都已归一），
+    // 直接取说明文案给用户看；只有反向代理之类吐非 JSON 时才回退原文。
+    let msg = raw.slice(0, 200);
+    try {
+      const parsed = JSON.parse(raw) as { error?: string };
+      if (parsed.error) msg = parsed.error;
+    } catch {
+      /* 非 JSON：保留原文 */
+    }
+    throw new Error(msg);
   }
   return (await resp.json()) as T;
 }
@@ -203,6 +212,12 @@ export interface CronJob {
   prompt: string;
   cron?: string;
   at?: string;
+  /** 任务类型：cron（周期）| at（一次性）| queue（连续任务）；缺省按 cron/at 推断 */
+  kind?: "cron" | "at" | "queue" | string;
+  /** at 类型：投递到的已有会话 id（空 = 按 sessionTitle 新建/复用） */
+  targetSession?: string;
+  /** queue 类型：按序执行的任务 id 列表 */
+  steps?: string[];
   group?: string;
   sessionTitle?: string;
   enabled: boolean;
@@ -559,6 +574,12 @@ export const api = {
     prompt: string;
     cron?: string;
     at?: string;
+    /** 任务类型（v0.4.0）：cron | at | queue；缺省由后端按 cron/at 推断 */
+    kind?: string;
+    /** at 类型：投递到的已有会话 id */
+    targetSession?: string;
+    /** queue 类型：按序执行的任务 id 列表 */
+    steps?: string[];
     group?: string;
     sessionTitle?: string;
     notifyChannels?: string[];

@@ -59,7 +59,8 @@
   --text: #d4dae5;
   --text-hi: #f2f5fa;
   --muted: #8b95a7;
-  --muted-dim: #5c6678;
+  /* 次级读数色：需在面板底色上达 WCAG AA 4.5:1（#79839a = 4.93/5.18/4.58） */
+  --muted-dim: #79839a;
   --hover: rgba(255, 255, 255, 0.045);
   --hover-strong: rgba(255, 255, 255, 0.085);
   --overlay: rgba(6, 7, 9, 0.68);
@@ -84,8 +85,9 @@
   --line-strong: #d4d4d8;
   --text: #3f3f46;
   --text-hi: #18181b;
-  --muted: #71717a;
-  --muted-dim: #a1a1aa;
+  --muted: #6b6b73;
+  /* 浅色底下必须更深才够 4.5:1（含 bg-raise 底：#63636c ≈ 5.1） */
+  --muted-dim: #63636c;
   --hover: rgba(0, 0, 0, 0.04);
   --hover-strong: rgba(0, 0, 0, 0.065);
   --overlay: rgba(24, 24, 27, 0.36);
@@ -111,7 +113,7 @@
   --text: #d4d4d8;
   --text-hi: #fafafa;
   --muted: #a1a1aa;
-  --muted-dim: #71717a;
+  --muted-dim: #94949f; /* 4.5:1 起（#94949f = 5.47/5.90/4.96） */
   --hover: rgba(255, 255, 255, 0.05);
   --hover-strong: rgba(255, 255, 255, 0.09);
   --overlay: rgba(9, 9, 11, 0.66);
@@ -248,10 +250,19 @@ input, textarea { caret-color: var(--accent); }
 .app-sider .ant-menu-item:hover .anticon { color: var(--text); }
 .app-sider .ant-menu-item-selected {
   background: var(--accent-soft) !important;
-  color: var(--accent) !important;
+  /* 文字用高对比色、图标保留强调色：强调色压在 13% 强调底上只有 ~4.3:1 */
+  color: var(--text-hi) !important;
   font-weight: 500;
 }
 .app-sider .ant-menu-item-selected .anticon { color: var(--accent); }
+/* 选中态底色被强调色提亮，次级小字需提到 --muted 才够 4.5:1 */
+.app-sider .ant-menu-item-selected .label-en,
+.app-sider .ant-menu-item:hover .label-en { color: var(--muted); }
+/* 强调色浅底（accent-soft）上的文字：强调色压在 13% 强调底上只有 ~3.9:1，
+ * 文字改用 --text，强调色留给图标与色块 */
+:root[data-mode="light"] .cfg-nav-item.on,
+:root[data-mode="light"] .theme-option.active { color: var(--text); }
+:root[data-mode="light"] .cfg-nav-item.on .cfg-nav-icon { color: var(--accent); }
 
 /* ============ 品牌徽记 ============ */
 .emblem { display: block; }
@@ -480,12 +491,14 @@ input, textarea { caret-color: var(--accent); }
 .rail-no { color: var(--accent); font-family: var(--mono); font-size: 10.5px; font-weight: 600; }
 .chat-rail .new-session-btn { width: 100%; margin: 0 0 10px; }
 .session-list { flex: 1; overflow: auto; }
+/* 行结构（桌面与窄屏共用）：bar(窄屏) · avatar · main(标题/副标题) · time · ops(⋮)
+ * 窄屏块只在此之上调密度，不再另立一套版式。 */
 .session-row {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
-  padding: 8px 10px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
   border: 1px solid transparent;
   border-radius: var(--r-md);
   cursor: pointer;
@@ -530,7 +543,11 @@ input, textarea { caret-color: var(--accent); }
 .console-sep { width: 1px; height: 14px; background: var(--line); flex: none; }
 .console-bar .readout + .readout { margin-left: 2px; }
 .ws-alert { margin-bottom: 8px; }
-.chat-scroll { flex: 1; overflow-y: auto; padding-bottom: 8px; scroll-behavior: smooth; }
+/* 滚动容器：relative 是「回到底部」悬浮按钮的定位基准
+ * （缺失时按钮会落到输入区上，压住发送键） */
+.chat-scroll { flex: 1; overflow-y: auto; padding-bottom: 8px; scroll-behavior: smooth; position: relative; }
+
+/* 左栏抽屉方案已废弃：竖屏改为「列表页 / 会话页」整页切换（见媒体查询） */
 
 /* 消息气泡 */
 .msg-bubble { margin-bottom: 12px; border-radius: var(--r-lg); position: relative; }
@@ -637,6 +654,19 @@ input, textarea { caret-color: var(--accent); }
   letter-spacing: 0.04em;
   color: var(--muted-dim);
 }
+/* 侧栏底上有字符流画布叠色（opacity .5），次级括注用 --text 保底可读 */
+.app-sider .ant-menu-item .label-en,
+.app-sider .ant-menu-item .label-en .ant-menu-title-content { color: var(--text); }
+/* 主题选项选中态底色被强调色提亮，括注同理 */
+:root .theme-option.active .label-en { color: var(--text); }
+/* 可勾选筛选标签（记忆类型等）：仅修未选中态——antd 默认字色只有 3.85:1。
+ * 选中态是实心强调色底 + 白字，不可一并改深色（会变成深字压深蓝，2.0:1）。 */
+:root .ant-tag-checkable:not(.ant-tag-checkable-checked) { color: var(--text); }
+:root .ant-tag-checkable:not(.ant-tag-checkable-checked) > span { color: inherit; }
+:root[data-mode="dark"] .ant-tag-checkable:not(.ant-tag-checkable-checked) { color: var(--text-hi); }
+/* 暗色主题的强调色本身是亮色，选中态用 accent-fg 深字（白字压在亮强调色上仅 ~2.2:1） */
+:root[data-mode="dark"] .ant-tag-checkable-checked { color: var(--accent-fg); }
+:root[data-mode="dark"] .ant-tag-checkable-checked > span { color: inherit; }
 
 /* ============ 主题 / 语言切换 ============ */
 .theme-switcher { border-top: 1px solid var(--line); }
@@ -1011,6 +1041,19 @@ input, textarea { caret-color: var(--accent); }
   font-weight: 500;
 }
 .cfg-nav-icon { font-size: 15px; color: inherit; }
+/* schema 载入骨架：占位而非空白导航（空列表会被读成「配置项没了」） */
+.cfg-nav-skeleton {
+  height: 37px; cursor: default; pointer-events: none;
+  background: linear-gradient(90deg, var(--hover) 25%, var(--hover-strong) 37%, var(--hover) 63%);
+  background-size: 400% 100%;
+  animation: cfg-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes cfg-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+/* schema 拉取失败：说明 + 重试 */
+.cfg-fallback { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
 .cfg-panel {
   flex: 1 1 auto;
   min-width: 0;
@@ -1213,12 +1256,72 @@ input, textarea { caret-color: var(--accent); }
 }
 .md a { color: var(--accent); }
 
-/* 会话行操作 */
-.session-ops { margin-left: auto; display: none; flex: none; }
-.session-row:hover .session-ops { display: flex; gap: 0; }
-.session-row { display: flex; align-items: center; }
-.session-row .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ============================================================
+   会话列表（右栏；窄屏时同一结构充当「列表页」头部与行版式）
+   —— 桌面与窄屏共用：工具条（搜索 + 类型过滤）、日期分组、头像 + 副标题两行、
+      行尾时间与「⋮」操作。窄屏差异一律写进 @media (max-width: 860px)。
+   ============================================================ */
+.rail-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+/* 标题与计数之间留白：同字号紧贴会读成「会话16」一个词 */
+.rail-head-count { margin-left: 6px; }
+.rail-toolbar .session-search { flex: 1 1 auto; min-width: 0; }
+.rail-toolbar .session-kind { flex: none; width: 106px; }  /* 容纳「全部会话」全称 + 箭头 */
+.rail-search-icon { color: var(--muted); font-size: 12px; }
+.rail-new-session { color: var(--accent); font-weight: 500; }
+/* 日期分组（今天 / 昨天 / 更早）：标题 + 该段新建动作同一行 */
+.session-group { display: block; }
+.session-group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 9px 4px 3px;
+}
+.session-group-left { display: flex; align-items: baseline; gap: 6px; }
+.session-group-label {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted);
+}
+.session-group-count { font-size: 10.5px; color: var(--muted-dim); }
+.rail-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 28px 12px;
+}
+.rail-empty p { margin: 0; font-size: 12.5px; }
+
+/* 行内左缘细条仅窄屏用（桌面端由分组与头像承担视觉锚点） */
+.session-bar { display: none; }
+.session-avatar {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex: none;
+  border-radius: var(--r-sm);
+  background: var(--bg-raise);
+  color: var(--muted);
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+}
+/* 类型徽标：通道会话用琥珀色，普通会话中性 —— 与「类型」过滤器呼应，扫一眼就能挑出要的那类 */
+.session-avatar.kind-channel { background: color-mix(in srgb, var(--amber) 14%, transparent); color: var(--amber); }
+.session-row.active .session-avatar { background: var(--accent-soft); color: var(--accent); }
+.session-row.active .session-avatar.kind-channel { background: var(--accent-soft); color: var(--accent); }
+/* 行主体：标题 + 副标题两行；窄屏块同样用两行 */
+.session-main {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  flex: 1 1 auto; min-width: 0;
+}
+.session-row .session-title {
+  font-size: 13px; color: var(--text-hi);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 选中行标题用「浅色主题压暗档」：白底上 4.3:1 差一口气，小字须 ≥4.5:1 */
+.session-row.active .session-title { color: var(--accent-strong, var(--accent)); }
+.session-sub {
+  display: block; font-size: 11px; color: var(--muted);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 行尾：时间贴右，「⋮」悬停显形（触屏无 hover，由 hover:none 块常显） */
+.session-row .session-time { order: 4; flex: none; font-size: 10.5px; }
+.session-row .session-ops { order: 5; flex: none; margin-left: 0; display: inline-flex; opacity: 0; }
+.session-row:hover .session-ops,
+.session-row.active .session-ops,
+.session-row:focus-within .session-ops { opacity: 1; }
 .rail-toggle:hover { color: var(--accent); }
+/* 右栏在对话区右侧（DOM 顺序为 rail → main） */
 .chat-shell { flex-direction: row-reverse; }
 
 /* ============================================================
@@ -1243,9 +1346,33 @@ input, textarea { caret-color: var(--accent); }
   background: var(--line);
   color: transparent;
   overflow: hidden;
-  user-select: none;
   font-size: 0;
 }
+/* 预设色标签（purple/cyan/geekblue/gold…）：antd v6 的预设标签取调色板变量
+ * `--ant-<color>-1`（底）/ `--ant-<color>-7`（字），默认组合在 11–12px 下只有 3.3–3.4:1。
+ * 此处按主题改写这两档，令小字达 4.5:1。选择器带 :root 提高特异性——
+ * antd 的变量定义在运行时注入的 :where() 作用域里（同优先级会压过静态表）。 */
+:root .ant-tag-purple { --ant-purple-1: #f3e8ff; --ant-purple-7: #5b21b6; }
+:root .ant-tag-cyan { --ant-cyan-1: #ecfeff; --ant-cyan-7: #0e7490; }
+:root .ant-tag-geekblue { --ant-geekblue-1: #ecfeff; --ant-geekblue-7: #0e7490; }
+:root .ant-tag-blue { --ant-blue-1: #eff6ff; --ant-blue-7: #1d4ed8; }
+:root .ant-tag-green { --ant-green-1: #ecfdf5; --ant-green-7: #047857; }
+:root .ant-tag-gold { --ant-gold-1: #fdf6e8; --ant-gold-7: #92400e; }
+:root .ant-tag-orange { --ant-orange-1: #fff7ed; --ant-orange-7: #9a3412; }
+:root .ant-tag-volcano { --ant-volcano-1: #fff1f0; --ant-volcano-7: #b42318; }
+:root .ant-tag-red { --ant-red-1: #fef2f2; --ant-red-7: #b91c1c; }
+:root .ant-tag-magenta { --ant-magenta-1: #fdf2fa; --ant-magenta-7: #a21caf; }
+:root[data-mode="dark"] .ant-tag-purple { --ant-purple-1: #2a1f45; --ant-purple-7: #d8b4fe; }
+:root[data-mode="dark"] .ant-tag-cyan { --ant-cyan-1: #10333a; --ant-cyan-7: #67e8f9; }
+:root[data-mode="dark"] .ant-tag-geekblue { --ant-geekblue-1: #10333a; --ant-geekblue-7: #67e8f9; }
+:root[data-mode="dark"] .ant-tag-blue { --ant-blue-1: #16264a; --ant-blue-7: #93c5fd; }
+:root[data-mode="dark"] .ant-tag-green { --ant-green-1: #0e2f22; --ant-green-7: #6ee7b7; }
+:root[data-mode="dark"] .ant-tag-gold { --ant-gold-1: #33260a; --ant-gold-7: #fcd34d; }
+:root[data-mode="dark"] .ant-tag-orange { --ant-orange-1: #35210f; --ant-orange-7: #fdba74; }
+:root[data-mode="dark"] .ant-tag-volcano { --ant-volcano-1: #351a18; --ant-volcano-7: #fda29b; }
+:root[data-mode="dark"] .ant-tag-red { --ant-red-1: #3a1618; --ant-red-7: #fca5a5; }
+:root[data-mode="dark"] .ant-tag-magenta { --ant-magenta-1: #331a30; --ant-magenta-7: #f0abfc; }
+
 /* 分节线：细线 + 小号标签 */
 .ascii-divider {
   display: flex;
@@ -1414,8 +1541,9 @@ input, textarea { caret-color: var(--accent); }
   }
   .app-sider.open { transform: translateX(0); }
   .app-content { padding: 52px 10px 14px 10px !important; }
-  .chat-shell { flex-direction: column; height: calc(100vh - 66px); gap: 10px; }
-  .chat-rail { width: 100%; max-height: 38vh; overflow-y: auto; }
+  /* 对话竖屏改由「左栏抽屉」方案接管（见上方 media 块）：
+   * 此处不再对 .chat-shell/.chat-rail 做纵向堆叠与 max-height 截断——
+   * 两者叠加会把抽屉压到 38vh，会话列表只剩 20px 高并把行截断。 */
   .chat-wrap { height: auto; flex: 1; min-height: 0; }
   .chat-input { position: sticky; bottom: 0; }
   .console-bar { flex-wrap: wrap; gap: 6px; }
@@ -1732,11 +1860,13 @@ input, textarea { caret-color: var(--accent); }
 .nav-menu .nav-exp-tag { display: inline-block; margin: 0 0 0 4px; vertical-align: 1px; }
 .nav-menu .ant-menu-item { white-space: nowrap; }
 
-/* 会话行两行布局 */
-.session-row .session-row-top { display: flex; align-items: center; gap: 6px; }
-.session-row .session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-row .session-time { margin-left: auto; font-size: 10px; color: var(--muted); flex: none; }
-.session-row .session-preview { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 会话行：时间贴右（10–11px 小字对比度更吃紧 → 走 --muted-dim，在面板底上 ≥4.5:1） */
+.session-row .session-time { margin-left: auto; color: var(--muted-dim); }
+.session-row .session-ops .ant-btn { flex: none; }
+/* 触摸端操作常驻：整行可点，图标按钮放大到 30px 便于点按 */
+@media (hover: none) {
+  .session-row .session-ops .ant-btn { min-width: 30px; min-height: 30px; }
+}
 
 /* 代码块复制按钮 */
 .code-block-wrap { position: relative; }
@@ -1846,13 +1976,201 @@ input, textarea { caret-color: var(--accent); }
 }
 
 @media (max-width: 860px) {
+  /* ── 对话竖屏：列表页 / 会话页 两个独立页面互斥显示 ──────────────────
+   * 抽屉方案的问题：会话列表只是覆盖在对话之上，返回语义弱、两个汉堡按钮撞脸。
+   * 现改为 data-screen 驱动的整页切换（对标主流移动端）：
+   *   screen=list    → 只显示会话列表（含交互目标与新建）
+   *   screen=thread  → 只显示该会话的对话，页头带返回按钮
+   * 桌面端不受影响：两栏并排常驻。 */
+  .app-content { display: flex; flex-direction: column; min-height: 0; }
+  /* min-width:0 必填：flex 子项默认 min-width:auto，宽表格会把容器撑破（横向溢出 200px+） */
+  .view-stage { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+  .view-stage > * { min-width: 0; }
+  /* margin:0 auto（基线的居中写法）会让 flex 子项在交叉轴上不再 stretch，
+   .chat-shell 被内容宽度收窄到 255px —— 竖屏必须显式归零外边距并占满 */
+  .chat-shell {
+    position: relative; flex: 1; min-height: 0; height: auto; gap: 0;
+    margin: 0; max-width: none; width: 100%;
+  }
+  /* 两页互斥 */
+  .chat-shell[data-screen="list"] .chat-wrap { display: none; }
+  .chat-shell[data-screen="thread"] .chat-rail { display: none; }
+  /* 列表页占满内容区（不再是浮层抽屉）。
+   * 注意：基线规则是 `width:272px; flex:none`，此处必须改 flex 才能铺满——
+   * 只写 width:100% 会被 flex-basis:auto 吃掉（实测仍是 272px）。 */
+  .chat-rail {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    width: auto;
+    max-width: none;
+    max-height: none; /* 覆盖旧竖屏方案的 38vh 截断 */
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
+    border: none;
+    padding: 0;
+    overflow: hidden;
+  }
+  .chat-rail .rail-section.grow { min-height: 0; }
+  .chat-rail .session-list { min-height: 0; overscroll-behavior: contain; }
+
+  /* ── 移动端会话列表页版式 ────────────────────────────────────────────
+   * 密度基准（列表页要尽量多露会话，控件别抢戏）：
+   *   项目选择 38px · 搜索/类型 34px · 分组头 28px · 行 58px · 控件字号 13px
+   * 标题栏 16px / 分组标签 12px 与之配套，整体控制在 ~150px 的头部预算内。 */
+  .rail-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 0 2px 8px;
+  }
+  .rail-head-title { font-size: 16px; font-weight: 600; color: var(--text-hi); }
+  .rail-head-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* 窄屏隐藏编号标签与「主智能体」提示行：目标选择器本身已说清归属，
+     再挂两行说明只会把列表压到首屏之外 */
+  .chat-rail .rail-label,
+  .chat-rail .rail-hint { display: none; }
+  /* 目标（=项目）选择。antd v6 的 Select 内部节点是 .ant-select-content */
+  .chat-rail > .rail-section { margin-bottom: 8px; }
+  .target-select {
+    height: 38px;   /* antd Select 根元素自带额外高度，需与内容一起压到 38 */
+  }
+  .target-select .ant-select-content {
+    min-height: 38px;
+    border-radius: var(--r-sm) !important;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    font-size: 13px;
+  }
+  /* 工具条：搜索 + 类型过滤同一行 */
+  .rail-toolbar {
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: 2px;
+  }
+  /* .session-search 就是 affix-wrapper 自身（antd 把 className 落在同一元素上）；
+     描边只留一层：清掉外框与内框 */
+  .rail-toolbar .session-search,
+  .rail-toolbar .session-search.ant-input-affix-wrapper {
+    flex: 1 1 auto; min-width: 0;
+    height: 34px;
+    padding-inline: 8px;
+    font-size: 13px;
+    border: none !important;
+    border-radius: var(--r-sm);
+    background: var(--bg-panel);
+    /* 描边用 outline：antd 把 box-shadow 占用于 focus 态，inset 描边会被覆盖 */
+    outline: 1px solid var(--line);
+    outline-offset: -1px;
+  }
+  .rail-toolbar .session-search > input,
+  .rail-toolbar .session-search input.ant-input {
+    background: transparent !important;
+    border: none !important;   /* antd v6 给内层 input 也描边，会和外壳叠成双框 */
+    box-shadow: none !important;
+    font-size: 13px;
+  }
+  .rail-toolbar .session-search:focus-within {
+    outline-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-08) !important;
+  }
+  .rail-search-icon { color: var(--muted); font-size: 12px; }
+  /* 类型过滤：紧凑下拉，与搜索等高 */
+  .rail-toolbar .session-kind {
+    flex: none; width: 106px;   /* 容下「全部会话」全称 + 箭头，不截断不溢出 */
+    height: 34px;
+    font-size: 13px;
+  }
+  .rail-toolbar .session-kind .ant-select-content {
+    height: 34px; min-height: 34px; border-radius: var(--r-sm);
+    background: var(--bg-panel); border: 1px solid var(--line);
+    font-size: 13px;
+  }
+  .rail-new-session { color: var(--accent); font-weight: 500; height: 28px; padding-inline: 6px; }
+  /* 分组标题（右侧为该段动作，如新建会话） */
+  .session-group { display: block; }
+  .session-group + .session-group .session-group-head { padding-top: 8px; }
+  .session-group-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 2px 4px;
+    min-height: 28px;
+  }
+  .session-group-left { display: flex; align-items: baseline; gap: 6px; }
+  .session-group-label { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; }
+  .session-group-count { font-size: 11px; color: var(--muted-dim); }
+  /* 空态：居中提示 + 主操作 */
+  .rail-empty {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding: 40px 12px;
+  }
+  .rail-empty p { margin: 0; font-size: 12.5px; }
+  /* 行：左缘细条 + 组首字母方块 + 标题/副标题两行。
+   * 结构与基线一致（基线已是 row 版式），此处只调密度：更紧的行距与更大的点按区。 */
+  .session-row {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 6px;
+    border-radius: var(--r-sm);
+  }
+  .session-bar {
+    display: block; width: 2px; align-self: stretch; min-height: 30px;
+    border-radius: 2px; background: var(--line-strong);
+  }
+  .session-row.active .session-bar { background: var(--accent); }
+  .session-avatar {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; flex: none;
+    border-radius: var(--r-sm);
+    background: var(--bg-raise);
+    color: var(--text);
+    font-size: 13px; font-weight: 600;
+    font-family: var(--mono);
+  }
+  .session-row.active .session-avatar { background: var(--accent-soft); color: var(--accent); }
+  .session-main { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .session-row .session-title { font-size: 13.5px; font-weight: 500; color: var(--text-hi); width: 100%; }
+  .session-row.active .session-title { color: var(--accent-strong, var(--accent)); }
+  .session-sub {
+    display: block; font-size: 11px; color: var(--muted);
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 时间与操作：行尾竖排 */
+  .session-row .session-time { order: 4; font-size: 10.5px; }
+  .session-row .session-ops { order: 5; display: inline-flex; margin-left: 0; }
+  .chat-rail .session-row .session-ops .ant-btn { min-width: 34px; min-height: 34px; }
+  .rail-back {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 30px; flex: none; padding: 0 10px;
+    margin-right: 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    background: var(--bg-raise);
+    color: var(--text); cursor: pointer;
+    font-size: 12px; font-family: var(--font-ui);
+  }
+  .console-title { margin-right: 4px; }
+  /* 输入区：文本框可收缩，发送键永不被挤出可视区 */
+  .chat-input { flex-wrap: nowrap; gap: 6px; }
+  .chat-input .ant-input { min-width: 0; }
+  .chat-input textarea { min-width: 0; }
+  .chat-input .ant-btn { flex: none; }
+  /* 触控目标不小于 36px */
+  .chat-input .ant-btn { min-height: 36px; }
+  .attach-btn { min-width: 36px; }
+}
+
+@media (max-width: 860px) {
   .settings2 { flex-direction: column; gap: 12px; }
   .cfg-nav { width: 100%; flex-direction: row; overflow-x: auto; gap: 4px; padding-bottom: 6px; }
   .cfg-nav-item { white-space: nowrap; padding: 6px 10px; }
+  /* 宽表横滚：滚动容器取 wrapper（.ant-table 本身带 min-width，
+     放在 .ant-table-content 上滚不动，只会把页面撑破 200px+） */
+  .ant-table-wrapper { overflow-x: auto; }
   .ant-table-content { overflow-x: auto; }
   .ant-table { min-width: 560px; }
   .skill-grid, .group-grid { grid-template-columns: 1fr; }
-  .page-actions { width: 100%; justify-content: flex-start; }
+  /* 竖屏：操作区换行到标题下方。width:100% 会把行撑出容器（6px 横向滚动条） */
+  .page-head-row { flex-wrap: wrap; gap: 10px; }
+  .page-actions { width: auto; flex: 1 1 100%; justify-content: flex-start; }
   .session-row .session-ops { display: inline-flex; opacity: 1; }
   .chat-input { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
 }
@@ -1863,6 +2181,9 @@ input, textarea { caret-color: var(--accent); }
   .usage-body { max-height: 240px; }
   .nexus-link-row { flex-wrap: wrap; }
   .nexus-link-row .nexus-endpoint { max-width: 100%; }
+  /* 控制条在 375px 级窄屏上只留必要读数：字符进度条让位给数字 */
+  .console-bar .ascii-meter { display: none; }
+  .console-bar { gap: 6px; font-size: 11px; }
 }
 
 /* 回到底部悬浮按钮 */
