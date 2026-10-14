@@ -18,7 +18,7 @@ import { useT } from "../i18n/core";
 
 export function GroupsView(): React.ReactElement {
   const t = useT();
-  const { groups, activeGroup, refreshAgents } = useExm();
+  const { groups, activeGroup, refreshAgents, loadGroups } = useExm();
   /** null = 卡片总览；非空 = 已进入该组详情 */
   const [entered, setEntered] = useState<string | null>(null);
   const [members, setMembers] = useState<AgentDefinition[]>([]);
@@ -47,6 +47,8 @@ export function GroupsView(): React.ReactElement {
   const [personaSaving, setPersonaSaving] = useState(false);
 
   const meta: GroupMeta | undefined = groups.find((g) => g.id === entered) ?? undefined;
+  // 内置组的出厂人格受保护（后端禁重置：出厂 SOUL 无副本可复原）——按钮同步置灰并给出说明
+  const personaProtected = meta?.builtin ?? false;
 
   const loadMembers = useCallback(async (gid: string) => {
     if (!gid) return;
@@ -81,7 +83,7 @@ export function GroupsView(): React.ReactElement {
   const submitGroup = async () => {
     const v = await groupForm.validateFields();
     try {
-      await api.createGroup({
+      const created = await api.createGroup({
         name: v.name,
         id: v.id || undefined,
         description: v.description ?? "",
@@ -90,7 +92,10 @@ export function GroupsView(): React.ReactElement {
       message.success(t("groups.created", { name: v.name }));
       setGroupModal(false);
       groupForm.resetFields();
-      setEntered(v.id || "");
+      // 必须先刷新组列表再进入详情：列表里没有该组时 meta 为 undefined，
+      // 详情面板拿不到成员与概览（此前 toast 成功但界面停在旧列表）
+      await loadGroups();
+      setEntered(created.id);
     } catch (e) {
       message.error(t("groups.createFailed", { err: String(e) }));
     }
@@ -123,6 +128,7 @@ export function GroupsView(): React.ReactElement {
       await api.deleteGroup(gid);
       message.success(t("groups.groupDeleted", { id: gid }));
       setEntered(null);
+      await loadGroups(); // 卡片列表同步移除已删组
     } catch (e) {
       message.error(t("groups.deleteFailed", { err: String(e) }));
     }
@@ -500,9 +506,9 @@ export function GroupsView(): React.ReactElement {
               <Popconfirm
                 title={t("agents.resetConfirm")}
                 onConfirm={() => void resetPersona()}
-                disabled={personaInfo ? !personaInfo.custom : false}
+                disabled={personaProtected || (personaInfo ? !personaInfo.custom : false)}
               >
-                <Button disabled={personaInfo ? !personaInfo.custom : false}>{t("agents.soulReset")}</Button>
+                <Button disabled={personaProtected || (personaInfo ? !personaInfo.custom : false)}>{t("agents.soulReset")}</Button>
               </Popconfirm>
               <Button onClick={() => setPersonaOf(null)}>{t("common.close")}</Button>
               <Button type="primary" loading={personaSaving} onClick={() => void savePersona()}>
@@ -516,6 +522,7 @@ export function GroupsView(): React.ReactElement {
               {personaInfo.custom ? <Tag color="gold">{t("agents.soulCustom")}</Tag> : <Tag>{t("agents.soulDefault")}</Tag>}
             </div>
           )}
+          {personaProtected && <div className="persona-hint">{t("agents.soulProtectedHint")}</div>}
           <Input.TextArea
             rows={14}
             className="prompt-editor"

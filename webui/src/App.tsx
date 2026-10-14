@@ -130,10 +130,13 @@ export default function App(): React.ReactElement {
   const setPreset = useTheme((s) => s.setPreset);
   const initial = parseHash();
   const [view, setViewState] = useState<ViewKey>(initial.view);
-  /** 切视图并同步 hash（app-shell-routing） */
+  /** 切视图并同步 hash（app-shell-routing）
+   *  保留 `#/chat/<sessionId>` 的会话段：此前三元恒为空串，深链进来第一跳就被抹平，
+   *  移动端无法判断「是否深链直入会话页」，只能一律落在列表页。 */
   const setView = (v: ViewKey) => {
     setViewState(v);
-    const target = "#/" + v + (location.hash.startsWith("#/chat/") && v === "chat" ? "" : "");
+    const seg = location.hash.startsWith("#/chat/") ? location.hash.slice("#/chat/".length) : "";
+    const target = "#/" + v + (v === "chat" && seg ? "/" + seg : "");
     if (location.hash !== target) {
       history.replaceState(null, "", target);
     }

@@ -1347,7 +1347,7 @@ pub fn config_schema() -> serde_json::Value {
                 "fields": [
                     { "key": "automation.heartbeatEnabled", "label": "启用心跳巡检", "kind": "boolean",
                       "default": "false", "required": false,
-                      "help": "网关调度器按周期向心跳会话发送巡检提示（需 exm serve 常驻）" },
+                      "help": "网关调度器按周期向心跳会话发送巡检提示（需 exm gateway 常驻）" },
                     { "key": "automation.heartbeatIntervalMinutes", "label": "心跳间隔（分钟）", "kind": "number",
                       "default": "30", "required": false, "min": 5, "max": 1440,
                       "help": "心跳巡检的执行周期" },
