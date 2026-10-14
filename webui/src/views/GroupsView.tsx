@@ -104,7 +104,6 @@ export function GroupsView(): React.ReactElement {
         name: v.name || "",
         identifier: v.identifier,
         description: v.description || "",
-        tier: v.tier || undefined,
         prompt: v.prompt || undefined,
         group: meta.id,
         template: v.template || undefined,
@@ -138,17 +137,6 @@ export function GroupsView(): React.ReactElement {
       message.success(t("groups.agentDeleted", { id: identifier }));
     } catch (e) {
       message.error(t("groups.deleteFailed", { err: String(e) }));
-    }
-  };
-
-  const doSetPrimary = async (identifier: string) => {
-    if (!meta) return;
-    try {
-      await api.setGroupPrimary(meta.id, identifier);
-      await loadMembers(meta.id);
-      message.success(t("groups.primarySet", { id: identifier }));
-    } catch (e) {
-      message.error(t("groups.setFailed", { err: String(e) }));
     }
   };
 
@@ -399,14 +387,9 @@ export function GroupsView(): React.ReactElement {
                           {t("agents.soulBtn")}
                         </Button>
                         {!isBuiltin && meta.primary !== a.identifier && (
-                          <>
-                            <Button size="small" onClick={() => void doSetPrimary(a.identifier)}>
-                              {t("groups.setPrimary")}
-                            </Button>
-                            <Popconfirm title={t("groups.agentDeleteConfirm")} onConfirm={() => void doRemoveAgent(a.identifier)}>
-                              <Button size="small" danger icon={<DeleteOutlined />} />
-                            </Popconfirm>
-                          </>
+                          <Popconfirm title={t("groups.agentDeleteConfirm")} onConfirm={() => void doRemoveAgent(a.identifier)}>
+                            <Button size="small" danger icon={<DeleteOutlined />} />
+                          </Popconfirm>
                         )}
                       </Space>
                     ),
@@ -464,9 +447,6 @@ export function GroupsView(): React.ReactElement {
             </Form.Item>
             <Form.Item name="prompt" label={t("agents.f.prompt")} extra={t("agents.f.promptExtra")}>
               <Input.TextArea rows={4} placeholder={t("agents.f.promptPh")} />
-            </Form.Item>
-            <Form.Item name="tier" label={t("groups.f.tier")} initialValue="unit">
-              <Select options={[{ value: "unit", label: t("groups.tier.unit") }, { value: "orchestrator", label: t("groups.tier.orch") }]} />
             </Form.Item>
           </Form>
         </Modal>

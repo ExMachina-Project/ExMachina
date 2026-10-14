@@ -335,7 +335,7 @@ exm model test deepseek     # 连通测试（真实发一条极短请求）
 
 ```bash
 exm group create 研发组 --id dev --description "需求拆解与实现"
-exm agent create 主脑 --identifier chief --description "组内主智能体" --tier orchestrator
+exm agent create 主脑 --identifier chief --description "组内主智能体"   # 组内首个个体自动成为主智能体
 exm group switch company
 ```
 

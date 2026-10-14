@@ -439,9 +439,6 @@ export const api = {
     }>("/version/check"),
   switchGroup: (id: string) =>
     req<{ ok: boolean }>("/groups/active", { method: "PUT", body: JSON.stringify({ id }) }),
-  /** 设置组主智能体 */
-  setGroupPrimary: (gid: string, identifier: string) =>
-    req<{ ok: boolean }>(`/groups/${gid}/primary`, { method: "POST", body: JSON.stringify({ identifier }) }),
   deleteGroup: (id: string) => req<{ ok: boolean }>(`/groups/${id}`, { method: "DELETE" }),
   createAgent: (body: {
     name: string;

@@ -1380,7 +1380,8 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
                 .registry()
                 .upsert_agent(gid, def, b.prompt.clone())
                 .map(|saved| {
-                    if was_empty || b.tier.as_deref() == Some("orchestrator") {
+                    // 主智能体由系统指定：仅组的首个个体自动成为主智能体（tier 不再触发换主）
+                    if was_empty {
                         let _ = st.core.registry().set_primary(gid, &saved.identifier);
                     }
                     let _ = meta;

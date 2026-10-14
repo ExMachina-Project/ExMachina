@@ -550,7 +550,7 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text-dim); font-size: 11.5px; padding: 1px 8px; margin: 2px 4px 2px 0; border-radius: var(--radius-full);
 }
 .agent-chip:hover { color: var(--accent); border-color: var(--accent); }
-.agent-chip .pri { color: var(--ok); font-style: normal; }
+.agent-chip .pri, .agent-ops .pri { color: var(--ok); font-style: normal; font-size: 12px; font-weight: 600; }
 .agent-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-top: 1px solid var(--border); }
 .agent-row:first-of-type { border-top: none; }
 .agent-name { color: var(--accent); font-size: 12px; font-family: var(--font-mono); min-width: 120px; }

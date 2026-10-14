@@ -334,12 +334,6 @@ enum AgentAction {
         #[arg(long)]
         group: Option<String>,
     },
-    /// 设置组内主智能体
-    SetPrimary {
-        identifier: String,
-        #[arg(long)]
-        group: Option<String>,
-    },
     /// 基于历史教训优化个体：合成经验改进要点（只调优，不创建）
     Optimize { identifier: String },
     /// 查看个体经验改进要点
@@ -753,9 +747,6 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 }
                 AgentAction::ResetAdaptation { identifier } => {
                     platform_cmd::run_agent_reset_adaptation(&core, &identifier)
-                }
-                AgentAction::SetPrimary { identifier, group } => {
-                    group_cmd::run_agent_set_primary(&core, &identifier, group.as_deref())
                 }
             }
         }
