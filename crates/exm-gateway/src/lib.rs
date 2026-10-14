@@ -1440,7 +1440,7 @@ async fn set_agent_model(
 }
 
 /// 更新个体可编辑字段（name/domain/description/capabilities/tools/model_hint）。
-/// identifier/tier/prompt_file 不可改；单体智能体与组内个体（含内置组受限编辑）统一走 registry::update_agent。
+/// identifier/tier/prompt_file 不可改；智能体与组内个体（含内置组受限编辑）统一走 registry::update_agent。
 async fn update_agent(
     State(st): State<AppState>,
     Path(identifier): Path<String>,

@@ -207,7 +207,7 @@ impl Panel {
             Some(id) => {
                 let name = reg.single(&id).map(|d| d.name).unwrap_or_else(|| id.clone());
                 rows.push(("交互目标", format!("智能体 {name}（{id}）")));
-                rows.push(("说明", "单体服务，不经调度；回组用 /target group <id>".to_string()));
+                rows.push(("说明", "不经调度，直接服务；回组用 /target group <id>".to_string()));
             }
             None => {
                 let gid = core.active_group();
@@ -285,7 +285,7 @@ impl Panel {
         match reg.active_single() {
             Some(id) => {
                 let name = reg.single(&id).map(|d| d.name).unwrap_or_else(|| id.clone());
-                format!("智能体 {name}（{id}）· 单体服务，不经调度")
+                format!("智能体 {name}（{id}）· 不经调度直接服务")
             }
             None => {
                 let gid = core.active_group();
@@ -589,7 +589,7 @@ impl Panel {
             "singles" => {
                 let singles = core.registry().list_singles();
                 if singles.is_empty() {
-                    println!("{}", dim("（无智能体；智能体为预置单体，不经调度直接服务）"));
+                    println!("{}", dim("（无智能体；智能体为预置，不经调度直接服务）"));
                 }
                 let active = core.registry().active_single();
                 for s in singles {
@@ -917,7 +917,7 @@ impl Panel {
             );
         }
 
-        println!("\n{}", self.accent_bold("// 智能体（单体服务，不经调度）"));
+        println!("\n{}", self.accent_bold("// 智能体（不经调度直接服务）"));
         let singles = core.registry().list_singles();
         if singles.is_empty() {
             println!("  {}", dim("（无）"));
@@ -933,10 +933,10 @@ impl Panel {
                 dim(s.description.chars().take(40).collect::<String>())
             );
         }
-        println!("\n{}", dim("  切换：/target group <id>（集群）或 /target single <id>（单体）"));
+        println!("\n{}", dim("  切换：/target group <id>（集群）或 /target single <id>（智能体）"));
     }
 
-    /// 切到某个组：退出单体模式 → 设激活组 → 新会话
+    /// 切到某个组：退出智能体模式 → 设激活组 → 新会话
     fn switch_target_group(&mut self, core: &Arc<Core>, state: &mut PanelState, id: &str) -> anyhow::Result<()> {
         core.registry().set_active_single(None)?;
         group_cmd::run_switch(core, id)?;
@@ -944,11 +944,11 @@ impl Panel {
         Ok(())
     }
 
-    /// 切到某个智能体（单体服务）
+    /// 切到某个智能体（不经调度直接服务）
     fn switch_target_single(&mut self, core: &Arc<Core>, state: &mut PanelState, id: &str) -> anyhow::Result<()> {
         core.registry().set_active_single(Some(id))?;
         let name = core.registry().single(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
-        println!("{} 交互目标已切换：智能体 {}（{id}）· 单体服务，不经调度", ok("完成"), name);
+        println!("{} 交互目标已切换：智能体 {}（{id}）· 不经调度直接服务", ok("完成"), name);
         self.on_target_switched(core, state);
         Ok(())
     }
@@ -1706,7 +1706,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("/target", "当前交互目标 + 全部可选目标（组 / 智能体）"),
             ("/target group <id>", "切到某组（集群协作，经调度）"),
-            ("/target single <id>", "切到某智能体（单体服务，不经调度）"),
+            ("/target single <id>", "切到某智能体（不经调度直接服务）"),
             ("/singles", "智能体清单（可直接作为交互目标）"),
             ("/groups", "智能体组清单"),
             ("/group <id>", "切换激活组（等价 /target group <id>）"),

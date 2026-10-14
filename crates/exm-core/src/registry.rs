@@ -3,7 +3,7 @@
 //! 组（Group）是隔离与切换的基本单位，统一布局 `agents/groups/<gid>/`：
 //!   - SOUL.md（主智能体人格，用户面）+ MEMORY.md（组浅层记忆快照）
 //!   - agents/*.json（成员定义，含主智能体）+ prompts/*.md（成员提示词）+ adaptations/（经验要点）
-//!   - 内置默认组 = groups/default（builtin=true，定义受保护）；主智能体与单体持 SOUL，子个体无人格层
+//!   - 内置默认组 = groups/default（builtin=true，定义受保护）；主智能体与独立智能体持 SOUL，子个体无人格层
 //!   - 集群级共享：protocol/（协议）、skills/（技能）、default-soul.md（兜底人格）
 //! 切换组即热切换：指挥体的规划/派发/提示词/SOUL 全部落在激活组内。
 //! 分布式实现可替换本文件（接口一致）。
@@ -71,11 +71,11 @@ pub struct LocalRegistry {
     dir: PathBuf,
     groups: RwLock<HashMap<String, GroupData>>,
     active: RwLock<String>,
-    /// 单体智能体（独立于任何组，直接作为交互对象；entities/agents/）
+    /// 智能体（独立于任何组，直接作为交互对象；entities/agents/）
     singles: RwLock<HashMap<String, AgentDefinition>>,
-    /// 当前交互目标：None = 激活组；Some(id) = 单体智能体
+    /// 当前交互目标：None = 激活组；Some(id) = 智能体
     active_single: RwLock<Option<String>>,
-    /// 工作目录（干活的项目）：显式设置后优先于组声明与全局根，智能体/智能体组通用
+    /// 工作目录（干活的项目）：显式设置后优先于组声明与全局根，智能体与智能体组通用
     active_workspace: RwLock<Option<String>>,
 }
 
@@ -165,7 +165,7 @@ impl LocalRegistry {
             anyhow::bail!("缺少内置默认组");
         }
 
-        // 单体智能体：entities/agents/*.json（独立交互对象，不属于任何组）
+        // 智能体：entities/agents/*.json（独立交互对象，不属于任何组）
         let mut singles = HashMap::new();
         let singles_dir = self.dir.join("agents");
         if singles_dir.exists() {
@@ -532,7 +532,7 @@ impl LocalRegistry {
         out
     }
 
-    /// 当前交互范围的个体集合（单体模式 = 单体列表；组模式 = 组编成）
+    /// 当前交互范围的个体集合（智能体模式 = 智能体列表；组模式 = 组编成）
     pub fn list_active(&self) -> Vec<AgentDefinition> {
         if self.single_mode() {
             self.list_singles()
@@ -550,9 +550,9 @@ impl LocalRegistry {
         .unwrap_or_default()
     }
 
-    // ---------------- 单体智能体（独立交互对象，docs/09 §8） ----------------
+    // ---------------- 智能体（独立交互对象，docs/09 §8） ----------------
 
-    /// 当前是否处于单体交互模式
+    /// 当前是否处于智能体交互模式
     pub fn single_mode(&self) -> bool {
         self.active_single.read().is_some()
     }
@@ -561,7 +561,7 @@ impl LocalRegistry {
         self.active_single.read().clone()
     }
 
-    /// 当前交互范围 id：单体模式 = single:<id>（会话归属键），否则 = 激活组
+    /// 当前交互范围 id：智能体模式 = single:<id>（会话归属键），否则 = 激活组
     pub fn active_scope(&self) -> String {
         match &*self.active_single.read() {
             Some(id) => format!("single:{id}"),
@@ -579,7 +579,7 @@ impl LocalRegistry {
         self.singles.read().get(id).cloned()
     }
 
-    /// 语言变体提示词路径：组内 prompts/ 或全局 prompts/（单体模式）
+    /// 语言变体提示词路径：组内 prompts/ 或全局 prompts/（智能体模式）
     fn variant_path(&self, stem: &str, lang: &str) -> Option<PathBuf> {
         let file = format!("{stem}.{lang}.md");
         if self.single_mode() {
@@ -605,25 +605,25 @@ impl LocalRegistry {
 
     fn singles_prompt_path(&self, prompt_file: &str) -> PathBuf {
         if prompt_file.contains('/') || prompt_file.contains('\\') {
-            // 新约定：单体目录 entities/agents/<id>/PROMPT.md
+            // 新约定：智能体目录 entities/agents/<id>/PROMPT.md
             self.singles_dir().join(prompt_file)
         } else {
             self.singles_dir().join("prompts").join(prompt_file)
         }
     }
 
-    /// 单体定义文件：entities/agents/<id>/agent.json
+    /// 智能体定义文件：entities/agents/<id>/agent.json
     fn single_def_path(&self, id: &str) -> PathBuf {
         self.singles_dir().join(id).join("agent.json")
     }
 
-    /// 读取单体智能体提示词
+    /// 读取智能体提示词
     pub fn load_single_prompt(&self, prompt_file: &str) -> anyhow::Result<String> {
         std::fs::read_to_string(self.singles_prompt_path(prompt_file))
-            .with_context(|| format!("读取单体提示词失败: {prompt_file}"))
+            .with_context(|| format!("读取智能体提示词失败: {prompt_file}"))
     }
 
-    /// 写入单体提示词文件（PROMPT.md；与激活组状态无关）
+    /// 写入智能体提示词文件（PROMPT.md；与激活组状态无关）
     pub fn write_single_prompt(&self, prompt_file: &str, content: &str) -> anyhow::Result<()> {
         let p = self.singles_prompt_path(prompt_file);
         if let Some(parent) = p.parent() {
@@ -633,7 +633,7 @@ impl LocalRegistry {
         Ok(())
     }
 
-    /// 新增/更新单体智能体（identifier 冲突即替换）
+    /// 新增/更新智能体（identifier 冲突即替换）
     pub fn upsert_single(&self, mut def: AgentDefinition, prompt: Option<String>) -> anyhow::Result<AgentDefinition> {
         Self::validate_identifier(&def.identifier)?;
         if def.name.trim().is_empty() || def.description.trim().is_empty() {
@@ -655,7 +655,7 @@ impl LocalRegistry {
                 format!(
                     "# {}
 
-你是 {}，用户的单体智能体：听清意图、亲手做完、回报结果——分析与实施一体完成。
+你是 {}，用户的智能体：听清意图、亲手做完、回报结果——分析与实施一体完成。
 
 ## 语言纪律
 - 称用户为\"用户\"，以\"本机\"自称。
@@ -686,7 +686,7 @@ impl LocalRegistry {
         Ok(removed)
     }
 
-    /// 切换交互目标：Some(单体 id) 进单体模式，None 回到激活组
+    /// 切换交互目标：Some(智能体 id) 进智能体模式，None 回到激活组
     pub fn set_active_single(&self, id: Option<&str>) -> anyhow::Result<()> {
         match id {
             Some(x) => {
@@ -715,12 +715,12 @@ impl LocalRegistry {
 
     pub fn units(&self) -> Vec<AgentDefinition> {
         if self.single_mode() {
-            return vec![]; // 单体模式不派发子个体
+            return vec![]; // 智能体模式不派发子个体
         }
         self.list().into_iter().filter(|d| matches!(d.tier, Tier::Unit)).collect()
     }
 
-    /// 当前交互目标的主智能体：单体模式 = 该单体；否则 = 组内主智能体
+    /// 当前交互目标的主智能体：智能体模式 = 该智能体；否则 = 组内主智能体
     pub fn primary(&self) -> Option<AgentDefinition> {
         if let Some(id) = &*self.active_single.read() {
             if let Some(d) = self.singles.read().get(id) {
@@ -771,7 +771,7 @@ impl LocalRegistry {
         self.groups.read().get(gid).map(|g| g.dir.clone())
     }
 
-    /// 单体根目录（entities/agents/，公开供记忆渲染等使用）
+    /// 智能体根目录（entities/agents/，公开供记忆渲染等使用）
     pub fn singles_dir_pub(&self) -> PathBuf {
         self.singles_dir()
     }
@@ -1228,16 +1228,16 @@ impl LocalRegistry {
         Ok(())
     }
 
-    /// 个体定义文件：组内 agents/<id>.json（单体 entities/agents/<id>/agent.json）
+    /// 个体定义文件：组内 agents/<id>.json（智能体 entities/agents/<id>/agent.json）
     fn def_path_in(g_dir: &Path, identifier: &str) -> PathBuf {
         g_dir.join("agents").join(format!("{identifier}.json"))
     }
 
-    /// 设置个体默认模型（单体优先，其次跨组查找；空串清除 = 跟随所属组/全局）
+    /// 设置个体默认模型（智能体优先，其次跨组查找；空串清除 = 跟随所属组/全局）
     pub fn set_agent_model(&self, identifier: &str, model: &str) -> anyhow::Result<()> {
         let m = model.trim();
         let hint = if m.is_empty() { None } else { Some(m.to_string()) };
-        // 1) 单体智能体
+        // 1) 智能体
         if self.singles.read().contains_key(identifier) {
             let mut singles = self.singles.write();
             let Some(def) = singles.get_mut(identifier) else {
@@ -1274,12 +1274,12 @@ impl LocalRegistry {
         Ok(())
     }
 
-    /// 更新个体可编辑字段（单体优先，其次跨组查找）——与 set_agent_model 同构。
+    /// 更新个体可编辑字段（智能体优先，其次跨组查找）——与 set_agent_model 同构。
     /// 保护口径：内置组「定义受保护」指不得增删个体或整体替换定义（upsert_agent / remove_agent）；
     /// 本方法与 set_agent_model 同属受限字段编辑，仅放行 AgentPatch 声明的字段，
     /// identifier/tier/prompt_file 与提示词文件恒不可改，落盘回原定义文件。
     pub fn update_agent(&self, identifier: &str, patch: &AgentPatch) -> anyhow::Result<AgentDefinition> {
-        // 1) 单体智能体（entities/agents/<id>.json）
+        // 1) 智能体（entities/agents/<id>.json）
         if self.singles.read().contains_key(identifier) {
             let mut d = {
                 let singles = self.singles.read();
@@ -1334,7 +1334,7 @@ impl LocalRegistry {
     }
 
     // ---------------- SOUL（灵魂·人格层）：**仅用户面智能体** ----------------
-    // 组 = 组根 SOUL.md（即主智能体的人格，组对用户的脸面）；单体 = entities/agents/<id>/SOUL.md。
+    // 组 = 组根 SOUL.md（即主智能体的人格，组对用户的脸面）；智能体 = entities/agents/<id>/SOUL.md。
     // 子个体无人格层（返回 None）：统一智械纪律已在各自系统提示词内。
 
     /// 组主智能体的 SOUL：组根 SOUL.md。子个体返回 None。
@@ -1383,7 +1383,7 @@ impl LocalRegistry {
     pub fn set_persona(&self, identifier: &str, text: &str) -> anyhow::Result<()> {
         // 仅用户面智能体（组主智能体）可设：写入组根 SOUL.md
         let path = self.persona_path(identifier).ok_or_else(|| {
-            anyhow::anyhow!("子个体无人格层（SOUL 仅限主智能体与单体）：{identifier}")
+            anyhow::anyhow!("子个体无人格层（SOUL 仅限主智能体与独立智能体）：{identifier}")
         })?;
         let text = text.trim();
         if text.is_empty() {
@@ -1406,7 +1406,7 @@ impl LocalRegistry {
         }
     }
 
-    // ---------------- 单体智能体 SOUL（entities/agents/<id>/SOUL.md，同语义） ----------------
+    // ---------------- 智能体 SOUL（entities/agents/<id>/SOUL.md，同语义） ----------------
 
     fn single_persona_path(&self, id: &str) -> Option<PathBuf> {
         self.singles
@@ -1416,7 +1416,7 @@ impl LocalRegistry {
     }
 
     pub fn single_persona(&self, id: &str) -> anyhow::Result<String> {
-        let path = self.single_persona_path(id).context("单体不存在")?;
+        let path = self.single_persona_path(id).context("智能体不存在")?;
         match std::fs::read_to_string(path) {
             Ok(text) if !text.trim().is_empty() => Ok(text),
             _ => Ok(self.default_soul()),
@@ -1424,18 +1424,18 @@ impl LocalRegistry {
     }
 
     pub fn single_persona_is_custom(&self, id: &str) -> anyhow::Result<bool> {
-        let path = self.single_persona_path(id).context("单体不存在")?;
+        let path = self.single_persona_path(id).context("智能体不存在")?;
         Ok(path.exists())
     }
 
     pub fn single_set_persona(&self, id: &str, text: &str) -> anyhow::Result<()> {
-        // 写入恒落到单体目录 entities/agents/<id>/SOUL.md
+        // 写入恒落到智能体目录 entities/agents/<id>/SOUL.md
         let path = self
             .singles
             .read()
             .contains_key(id)
             .then(|| self.singles_dir().join(id).join("SOUL.md"))
-            .context("单体不存在")?;
+            .context("智能体不存在")?;
         let text = text.trim();
         if text.is_empty() {
             anyhow::bail!("SOUL 内容不能为空（如需恢复默认请使用 reset）");
@@ -1451,7 +1451,7 @@ impl LocalRegistry {
             .read()
             .contains_key(id)
             .then(|| self.singles_dir().join(id).join("SOUL.md"))
-            .context("单体不存在")?;
+            .context("智能体不存在")?;
         if path.exists() {
             std::fs::remove_file(&path)?;
             Ok(true)

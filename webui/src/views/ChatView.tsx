@@ -198,7 +198,7 @@ export function ChatView(): React.ReactElement {
 
   const liveUnitEntries = Object.entries(liveUnits).filter(([, v]) => v);
   const activeMeta = groups.find((g) => g.id === activeGroup);
-  // 指挥体显示名（10）：单体模式显示该智能体名；组模式显示「指挥体 [组名]」
+  // 指挥体显示名（10）：智能体模式显示该智能体名；组模式显示「指挥体 [组名]」
   const orchLabel = target.mode === "single"
     ? (singles.find((x) => x.identifier === target.id)?.name ?? target.id)
     : t("chat.orchGroup", { group: activeMeta?.name ?? target.id });
