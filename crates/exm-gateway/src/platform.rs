@@ -140,16 +140,18 @@ pub async fn set_group_workspace(
     }
 }
 
-/// 设置组内主智能体（内置组会被核心拒绝）
+/// 设置组内主智能体：**已停用**——主智能体由系统指定（组的首个个体），不提供手动更换。
+/// 路由保留以便旧客户端得到明确拒绝，而非静默 404。
 pub async fn set_group_primary(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Json(b): Json<GroupPrimaryBody>,
+    State(_st): State<AppState>,
+    Path(_id): Path<String>,
+    Json(_b): Json<GroupPrimaryBody>,
 ) -> impl IntoResponse {
-    match st.core.registry().set_primary(&id, &b.identifier) {
-        Ok(_) => Json(json!({ "ok": true, "primary": b.identifier })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
-    }
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "主智能体由系统指定（组的首个个体），不支持手动更换" })),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]

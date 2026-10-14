@@ -1177,7 +1177,7 @@ impl LocalRegistry {
             anyhow::bail!("内置组的定义受保护，不可删除个体");
         }
         if g.meta.primary.as_deref() == Some(identifier) {
-            anyhow::bail!("主智能体不可删除（可先 set_primary 转移角色）");
+            anyhow::bail!("主智能体不可删除（主智能体由系统指定，组内固定）");
         }
         let def = g.defs.remove(identifier).context("个体不存在")?;
         let _ = std::fs::remove_file(g.dir.join("agents").join(format!("{identifier}.json")));
@@ -1320,12 +1320,19 @@ impl LocalRegistry {
         Ok(def.clone())
     }
 
-    /// 设置组内主智能体
+    /// 指定组内主智能体：**仅供系统内部调用**（建组、组的首个个体、装载修正）。
+    /// 用户面不提供换主入口——主智能体一旦由系统指定即固定，不可改指他人。
     pub fn set_primary(&self, gid: &str, identifier: &str) -> anyhow::Result<()> {
         let mut groups = self.groups.write();
         let g = groups.get_mut(gid).context("组不存在")?;
         if !g.defs.contains_key(identifier) {
             anyhow::bail!("个体不存在: {identifier}");
+        }
+        // 已指定且仍然有效的主智能体不可被替换；仅当原指向已失效（个体不存在）时允许修正
+        if let Some(cur) = g.meta.primary.clone() {
+            if cur != identifier && g.defs.contains_key(&cur) {
+                anyhow::bail!("主智能体已由系统指定（{cur}），不支持更换");
+            }
         }
         g.meta.primary = Some(identifier.to_string());
         let meta_path = g.dir.join("group.json");

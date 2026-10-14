@@ -402,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
     let agents_g: serde_json::Value = client.get(format!("{base}/agents")).send().await?.json().await?;
     c.check("新组初始为空", agents_g.as_array().map(|a| a.is_empty()).unwrap_or(false));
 
-    // 只创建一个主智能体（tier=orchestrator → 自动成为 primary）
+    // 只创建一个主智能体（组内首个个体 → 自动成为 primary）
     let lead: serde_json::Value = client
         .post(format!("{base}/agents"))
         .json(&serde_json::json!({
