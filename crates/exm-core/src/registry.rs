@@ -110,13 +110,13 @@ impl LocalRegistry {
         std::fs::create_dir_all(&groups_dir)?;
         let default_dir = groups_dir.join("exmachina");
         let default_meta_path = default_dir.join("group.json");
-        let default_meta = if default_meta_path.exists() {
+        let mut default_meta = if default_meta_path.exists() {
             serde_json::from_str(&std::fs::read_to_string(&default_meta_path)?)
                 .context("解析 groups/default/group.json 失败")?
         } else {
             let meta = GroupMeta {
                 id: "exmachina".into(),
-                name: "智能连结".into(),
+                name: "default".into(),
                 description: "内置默认组（连结体）：指挥体 + 子个体集群（定义受保护）".into(),
                 primary: Some("orchestrator".into()),
                 workspace: None,
@@ -129,6 +129,11 @@ impl LocalRegistry {
             std::fs::write(&default_meta_path, serde_json::to_string_pretty(&meta)?)?;
             meta
         };
+        // 显示名迁移：内置默认组显示名统一为 default（历史安装落盘为「智能连结」）
+        if default_meta.name == "智能连结" {
+            default_meta.name = "default".into();
+            let _ = std::fs::write(&default_meta_path, serde_json::to_string_pretty(&default_meta)?);
+        }
         groups.insert(
             default_meta.id.clone(),
             self.load_group(default_meta, default_dir)?,
@@ -181,8 +186,18 @@ impl LocalRegistry {
             def_files.sort();
             for p in def_files {
                 let def: AgentDefinition = serde_json::from_str(&std::fs::read_to_string(&p)?)
-                    .with_context(|| format!("单体定义校验失败: {}", p.display()))?;
+                    .with_context(|| format!("智能体定义校验失败: {}", p.display()))?;
                 singles.insert(def.identifier.clone(), def);
+            }
+        }
+        // 显示名迁移：内置默认智能体显示名统一为 default（历史安装落盘为 Machina）
+        if let Some(def) = singles.get_mut("machina") {
+            if def.name == "Machina" {
+                def.name = "default".into();
+                let p = self.dir.join("agents").join("machina").join("agent.json");
+                if p.is_file() {
+                    let _ = std::fs::write(&p, serde_json::to_string_pretty(def)?);
+                }
             }
         }
         *self.singles.write() = singles;
@@ -191,7 +206,7 @@ impl LocalRegistry {
         *self.active_single.write() =
             if active_single.is_empty() { None } else { Some(active_single.to_string()) };
 
-        // 工作目录持久化：agents/active_workspace（干活的项目，智能体/智能体组通用）
+        // 工作目录持久化：agents/active_workspace（干活的项目，智能体与智能体组通用）
         let active_ws = std::fs::read_to_string(self.dir.join("active_workspace")).unwrap_or_default();
         let active_ws = active_ws.trim();
         *self.active_workspace.write() =
