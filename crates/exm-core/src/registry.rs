@@ -1163,7 +1163,7 @@ impl LocalRegistry {
         let meta_path = g.dir.join("group.json");
         std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
         // 持有写锁期间直接落盘（不可再进入二次加锁路径 → 防自锁）；定义落组内 agents/
-        let def_path = g.dir.join("agents").join(format!("{}.json", def.identifier));
+        let def_path = Self::def_path_in(&g.dir, &def.identifier);
         std::fs::create_dir_all(def_path.parent().unwrap())?;
         std::fs::write(&def_path, serde_json::to_string_pretty(&def)?)?;
         Ok(def)
@@ -1180,7 +1180,7 @@ impl LocalRegistry {
             anyhow::bail!("主智能体不可删除（主智能体由系统指定，组内固定）");
         }
         let def = g.defs.remove(identifier).context("个体不存在")?;
-        let _ = std::fs::remove_file(g.dir.join("agents").join(format!("{identifier}.json")));
+        let _ = std::fs::remove_file(Self::def_path_in(&g.dir, identifier));
         let _ = std::fs::remove_file(g.dir.join("prompts").join(&def.prompt_file));
         let _ = std::fs::remove_file(g.dir.join("adaptations").join(format!("{identifier}.json")));
         Ok(())
@@ -1291,7 +1291,8 @@ impl LocalRegistry {
             }
             let path = self.single_def_path(identifier);
             std::fs::create_dir_all(path.parent().unwrap())?;
-            std::fs::write(&path, serde_json::to_string_pretty(&d)?)?;
+            std::fs::write(&path, serde_json::to_string_pretty(&d)?)
+                .with_context(|| format!("写入个体定义失败: {}", path.display()))?;
             self.singles.write().insert(identifier.to_string(), d.clone());
             return Ok(d);
         }
@@ -1301,7 +1302,7 @@ impl LocalRegistry {
             groups.values().find_map(|g| {
                 g.defs
                     .contains_key(identifier)
-                    .then(|| (g.meta.id.clone(), g.dir.join(identifier).join("agent.json")))
+                    .then(|| (g.meta.id.clone(), Self::def_path_in(&g.dir, identifier)))
             })
         };
         let Some((gid, path)) = owner else {
@@ -1316,7 +1317,8 @@ impl LocalRegistry {
         if def.name.trim().is_empty() || def.description.trim().is_empty() {
             anyhow::bail!("name/description 不能为空");
         }
-        std::fs::write(&path, serde_json::to_string_pretty(def)?)?;
+        std::fs::write(&path, serde_json::to_string_pretty(def)?)
+            .with_context(|| format!("写入个体定义失败: {}", path.display()))?;
         Ok(def.clone())
     }
 
@@ -1405,6 +1407,18 @@ impl LocalRegistry {
         let Some(path) = self.persona_path(identifier) else {
             return Ok(false);
         };
+        // 内置组的人格定义随项目内容交付（出厂 SOUL 无运行时副本可复原：组模板里只有
+        // {{name}} 占位稿），而 reset 的语义是删文件回落共享默认 → 抹掉即不可逆。
+        // 与 remove_agent 的内置组保护同口径：允许改写，不允许抹掉出厂人格。
+        let builtin = self
+            .groups
+            .read()
+            .get(&*self.active.read())
+            .map(|g| g.meta.builtin)
+            .unwrap_or(false);
+        if builtin && path.exists() {
+            anyhow::bail!("内置组的人格定义受保护，不可重置（如需恢复出厂文案请用版本控制取回，或直接改写为所需文案）");
+        }
         if path.exists() {
             std::fs::remove_file(&path)?;
             Ok(true)

@@ -8,6 +8,13 @@ import { useT } from "../i18n/core";
 
 const LEVEL_COLORS: Record<string, string> = { A: "red", B: "orange", C: "blue", D: "default" };
 
+/** 账目去重：多个节点常登记同一条风险（mock 场景 4 个节点各记一条同文风险），
+ *  原样并列会把一屏刷成重复行。按文本去重并保留首次出现顺序。 */
+function dedupe(items: string[] | undefined): string[] {
+  if (!items) return [];
+  return Array.from(new Set(items));
+}
+
 export function LedgerView(): React.ReactElement {
   const t = useT();
   const { ledger } = useExm();
@@ -54,11 +61,11 @@ export function LedgerView(): React.ReactElement {
           <Col span={8}>
             <Card title={t("ledger.riskCard")} size="small" className="hud">
               <p><b>{t("ledger.impact")}</b></p>
-              <List size="small" dataSource={ledger.risk.impact} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
+              <List size="small" dataSource={dedupe(ledger.risk.impact)} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
               <p><b>{t("ledger.blockers")}</b></p>
-              <List size="small" dataSource={ledger.risk.blockers} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
+              <List size="small" dataSource={dedupe(ledger.risk.blockers)} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
               <p><b>{t("ledger.openAssertions")}</b></p>
-              <List size="small" dataSource={ledger.risk.openAssertions} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
+              <List size="small" dataSource={dedupe(ledger.risk.openAssertions)} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
             </Card>
           </Col>
         </Row>

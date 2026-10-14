@@ -24,6 +24,26 @@ pub fn render_statement(s: &Statement) -> String {
     format!("【{}】{}{}", tag_color(s.tag), s.text, level)
 }
 
+/// 连续同标签的陈述只标一次标签，其余缩进对齐：
+/// 一屏回答里出现 19 行「【报告】」时，标签噪声压过内容本身。
+pub fn render_statements(statements: &[Statement]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut prev: Option<SpeechTag> = None;
+    for s in statements {
+        if prev == Some(s.tag) {
+            let level = s
+                .evidence_level
+                .map(|l| format!(" {}", format!("(证据{})", l.label()).bright_black()))
+                .unwrap_or_default();
+            out.push(format!("  {}{}", s.text, level));
+        } else {
+            out.push(render_statement(s));
+            prev = Some(s.tag);
+        }
+    }
+    out.join("\n")
+}
+
 pub fn render_role(role: &str, agent: Option<&str>, statements: &[Statement]) -> String {
     let head = match role {
         "orchestrator" => format!(" {} ", "指挥体".on_blue().white()),
@@ -31,7 +51,7 @@ pub fn render_role(role: &str, agent: Option<&str>, statements: &[Statement]) ->
         "user" => format!(" {} ", "用户".on_yellow().black()),
         _ => format!(" {} ", "系统".on_bright_black().white()),
     };
-    let body = statements.iter().map(render_statement).collect::<Vec<_>>().join("\n");
+    let body = render_statements(statements);
     format!("{head}\n{body}")
 }
 
