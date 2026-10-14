@@ -466,7 +466,7 @@ async fn single_agent_target_switch_and_l0_direct() {
     let messages = core.store.list_messages(&session.id, 50).unwrap();
     assert!(
         messages.iter().any(|m| m.role == MessageRole::Orchestrator && m.agent_id.as_deref() == Some("lone-writer")),
-        "收束消息应归属单体智能体"
+        "收束消息应归属智能体"
     );
 
     // 切回组模式：编成恢复，单体删除

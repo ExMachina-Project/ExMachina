@@ -254,7 +254,7 @@ impl Orchestrator {
 
     // ---------------------------------------------------------- 模型解析
 
-    /// 当前交互目标的模型提示：单体模式 = 该单体 model_hint；组模式 = 组默认模型
+    /// 当前交互目标的模型提示：智能体模式 = 该智能体 model_hint；组模式 = 组默认模型
     fn target_model_hint(&self) -> Option<String> {
         if let Some(id) = self.registry.active_single() {
             return self.registry.single(&id).and_then(|d| d.model_hint);
@@ -586,14 +586,14 @@ impl Orchestrator {
         );
     }
 
-    /// 单体模式直接执行轮(常见单 agent 应用同款):系统提示 + 会话历史 + 工具循环,
+    /// 智能体模式直接执行轮(常见单 agent 应用同款):系统提示 + 会话历史 + 工具循环,
     /// 自主决策直至产出最终回复。无规划 JSON、无派发语义;过程分轨与留痕对齐既有体验。
     async fn single_direct_round(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<()> {
         let def = self
             .registry
             .primary()
-            .ok_or_else(|| anyhow::anyhow!("单体模式未配置交互目标"))?;
-        // 轮次模式消费:direct/full 在单体下无差异(工具循环自主决策),取走避免跨轮残留
+            .ok_or_else(|| anyhow::anyhow!("智能体模式未配置交互目标"))?;
+        // 轮次模式消费:direct/full 在智能体下无差异(工具循环自主决策),取走避免跨轮残留
         let _forced = take_session_mode(session_id);
 
         let mut system_prompt = self
@@ -720,7 +720,7 @@ impl Orchestrator {
         agent_identifier: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        // 解析个体：组内子个体优先，其次独立单体
+        // 解析个体：组内子个体优先，其次独立智能体
         let def = self
             .registry
             .agents_in_group(&self.registry.active_group())
@@ -872,7 +872,7 @@ impl Orchestrator {
     }
 
     async fn run_round(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<()> {
-        // 单体模式:直接工具循环(常见单 agent 应用同款),不进规划/派发语义
+        // 智能体模式:直接工具循环(常见单 agent 应用同款),不进规划/派发语义
         if self.registry.single_mode() {
             return self.single_direct_round(session_id, text).await;
         }
@@ -1287,7 +1287,7 @@ impl Orchestrator {
         let mut system_prompt = self.registry.load_prompt(&primary.prompt_file).unwrap_or_else(|_| {
             format!("# {}\n\n你是本组的主智能体，直接对接用户并调度组内个体。", primary.name)
         });
-        // 主智能体人格（用户面 SOUL）：单体模式读 entities/agents/<id>/SOUL.md，组模式读组根 SOUL.md（热读取）
+        // 主智能体人格（用户面 SOUL）：智能体模式读 entities/agents/<id>/SOUL.md，组模式读组根 SOUL.md（热读取）
         let soul = if self.registry.single_mode() {
             self.registry
                 .active_single()
@@ -1310,7 +1310,7 @@ impl Orchestrator {
             .map(|d| format!("- {}（{}）：{}", d.identifier, d.name, d.description))
             .collect::<Vec<_>>()
             .join("\n");
-        // 清单为空时不渲染该段（单体模式不宣传派发能力，也不否认——交由模型自主判断）
+        // 清单为空时不渲染该段（智能体模式不宣传派发能力，也不否认——交由模型自主判断）
         let registry_section = if registry_brief.is_empty() {
             String::new()
         } else {
@@ -1457,7 +1457,7 @@ impl Orchestrator {
         if let Some(mode) = &forced_mode {
             let line = match mode.as_str() {
                 "direct" => "【本轮模式：直答】routeLevel 必须为 \"L0\"，nodes 必须为空数组，答案完整写入 finalAnswer。",
-                _ => "【本轮模式：集群】除非单体模式，routeLevel 不得为 \"L0\"：必须拆解为可派发的 nodes（至少一个节点）。",
+                _ => "【本轮模式：集群】除非智能体模式，routeLevel 不得为 \"L0\"：必须拆解为可派发的 nodes（至少一个节点）。",
             };
             if let Some(last) = messages.last_mut() {
                 last.content.push_str(&format!("\n\n{line}"));
@@ -1521,7 +1521,7 @@ impl Orchestrator {
             .registry
             .load_prompt(&primary.prompt_file)
             .unwrap_or_else(|_| format!("# {}\n\n你是本组的主智能体。", primary.name));
-        // 主智能体人格（用户面 SOUL）：单体模式读 entities/agents/<id>/SOUL.md，组模式读组根 SOUL.md
+        // 主智能体人格（用户面 SOUL）：智能体模式读 entities/agents/<id>/SOUL.md，组模式读组根 SOUL.md
         let soul = if self.registry.single_mode() {
             self.registry
                 .active_single()

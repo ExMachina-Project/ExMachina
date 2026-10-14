@@ -465,7 +465,7 @@ export const api = {
     }),
   resetPersona: (identifier: string) =>
     req<{ ok: boolean }>(`/agents/${identifier}/persona`, { method: "DELETE" }),
-  /** 单体智能体人设（entities/agents/<id>/SOUL.md，与组内个体同语义） */
+  /** 智能体人设（entities/agents/<id>/SOUL.md，与组内个体同语义） */
   singlePersona: (id: string) => req<PersonaInfo>(`/singles/${id}/persona`),
   singlesSetPersona: (id: string, persona: string) =>
     req<{ ok: boolean }>(`/singles/${id}/persona`, { method: "PUT", body: JSON.stringify({ persona }) }),
@@ -523,7 +523,7 @@ export const api = {
     identifier: string,
     body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
   ) => req<AgentDefinition>(`/agents/${identifier}`, { method: "PUT", body: JSON.stringify(body) }),
-  /** 更新单体智能体可编辑字段（同 updateAgent 字段集） */
+  /** 更新智能体可编辑字段（同 updateAgent 字段集） */
   updateSingle: (
     id: string,
     body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
@@ -620,7 +620,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(id ? { id } : {}),
     }),
-  // 系统提示词（PROMPT）读写：组内个体按组作用域；单体走 singles 端点
+  // 系统提示词（PROMPT）读写：组内个体按组作用域；智能体走 singles 端点
   getAgentPrompt: (gid: string, identifier: string) =>
     req<{ identifier: string; promptFile: string; prompt: string }>(`/groups/${gid}/agents/${identifier}/prompt`),
   putAgentPrompt: (gid: string, identifier: string, prompt: string) =>

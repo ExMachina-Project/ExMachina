@@ -62,7 +62,7 @@ impl AgentRuntime {
         // 多 Key 粘性键位按个体区分：每个子个体用自己的 Key（限额才在该键位上前进）
         let agent_hint = Some(def.identifier.clone());
         // 系统提示词 = 职责提示词（内置最优，已含统一智械纪律）。
-        // 子个体无人格层（SOUL 仅限用户面智能体：组主智能体 / 单体）。
+        // 子个体无人格层（SOUL 仅限用户面智能体：组主智能体 / 独立智能体）。
         let system_prompt = self.registry.load_prompt(&def.prompt_file)?;
         let order_json = serde_json::to_string_pretty(order)?;
         let mut messages = vec![
@@ -240,7 +240,7 @@ impl AgentRuntime {
 
     /// 直接对话执行(常见单 agent 应用同款):系统提示 + 会话历史 + 工具循环,
     /// 无派发概念、无 SyncReport 契约——模型产出不含工具调用的文本即为终点。
-    /// 供单体模式使用;工具面 = 个体 allowlist + 可见自定义工具 + MCP。
+    /// 供智能体模式使用;工具面 = 个体 allowlist + 可见自定义工具 + MCP。
     pub async fn chat_execute<F>(
         &self,
         def: &AgentDefinition,
