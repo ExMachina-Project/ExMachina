@@ -26,10 +26,17 @@ function walk(dir, out = []) {
   return out;
 }
 
-/** 从 `t("a.b")` / `tr("a.b")` / `tb("a.b")` 等任何取词调用里抓字面量 key */
+/**
+ * 从取词调用里抓字面量 key：`t("a.b")` / `tr("a.b")` / `tb("a.b")`。
+ *
+ * 必须锚定**取词函数名**：早期版本只匹配任意 `("a.b")`，于是
+ * `kind.startsWith("run.finished")`、`kind.includes("memory.write")` 这类
+ * 业务字符串被判成缺失词条 —— 假阳性会让检查不可信，真缺失反而被淹没。
+ */
+const TAKE = String.raw`(?:t|tr|tb|translate)\s*\(\s*"([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_]+)+)"`;
 function keysIn(text) {
   const keys = new Set();
-  const re = /\(\s*"([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_]+)+)"/g;
+  const re = new RegExp(TAKE, "g");
   let m;
   while ((m = re.exec(text))) keys.add(m[1]);
   return keys;
@@ -59,12 +66,11 @@ for (const f of files) {
 const zh = dictKeys(join(SRC, "i18n/langs/zh.ts"));
 const en = dictKeys(join(SRC, "i18n/langs/en.ts"));
 
-// 配置字段名、事件类型、存储键等本来就不是词条，按已知前缀排除
-const NOT_I18N = /^(memory|security|automation|computer|search|sandbox|browser|hooks|tools|identity|limits|triggers|mcpServe|notify|cron|sessions|core|activity)\.[a-zA-Z]+$/;
-
+// 前缀取词锚定取词函数后不再需要「哪些前缀不是词条」的例外名单：
+// 校验过一遍收紧后依然零缺失（配置字段名等都在 `t()` 之外，不进 used）。
 const missingZh = [];
 for (const [key, uses] of used) {
-  if (!zh.has(key) && !NOT_I18N.test(key) && !key.startsWith("exm.")) missingZh.push({ key, uses });
+  if (!zh.has(key) && !key.startsWith("exm.")) missingZh.push({ key, uses });
 }
 const missingEn = [...en].length === 0 ? [] : [];
 for (const k of zh) if (!en.has(k)) missingEn.push(k);
