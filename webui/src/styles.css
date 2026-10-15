@@ -382,7 +382,7 @@ input, textarea { caret-color: var(--accent); }
   border-color: var(--accent) !important;
   box-shadow: 0 0 0 3px var(--accent-dim) !important;
 }
-.ant-modal-content, .ant-drawer-content { border-radius: var(--r-xl); }
+.ant-modal-container, .ant-modal-content, .ant-drawer-content { border-radius: var(--r-xl); }
 .ant-modal-header { border-bottom: 1px solid var(--line); padding-bottom: 12px; }
 .ant-modal-title { font-size: 15px; font-weight: 600; color: var(--text-hi); }
 .ant-drawer-header { border-bottom: 1px solid var(--line); }
@@ -1725,9 +1725,16 @@ input, textarea { caret-color: var(--accent); }
 .ant-card .ant-card-head { min-height: 42px; }
 .ant-modal .ant-form-item { margin-bottom: 14px; }
 
-/* ============ 弹窗防溢出 ============ */
+/* ============ 弹窗防溢出 ============
+ * 内容壳的类名：antd v6 是 .ant-modal-container（v5 及以前为 .ant-modal-content）。
+ * 两者都写上：只写 v6 会让 v5 样式完全落空，表现为长表单把「创建/保存」顶出视口。 */
 .ant-modal { max-width: calc(100vw - 24px); padding-bottom: 16px; }
-.ant-modal .ant-modal-content { max-height: calc(100vh - 88px); display: flex; flex-direction: column; }
+.ant-modal .ant-modal-container,
+.ant-modal .ant-modal-content {
+  max-height: calc(100vh - 88px);
+  display: flex;
+  flex-direction: column;
+}
 .ant-modal .ant-modal-body { overflow: auto; flex: 1 1 auto; min-height: 0; }
 .ant-modal .ant-modal-header { flex: none; }
 .ant-modal .ant-modal-footer { flex: none; }
@@ -2266,6 +2273,33 @@ input, textarea { caret-color: var(--accent); }
 }
 @media (max-width: 860px) {
   .telemetry-bar { display: none; }
+}
+
+/* ============ 窄屏表单：标签与控件上下堆叠 ============
+ * 桌面两栏（标签左 / 控件右）在 390px 下会把标签挤成三行、控件只剩半幅宽，
+ * 既是可读性问题也是点按问题（输入框太窄、开关难点）。 */
+@media (max-width: 860px) {
+  .cfg2-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 12px 0;
+  }
+  .cfg2-help { max-width: none; }
+  .cfg2-ctrl { width: 100%; }
+  /* InputNumber/部分控件带内联 style="width:180px"（antd 默认宽），
+   * 内联优先级高于类选择器，窄屏下必须 !important 才能真正撑满 */
+  .cfg2-ctrl .ant-input,
+  .cfg2-ctrl .ant-input-number,
+  .cfg2-ctrl .ant-select,
+  .cfg2-ctrl .ant-select-selector { width: 100% !important; }
+  /* antd InputNumber 的内层 <input> 是自有宽度（100% 会顶出滚动条），
+   * 这里只需让它占满已撑满的控件壳即可 */
+  .cfg2-ctrl .ant-input-number-input,
+  .cfg2-ctrl .ant-select-selection-item,
+  .cfg2-ctrl .ant-select-selection-search-input { max-width: 100%; }
+  /* 开关保持自身尺寸，靠左对齐（拉伸会变形） */
+  .cfg2-ctrl .ant-switch { margin-top: 2px; }
 }
 
 /* ============ 空态 ============ */
