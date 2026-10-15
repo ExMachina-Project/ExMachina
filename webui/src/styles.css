@@ -885,9 +885,18 @@ input, textarea { caret-color: var(--accent); }
   border-bottom: 1px solid var(--line);
   border-radius: var(--r-sm);
   position: relative;
+  /* 左缘语义色条：事件流是长列表，只有 Tag 颜色时扫读仍费力 */
+  border-left: 2px solid transparent;
+  padding-left: 12px;
 }
+.event-row.ev-dispatch { border-left-color: var(--blue); }
+.event-row.ev-sync, .event-row.ev-ledger { border-left-color: var(--green); }
+.event-row.ev-arbitration { border-left-color: var(--amber); }
+.event-row.ev-error { border-left-color: var(--red); }
+.event-row.ev-memory { border-left-color: var(--blue); }
+.event-row.ev-finished { border-left-color: var(--accent); }
 .event-row:hover { background: var(--hover); }
-.event-text { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text); }
+.event-text { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
 .event-time { font-size: 11px; flex: none; }
 
 /* ============ 审批 / 通道杂项 ============ */
