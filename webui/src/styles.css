@@ -1373,10 +1373,16 @@ input, textarea { caret-color: var(--accent); }
   opacity: 0.12;
   z-index: 1;
   pointer-events: none;
+  /* 顶底渐隐：行不再被屏幕边缘生硬裁断 —— 随机内容两侧裁切位置不同，
+   * 硬切时肉眼会读成「左右不齐」；渐隐后边界干净，只留流动感 */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 56px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 56px), transparent 100%);
 }
 .data-stream-left { left: 3vw; }
 .data-stream-right { right: 3vw; }
 .data-stream-inner { animation: datarain 14s linear infinite; }
+/* 右列反向：两列镜像对流，运动构图左右对称（同向锁步会读成整块平移） */
+.data-stream-right .data-stream-inner { animation-direction: reverse; }
 .data-line {
   font-family: var(--mono);
   font-size: 12px;
