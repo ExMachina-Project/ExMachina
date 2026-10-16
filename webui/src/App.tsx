@@ -26,6 +26,7 @@ import { useExm } from "./store";
 import { LANGS, useLang, useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
+import { DataStream } from "./components/DataStream";
 import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
 import { TelemetryBar } from "./components/TelemetryBar";
@@ -200,7 +201,8 @@ export default function App(): React.ReactElement {
   if (authed === null) {
     return (
       <div className="login-wrap">
-        <CharStream />
+        <DataStream side="left" />
+        <DataStream side="right" />
         <div className="login-core">
           <div className="login-figure">
             <Emblem size={92} charging />
