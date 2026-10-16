@@ -15,7 +15,8 @@ export function DataStream({ side }: { side: "left" | "right" }): React.ReactEle
         s += Math.floor(Math.random() * 256)
           .toString(16)
           .padStart(2, "0")
-          .toUpperCase() + " ";
+          .toUpperCase();
+        if (j < 7) s += " "; // 分隔符只夹在中间：尾随空格会让右列可见墨迹比左列缩进一个字宽
       }
       rows.push(s);
     }
