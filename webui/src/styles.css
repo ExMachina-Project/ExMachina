@@ -1360,6 +1360,32 @@ input, textarea { caret-color: var(--accent); }
 :root[data-stream="off"] .char-stream { display: none; }
 @media (prefers-reduced-motion: reduce) { .char-stream { display: none; } }
 
+/* ---------- 数据流（登录门十六进制字节雨，自 d38806f 恢复） ---------- */
+.data-stream {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 稳定 8 列（8 × "XX " = 24ch）：宽度由字宽推导，任何字号下列都不被截断 */
+  font-family: var(--mono);
+  font-size: 12px;
+  width: 24ch;
+  overflow: hidden;
+  opacity: 0.12;
+  z-index: 1;
+  pointer-events: none;
+}
+.data-stream-left { left: 3vw; }
+.data-stream-right { right: 3vw; }
+.data-stream-inner { animation: datarain 14s linear infinite; }
+.data-line {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 2.1;
+  color: var(--text);
+  white-space: pre;
+}
+@keyframes datarain { from { transform: translateY(0); } to { transform: translateY(-50%); } }
+
 /* 通栏线：字符带 → 1px 细线 */
 .ascii-bar {
   height: 1px;
