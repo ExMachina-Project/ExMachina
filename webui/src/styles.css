@@ -366,15 +366,26 @@ input, textarea { caret-color: var(--accent); }
   color: var(--accent) !important;
 }
 
-/* 输入框：完整圆角描边，聚焦强调色描边 + 柔光环 */
-.ant-input, .ant-input-affix-wrapper, .ant-select-selector, .ant-input-number {
+/* 输入框：仅给外层 wrapper 描边，内层 input 透明无框 —— 避免双框 */
+.ant-input-affix-wrapper,
+.ant-select-selector,
+.ant-input-number {
   background: var(--bg-panel) !important;
   border: 1px solid var(--line-strong) !important;
   border-radius: var(--r-md) !important;
   box-shadow: none !important;
   transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
-.ant-input:focus,
+/* 内层 input：antd 会给它单独描边，造成双框 —— 全透明化 */
+.ant-input,
+.ant-input-number-input,
+.ant-input > input,
+.ant-input-number input {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  height: 100%;
+}
 .ant-input-affix-wrapper:focus,
 .ant-input-affix-wrapper-focused,
 .ant-input-number-focused,
