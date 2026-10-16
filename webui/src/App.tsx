@@ -200,6 +200,7 @@ export default function App(): React.ReactElement {
   if (authed === null) {
     return (
       <div className="login-wrap">
+        <CharStream />
         <div className="login-core">
           <div className="login-figure">
             <Emblem size={92} charging />
