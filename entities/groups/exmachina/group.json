@@ -1,6 +1,6 @@
 {
   "id": "exmachina",
-  "name": "智能连结",
+  "name": "default",
   "description": "内置默认组（连结体）：指挥体 + 子个体集群（定义受保护）",
   "primary": "orchestrator",
   "builtin": true,

@@ -75,6 +75,17 @@ function hexToRgb(hex: string): string {
   return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
 }
 
+/** 浅色主题上的强调色作正文色时对比度不够（选中行标题 4.3:1 < 4.5:1），
+ *  按比例压暗各通道得到「同色相深一档」，交给 --accent-strong 给小字场景用。 */
+function darkenHex(hex: string, ratio: number): string {
+  const h = hex.replace("#", "");
+  const n = parseInt(h.length === 3 ? h.replace(/./g, "$&$&") : h, 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) =>
+    Math.max(0, Math.min(255, Math.round(c * (1 - ratio)))),
+  );
+  return `#${ch.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
 /** 把主题预设与强调色落到 DOM：data-theme 走 CSS 色阶，accent 走内联变量 */
 export function applyTheme(presetKey: string, accentKey: string): void {
   const preset = themeOf(presetKey);
@@ -86,6 +97,8 @@ export function applyTheme(presetKey: string, accentKey: string): void {
   root.style.setProperty("--accent-rgb", hexToRgb(color));
   // 亮色强调色配白字，暗色强调色配深字 —— 保证按钮/选中态上的文字可读
   root.style.setProperty("--accent-fg", preset.mode === "light" ? "#ffffff" : "#0a0b0f");
+  // 小字（列表选中标题、链接文字）用色：浅色主题压暗一档以过 4.5:1
+  root.style.setProperty("--accent-strong", preset.mode === "light" ? darkenHex(color, 0.18) : color);
   // antd 弹层/滚动条等原生控件跟随主题明暗
   root.style.colorScheme = preset.mode;
 }

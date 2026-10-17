@@ -1540,13 +1540,39 @@ impl LlmProvider for MockLlmProvider {
         tx: UnboundedSender<StreamDelta>,
     ) -> anyhow::Result<ChatResponse> {
         let content = respond(&req);
-        for chunk in content.as_bytes().chunks(48) {
-            let piece = String::from_utf8_lossy(chunk).to_string();
+        // 按字符边界切块（每块 ≈48 字节）：此前按字节切，边界落在多字节字符中间时
+        // from_utf8_lossy 会把残字替换成 U+FFFD——中文模拟输出满屏「���」。
+        for piece in char_chunks(&content, 48) {
             let _ = tx.send(StreamDelta::Text(piece));
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         Ok(ChatResponse { content, reasoning: String::new(), prompt_tokens: 100, completion_tokens: 200, tool_calls: Vec::new() })
     }
+}
+
+/// 按**字符**边界把文本切成约 `max_bytes` 一块的流式增量。
+///
+/// 为什么不能 `as_bytes().chunks(n)`：UTF-8 多字节字符被边界切开时，
+/// `String::from_utf8_lossy` 会把残字替换成 U+FFFD（终端里就是「���」），
+/// 中文内容每 ~48 字节必现一次。逐字符累积到字节预算再收口即可。
+fn char_chunks(text: &str, max_bytes: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut bytes = 0usize;
+    for ch in text.chars() {
+        let ch_len = ch.len_utf8();
+        // 单字符超预算（极长组合字符等）时单独成块，避免死循环
+        if !cur.is_empty() && bytes + ch_len > max_bytes {
+            out.push(std::mem::take(&mut cur));
+            bytes = 0;
+        }
+        cur.push(ch);
+        bytes += ch_len;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn respond(req: &ChatRequest) -> String {
@@ -1566,10 +1592,10 @@ fn respond(req: &ChatRequest) -> String {
     } else if system.contains("经验改进要点合成") {
         adaptation_text(&system)
     } else if user.contains("exm-tool-loop-ok") {
-        // 单体直接循环第二步:工具回灌已收到,收敛为最终文本
+        // 智能体直接循环第二步:工具回灌已收到,收敛为最终文本
         "▸ 工具回灌已收到：输出包含 exm-tool-loop-ok，任务完成。".to_string()
     } else if user.contains("触发工具循环") {
-        // 单体直接循环第一步:文本协议工具调用(确定性)
+        // 智能体直接循环第一步:文本协议工具调用(确定性)
         r#"{"tool": "terminal", "args": {"command": "echo exm-tool-loop-ok"}}"#.to_string()
     } else if user.starts_with("【收束请求】") {
         converge_text(&user)
@@ -1882,6 +1908,27 @@ mod stream_tests {
         }
         assert_eq!(content, payload, "跨块多字节字符不得产生替换符");
         assert!(!content.contains('\u{FFFD}'), "不得出现 U+FFFD");
+    }
+
+    /// 模拟通道流式切块：按字符边界切，重组无损且无 U+FFFD
+    /// （回归：此前 `as_bytes().chunks(48)` 会在多字节字符中间断开，
+    ///   from_utf8_lossy 把残字替换成「���」，中文模拟输出每 ~48 字节必现）
+    #[test]
+    fn 模拟通道_流式切块不切碎多字节字符() {
+        let text = "背景事实带证据等级、缺口显式列出；不可逆变更与越权调度。🦀 mixed 中英";
+        let chunks = char_chunks(text, 48);
+        assert!(chunks.len() > 1, "样本应被切成多块");
+        for c in &chunks {
+            assert!(!c.contains('\u{FFFD}'), "单块不得含替换符：{c}");
+        }
+        assert_eq!(chunks.concat(), text, "重组必须与原文逐字一致");
+        // 每块不超过预算（单字符超预算除外）
+        for c in &chunks {
+            assert!(c.len() <= 48 + 4, "块过大：{}", c.len());
+        }
+        // 空串与纯 ASCII
+        assert!(char_chunks("", 48).is_empty());
+        assert_eq!(char_chunks("abc", 48), vec!["abc".to_string()]);
     }
 
     /// 半包攒齐才出行：不完整的行不出、拼齐后恰好出一行；残留半行由 flush 兜底
