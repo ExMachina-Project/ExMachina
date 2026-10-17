@@ -125,11 +125,21 @@ export function GraphView(): React.ReactElement {
           {layout.edges.map(([from, to]) => {
             const a = layout.pos.get(from)!;
             const b = layout.pos.get(to)!;
-            const mx = a.x + NODE_W + (b.x - a.x - NODE_W) / 2;
+            const x1 = a.x + NODE_W;
+            const y1 = a.y + NODE_H / 2;
+            const x2 = b.x;
+            const y2 = b.y + NODE_H / 2;
+            // 同层（横向相邻）：直线；跨层：三次贝塞尔在两节点右侧的控制点之间平滑过渡。
+            // 早先用「水平-垂直-水平」折线，跨层时会在目标行拐出一个硬直角，
+            // 视觉上像走错线（且与同层的直连并置时尤其别扭）。
+            const d =
+              y1 === y2
+                ? `M${x1},${y1} L${x2},${y2}`
+                : `M${x1},${y1} C${x1 + Math.max(28, (x2 - x1) / 2)},${y1} ${x2 - Math.max(28, (x2 - x1) / 2)},${y2} ${x2},${y2}`;
             return (
-              <polyline
+              <path
                 key={`${from}-${to}`}
-                points={`${a.x + NODE_W},${a.y + NODE_H / 2} ${mx},${a.y + NODE_H / 2} ${mx},${b.y + NODE_H / 2} ${b.x},${b.y + NODE_H / 2}`}
+                d={d}
                 fill="none"
                 stroke="var(--line-strong)"
                 strokeWidth={1.4}

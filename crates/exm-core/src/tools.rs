@@ -1025,7 +1025,7 @@ impl ToolGateway {
     /// 派发时的运行时工具白名单（8.2 口径）：
     /// - 个体 = 编成 JSON 的 tools 清单（未授权工具不在其工具面，不可见亦不可调用）
     /// - 组主智能体 = 额外获得组内个体管理工具（自定义组）与记忆三工具（默认授权）
-    /// - 单体（tier=orchestrator 且不在组内）按编成清单，可经 tools 显式授权记忆工具
+    /// - 智能体（tier=orchestrator 且不在组内）按编成清单，可经 tools 显式授权记忆工具
     pub fn runtime_allowlist(
         def: &AgentDefinition,
         group_meta: Option<&crate::types::GroupMeta>,
@@ -1201,8 +1201,7 @@ impl ToolGateway {
                 "domain": { "type": "string" },
                 "tier": { "type": "string", "enum": ["unit", "orchestrator"] },
                 "prompt": { "type": "string" },
-                "capabilities": { "type": "array", "items": { "type": "string" } },
-                "setPrimary": { "type": "boolean" }
+                "capabilities": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["op"]
         }));
@@ -1969,10 +1968,8 @@ impl ToolGateway {
                     self.registry.write_prompt(&def.prompt_file, t)?;
                 }
                 let saved = self.registry.upsert_agent(&meta.id, def, None)?;
-                // 首个个体或显式指定时设立主智能体
-                if args.get("setPrimary").and_then(|v| v.as_bool()).unwrap_or(false)
-                    || meta.primary.is_none()
-                {
+                // 主智能体由系统指定：仅组的首个个体自动成为主智能体，不支持手动换主
+                if meta.primary.is_none() {
                     self.registry.set_primary(&meta.id, &saved.identifier)?;
                 }
                 Ok(serde_json::to_value(&saved)?)
@@ -1981,11 +1978,6 @@ impl ToolGateway {
                 let identifier = s("identifier");
                 self.registry.remove_agent(&meta.id, &identifier)?;
                 Ok(serde_json::json!({ "deleted": identifier }))
-            }
-            "set_primary" => {
-                let identifier = s("identifier");
-                self.registry.set_primary(&meta.id, &identifier)?;
-                Ok(serde_json::json!({ "primary": identifier }))
             }
             other => bail!("未知 agent_manage 操作: {other}"),
         }

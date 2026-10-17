@@ -208,7 +208,7 @@ impl Core {
     }
 
     /// 重新生成基础记忆文件（memory.md，全局浅层视图）；
-    /// 同时刷新：每组一份 `groups/<gid>/MEMORY.md`（组浅层记忆）、每单体一份 `entities/agents/<id>/MEMORY.md`。
+    /// 同时刷新：每组一份 `groups/<gid>/MEMORY.md`（组浅层记忆）、每智能体一份 `entities/agents/<id>/MEMORY.md`。
     /// 深层记忆始终在 MemoryStore（数据库检索/衰减/压缩）——MEMORY.md 只是容量受限的人读快照。
     pub fn render_memory_md(&self) -> anyhow::Result<usize> {
         let cfg = self.config();
@@ -845,7 +845,7 @@ impl Core {
         Ok(self.store.list_sessions_in_group(gid)?)
     }
 
-    /// 当前交互范围（组或单体）的会话列表
+    /// 当前交互范围（组或智能体）的会话列表
     pub fn list_sessions_in_scope(&self) -> anyhow::Result<Vec<Session>> {
         Ok(self.store.list_sessions_in_group(&self.registry.active_scope())?)
     }
