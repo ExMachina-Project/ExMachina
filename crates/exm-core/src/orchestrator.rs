@@ -2006,8 +2006,10 @@ impl ExecCtx {
                             payload: serde_json::json!({ "agentId": def.identifier, "reason": e.to_string() }),
                         });
                         let chain = orch.unit_chain_for(&def);
+                        // 回落本地执行：思考增量照常挂到 trace（与本地直连路径一致），
+                        // 否则回落轮的子会话过程轨迹缺失
                         orch.unit_runtime
-                            .execute(&def, &order, chain, &self.session_id, &trace_key, attach_images, |_delta| {})
+                            .execute(&def, &order, chain, &self.session_id, &trace_key, attach_images, &relay)
                             .await
                     }
                 }
@@ -2133,21 +2135,25 @@ impl ExecCtx {
                 NodeOutcome::done(node.id.clone()).with_appends(appends)
             }
             Err(e) => {
-                // 子会话留痕：失败原因落子会话（主会话仍由节点状态承载）
+                // 子会话留痕：失败原因 + 已收集的过程轨迹（思考/工具）一并落子会话，便于回看
+                let (thinking, tools, steps) = crate::round_trace::drain(&trace_key);
                 if trace_key != self.session_id {
-                    let _ = o.store.add_message(
+                    let _ = o.store.add_message_full(
                         &trace_key,
                         MessageRole::System,
                         None,
                         vec![Statement::warn(format!("节点执行失败：{e}"))],
+                        thinking,
+                        tools,
+                        steps,
                     );
                     o.emit(
                         &trace_key,
                         "unit.finished",
                         serde_json::json!({ "agentId": def.identifier, "nodeId": node.id, "failed": true }),
                     );
-                    crate::round_trace::end(&trace_key);
                 }
+                crate::round_trace::end(&trace_key);
                 NodeOutcome::failed(node.id.clone(), e.to_string())
             }
         }

@@ -129,7 +129,7 @@ export function relativeTime(iso?: string): string {
 export function ChatView(): React.ReactElement {
   const t = useT();
   const {     messages, liveOrch, liveThinking, liveParts, runToolCalls, approvals,
-    timeline, running, send, wsConnected, decideApproval,
+    timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
     refreshAgents,
@@ -732,7 +732,7 @@ export function ChatView(): React.ReactElement {
           )}
 
           {/* 本轮调度轨迹（收束后保留）：派发/回流条目 + 子会话入口，直到下一次发送或切会话 */}
-          {!running && timeline.length > 0 && (
+          {!running && timeline.length > 0 && timelineSession === sessionId && (
             <Card size="small" className="msg-bubble msg-agent turn-timeline-card">
               <div className="msg-process">
                 <UsageBar label={t("chat.turnTimeline", { n: String(timeline.length) })} defaultOpen>
