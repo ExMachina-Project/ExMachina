@@ -1363,6 +1363,12 @@ impl Orchestrator {
             _ => String::new(),
         };
 
+        // 协议层（数据驱动，protocol/README.md）：常驻目录 + 命中触发词的协议全文按需注入
+        let protocol_block = match self.registry.load_protocols() {
+            Ok(ps) => protocol_plan_block(&ps, text),
+            Err(_) => String::new(),
+        };
+
         // ---- 记忆召回（docs/08 §5）：注入历史记忆与个体可靠性统计 ----
         let mut memory_block = String::new();
         if self.memory_enabled {
@@ -1447,7 +1453,7 @@ impl Orchestrator {
         }
         let mut messages = vec![
             ChatMessage::system(format!(
-                "{system_prompt}\n\n{registry_section}{skill_brief}{playbook_brief}{stats_block}{memory_block}"
+                "{system_prompt}\n\n{registry_section}{skill_brief}{playbook_brief}{protocol_block}{stats_block}{memory_block}"
             )),
             user_msg,
         ];
@@ -1824,6 +1830,17 @@ impl ExecCtx {
                         });
                     }
                 }
+                // 协议层注入（按需）：任务目标命中触发词的协议全文随派发下发
+                if let Ok(protocols) = o.registry.load_protocols() {
+                    let haystack = format!("{} {} {}", self.plan.goal, node.title, node.objective);
+                    for (id, body) in protocol_unit_inputs(&protocols, &def.identifier, &haystack) {
+                        inputs.push(DispatchInput {
+                            ref_id: format!("protocol:{id}"),
+                            kind: "protocol".into(),
+                            summary: body.to_string(),
+                        });
+                    }
+                }
                 inputs
             },
             // 主智能体权限注入：组主智能体获得组内个体管理工具（自定义组）与记忆三工具（默认授权）；
@@ -2168,6 +2185,131 @@ pub fn text_to_statements(text: &str) -> Vec<Statement> {
         out.push(Statement::report("（收束输出为空）"));
     }
     out
+}
+
+// ---------------------------------------------------------------- 协议层注入（按需）
+
+/// 单次注入上限：触发词宽泛时防止协议全文挤占上下文
+const PROTOCOL_INJECT_CAP: usize = 4;
+
+/// 规划期协议段：常驻目录（id/用途/触发词/注入点）+ 命中触发词的协议全文。
+/// 命中序：plan 专属优先（如收拢/分派），其余保持文件名序；上限 PROTOCOL_INJECT_CAP。
+fn protocol_plan_block(protocols: &[ProtocolDef], text: &str) -> String {
+    if protocols.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "## 协议层（按需注入）\n命中协议的全文附于本节末尾，规划时必须遵守；注入点标注「派发」的协议会随对应节点下发给子个体。\n",
+    );
+    for p in protocols {
+        let slot = match (p.injects_plan(), p.injects_unit()) {
+            (true, true) => "规划+派发",
+            (true, false) => "规划",
+            _ => "派发",
+        };
+        out.push_str(&format!(
+            "- {}（{}）：{}；触发 [{}]；注入 {}\n",
+            p.id,
+            p.name,
+            if p.description.is_empty() { "—" } else { p.description.as_str() },
+            if p.triggers.is_empty() { "—".to_string() } else { p.triggers.join("、") },
+            slot
+        ));
+    }
+    let mut hits: Vec<&ProtocolDef> =
+        protocols.iter().filter(|p| p.injects_plan() && p.matches(text)).collect();
+    hits.sort_by_key(|p| usize::from(p.injects_unit()));
+    let hits: Vec<&ProtocolDef> = hits.into_iter().take(PROTOCOL_INJECT_CAP).collect();
+    if !hits.is_empty() {
+        out.push_str("\n### 本次任务命中的协议（全文）\n");
+        for p in hits {
+            out.push_str(&format!("\n#### {}（{}）\n{}\n", p.name, p.id, p.body));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// 派发期协议输入：命中触发词的 unit 范围协议（id, 正文）。上限 PROTOCOL_INJECT_CAP。
+fn protocol_unit_inputs<'a>(
+    protocols: &'a [ProtocolDef],
+    agent: &str,
+    haystack: &str,
+) -> Vec<(&'a str, &'a str)> {
+    protocols
+        .iter()
+        .filter(|p| p.injects_unit() && p.applies_to(agent) && p.matches(haystack))
+        .take(PROTOCOL_INJECT_CAP)
+        .map(|p| (p.id.as_str(), p.body.as_str()))
+        .collect()
+}
+
+#[cfg(test)]
+mod protocol_inject_tests {
+    use super::*;
+
+    fn proto(id: &str, scope: &str, triggers: &[&str], body: &str) -> ProtocolDef {
+        ProtocolDef {
+            id: id.into(),
+            name: format!("{id} 协议"),
+            description: "用途".into(),
+            triggers: triggers.iter().map(|s| s.to_string()).collect(),
+            scope: scope.into(),
+            agents: vec![],
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn 规划块_目录常驻_命中带全文() {
+        let ps = vec![
+            proto("reasoning", "", &["不可逆"], "BODY-REASONING"),
+            proto("debug", "", &["调试"], "BODY-DEBUG"),
+            proto("spec", "plan", &["修复"], "BODY-SPEC"),
+        ];
+        let block = protocol_plan_block(&ps, "帮我修复登录");
+        for id in ["reasoning", "debug", "spec"] {
+            assert!(block.contains(&format!("- {id}（")), "索引缺 {id}：\n{block}");
+        }
+        assert!(block.contains("### 本次任务命中的协议"), "应有命中段：\n{block}");
+        assert!(block.contains("BODY-SPEC"), "命中协议应带全文");
+        assert!(!block.contains("BODY-DEBUG"), "未命中协议不应注入");
+        assert!(!block.contains("BODY-REASONING"), "未命中协议不应注入");
+    }
+
+    #[test]
+    fn 规划块_plan专属优先_超出上限截断() {
+        let ps = vec![
+            proto("a", "", &["修复"], "BODY-A"),
+            proto("b", "", &["修复"], "BODY-B"),
+            proto("c", "", &["修复"], "BODY-C"),
+            proto("d", "", &["修复"], "BODY-D"),
+            proto("spec", "plan", &["修复"], "BODY-SPEC"),
+        ];
+        let block = protocol_plan_block(&ps, "修复");
+        assert_eq!(block.matches("#### ").count(), 4, "注入份数应被上限截断：\n{block}");
+        assert!(block.contains("BODY-SPEC"), "plan 专属应优先入选");
+        assert!(!block.contains("BODY-D"), "超出上限的按文件名序截断");
+    }
+
+    #[test]
+    fn 派发输入_命中与个体限定_plan协议不下发() {
+        let mut review = proto("code-review", "", &["审查"], "BODY-REVIEW");
+        review.agents = vec!["review-agent".into()];
+        let ps = vec![
+            proto("debug", "", &["调试"], "BODY-DEBUG"),
+            proto("release", "", &["发布"], "BODY-RELEASE"),
+            review,
+            proto("spec", "plan", &["修复"], "BODY-SPEC"),
+        ];
+        let hits = protocol_unit_inputs(&ps, "coding-agent", "调试并发布，另外修复");
+        let ids: Vec<&str> = hits.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec!["debug", "release"], "个体限定与 plan 范围都应过滤");
+        let hits = protocol_unit_inputs(&ps, "review-agent", "审查");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "code-review");
+        assert_eq!(hits[0].1, "BODY-REVIEW");
+    }
 }
 
 // ---------------------------------------------------------------- 收束降级测试

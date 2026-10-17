@@ -223,7 +223,8 @@ flowchart LR
 
 - **核心语言**：Rust（并发与长驻进程关键路径）；WebUI 为 TypeScript + React 19 + antd 6。
 - **提示词协议**：`entities/groups/exmachina/protocol/` 下协议（绝对理性 / 证据分级 / 冲突裁决 /
-  多智能体回流 / 审查 / 调试 / 变更 / 审计 / 发布 / 回滚 / 工作区协作 / 收拢 / 分派），指挥体与子个体提示词遵循同一口径。
+  多智能体回流 / 审查 / 调试 / 变更 / 审计 / 发布 / 回滚 / 工作区协作 / 收拢 / 分派），指挥体与子个体提示词遵循同一口径；
+  协议按 frontmatter 触发词在规划与派发两处按需注入（全文随命中的任务/节点携带，见协议 README）。
 - **存储**：文档型 fsdb（`.exmachina/data`），无 C 依赖；repository 接口保留换回 SQLite/redb 的余地。
 
 ## CLI 命令
