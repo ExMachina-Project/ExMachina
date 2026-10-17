@@ -381,6 +381,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ key }),
     }),
+  /** 首启引导状态：是否已配置访问密钥 + 提醒是否已被跳过 / 关闭（免鉴权） */
+  authStatus: () =>
+    req<{ ok: boolean; keyConfigured: boolean; setupSnoozed: boolean; setupDismissed: boolean }>("/auth/status"),
+  /** 「下次再说」：本次进程内不再提示（网关重启后恢复提醒） */
+  snoozeKeySetup: () => req<{ ok: boolean }>("/auth/snooze", { method: "POST" }),
+  /** 「不再提醒」：持久化关闭首启设置引导 */
+  dismissKeySetup: () => req<{ ok: boolean }>("/auth/dismiss", { method: "POST" }),
   health: () => req<{ ok: boolean; mock: boolean; agents: number }>("/health"),
   listSessions: () => req<Session[]>("/sessions"),
   createSession: (title: string) =>
