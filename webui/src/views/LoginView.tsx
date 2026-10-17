@@ -8,6 +8,7 @@ import { Button, Input, type InputRef } from "antd";
 import { KeyOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { Emblem } from "../components/Emblem";
+import { DataStream } from "../components/DataStream";
 import { useT } from "../i18n/core";
 
 export function LoginView({ onUnlock }: { onUnlock: () => void }): React.ReactElement {
@@ -42,6 +43,9 @@ export function LoginView({ onUnlock }: { onUnlock: () => void }): React.ReactEl
 
   return (
     <div className="login-wrap">
+      {/* 背景十六进制字节雨（左右两列）：放在 login-wrap 内部（它是定位祖先），z-index 低于 login-core */}
+      <DataStream side="left" />
+      <DataStream side="right" />
       <div className="login-core">
         <div className="login-figure">
           <Emblem size={132} animated />

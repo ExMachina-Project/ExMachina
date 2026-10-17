@@ -162,10 +162,3 @@ pub fn run_agent_remove(core: &Core, identifier: &str, group: Option<&str>) -> a
     println!("{} 个体已删除：{identifier}", ok("完成"));
     Ok(())
 }
-
-pub fn run_agent_set_primary(core: &Core, identifier: &str, group: Option<&str>) -> anyhow::Result<()> {
-    let gid = group.map(String::from).unwrap_or_else(|| core.active_group());
-    core.registry().set_primary(&gid, identifier)?;
-    println!("{} 主智能体已设置为：{identifier}", ok("完成"));
-    Ok(())
-}

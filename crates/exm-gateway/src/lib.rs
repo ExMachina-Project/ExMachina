@@ -33,12 +33,67 @@ pub mod telegram;
 pub mod triggers;
 pub mod worker_hub;
 
+/// 提取器拒绝（请求体 / 查询串解析失败）统一成全站错误契约：400 + {"error": 可读中文}。
+///
+/// axum 0.7 里 `Json`/`Query` 的拒绝在 MethodRouter 层就变成响应，绕过 handler（`HandleErrorLayer`
+/// 对 Router 不生效），默认应答是**纯文本英文内部串**——"Failed to deserialize the JSON body into
+/// the target type: missing field `description` at line 1 column 54"。前端一律按 `{"error"}` 读取、
+/// 失败时把响应体原样塞进 Error（api.ts::req），于是表单少一个字段，用户看到的就是这串内部英文。
+///
+/// 不改上百个 handler 的签名，改在响应层做归一：仅当应答是提取器拒绝的特征
+/// （415 / 422，或 400 + text/plain）时换壳；本层自己抛的 400 业务错误都是 JSON，不会被误伤。
+async fn normalize_rejection(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let resp = next.run(req).await;
+    let text_plain = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("text/plain"))
+        .unwrap_or(false);
+    let status = resp.status();
+    let is_rejection = status == StatusCode::UNPROCESSABLE_ENTITY
+        || status == StatusCode::UNSUPPORTED_MEDIA_TYPE
+        || (status == StatusCode::BAD_REQUEST && text_plain);
+    if !is_rejection {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let raw = String::from_utf8_lossy(&bytes);
+    let msg = match status {
+        StatusCode::UNPROCESSABLE_ENTITY => format!("请求体字段有误：{}", serde_hint(&raw)),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "需以 application/json 提交请求体".to_string(),
+        _ => format!("请求体格式有误：{}", serde_hint(&raw)),
+    };
+    parts.status = StatusCode::BAD_REQUEST;
+    parts.headers.remove(axum::http::header::CONTENT_TYPE);
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let payload = serde_json::to_vec(&json!({ "error": msg })).unwrap_or_default();
+    axum::response::Response::from_parts(parts, axum::body::Body::from(payload))
+}
+
+/// 从 serde 的拒绝文案里摘出「缺哪个字段 / 类型不对」那段：去掉固定前缀与行号定位噪音
+fn serde_hint(text: &str) -> String {
+    let msg = text.split_once(": ").map(|(_, r)| r).unwrap_or(text);
+    msg.split(" at line ").next().unwrap_or(msg).trim().to_string()
+}
+
+/// 首启密钥设置引导的进程内状态：「下次再说」置位；网关重启自然清零 → 下次启动恢复提醒
+/// 「不再提醒」另持久化到 config.security.keySetupDismissed（跨重启）
+static KEY_SETUP_SNOOZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Clone)]
 pub struct AppState {
     pub core: Arc<Core>,
 }
 
-/// 后台鉴权：auth_key 非空时 /api/* 需 X-Auth-Key（或 Bearer）；/api/auth/verify 与静态资源豁免
+/// 后台鉴权：auth_key 非空时 /api/* 需 X-Auth-Key（或 Bearer）；/api/auth/*（verify/status/引导动作）与静态资源豁免
 async fn auth_middleware(
     State(st): State<AppState>,
     req: axum::extract::Request,
@@ -47,14 +102,14 @@ async fn auth_middleware(
     let required = !st.core.config().security.auth_key.is_empty();
     let path = req.uri().path();
     // 守 /api/* 与 MCP 挂载；静态资源（壳/登录页）与 verify 豁免。
-    // /ws 不在此守卫：浏览器 WebSocket 无法携带自定义头，由 ws_handler 自身校验查询参数密钥
-    // （缺失/错误同样 401，安全口径不降级）。MCP HTTP 挂载（10.3）启用时纳入守卫。
+    // /ws 不在此守卫：浏览器 WebSocket 无法携带自定义头，改由路由级 ws_auth_guard
+    // 前置校验查询参数密钥（缺失/错误同样 401，安全口径不降级）。MCP HTTP 挂载（10.3）启用时纳入守卫。
     let mcp_path = {
         let c = st.core.config();
         if c.mcp_serve.enabled { format!("/{}", c.mcp_serve.http_path.trim_matches('/')) } else { String::new() }
     };
     let guarded = path.starts_with("/api/") || (!mcp_path.is_empty() && path == mcp_path);
-    if !required || path == "/api/auth/verify" || !guarded {
+    if !required || path.starts_with("/api/auth/") || !guarded {
         return next.run(req).await;
     }
     // 事件 webhook 豁免（7.2）：自带 HMAC 签名校验（独立密钥），不走全局访问密钥
@@ -128,6 +183,40 @@ async fn verify_auth(State(st): State<AppState>, Json(b): Json<Value>) -> impl I
     }
 }
 
+/// 首启引导状态（免鉴权，同 verify）：是否已配置访问密钥 + 提醒是否已被跳过/关闭。
+/// keyConfigured=false 且未 snoozed/dismissed 时，前端展示「设置访问密钥」页
+/// （部署后首次启动、尚未设置密钥的场景）。
+async fn auth_status(State(st): State<AppState>) -> impl IntoResponse {
+    Json(json!({
+        "ok": true,
+        "keyConfigured": !st.core.config().security.auth_key.is_empty(),
+        "setupSnoozed": KEY_SETUP_SNOOZED.load(std::sync::atomic::Ordering::SeqCst),
+        "setupDismissed": st.core.config().security.key_setup_dismissed,
+    }))
+}
+
+/// 「下次再说」：本次进程内不再提示（网关重启后恢复提醒）。已配置密钥时拒绝。
+async fn auth_snooze(State(st): State<AppState>) -> impl IntoResponse {
+    if !st.core.config().security.auth_key.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "已配置密钥" }))).into_response();
+    }
+    KEY_SETUP_SNOOZED.store(true, std::sync::atomic::Ordering::SeqCst);
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// 「不再提醒」：持久化关闭首启设置引导（config.security.keySetupDismissed）。已配置密钥时拒绝。
+async fn auth_dismiss(State(st): State<AppState>) -> impl IntoResponse {
+    if !st.core.config().security.auth_key.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "已配置密钥" }))).into_response();
+    }
+    let mut next = (*st.core.config()).clone();
+    next.security.key_setup_dismissed = true;
+    match st.core.apply_config(next) {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "ok": false, "error": e.to_string() }))).into_response(),
+    }
+}
+
 pub fn build_router(core: Arc<Core>) -> Router {
     let state = AppState { core: core.clone() };
     let mut router = Router::new()
@@ -182,7 +271,10 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/memory/:id", axum::routing::delete(forget_memory))
         .route("/api/memory/:id/pin", post(pin_memory))
         .route("/api/memory/md", get(get_memory_md).put(put_memory_md))
-        .route("/ws", get(ws_handler))
+        .route(
+            "/ws",
+            get(ws_handler).layer(axum::middleware::from_fn_with_state(state.clone(), ws_auth_guard)),
+        )
         .merge(platform::routes())
         .merge(llm_admin::routes())
         .merge(git_panel::routes())
@@ -207,6 +299,9 @@ pub fn build_router(core: Arc<Core>) -> Router {
         // 通道连通测试（integration-ux）
         .route("/api/channels/:id/test", post(crate::channel_test::test_channel))
         .route("/api/auth/verify", post(verify_auth))
+        .route("/api/auth/status", get(auth_status))
+        .route("/api/auth/snooze", post(auth_snooze))
+        .route("/api/auth/dismiss", post(auth_dismiss))
         // 模型思考强度（reasoning effort）：进程级生效于全部 LLM 调用（指挥体/子个体/工具回路）
         .route("/api/llm/effort", get(get_effort).put(put_effort))
         // 工作目录（干活的项目）：智能体与智能体组通用，优先于组声明与全局根
@@ -222,6 +317,8 @@ pub fn build_router(core: Arc<Core>) -> Router {
         // 工作区变更清单（编码页变更视图）：git 口径优先，非 git 回退检查点口径
         .route("/api/workspace/changes", get(workspace_changes))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+        // 提取器拒绝归一为全站错误契约（放在鉴权之内：拒绝体不含数据，但口径一致优先）
+        .layer(axum::middleware::from_fn(normalize_rejection))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
@@ -571,6 +668,7 @@ async fn get_config(State(st): State<AppState>) -> impl IntoResponse {
             "authKey": if cfg.security.auth_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "terminalTimeoutSecs": cfg.security.terminal_timeout_secs,
             "toolOutputSpillChars": cfg.security.tool_output_spill_chars,
+            "keySetupDismissed": cfg.security.key_setup_dismissed,
         },
         "automation": {
             "heartbeatEnabled": cfg.automation.heartbeat_enabled,
@@ -905,6 +1003,8 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
             approval_wait_secs: sec
                 .approval_wait_secs
                 .unwrap_or(current.security.approval_wait_secs),
+            // 首启引导提醒：不由设置页改写（专属端点 auth/dismiss 控制）
+            key_setup_dismissed: current.security.key_setup_dismissed,
         },
         computer: exm_core::config::ComputerUseConfig {
             enabled: computer.enabled.unwrap_or(current.computer.enabled),
@@ -1380,7 +1480,8 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
                 .registry()
                 .upsert_agent(gid, def, b.prompt.clone())
                 .map(|saved| {
-                    if was_empty || b.tier.as_deref() == Some("orchestrator") {
+                    // 主智能体由系统指定：仅组的首个个体自动成为主智能体（tier 不再触发换主）
+                    if was_empty {
                         let _ = st.core.registry().set_primary(gid, &saved.identifier);
                     }
                     let _ = meta;
@@ -1440,7 +1541,7 @@ async fn set_agent_model(
 }
 
 /// 更新个体可编辑字段（name/domain/description/capabilities/tools/model_hint）。
-/// identifier/tier/prompt_file 不可改；单体智能体与组内个体（含内置组受限编辑）统一走 registry::update_agent。
+/// identifier/tier/prompt_file 不可改；智能体与组内个体（含内置组受限编辑）统一走 registry::update_agent。
 async fn update_agent(
     State(st): State<AppState>,
     Path(identifier): Path<String>,
@@ -2078,6 +2179,55 @@ struct WsQuery {
 struct WsAuthQuery {
     #[serde(default)]
     key: Option<String>,
+}
+
+/// /ws 鉴权守卫：与 ws_handler 内联校验同一口径，但**先于** handler 提取器执行。
+///
+/// 提取器（WebSocketUpgrade）在 handler 体之前运行，未携带升级头的裸 GET /ws 会在鉴权前
+/// 就被挡成 400 —— 于是未授权探测拿到的是 400 而非 401（虽不泄露数据，但与「无密钥一律 401」
+/// 的对外口径不符）。这里用路由级前置守卫把口径统一，handler 内的校验保留为纵深防御。
+async fn ws_auth_guard(
+    State(st): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let cfg = st.core.config();
+    if cfg.security.auth_key.is_empty() {
+        return next.run(req).await;
+    }
+    let provided = req
+        .uri()
+        .query()
+        .and_then(|q| {
+            q.split('&').find_map(|kv| {
+                let (k, v) = kv.split_once('=')?;
+                (k == "key").then(|| percent_decode(v))
+            })
+        });
+    if provided.as_deref() != Some(cfg.security.auth_key.as_str()) {
+        return (StatusCode::UNAUTHORIZED, "需要访问密钥").into_response();
+    }
+    next.run(req).await
+}
+
+/// 查询串百分号解码（守卫里只需 key 一项，取最简实现：%XX → 字节，其余原样）
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 async fn ws_handler(

@@ -2,9 +2,9 @@
  * 设置页：左侧分类导航 + 右侧单分类面板（一屏只看一类，杜绝堆叠杂乱）。
  * 字段定义来自后端 config_schema()；LLM 接入在「提供商」页维护。
  */
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Input, InputNumber, message, Select, Switch, Card, Tag } from "antd";
-import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
+import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import { useExm } from "../store";
 import { useTheme } from "../theme";
 import { useT, type TKey } from "../i18n/core";
@@ -220,24 +220,49 @@ export function SettingsView(): React.ReactElement {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [selected, setSelected] = useState<string>("runtime");
   const [saving, setSaving] = useState(false);
+  /** schema 载入态：未就绪时分类导航只剩「界面/版本更新」，面板空白，
+   *  与「配置项不存在」难以区分；拉取失败同样静默塌缩且无从重试 */
+  const [schemaErr, setSchemaErr] = useState<string | null>(null);
+  const [schemaLoading, setSchemaLoading] = useState(true);
+  /** 有未保存改动时，config 变化不再回填表单（避免把用户正在编辑的值冲掉） */
+  const dirtyRef = useRef(false);
+
+  /** 只拉一次 schema（配置项清单是静态元数据，不必随 config 重取） */
+  const reloadSchema = useCallback(async () => {
+    setSchemaLoading(true);
+    try {
+      const s = await api.configSchema();
+      setSchemaErr(null);
+      setSchema({ ...s, groups: s.groups.filter((g) => g.key !== "llm") });
+    } catch (e) {
+      setSchemaErr(String(e).slice(0, 160));
+    } finally {
+      setSchemaLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    void (async () => {
-      const s = await api.configSchema();
-      setSchema({ ...s, groups: s.groups.filter((g) => g.key !== "llm") });
-      const init: Record<string, unknown> = {};
-      for (const g of s.groups) {
-        for (const f of g.fields) init[f.key] = readCurrent(config ?? null, f.key);
-      }
-      setValues(init);
-    })();
-  }, [config]);
+    void reloadSchema();
+  }, [reloadSchema]);
+
+  /** 按当前 config 回填表单值：仅在无未保存改动时执行 */
+  useEffect(() => {
+    if (!schema || dirtyRef.current) return;
+    const init: Record<string, unknown> = {};
+    for (const g of schema.groups) {
+      for (const f of g.fields) init[f.key] = readCurrent(config ?? null, f.key);
+    }
+    setValues(init);
+  }, [schema, config]);
 
   const groups = useMemo(() => schema?.groups ?? [], [schema]);
   const current = groups.find((g) => g.key === selected) ?? null;
   const meta = current ? SECTIONS[current.key] : undefined;
 
-  const setField = (key: string, v: unknown) => setValues((p) => ({ ...p, [key]: v }));
+  const setField = (key: string, v: unknown) => {
+    dirtyRef.current = true;
+    setValues((p) => ({ ...p, [key]: v }));
+  };
 
   const save = async () => {
     setSaving(true);
@@ -261,6 +286,7 @@ export function SettingsView(): React.ReactElement {
         body[g] = { ...((body[g] as Record<string, unknown>) ?? {}), [f]: v };
       }
       await saveConfig(body);
+      dirtyRef.current = false;
       message.success(t("settings.savedToast"));
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e) }));
@@ -279,6 +305,11 @@ export function SettingsView(): React.ReactElement {
       <div className="settings2">
         {/* 左侧分类导航：后端 schema 分组 + 本地「界面」偏好 */}
         <nav className="cfg-nav">
+          {/* 载入中：分类列表尚不可知，给骨架而非空白（空导航会被当成「配置项没了」） */}
+          {schemaLoading && !schemaErr &&
+            Array.from({ length: 8 }, (_, i) => (
+              <span key={`sk-${i}`} className="cfg-nav-item cfg-nav-skeleton" />
+            ))}
           {groups.map((g) => (
             <button
               key={g.key}
@@ -303,7 +334,15 @@ export function SettingsView(): React.ReactElement {
         </nav>
         {/* 右侧面板：仅当前分类 */}
         <section className="cfg-panel">
-        {selected === "version" ? (
+        {schemaErr ? (
+          /* —— 拉取失败：明说原因并给重试，不再静默塌缩成「只有界面与版本」 —— */
+          <div className="cfg-fallback">
+            <Alert type="error" showIcon message={t("settings.schemaFail", { err: schemaErr })} />
+            <Button type="primary" icon={<ReloadOutlined />} onClick={() => void reloadSchema()}>
+              {t("common.retry")}
+            </Button>
+          </div>
+        ) : selected === "version" ? (
           /* —— 版本与更新:本地信息 + 上游检查,不参与「保存设置」 —— */
           <VersionPanel />
         ) : selected === "ui" ? (

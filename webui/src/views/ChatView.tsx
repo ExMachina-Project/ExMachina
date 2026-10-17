@@ -1,7 +1,8 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
-import { CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, MessageOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SendOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
+import { ArrowLeftOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SearchOutlined, SendOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { api } from "../api";
 import { agentIdEn } from "../models";
 import { useExm } from "../store";
@@ -123,6 +124,19 @@ export function ChatView(): React.ReactElement {
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [sessionFilter, setSessionFilter] = useState("");
+  /** 竖屏导航 = 列表页 / 会话页 两个独立页面（对标主流移动端）：
+   *  进入应用先落在会话列表，点某条会话才进入该会话页，会话页有返回按钮回到列表。
+   *  带深链（#/chat/<id>）时直接进会话页；桌面端两栏并排，screen 恒为 thread。 */
+  const narrow = useIsNarrow();
+  // 首屏偏好：窄屏默认落在列表页（深链 #/chat/<id> 直接进会话页）。
+  // 注意不要用 effect 在首帧纠正 screen——matchMedia 在懒加载 chunk 落地时可能
+  // 还没稳定，一次 setScreen("thread") 就会把用户永远留在会话页（实测复现）。
+  const [screenPref, setScreenPref] = useState<"list" | "thread">(() => {
+    if (typeof window === "undefined" || !window.matchMedia(NARROW_QUERY).matches) return "thread";
+    return /^#\/chat\/[^/]/.test(window.location.hash) ? "thread" : "list";
+  });
+  const screen: "list" | "thread" = narrow ? screenPref : "thread";
+  const setScreen = setScreenPref;
   /** 会话类型过滤（2.2）：all / normal / channel */
   const [sessionKind, setSessionKind] = useState("all");
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
@@ -198,10 +212,52 @@ export function ChatView(): React.ReactElement {
 
   const liveUnitEntries = Object.entries(liveUnits).filter(([, v]) => v);
   const activeMeta = groups.find((g) => g.id === activeGroup);
-  // 指挥体显示名（10）：单体模式显示该智能体名；组模式显示「指挥体 [组名]」
+  // 指挥体显示名（10）：智能体模式显示该智能体名；组模式显示「指挥体 [组名]」
   const orchLabel = target.mode === "single"
     ? (singles.find((x) => x.identifier === target.id)?.name ?? target.id)
     : t("chat.orchGroup", { group: activeMeta?.name ?? target.id });
+
+  /** 会话归属的组名（列表副标题） */
+  const groupNameOf = useCallback(
+    (gid: string) => groups.find((g) => g.id === gid)?.name ?? gid,
+    [groups],
+  );
+
+  /** 会话列表（按类型与关键字过滤） */
+  const visibleSessions = useMemo(
+    () =>
+      sessions
+        .filter((s) =>
+          sessionKind === "all" ? true : sessionKind === "channel" ? s.title.startsWith("channel:") : !s.title.startsWith("channel:"),
+        )
+        .filter((s) => !sessionFilter || s.title.toLowerCase().includes(sessionFilter.toLowerCase())),
+    [sessions, sessionKind, sessionFilter],
+  );
+
+  /** 按活跃时间分组：今天 / 昨天 / 更早（移动端列表页的段落结构） */
+  const sessionGroups = useMemo(() => {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const startOfYesterday = new Date(startOfToday);
+    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+    const buckets: { key: "today" | "yesterday" | "earlier"; labelKey: string; items: typeof sessions }[] = [
+      { key: "today", labelKey: "chat.groupToday", items: [] },
+      { key: "yesterday", labelKey: "chat.groupYesterday", items: [] },
+      { key: "earlier", labelKey: "chat.groupEarlier", items: [] },
+    ];
+    for (const s of visibleSessions) {
+      const ts = new Date(s.lastActiveAt ?? s.updatedAt ?? s.createdAt).getTime();
+      const bucket = Number.isNaN(ts)
+        ? buckets[2]
+        : ts >= startOfToday.getTime()
+          ? buckets[0]
+          : ts >= startOfYesterday.getTime()
+            ? buckets[1]
+            : buckets[2];
+      bucket.items.push(s);
+    }
+    return buckets.filter((b) => b.items.length > 0);
+  }, [visibleSessions]);
 
   const removeSession = async (id: string) => {
     try {
@@ -217,6 +273,8 @@ export function ChatView(): React.ReactElement {
           await newSession();
         }
       }
+      // 列表删空后留在列表页（窄屏），否则会落在一个空会话页上
+      if (rest.length === 0 && narrow) setScreen("list");
     } catch {
       // 删除失败静默：会话可能在运行中被网关拒绝
     }
@@ -326,9 +384,14 @@ export function ChatView(): React.ReactElement {
   });
 
   return (
-    <div className="chat-shell">
-      {/* 左栏：目标切换 + 会话列表 */}
+    <div className={`chat-shell screen-${screen}`} data-screen={screen}>
+      {/* 左栏 = 移动端「会话列表页」，桌面端是常驻侧栏（见 styles.css 的屏幕切换） */}
       <aside className="chat-rail">
+        {/* 列表页标题栏（窄屏显示）：标题 + 会话计数 */}
+        <div className="rail-head">
+          <span className="rail-head-title">{t("chat.sessions")}</span>
+          <span className="rail-head-count">{visibleSessions.length}</span>
+        </div>
         <div className="rail-section">
           <div className="rail-label">
             <span className="rail-no">01</span> {t("chat.target")} [TARGET]
@@ -336,6 +399,7 @@ export function ChatView(): React.ReactElement {
           <Select
             value={target.mode === "single" ? `single:${target.id}` : `group:${target.id}`}
             style={{ width: "100%" }}
+            className="target-select"
             onChange={(v) => void changeTarget(v)}
             options={[
               {
@@ -360,99 +424,131 @@ export function ChatView(): React.ReactElement {
           )}
         </div>
         <div className="rail-section grow">
-          <div className="rail-label">
-            <span className="rail-no">02</span> {t("chat.sessions")} [SESSIONS]
+          {/* 工具条：搜索 + 类型过滤（桌面端沿用原竖排，见样式表） */}
+          <div className="rail-toolbar">
+            <Input
+              size="small"
+              allowClear
+              prefix={<SearchOutlined className="rail-search-icon" />}
+              placeholder={t("chat.searchSessions")}
+              className="session-search"
+              value={sessionFilter}
+              onChange={(e) => setSessionFilter(e.target.value)}
+            />
+            {/* 会话类型过滤（2.2）：全部 / 普通 / 通道 */}
+            <Select
+              value={sessionKind}
+              onChange={setSessionKind}
+              className="session-kind"
+              popupMatchSelectWidth={false}
+              options={[
+                { value: "all", label: t("chat.kind.all") },
+                { value: "normal", label: t("chat.kind.normal") },
+                { value: "channel", label: t("chat.kind.channel") },
+              ]}
+            />
           </div>
-          <Button
-            block
-            icon={<PlusOutlined />}
-            className="new-session-btn"
-            onClick={() => void newSession()}
-          >
-            {t("session.new")}
-          </Button>
-          <Input
-            size="small"
-            allowClear
-            placeholder={t("chat.searchSessions")}
-            className="session-search"
-            value={sessionFilter}
-            onChange={(e) => setSessionFilter(e.target.value)}
-          />
-          {/* 会话类型过滤（2.2）：全部 / 普通 / 通道 */}
-          <Select
-            size="small"
-            value={sessionKind}
-            onChange={setSessionKind}
-            className="session-kind"
-            options={[
-              { value: "all", label: t("chat.kind.all") },
-              { value: "normal", label: t("chat.kind.normal") },
-              { value: "channel", label: t("chat.kind.channel") },
-            ]}
-          />
           <div className="session-list">
             {sessions.length === 0 && !sessionsLoaded && <SkeletonList rows={6} />}
-            {sessions
-              .filter((s) => (sessionKind === "all" ? true : sessionKind === "channel" ? s.title.startsWith("channel:") : !s.title.startsWith("channel:")))
-              .filter((s) => !sessionFilter || s.title.toLowerCase().includes(sessionFilter.toLowerCase()))
-              .map((s) => (
-              <div
-                key={s.id}
-                className={`session-row ${s.id === sessionId ? "active" : ""}`}
-                onClick={() => void selectSession(s.id)}
-              >
-                <div className="session-row-top">
-                  {s.title.startsWith("channel:") ? <CloudUploadOutlined className="session-row-icon" /> : <MessageOutlined className="session-row-icon" />}
-                  <span className="session-title">{s.title.replace(/^channel:[^:]+:/, "↗ ")}</span>
-                  <span className="session-time">{relativeTime(s.lastActiveAt ?? s.createdAt)}</span>
-                </div>
-                {s.lastMessagePreview && <div className="session-preview">{s.lastMessagePreview}</div>}
-                {s.id === sessionId && running && <span className="session-live-dot" />}
-                <span className="session-ops" onClick={(e) => e.stopPropagation()}>
-                  <Button
-                    size="small"
-                    type="text"
-                    className="session-edit"
-                    icon={<ExportOutlined />}
-                    title={t("chat.export")}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void exportSession(s.id, s.title);
-                    }}
-                  />
-                  <Button
-                    size="small"
-                    type="text"
-                    className="session-edit"
-                    icon={<EditOutlined />}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRenaming({ id: s.id, title: s.title });
-                    }}
-                  />
-                  <Popconfirm
-                    title={t("chat.deleteConfirm")}
-                    onConfirm={(e) => {
-                      e?.stopPropagation();
-                      void removeSession(s.id);
-                    }}
-                    onCancel={(e) => e?.stopPropagation()}
-                  >
+            {sessionGroups.map((g, gi) => (
+              <section className="session-group" key={g.key}>
+                <header className="session-group-head">
+                  <span className="session-group-left">
+                    <span className="session-group-label">{t(g.labelKey)}</span>
+                    <span className="session-group-count">{g.items.length}</span>
+                  </span>
+                  {/* 新建入口跟着第一段走：省一整行控制条，也符合移动端列表的惯例 */}
+                  {gi === 0 && (
                     <Button
-                      size="small"
                       type="text"
-                      className="session-del"
-                      icon={<CloseOutlined />}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </Popconfirm>
-                </span>
-              </div>
+                      size="small"
+                      icon={<PlusOutlined />}
+                      className="rail-new-session"
+                      onClick={() => {
+                        void newSession();
+                        setScreen("thread"); // 竖屏：新建后直接进会话页
+                      }}
+                    >
+                      {t("session.new")}
+                    </Button>
+                  )}
+                </header>
+                {g.items.map((s) => (
+                  <div
+                    key={s.id}
+                    className={`session-row ${s.id === sessionId ? "active" : ""}`}
+                    onClick={() => {
+                      void selectSession(s.id);
+                      if (narrow) setScreen("thread"); // 竖屏：点会话才进入该会话页
+                    }}
+                  >
+                    <span className="session-bar" />
+                    {/* 头像承载「会话类型」而非组名首字母：副标题已经写了组名，
+                     * 首字母与之一一对应（整组同字母）＝零信息；类型恰好是列表里可筛的维度。 */}
+                    <span className={`session-avatar kind-${s.title.startsWith("channel:") ? "channel" : "normal"}`} aria-hidden="true">
+                      {s.title.startsWith("channel:") ? <CloudUploadOutlined /> : <MessageOutlined />}
+                    </span>
+                    <span className="session-main">
+                      <span className="session-title">{s.title.replace(/^channel:[^:]+:/, "↗ ")}</span>
+                      <span className="session-sub">{groupNameOf(s.groupId)}</span>
+                    </span>
+                    {/* 操作收进「⋮」菜单：此前三个图标常驻，窄屏上既挤占标题又换行 */}
+                    <span className="session-ops" onClick={(e) => e.stopPropagation()}>
+                      <Dropdown
+                        trigger={["click"]}
+                        menu={{
+                          items: [
+                            { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
+                            { key: "rename", icon: <EditOutlined />, label: t("common.rename") },
+                            { type: "divider" },
+                            { key: "delete", icon: <CloseOutlined />, label: t("chat.delete"), danger: true },
+                          ],
+                          onClick: ({ key, domEvent }) => {
+                            domEvent.stopPropagation();
+                            if (key === "export") void exportSession(s.id, s.title);
+                            else if (key === "rename") setRenaming({ id: s.id, title: s.title });
+                            else {
+                              Modal.confirm({
+                                title: t("chat.deleteConfirm"),
+                                okText: t("common.confirm"),
+                                okButtonProps: { danger: true },
+                                cancelText: t("common.cancel"),
+                                onOk: () => removeSession(s.id),
+                              });
+                            }
+                          },
+                        }}
+                      >
+                        <Button
+                          size="small"
+                          type="text"
+                          className="session-more"
+                          icon={<MoreOutlined />}
+                          aria-label={t("chat.moreOps")}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </Dropdown>
+                    </span>
+                    <span className="session-time">{relativeTime(s.lastActiveAt ?? s.createdAt)}</span>
+                  </div>
+                ))}
+              </section>
             ))}
-            {sessions.filter((s) => !sessionFilter || s.title.toLowerCase().includes(sessionFilter.toLowerCase())).length === 0 && (
-              <div className="dim" style={{ padding: "12px 8px", fontSize: 12 }}>
-                {sessionFilter ? t("chat.noMatch") : t("chat.noSessions")}
+            {visibleSessions.length === 0 && (
+              <div className="rail-empty">
+                <p className="dim">{sessionFilter ? t("chat.noMatch") : t("chat.noSessions")}</p>
+                {!sessionFilter && (
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={() => {
+                      void newSession();
+                      setScreen("thread");
+                    }}
+                  >
+                    {t("session.new")}
+                  </Button>
+                )}
               </div>
             )}
           </div>
@@ -475,6 +571,13 @@ export function ChatView(): React.ReactElement {
               <AsciiMeter value={usage.estimate} total={usage.unlimited ? 0 : usage.budget} cells={14} />
               <span className="v">{usage.measured ? usage.estimate : `~${usage.estimate}`}</span>
             </span>
+          )}
+          {/* 竖屏：返回会话列表页（列表页与本页是两个页面，不是叠加抽屉） */}
+          {narrow && (
+            <button className="rail-back" onClick={() => setScreen("list")} aria-label={t("chat.sessions")}>
+              <ArrowLeftOutlined />
+              <span className="rail-back-label">{t("chat.sessionsShort")}</span>
+            </button>
           )}
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} style={{ marginLeft: "auto" }} />
         </div>
@@ -645,7 +748,7 @@ export function ChatView(): React.ReactElement {
               setText(e.target.value);
               if (sessionId) useExm.getState().setDraft(sessionId, e.target.value);
             }}
-            placeholder={`> ${t("chat.inputPlaceholder")}`}
+            placeholder={`> ${narrow ? t("chat.inputPlaceholderNarrow") : t("chat.inputPlaceholder")}`}
             autoSize={{ minRows: 1, maxRows: 6 }}
             onPressEnter={(e) => {
               if (!e.shiftKey) {

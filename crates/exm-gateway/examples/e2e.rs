@@ -45,11 +45,22 @@ fn find_root() -> std::path::PathBuf {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let root = find_root();
-    // 清理上次运行残留（组数据与激活组状态在 agents/ 内持久化）
-    let _ = std::fs::remove_dir_all(root.join("entities").join("groups").join("product"));
-    let _ = std::fs::remove_dir_all(root.join("entities").join("groups").join("e2e-chan"));
-    let _ = std::fs::write(root.join("agents").join("active_group"), "exmachina");
-    let _ = std::fs::remove_file(root.join("agents").join("active_single"));
+    // 编成目录口径 = entities/（见 ExmConfig::agents_dir）；
+    // 迁移前脚本写的是已废弃的 agents/，导致注册表读到空编成 → 个体数 0 → 后续断言全挂。
+    let entities = root.join("entities");
+    // 先快照、后动手：验收期间会经 REST 写配置与激活组指针，跑完必须原样还回工作机/工作树
+    // （config.json / active_group / 出厂人格）。快照必须早于任何清理写入，否则会被当成原状。
+    let _guards = vec![
+        FileGuard::watch(root.join(".exmachina").join("config.json")),
+        FileGuard::watch(entities.join("active_group")),
+        // 出厂人格随项目内容交付：验收可临时改写，但跑完必须原样还回（否则工作树被改脏）
+        FileGuard::watch(entities.join("groups").join("exmachina").join("SOUL.md")),
+    ];
+    // 清理上次运行残留（组数据与激活组状态在 entities/ 内持久化）
+    let _ = std::fs::remove_dir_all(entities.join("groups").join("product"));
+    let _ = std::fs::remove_dir_all(entities.join("groups").join("e2e-chan"));
+    let _ = std::fs::write(entities.join("active_group"), "exmachina");
+    let _ = std::fs::remove_file(entities.join("active_single"));
     // 清理残留通道（只动 e2e 自己的条目）
     {
         let ch_path = root.join(".exmachina").join("data").join("channels.json");
@@ -61,12 +72,50 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut cfg = ExmConfig::load(&root);
+    // 开发者本地 config 在验收期间必须原样还回：脚本会经 REST 写配置
+// （档案、鉴权开关等），跑完不还原就等于把工作机配置改成测试残留。
+struct FileGuard {
+    path: std::path::PathBuf,
+    original: Option<Vec<u8>>,
+}
+impl FileGuard {
+    fn watch(path: std::path::PathBuf) -> Self {
+        let original = std::fs::read(&path).ok();
+        Self { path, original }
+    }
+}
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+let mut cfg = ExmConfig::load(&root);
     cfg.data_dir = std::env::temp_dir().join(format!("exm-gw-e2e-{}", uuid::Uuid::new_v4()));
     cfg.use_mock = true;
     // e2e 环境自持：不随开发者本地配置漂移（本机 config 曾关掉深层记忆导致记忆断言全挂）
     cfg.memory_enabled = true;
-    cfg.agents_dir = root.join("agents");
+    cfg.agents_dir = entities.clone();
+    // 鉴权闸门：验收全程由尾部「后台密钥鉴权」段自持开关；本机 config 若残留 authKey
+    // （局域网部署等），会把该段之前的所有 REST 断言挡成 401 → 整轮飘红。起始必须为关。
+    cfg.security.auth_key.clear();
+    // 关键：provider 只在「未配置端点」时才落到测试替身（见 Core::provider 的通道选择）。
+    // 本地 config 若残留 baseUrl/apiKey（脚本自己上一次跑就会留下指向临时 fake 服务的端点），
+    // 则会绕过 use_mock 去连那个已消失的端口 → 整轮 run.error → 事件流断言全线飘红。
+    // 这里显式清空端点与档案，强制走替身，验收结果不再随本机配置漂移。
+    cfg.llm.base_url = String::new();
+    cfg.llm.api_key = String::new();
+    cfg.llm.api_keys = Vec::new();
+    cfg.llm.model = "mock".to_string();
+    cfg.active_profile = String::new();
+    cfg.llm_profiles = Vec::new();
     let data_dir = cfg.data_dir.clone();
     let core = Arc::new(Core::with_config(cfg)?);
 
@@ -134,7 +183,9 @@ async fn main() -> anyhow::Result<()> {
     c.check("会话创建", !sid.is_empty());
 
     // 技能包（docs/10）：写入后热装载，任务目标命中触发词即随派发携带
-    let skills_dir = root.join("agents").join("skills");
+    // 技能目录口径 = agents_dir 的父目录/skills（见 LocalRegistry::skills_dir），
+    // 即 agents_dir=entities/ 时落在仓库根的 skills/
+    let skills_dir = root.join("skills");
     let _ = std::fs::create_dir_all(&skills_dir);
     let _ = std::fs::write(
         skills_dir.join("e2e-skill.json"),
@@ -309,38 +360,64 @@ async fn main() -> anyhow::Result<()> {
     c.check("记忆列表含固定项", list.as_array().map(|a| a.iter().any(|e| e["pinned"] == true)).unwrap_or(false));
 
     // 人设：默认 → 修改 → 热生效 → 重置
+    // 对象口径：SOUL 仅「用户面智能体」持有（组主智能体 / 独立智能体），子个体无人格层。
+    // 往返用测试自建单体做（避免抹掉出厂 SOUL：内置组出厂人格受保护、machina 随项目内容交付）。
+    let _persona_single: serde_json::Value = client
+        .post(format!("{base}/singles"))
+        .json(&serde_json::json!({ "name": "e2e 人设单体", "identifier": "e2e-persona", "description": "人设往返用例" }))
+        .send()
+        .await?
+        .json()
+        .await?;
     let p0: serde_json::Value = client
-        .get(format!("{base}/agents/context-agent/persona"))
+        .get(format!("{base}/singles/e2e-persona/persona"))
         .send()
         .await?
         .json()
         .await?;
     c.check("人设默认（智械体风格）", p0["custom"] == false && p0["persona"].as_str().map(|s| s.contains("智械体")).unwrap_or(false));
-    let put = client
+    let unit_put = client
         .put(format!("{base}/agents/context-agent/persona"))
+        .json(&serde_json::json!({"persona": "子个体不该有人格"}))
+        .send()
+        .await?;
+    c.check("子个体人设写入被拒（SOUL 仅用户面）", unit_put.status().as_u16() == 400);
+    let put = client
+        .put(format!("{base}/singles/e2e-persona/persona"))
         .json(&serde_json::json!({"persona": "以武侠风格说话，简洁而有侠气。"}))
         .send()
         .await?;
     c.check("人设修改 200", put.status().is_success());
     let p1: serde_json::Value = client
-        .get(format!("{base}/agents/context-agent/persona"))
+        .get(format!("{base}/singles/e2e-persona/persona"))
         .send()
         .await?
         .json()
         .await?;
     c.check("人设修改后为自定义", p1["custom"] == true && p1["persona"].as_str().map(|s| s.contains("武侠")).unwrap_or(false));
+    // 内置组出厂人格：可改写，但重置（=删文件）受保护——出厂 SOUL 无运行时副本可复原
+    let _builtin_put: serde_json::Value = client
+        .put(format!("{base}/agents/orchestrator/persona"))
+        .json(&serde_json::json!({"persona": "e2e 临时改写出厂人格"}))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let builtin_reset = client.delete(format!("{base}/agents/orchestrator/persona")).send().await?;
+    c.check("内置组人设重置被拒（出厂定义受保护）", builtin_reset.status().as_u16() == 400);
     let del = client
-        .delete(format!("{base}/agents/context-agent/persona"))
+        .delete(format!("{base}/singles/e2e-persona/persona"))
         .send()
         .await?;
     c.check("人设重置 200", del.status().is_success());
     let p2: serde_json::Value = client
-        .get(format!("{base}/agents/context-agent/persona"))
+        .get(format!("{base}/singles/e2e-persona/persona"))
         .send()
         .await?
         .json()
         .await?;
     c.check("人设重置后回默认", p2["custom"] == false);
+    let _ = client.delete(format!("{base}/singles/e2e-persona")).send().await;
 
     // ---- 智能体组：创建 → 切换 → 主智能体直答 → 切回 ----
     let groups0: serde_json::Value = client.get(format!("{base}/groups")).send().await?.json().await?;
@@ -402,7 +479,7 @@ async fn main() -> anyhow::Result<()> {
     let agents_g: serde_json::Value = client.get(format!("{base}/agents")).send().await?.json().await?;
     c.check("新组初始为空", agents_g.as_array().map(|a| a.is_empty()).unwrap_or(false));
 
-    // 只创建一个主智能体（tier=orchestrator → 自动成为 primary）
+    // 只创建一个主智能体（组内首个个体 → 自动成为 primary）
     let lead: serde_json::Value = client
         .post(format!("{base}/agents"))
         .json(&serde_json::json!({
@@ -895,6 +972,22 @@ async fn main() -> anyhow::Result<()> {
     c.check("重置后查询 404", adapt_gone.status().as_u16() == 404);
 
     // ---- 多厂商模型档案（docs/11）----
+    // 自持基线：e2e 起手清空了本机档案（避免残留端点劫持推理），故先自建一个基线档案并激活，
+    // 断言对象是接口契约（清单可读 / 生效者可解析 / 可切回），不再依赖开发者本机配置。
+    let _base_seed: serde_json::Value = client
+        .post(format!("{base}/llm/profiles"))
+        .json(&serde_json::json!({ "id": "e2e-base", "name": "E2E 基线档案", "baseUrl": "https://api.example.invalid/v1" }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let _base_act: serde_json::Value = client
+        .put(format!("{base}/llm/active"))
+        .json(&serde_json::json!({ "id": "e2e-base" }))
+        .send()
+        .await?
+        .json()
+        .await?;
     let profiles0: serde_json::Value = client.get(format!("{base}/llm/profiles")).send().await?.json().await?;
     c.check(
         "模型档案非空且含生效者",
@@ -980,7 +1073,7 @@ async fn main() -> anyhow::Result<()> {
     c.check("切换后运行时模型已随档案", cfg_after["llm"]["model"] == "vendor-large");
     let restore: serde_json::Value = client
         .put(format!("{base}/llm/active"))
-        .json(&serde_json::json!({ "id": "exmachina" }))
+        .json(&serde_json::json!({ "id": "e2e-base" }))
         .send()
         .await?
         .json()
@@ -1543,7 +1636,7 @@ async fn main() -> anyhow::Result<()> {
             tail.len() >= 3
                 && tail
                     .iter()
-                    .all(|s| s.contains("e2e 灵魂标记 XYZQ") && s.contains("## 说话风格（人设）")),
+                    .all(|s| s.contains("e2e 灵魂标记 XYZQ") && s.contains("## SOUL（人格）")),
         );
     }
     let _soul_reset2: serde_json::Value = client
@@ -1660,6 +1753,13 @@ async fn main() -> anyhow::Result<()> {
     with_key.headers_mut().insert("x-auth-key", "e2e-secret".parse().unwrap());
     let ok_resp = client.execute(with_key).await?;
     c.check("带密钥访问 200", ok_resp.status().as_u16() == 200);
+    // 首启引导：状态查询免鉴权；已配置密钥时两个引导动作拒绝（防止经豁免端点复位提醒状态）
+    let st_configured: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("已配置密钥时 status.keyConfigured=true", st_configured["keyConfigured"] == true);
+    let snooze_guarded: reqwest::Response = client.post(format!("{base}/auth/snooze")).send().await?;
+    c.check("已配置密钥时「下次再说」拒绝 400", snooze_guarded.status().as_u16() == 400);
+    let dismiss_guarded: reqwest::Response = client.post(format!("{base}/auth/dismiss")).send().await?;
+    c.check("已配置密钥时「不再提醒」拒绝 400", dismiss_guarded.status().as_u16() == 400);
     // 通道入站豁免（D10）：有自有 secret 的 webhook 通道放行；无 secret 通道仍被全局鉴权拦截
     let _mk_hook: serde_json::Value = client
         .post(format!("{base}/channels"))
@@ -1713,6 +1813,22 @@ async fn main() -> anyhow::Result<()> {
     // 注意：清除后旧客户端仍带 X-Auth-Key 头也无需匹配——中间件放行所有请求
     let after_clear: reqwest::Response = client.get(format!("{base}/agents")).send().await?;
     c.check("清除密钥后恢复免鉴权", after_clear.status().as_u16() == 200);
+
+    // ---- 首启密钥设置引导（部署后首次启动、尚未设密钥）----
+    let st: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("无密钥时 status 提示未配置", st["keyConfigured"] == false);
+    c.check("初始 snoozed / dismissed 均为假", st["setupSnoozed"] == false && st["setupDismissed"] == false);
+    let snooze: serde_json::Value = client.post(format!("{base}/auth/snooze")).send().await?.json().await?;
+    c.check("「下次再说」成功", snooze["ok"] == true);
+    let st: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("「下次再说」后 setupSnoozed=true", st["setupSnoozed"] == true);
+    let dismiss: serde_json::Value = client.post(format!("{base}/auth/dismiss")).send().await?.json().await?;
+    c.check("「不再提醒」成功", dismiss["ok"] == true);
+    let st: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("「不再提醒」后 setupDismissed=true", st["setupDismissed"] == true);
+    // 持久化落盘：config.json 记录 keySetupDismissed（FileGuard 跑完原样还回）
+    let cfg_raw = std::fs::read_to_string(root.join(".exmachina").join("config.json")).unwrap_or_default();
+    c.check("「不再提醒」已持久化到配置文件", cfg_raw.contains("\"keySetupDismissed\": true"));
 
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);

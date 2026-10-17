@@ -31,6 +31,11 @@ pub async fn run_round(
     let mut thinking_streaming = false;
     let sid = session_id.to_string();
     let orch_id_fallback = core.orchestrator_id();
+    // 思维链只计字数，不逐字直出：规划 JSON / SyncReport 都是内部契约，
+    // 在终端裸奔会把「一屏回答」冲成两页协议（此前 48 字节分块还顺带切碎了中文）。
+    // 轮次收尾时给一行摘要，需要原文用 /tasks 与 WebUI 的收起栏。
+    let mut think_chars: u64 = 0;
+    let mut think_agents: Vec<(String, u64)> = Vec::new();
 
     let render_task = tokio::spawn(async move {
         loop {
@@ -40,23 +45,27 @@ pub async fn run_round(
                         continue;
                     }
                     match evt.kind.as_str() {
+                        // 指挥体收束：给一行「收束中」提示即可——正文由 run.finished
+                        // 以结构化陈述一次性呈现（此前两者都出，答案被打印两遍）
                         "orchestrator.token" => {
-                            if let Some(d) = evt.payload.get("delta").and_then(|v| v.as_str()) {
-                                if !quiet {
-                                    if !orch_streaming {
-                                        println!("{}", format!(" {} ", "指挥体".on_blue().white()));
-                                        orch_streaming = true;
-                                    }
-                                    print!("{d}");
-                                    use std::io::Write;
-                                    let _ = std::io::stdout().flush();
-                                }
-                            }
-                        }
-                        "unit.token" => {
                             if quiet {
                                 continue;
                             }
+                            if let Some(d) = evt.payload.get("delta").and_then(|v| v.as_str()) {
+                                if !d.is_empty() && !orch_streaming {
+                                    if thinking_streaming || !current_unit.is_empty() {
+                                        println!();
+                                        thinking_streaming = false;
+                                        current_unit.clear();
+                                    }
+                                    println!("{}", dim("  ⏳ 收束中…"));
+                                    orch_streaming = true;
+                                }
+                            }
+                        }
+                        // 子个体产出的是 SyncReport 契约 JSON（内部协议）：
+                        // 进度由 graph.updated（派发/回流）与 sync.received 呈现，此处不直出
+                        "unit.token" => {
                             let agent = evt
                                 .payload
                                 .get("agentId")
@@ -64,37 +73,37 @@ pub async fn run_round(
                                 .unwrap_or("unit")
                                 .to_string();
                             if agent != current_unit {
-                                if !current_unit.is_empty() {
-                                    println!();
-                                }
                                 current_unit = agent.clone();
                                 orch_streaming = false;
-                                println!("{}", format!(" {agent} ").on_green().black());
-                            }
-                            if let Some(d) = evt.payload.get("delta").and_then(|v| v.as_str()) {
-                                print!("{d}");
-                                use std::io::Write;
-                                let _ = std::io::stdout().flush();
                             }
                         }
-                        // 思维链（分轨）：暗色内联呈现，不与回答混流
+                        // 思维链（分轨）：累计字数，收尾给摘要
                         "orchestrator.thinking" | "unit.thinking" => {
                             if quiet {
                                 continue;
                             }
                             if let Some(d) = evt.payload.get("delta").and_then(|v| v.as_str()) {
+                                let n = d.chars().count() as u64;
+                                think_chars += n;
+                                let who = evt
+                                    .payload
+                                    .get("agentId")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("指挥体")
+                                    .to_string();
+                                match think_agents.iter_mut().find(|(a, _)| a == &who) {
+                                    Some((_, c)) => *c += n,
+                                    None => think_agents.push((who, n)),
+                                }
                                 if !thinking_streaming {
                                     if orch_streaming || !current_unit.is_empty() {
                                         println!();
                                         orch_streaming = false;
                                         current_unit.clear();
                                     }
-                                    println!("{}", dim("  ·思考·"));
+                                    println!("{}", dim("  ⌛ 思考中…"));
                                     thinking_streaming = true;
                                 }
-                                print!("{}", dim(d));
-                                use std::io::Write;
-                                let _ = std::io::stdout().flush();
                             }
                         }
                         // 工具执行（文件操作 / 终端 / 截屏全程可见）
@@ -230,7 +239,21 @@ pub async fn run_round(
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| orch_id_fallback.clone());
-                            println!();
+                            if orch_streaming || thinking_streaming || !current_unit.is_empty() {
+                                println!();
+                                orch_streaming = false;
+                                thinking_streaming = false;
+                                current_unit.clear();
+                            }
+                            // 思维链摘要（原文是内部协议，不直出）
+                            if think_chars > 0 {
+                                let by = think_agents
+                                    .iter()
+                                    .map(|(a, c)| format!("{a} {c}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" · ");
+                                println!("{}", dim(format!("  ⌛ 思维链 {think_chars} 字（{by}）")));
+                            }
                             println!(
                                 "{}",
                                 render_role("orchestrator", Some(orch_id.as_str()), &statements)
@@ -296,7 +319,13 @@ pub async fn run_interactive(core: Arc<Core>, quiet: bool) -> anyhow::Result<()>
         if stdin.lock().read_line(&mut line)? == 0 {
             break;
         }
-        let t = line.trim();
+        let t = line.trim().to_string();
+        // 行模式下输入不会被终端回显，先换行让命令输出（带框面板）另起一行：
+        // 否则 `用户> ` 前缀与框首行同行，框的左边框看起来缩进了 6 格
+        if !t.is_empty() {
+            println!();
+        }
+        let t = t.as_str();
         if t.is_empty() {
             continue;
         }
