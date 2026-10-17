@@ -229,6 +229,16 @@ let mut cfg = ExmConfig::load(&root);
                 .unwrap_or(false)
     });
     c.check("技能包随派发注入", skill_injected);
+    // 流式修复回归：token/thinking 增量只走实时广播、不落事件库（否则事件页被逐字刷屏）
+    c.check(
+        "流式增量不落事件库",
+        !events.iter().any(|e| {
+            matches!(
+                e["payload"]["kind"].as_str(),
+                Some("orchestrator.token") | Some("orchestrator.thinking") | Some("unit.token") | Some("unit.thinking")
+            )
+        }),
+    );
     let _ = std::fs::remove_file(skills_dir.join("e2e-skill.json"));
 
     // 任务图 / 证据 / 三账

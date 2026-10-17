@@ -385,6 +385,11 @@ impl Orchestrator {
             payload,
         };
         let _ = self.events.send(evt.clone());
+        // 流式增量（token/thinking）只走实时广播、不落事件库：
+        // 一次运行可达数千条，落库会把事件溯源刷成 token 流水账（事件页被逐字淹没）。
+        if Self::TRANSIENT_EVENT_KINDS.contains(&kind) {
+            return;
+        }
         // 事件溯源（可回放，docs/04 §8）
         let env = Envelope::new(
             format!("session.{session_id}.events"),
@@ -396,6 +401,10 @@ impl Orchestrator {
         );
         let _ = self.store.append_event(&env);
     }
+
+    /// 只广播不落库的事件名（流式增量）。
+    const TRANSIENT_EVENT_KINDS: [&'static str; 4] =
+        ["orchestrator.token", "orchestrator.thinking", "unit.token", "unit.thinking"];
 
     // ---------------------------------------------------------- 主入口
 
