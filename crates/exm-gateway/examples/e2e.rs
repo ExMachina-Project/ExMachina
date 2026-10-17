@@ -103,6 +103,9 @@ let mut cfg = ExmConfig::load(&root);
     // e2e 环境自持：不随开发者本地配置漂移（本机 config 曾关掉深层记忆导致记忆断言全挂）
     cfg.memory_enabled = true;
     cfg.agents_dir = entities.clone();
+    // 鉴权闸门：验收全程由尾部「后台密钥鉴权」段自持开关；本机 config 若残留 authKey
+    // （局域网部署等），会把该段之前的所有 REST 断言挡成 401 → 整轮飘红。起始必须为关。
+    cfg.security.auth_key.clear();
     // 关键：provider 只在「未配置端点」时才落到测试替身（见 Core::provider 的通道选择）。
     // 本地 config 若残留 baseUrl/apiKey（脚本自己上一次跑就会留下指向临时 fake 服务的端点），
     // 则会绕过 use_mock 去连那个已消失的端口 → 整轮 run.error → 事件流断言全线飘红。
