@@ -696,12 +696,16 @@ export const useExm = create<ExmState>((set, get) => ({
           const status = String(p.status ?? "");
           fireNotificationLocal(`定时任务${status === "done" ? "完成" : "失败"}：${name}`, String(p.summary ?? status), undefined);
         }
-        set({ timeline: [...get().timeline, { kind: "cron", text: tr("store.tl.cron", { name: String(p.jobName ?? ""), status: String(p.status ?? "") }) }] });
+        set({
+          timelineSession: evt.sessionId,
+          timeline: [...get().timeline, { kind: "cron", text: tr("store.tl.cron", { name: String(p.jobName ?? ""), status: String(p.status ?? "") }) }],
+        });
         break;
       }
       case "run.error":
         set({
           running: false,
+          timelineSession: evt.sessionId,
           timeline: [...get().timeline, { kind: "error", text: tr("store.tl.error", { msg: String(p.message) }) }],
         });
         break;
