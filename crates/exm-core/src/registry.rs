@@ -936,6 +936,40 @@ impl LocalRegistry {
         Ok(())
     }
 
+    // ---------------- 协议层（`<组目录>/protocol/*.md`，frontmatter 驱动按需注入） ----------------
+
+    /// 装载激活组的协议文档（热装载；无 frontmatter 的 .md 跳过，坏 frontmatter 跳过并告警）
+    pub fn load_protocols(&self) -> anyhow::Result<Vec<crate::types::ProtocolDef>> {
+        self.protocols_in_group(&self.active_group())
+    }
+
+    /// 装载指定组的协议文档（目录不存在返回空表；注入点与触发词见文件 frontmatter）
+    pub fn protocols_in_group(&self, gid: &str) -> anyhow::Result<Vec<crate::types::ProtocolDef>> {
+        let dir = {
+            let groups = self.groups.read();
+            let Some(g) = groups.get(gid) else { return Ok(vec![]) };
+            g.dir.join("protocol")
+        };
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
+            .collect();
+        files.sort();
+        let mut out = Vec::new();
+        for f in files {
+            let raw = std::fs::read_to_string(&f)?;
+            match parse_protocol_doc(&raw) {
+                Ok(Some(p)) => out.push(p),
+                Ok(None) => {} // 无 frontmatter：普通文档，不参与注入（如 README）
+                Err(why) => eprintln!("协议文档跳过（{why}）：{}", f.display()),
+            }
+        }
+        Ok(out)
+    }
+
     // ---------------- 组导出 / 导入（组是可分享的整体，docs/09） ----------------
 
     /// 导出组为 bundle：组元信息 + 全部个体定义 + 提示词正文（一条 JSON 可分享）
@@ -1479,5 +1513,106 @@ impl LocalRegistry {
         } else {
             Ok(false)
         }
+    }
+}
+
+// ---------------------------------------------------------------- 协议文档 frontmatter 解析
+
+/// 解析协议文档：`---` 包裹的 frontmatter（`key: value`；列表用 `[a, b]`）+ 正文。
+/// 无 frontmatter 返回 Ok(None)；有 frontmatter 但未闭合或缺 id/name 返回 Err。
+fn parse_protocol_doc(raw: &str) -> Result<Option<crate::types::ProtocolDef>, String> {
+    let raw = raw.trim_start_matches('\u{feff}');
+    let mut lines = raw.lines();
+    if lines.next().map(|l| l.trim()) != Some("---") {
+        return Ok(None);
+    }
+    let mut id = String::new();
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut triggers: Vec<String> = Vec::new();
+    let mut agents: Vec<String> = Vec::new();
+    let mut scope = String::new();
+    let mut closed = false;
+    for line in &mut lines {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let (k, v) = (k.trim(), v.trim());
+        match k {
+            "id" => id = v.to_string(),
+            "name" => name = v.to_string(),
+            "description" => description = v.to_string(),
+            "triggers" => triggers = parse_inline_list(v),
+            "agents" => agents = parse_inline_list(v),
+            "scope" => {
+                scope = match v {
+                    "plan" | "unit" => v.to_string(),
+                    _ => "both".to_string(),
+                }
+            }
+            _ => {}
+        }
+    }
+    if !closed {
+        return Err("frontmatter 未闭合".into());
+    }
+    if id.trim().is_empty() || name.trim().is_empty() {
+        return Err("缺少 id 或 name".into());
+    }
+    let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    Ok(Some(crate::types::ProtocolDef {
+        id: id.trim().to_string(),
+        name: name.trim().to_string(),
+        description: description.trim().to_string(),
+        triggers,
+        scope,
+        agents,
+        body,
+    }))
+}
+
+/// 行内列表：`[a, b, c]`（逗号 / 顿号分隔；空 `[]` = 空列表）
+fn parse_inline_list(v: &str) -> Vec<String> {
+    let inner = v.trim().trim_start_matches('[').trim_end_matches(']');
+    inner
+        .split([',', '，', '、'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+#[cfg(test)]
+mod protocol_parse_tests {
+    use super::*;
+
+    #[test]
+    fn 协议frontmatter解析_元数据与正文分离() {
+        let raw = "---\nid: debug\nname: 调试协议\ndescription: 定位\nscope: unit\ntriggers: [调试, 报错]\nagents: [review-agent]\n---\n# 调试协议\n\n正文第一行\n";
+        let p = parse_protocol_doc(raw).unwrap().unwrap();
+        assert_eq!(p.id, "debug");
+        assert_eq!(p.name, "调试协议");
+        assert_eq!(p.scope, "unit");
+        assert_eq!(p.triggers, vec!["调试", "报错"]);
+        assert_eq!(p.agents, vec!["review-agent"]);
+        assert!(p.body.starts_with("# 调试协议"));
+        assert!(!p.injects_plan() && p.injects_unit());
+    }
+
+    #[test]
+    fn 无frontmatter跳过_坏frontmatter报错() {
+        assert!(parse_protocol_doc("# 普通文档\n无元数据").unwrap().is_none());
+        assert!(parse_protocol_doc("---\nname: 缺 id\n---\n正文").is_err());
+        assert!(parse_protocol_doc("---\nid: x\nname: y\n正文未闭合").is_err());
+    }
+
+    #[test]
+    fn 缺省范围both_未知范围归both() {
+        let raw = "---\nid: a\nname: A\nscope: 火星\n---\n正文";
+        let p = parse_protocol_doc(raw).unwrap().unwrap();
+        assert_eq!(p.scope, "both");
+        assert!(p.injects_plan() && p.injects_unit());
     }
 }

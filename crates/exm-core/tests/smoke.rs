@@ -111,6 +111,22 @@ fn 装载编成_数据契约完整() {
 }
 
 #[test]
+fn 协议契约_frontmatter完整且可注入() {
+    let _serial = serial_guard();
+    let cfg = test_config();
+    let core = Core::with_config(cfg).expect("创建 Core 失败");
+    let protocols = core.registry().load_protocols().expect("协议装载失败");
+    assert!(protocols.len() >= 12, "协议装载异常：{}", protocols.len());
+    let mut ids = std::collections::HashSet::new();
+    for p in &protocols {
+        assert!(!p.id.trim().is_empty() && !p.name.trim().is_empty(), "协议缺少 id/name");
+        assert!(ids.insert(p.id.clone()), "协议 id 重复：{}", p.id);
+        assert!(!p.body.trim().is_empty(), "协议 {} 正文为空", p.id);
+        assert!(!p.triggers.is_empty(), "协议 {} 未声明触发词（无法参与注入）", p.id);
+    }
+}
+
+#[test]
 fn 自由建组_自定义集群热切换() {
     let _serial = serial_guard();
     let cfg = test_config();
