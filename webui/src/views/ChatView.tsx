@@ -15,6 +15,7 @@ import { AsciiMeter } from "../components/Ascii";
 import { ToolCallList } from "../components/ToolCall";
 import { copyText } from "../components/Markdown";
 import { UsageBar } from "../components/UsageBar";
+import { TimelineTag } from "../components/TimelineTag";
 import { SkeletonList } from "../components/SkeletonList";
 import { TurnOps } from "../components/HistoryOps";
 import { Emblem } from "../components/Emblem";
@@ -658,9 +659,7 @@ export function ChatView(): React.ReactElement {
                       <UsageBar label={t("chat.usedTools", { n: runToolCalls.length + timeline.length })} live>
                         {timeline.map((tl, i) => (
                           <div key={`tl-${i}`} className={`timeline-item tl-${tl.kind}`}>
-                            <Tag color={tl.kind === "dispatch" ? "blue" : tl.kind === "sync" ? "green" : tl.kind === "arbitration" ? "volcano" : "red"}>
-                              {tl.kind === "dispatch" ? t("chat.tl.dispatch") : tl.kind === "sync" ? t("chat.tl.sync") : tl.kind === "arbitration" ? t("chat.tl.arbitration") : t("chat.tl.error")}
-                            </Tag>
+                            <TimelineTag kind={tl.kind} ns="chat" />
                             <span className="tl-text">{tl.text}</span>
                           </div>
                         ))}
@@ -703,9 +702,7 @@ export function ChatView(): React.ReactElement {
                     <UsageBar label={t("chat.usedTools", { n: runToolCalls.length + timeline.length })} live>
                       {timeline.map((tl, i) => (
                         <div key={`tl-${i}`} className={`timeline-item tl-${tl.kind}`}>
-                          <Tag color={tl.kind === "dispatch" ? "blue" : tl.kind === "sync" ? "green" : tl.kind === "arbitration" ? "volcano" : "red"}>
-                            {tl.kind === "dispatch" ? t("chat.tl.dispatch") : tl.kind === "sync" ? t("chat.tl.sync") : tl.kind === "arbitration" ? t("chat.tl.arbitration") : t("chat.tl.error")}
-                          </Tag>
+                          <TimelineTag kind={tl.kind} ns="chat" />
                           <span className="tl-text">{tl.text}</span>
                         </div>
                       ))}
