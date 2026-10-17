@@ -46,7 +46,7 @@ export const zh = {
   "git.noRepo": "当前工作区不是 git 仓库",
   "git.log": "最近提交",
   "identity.title": "通道身份与配对",
-  "identity.notePlaceholder": "备注（如：给张三的码）",
+  "identity.notePlaceholder": "备注",
   "identity.issue": "签发配对码",
   "identity.issued": "配对码已签发",
   "identity.hint": "让用户在通道内发送上方 /pair 指令完成绑定；码单次有效、限时",

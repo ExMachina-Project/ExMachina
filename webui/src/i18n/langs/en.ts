@@ -48,7 +48,7 @@ export const en: Partial<Dict> = {
   "git.noRepo": "Workspace is not a git repository",
   "git.log": "Recent commits",
   "identity.title": "Channel identity & pairing",
-  "identity.notePlaceholder": "Note (e.g. for Zhang San)",
+  "identity.notePlaceholder": "Note",
   "identity.issue": "Issue pairing code",
   "identity.issued": "Pairing code issued",
   "identity.hint": "Ask the user to send the /pair command in the channel; codes are single-use and time-limited",
