@@ -84,12 +84,16 @@ fn serde_hint(text: &str) -> String {
     msg.split(" at line ").next().unwrap_or(msg).trim().to_string()
 }
 
+/// 首启密钥设置引导的进程内状态：「下次再说」置位；网关重启自然清零 → 下次启动恢复提醒
+/// 「不再提醒」另持久化到 config.security.keySetupDismissed（跨重启）
+static KEY_SETUP_SNOOZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Clone)]
 pub struct AppState {
     pub core: Arc<Core>,
 }
 
-/// 后台鉴权：auth_key 非空时 /api/* 需 X-Auth-Key（或 Bearer）；/api/auth/verify 与静态资源豁免
+/// 后台鉴权：auth_key 非空时 /api/* 需 X-Auth-Key（或 Bearer）；/api/auth/*（verify/status/引导动作）与静态资源豁免
 async fn auth_middleware(
     State(st): State<AppState>,
     req: axum::extract::Request,
@@ -105,7 +109,7 @@ async fn auth_middleware(
         if c.mcp_serve.enabled { format!("/{}", c.mcp_serve.http_path.trim_matches('/')) } else { String::new() }
     };
     let guarded = path.starts_with("/api/") || (!mcp_path.is_empty() && path == mcp_path);
-    if !required || path == "/api/auth/verify" || !guarded {
+    if !required || path.starts_with("/api/auth/") || !guarded {
         return next.run(req).await;
     }
     // 事件 webhook 豁免（7.2）：自带 HMAC 签名校验（独立密钥），不走全局访问密钥
@@ -176,6 +180,40 @@ async fn verify_auth(State(st): State<AppState>, Json(b): Json<Value>) -> impl I
         Json(json!({ "ok": true, "required": true })).into_response()
     } else {
         (StatusCode::UNAUTHORIZED, Json(json!({ "ok": false, "error": "密钥错误" }))).into_response()
+    }
+}
+
+/// 首启引导状态（免鉴权，同 verify）：是否已配置访问密钥 + 提醒是否已被跳过/关闭。
+/// keyConfigured=false 且未 snoozed/dismissed 时，前端展示「设置访问密钥」页
+/// （部署后首次启动、尚未设置密钥的场景）。
+async fn auth_status(State(st): State<AppState>) -> impl IntoResponse {
+    Json(json!({
+        "ok": true,
+        "keyConfigured": !st.core.config().security.auth_key.is_empty(),
+        "setupSnoozed": KEY_SETUP_SNOOZED.load(std::sync::atomic::Ordering::SeqCst),
+        "setupDismissed": st.core.config().security.key_setup_dismissed,
+    }))
+}
+
+/// 「下次再说」：本次进程内不再提示（网关重启后恢复提醒）。已配置密钥时拒绝。
+async fn auth_snooze(State(st): State<AppState>) -> impl IntoResponse {
+    if !st.core.config().security.auth_key.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "已配置密钥" }))).into_response();
+    }
+    KEY_SETUP_SNOOZED.store(true, std::sync::atomic::Ordering::SeqCst);
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// 「不再提醒」：持久化关闭首启设置引导（config.security.keySetupDismissed）。已配置密钥时拒绝。
+async fn auth_dismiss(State(st): State<AppState>) -> impl IntoResponse {
+    if !st.core.config().security.auth_key.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "已配置密钥" }))).into_response();
+    }
+    let mut next = (*st.core.config()).clone();
+    next.security.key_setup_dismissed = true;
+    match st.core.apply_config(next) {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "ok": false, "error": e.to_string() }))).into_response(),
     }
 }
 
@@ -261,6 +299,9 @@ pub fn build_router(core: Arc<Core>) -> Router {
         // 通道连通测试（integration-ux）
         .route("/api/channels/:id/test", post(crate::channel_test::test_channel))
         .route("/api/auth/verify", post(verify_auth))
+        .route("/api/auth/status", get(auth_status))
+        .route("/api/auth/snooze", post(auth_snooze))
+        .route("/api/auth/dismiss", post(auth_dismiss))
         // 模型思考强度（reasoning effort）：进程级生效于全部 LLM 调用（指挥体/子个体/工具回路）
         .route("/api/llm/effort", get(get_effort).put(put_effort))
         // 工作目录（干活的项目）：智能体与智能体组通用，优先于组声明与全局根
@@ -627,6 +668,7 @@ async fn get_config(State(st): State<AppState>) -> impl IntoResponse {
             "authKey": if cfg.security.auth_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "terminalTimeoutSecs": cfg.security.terminal_timeout_secs,
             "toolOutputSpillChars": cfg.security.tool_output_spill_chars,
+            "keySetupDismissed": cfg.security.key_setup_dismissed,
         },
         "automation": {
             "heartbeatEnabled": cfg.automation.heartbeat_enabled,
@@ -961,6 +1003,8 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
             approval_wait_secs: sec
                 .approval_wait_secs
                 .unwrap_or(current.security.approval_wait_secs),
+            // 首启引导提醒：不由设置页改写（专属端点 auth/dismiss 控制）
+            key_setup_dismissed: current.security.key_setup_dismissed,
         },
         computer: exm_core::config::ComputerUseConfig {
             enabled: computer.enabled.unwrap_or(current.computer.enabled),

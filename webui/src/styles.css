@@ -1189,6 +1189,10 @@ input, textarea { caret-color: var(--accent); }
 }
 .login-btn { margin-top: 12px; }
 .login-error { margin-top: 10px; color: var(--red); font-size: 12.5px; }
+/* 首启密钥设置页：次级动作（下次再说 / 不再提醒）与开放风险提示 */
+.setup-actions { display: flex; justify-content: space-between; margin-top: 6px; }
+.setup-actions .ant-btn { padding-inline: 4px; font-size: 12.5px; }
+.setup-hint { margin-top: 6px; font-size: 12px; line-height: 1.6; color: var(--muted-dim); text-align: center; }
 .login-foot {
   margin-top: 22px;
   font-size: 11px;

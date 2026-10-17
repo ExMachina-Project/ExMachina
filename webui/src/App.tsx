@@ -33,6 +33,7 @@ import { TelemetryBar } from "./components/TelemetryBar";
 /* 视图懒加载（React.lazy + 动态 import）：按视图切分 chunk，首屏只拉 shell + 当前视图，
  * 其余视图在导航到时才加载（vendor 三方库另行在 vite.config.ts 的 manualChunks 分组缓存） */
 const LoginView = lazy(() => import("./views/LoginView").then((m) => ({ default: m.LoginView })));
+const SetupKeyView = lazy(() => import("./views/SetupKeyView").then((m) => ({ default: m.SetupKeyView })));
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
 const ModelsView = lazy(() => import("./views/ModelsView").then((m) => ({ default: m.ModelsView })));
 const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default: m.GraphView })));
@@ -168,17 +169,23 @@ export default function App(): React.ReactElement {
   const t = useT();
   const lang = useLang((s) => s.lang);
   const setLang = useLang((s) => s.setLang);
-  // 登录门：null = 鉴权中；false = 未解锁；true = 已进入
-  const [authed, setAuthed] = useState<boolean | null>(null);
+  // 登录门：checking = 鉴权中；setup = 首启未设密钥（引导设置）；locked = 未解锁；open = 已进入
+  const [gate, setGate] = useState<"checking" | "setup" | "locked" | "open">("checking");
   /** 通道就绪 = 全局端点已配置密钥（apiKey 由服务端掩码回显，非空即已配置） */
   const llmReady = !!config?.llm?.apiKey;
 
   useEffect(() => {
     void (async () => {
       try {
+        // 首启引导（部署后首次启动）：未配置访问密钥且未「跳过 / 关闭」提醒 → 设置密钥页
+        const st = await api.authStatus();
+        if (!st.keyConfigured && !st.setupSnoozed && !st.setupDismissed) {
+          setGate("setup");
+          return;
+        }
         const key = localStorage.getItem("exm.key") ?? "";
-        const r = await api.verifyAuth(key);
-        setAuthed(r.ok);
+        const r = st.keyConfigured ? await api.verifyAuth(key) : { ok: true };
+        setGate(r.ok ? "open" : "locked");
         if (r.ok) {
           await init();
           // 会话深链（app-shell-routing）：#/chat/<sessionId> → 选中该会话
@@ -193,12 +200,12 @@ export default function App(): React.ReactElement {
           }
         }
       } catch {
-        setAuthed(false);
+        setGate("locked");
       }
     })();
   }, [init]);
 
-  if (authed === null) {
+  if (gate === "checking") {
     return (
       <div className="login-wrap">
         <DataStream side="left" />
@@ -216,12 +223,24 @@ export default function App(): React.ReactElement {
       </div>
     );
   }
-  if (!authed) {
+  if (gate === "setup") {
+    return (
+      <ViewSuspense>
+        <SetupKeyView
+          onEnter={() => {
+            setGate("open");
+            void init();
+          }}
+        />
+      </ViewSuspense>
+    );
+  }
+  if (gate === "locked") {
     return (
       <ViewSuspense>
         <LoginView
           onUnlock={() => {
-            setAuthed(true);
+            setGate("open");
             void init();
           }}
         />
