@@ -242,7 +242,8 @@ impl Orchestrator {
         F: FnMut(StreamDelta),
     {
         let chain = self.unit_chain_for(def);
-        self.unit_runtime.execute(def, order, chain, session_id, attach_images, |d| on_delta(d)).await
+        // 工作者端本地执行：过程归集键与用量同键（无子会话概念）
+        self.unit_runtime.execute(def, order, chain, session_id, session_id, attach_images, |d| on_delta(d)).await
     }
 
     pub fn orch_id(&self) -> String {
@@ -529,7 +530,7 @@ impl Orchestrator {
     fn finish_stopped_round(&self, session_id: &str, tools_executed: usize) -> anyhow::Result<()> {
         let text = format!("【警告】本轮已被用户停止（已执行 {} 次工具调用）。", tools_executed);
         let statements = vec![Statement::warn(text)];
-        let (thinking, tool_calls) = crate::round_trace::drain(session_id);
+        let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
         self.store.add_message_full(
             session_id,
             MessageRole::System,
@@ -537,6 +538,7 @@ impl Orchestrator {
             statements,
             thinking,
             tool_calls,
+            steps,
         )?;
         let _ = self.store.audit_tool(
             "system",
@@ -691,13 +693,14 @@ impl Orchestrator {
                 system_prompt,
                 history,
                 session_id,
+                session_id,
                 chain,
                 true,
                 on_delta,
             )
             .await?;
 
-        let (thinking, tool_calls) = crate::round_trace::drain(session_id);
+        let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
         let statements = vec![Statement::report(final_text)];
         self.store.add_message_full(
             session_id,
@@ -706,6 +709,7 @@ impl Orchestrator {
             statements.clone(),
             thinking,
             tool_calls,
+            steps,
         )?;
         self.emit(
             session_id,
@@ -855,13 +859,14 @@ impl Orchestrator {
                 system_prompt,
                 history,
                 session_id,
+                session_id,
                 chain,
                 true,
                 on_delta,
             )
             .await?;
 
-        let (thinking, tool_calls) = crate::round_trace::drain(session_id);
+        let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
         let statements = vec![Statement::report(final_text)];
         self.store.add_message_full(
             session_id,
@@ -870,6 +875,7 @@ impl Orchestrator {
             statements.clone(),
             thinking,
             tool_calls,
+            steps,
         )?;
         // 收尾事件：子代理会话视图据此结束实时态
         self.emit(
@@ -905,7 +911,7 @@ impl Orchestrator {
                 .final_answer
                 .clone()
                 .unwrap_or_else(|| vec![Statement::report("本机直接回答（L0）。")]);
-            let (thinking, tool_calls) = crate::round_trace::drain(session_id);
+            let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
             self.store.add_message_full(
                 session_id,
                 MessageRole::Orchestrator,
@@ -913,6 +919,7 @@ impl Orchestrator {
                 statements.clone(),
                 thinking,
                 tool_calls,
+                steps,
             )?;
             self.emit(
                 session_id,
@@ -975,7 +982,7 @@ impl Orchestrator {
             self.converge(session_id, &plan, &final_reports, &graph).await?
         };
         let statements = text_to_statements(&final_text);
-        let (thinking, tool_calls) = crate::round_trace::drain(session_id);
+        let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
         self.store.add_message_full(
             session_id,
             MessageRole::Orchestrator,
@@ -983,6 +990,7 @@ impl Orchestrator {
             statements.clone(),
             thinking,
             tool_calls,
+            steps,
         )?;
 
         // 只更新阻断项，保留并发节点写入的证据/风险（原子读改写）
@@ -1863,12 +1871,55 @@ impl ExecCtx {
             report_format: "SyncReport".into(),
         };
 
+        // 子会话（派发运行台账）：子个体的过程流（思考/工具/输出）与最终消息落在子会话里，
+        // 主会话只保留派发与回流标记——「把子个体的输出放到一个子会话中」。
+        // 创建失败时回落主会话（trace_key = 主会话，行为同旧版）。
+        // 标题取真实诉求（goal 常带摘要上下文：取 `[用户]` 之后的片段并压平空白）。
+        let goal_hint = self
+            .plan
+            .goal
+            .rsplit("[用户]")
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let goal_short: String = if goal_hint.trim().is_empty() {
+            node.title.clone()
+        } else {
+            goal_hint.chars().take(24).collect::<String>().trim_end().to_string()
+        };
+        let trace_key = match o.store.create_child_session(
+            &self.session_id,
+            &format!("sub:{}:{}·{}", def.identifier, goal_short, node.id),
+        ) {
+            Ok(s) => {
+                // 子会话首条消息：本节点派发要求（打开子会话即知上下文）
+                let _ = o.store.add_message(
+                    &s.id,
+                    MessageRole::User,
+                    None,
+                    vec![Statement::new(
+                        SpeechTag::要求,
+                        format!("【要求】{}｜节点 {}：{}", self.plan.goal, node.id, node.title),
+                    )],
+                );
+                s.id
+            }
+            Err(e) => {
+                eprintln!("[orchestrator] 子会话创建失败（回落主会话）: {e}");
+                String::new()
+            }
+        };
+        let trace_key = if trace_key.is_empty() { self.session_id.clone() } else { trace_key };
+
         o.emit(
             &self.session_id,
             "dispatch.sent",
             serde_json::json!({
                 "nodeId": node.id,
                 "agentIdentifier": def.identifier,
+                "childSessionId": (trace_key != self.session_id).then(|| trace_key.clone()),
                 "adaptationRevision": o
                     .registry
                     .load_adaptation(&def.identifier)
@@ -1906,15 +1957,21 @@ impl ExecCtx {
         // 远程工作者优先（失败/超时回落本地）；令牌流统一进事件总线
         let result = {
             let orch = o;
-            let sid = session_id.clone();
+            // 事件会话 = 子会话：主会话只保留派发/回流标记，不再承载个体流；
+            // 思考同步入有序轨迹（子会话消息「按调用顺序」数据源）
+            let sid = trace_key.clone();
             let nid = node_id.clone();
             let label = agent_label.clone();
             let evts = events.clone();
+            let trace = trace_key.clone();
             let relay = move |delta: crate::provider::StreamDelta| {
                 let (kind, text) = match delta {
                     crate::provider::StreamDelta::Thinking(t) => ("unit.thinking", t),
                     crate::provider::StreamDelta::Text(t) => ("unit.token", t),
                 };
+                if kind == "unit.thinking" {
+                    crate::round_trace::push_thinking(&trace, &text);
+                }
                 let _ = evts.send(CoreEvent {
                     kind: kind.into(),
                     session_id: sid.clone(),
@@ -1950,7 +2007,7 @@ impl ExecCtx {
                         });
                         let chain = orch.unit_chain_for(&def);
                         orch.unit_runtime
-                            .execute(&def, &order, chain, &self.session_id, attach_images, |_delta| {})
+                            .execute(&def, &order, chain, &self.session_id, &trace_key, attach_images, |_delta| {})
                             .await
                     }
                 }
@@ -1958,7 +2015,7 @@ impl ExecCtx {
                 let chain = orch.unit_chain_for(&def);
                 let sid_for_usage = self.session_id.clone();
                 orch.unit_runtime
-                    .execute(&def, &order, chain, &sid_for_usage, attach_images, relay)
+                    .execute(&def, &order, chain, &sid_for_usage, &trace_key, attach_images, relay)
                     .await
             }
         };
@@ -1972,12 +2029,38 @@ impl ExecCtx {
                 if let Err(e) = o.store.add_evidence(&self.session_id, &report.evidence, Some(&report_id)) {
                     eprintln!("[orchestrator] 证据写入失败: {e}");
                 }
-                let _ = o.store.add_message(
-                    &self.session_id,
-                    MessageRole::Unit,
-                    Some(def.identifier.as_str()),
-                    report.statements.clone(),
-                );
+                // 子个体输出落子会话（含有序过程步骤）；主会话不再直接展示个体消息
+                if trace_key == self.session_id {
+                    // 子会话创建失败（回落主会话）：保持旧行为
+                    let _ = o.store.add_message(
+                        &self.session_id,
+                        MessageRole::Unit,
+                        Some(def.identifier.as_str()),
+                        report.statements.clone(),
+                    );
+                } else {
+                    let (thinking, tool_calls, steps) = crate::round_trace::drain(&trace_key);
+                    crate::round_trace::end(&trace_key);
+                    let _ = o.store.add_message_full(
+                        &trace_key,
+                        MessageRole::Unit,
+                        Some(def.identifier.as_str()),
+                        report.statements.clone(),
+                        thinking,
+                        tool_calls,
+                        steps,
+                    );
+                    // 收尾事件：子会话视图据此结束实时态并回拉持久消息（含有序步骤）
+                    o.emit(
+                        &trace_key,
+                        "unit.finished",
+                        serde_json::json!({
+                            "agentId": def.identifier,
+                            "nodeId": node.id,
+                            "statements": report.statements,
+                        }),
+                    );
+                }
 
                 o.emit(
                     &self.session_id,
@@ -2049,7 +2132,24 @@ impl ExecCtx {
                 }
                 NodeOutcome::done(node.id.clone()).with_appends(appends)
             }
-            Err(e) => NodeOutcome::failed(node.id.clone(), e.to_string()),
+            Err(e) => {
+                // 子会话留痕：失败原因落子会话（主会话仍由节点状态承载）
+                if trace_key != self.session_id {
+                    let _ = o.store.add_message(
+                        &trace_key,
+                        MessageRole::System,
+                        None,
+                        vec![Statement::warn(format!("节点执行失败：{e}"))],
+                    );
+                    o.emit(
+                        &trace_key,
+                        "unit.finished",
+                        serde_json::json!({ "agentId": def.identifier, "nodeId": node.id, "failed": true }),
+                    );
+                    crate::round_trace::end(&trace_key);
+                }
+                NodeOutcome::failed(node.id.clone(), e.to_string())
+            }
         }
     }
 }
