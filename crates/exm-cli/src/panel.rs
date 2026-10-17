@@ -182,8 +182,19 @@ impl Panel {
 
     fn print_banner(&self) {
         println!();
-        for r in banner_rows() {
-            println!("  {}", self.accent(&r));
+        let rows = banner_rows();
+        let banner_w = disp_width(&rows[0]) + 2; // 含左侧两格缩进
+        if self.width >= banner_w {
+            for r in &rows {
+                println!("  {}", self.accent(r));
+            }
+        } else {
+            // 窄终端（<64 列）放不下整幅字标：折行会把版式撑破，
+            // 此时只留文字标识，不画字标
+            println!(
+                "  {}",
+                self.accent(&format!("EX·MACHINA{}", " ".repeat(banner_w.saturating_sub(12))))
+            );
         }
         println!(
             "  {}",
@@ -207,7 +218,7 @@ impl Panel {
             Some(id) => {
                 let name = reg.single(&id).map(|d| d.name).unwrap_or_else(|| id.clone());
                 rows.push(("交互目标", format!("智能体 {name}（{id}）")));
-                rows.push(("说明", "单体服务，不经调度；回组用 /target group <id>".to_string()));
+                rows.push(("说明", "不经调度，直接服务；回组用 /target group <id>".to_string()));
             }
             None => {
                 let gid = core.active_group();
@@ -285,7 +296,7 @@ impl Panel {
         match reg.active_single() {
             Some(id) => {
                 let name = reg.single(&id).map(|d| d.name).unwrap_or_else(|| id.clone());
-                format!("智能体 {name}（{id}）· 单体服务，不经调度")
+                format!("智能体 {name}（{id}）· 不经调度直接服务")
             }
             None => {
                 let gid = core.active_group();
@@ -320,7 +331,16 @@ impl Panel {
             }
         };
         // 状态栏只放模型名（档案前缀在信息面板里给全，这里省列宽）
-        let model = cfg.llm.model.clone();
+        // 未配置模型时给出显式占位，避免出现「MODEL  │」这种标签悬空的空芯片
+        let model = if cfg.llm.model.trim().is_empty() {
+            if exm_core::config::mock_enabled_from_env() {
+                "mock（测试替身）".to_string()
+            } else {
+                "未配置".to_string()
+            }
+        } else {
+            cfg.llm.model.clone()
+        };
         let tokens = core.session_tokens_estimate(&state.session_id);
 
         let candidates = [
@@ -589,7 +609,7 @@ impl Panel {
             "singles" => {
                 let singles = core.registry().list_singles();
                 if singles.is_empty() {
-                    println!("{}", dim("（无智能体；智能体为预置单体，不经调度直接服务）"));
+                    println!("{}", dim("（无智能体；智能体为预置，不经调度直接服务）"));
                 }
                 let active = core.registry().active_single();
                 for s in singles {
@@ -663,10 +683,6 @@ impl Panel {
                     "remove" | "rm" => match rest.get(1) {
                         Some(id) => group_cmd::run_agent_remove(core, id, args.kv.get("group").map(|s| s.as_str()))?,
                         None => println!("{}", warn("用法：/agent remove <identifier>")),
-                    },
-                    "primary" => match rest.get(1) {
-                        Some(id) => group_cmd::run_agent_set_primary(core, id, args.kv.get("group").map(|s| s.as_str()))?,
-                        None => println!("{}", warn("用法：/agent primary <identifier>")),
                     },
                     "optimize" => match rest.get(1) {
                         Some(id) => platform_cmd::run_agent_optimize(core, id).await?,
@@ -839,9 +855,19 @@ impl Panel {
                                 args.kv.get("at").cloned(),
                                 args.kv.get("group").cloned(),
                                 args.kv.get("session-title").cloned(),
+                                args.kv.get("kind").cloned(),
+                                args.kv.get("target-session").cloned(),
+                                args.kv
+                                    .get("steps")
+                                    .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                                    .unwrap_or_default(),
                             )?;
                         }
-                        None => println!("{}", warn("用法：/cron add <名称> --prompt <提示词> [--cron \"分 时 日 月 周\"] [--at <ISO8601>]")),
+                        None => println!(
+                            "{}",
+                            warn("用法：/cron add <名称> --prompt <提示词> [--cron \"分 时 日 月 周\"] [--at <ISO8601>]\
+                                  \n       连续任务：--kind queue --steps id1,id2")
+                        ),
                     },
                     "run" => match rest.get(1) {
                         Some(id) => platform_cmd::run_cron_now(core, id).await?,
@@ -917,7 +943,7 @@ impl Panel {
             );
         }
 
-        println!("\n{}", self.accent_bold("// 智能体（单体服务，不经调度）"));
+        println!("\n{}", self.accent_bold("// 智能体（不经调度直接服务）"));
         let singles = core.registry().list_singles();
         if singles.is_empty() {
             println!("  {}", dim("（无）"));
@@ -933,10 +959,10 @@ impl Panel {
                 dim(s.description.chars().take(40).collect::<String>())
             );
         }
-        println!("\n{}", dim("  切换：/target group <id>（集群）或 /target single <id>（单体）"));
+        println!("\n{}", dim("  切换：/target group <id>（集群）或 /target single <id>（智能体）"));
     }
 
-    /// 切到某个组：退出单体模式 → 设激活组 → 新会话
+    /// 切到某个组：退出智能体模式 → 设激活组 → 新会话
     fn switch_target_group(&mut self, core: &Arc<Core>, state: &mut PanelState, id: &str) -> anyhow::Result<()> {
         core.registry().set_active_single(None)?;
         group_cmd::run_switch(core, id)?;
@@ -944,11 +970,11 @@ impl Panel {
         Ok(())
     }
 
-    /// 切到某个智能体（单体服务）
+    /// 切到某个智能体（不经调度直接服务）
     fn switch_target_single(&mut self, core: &Arc<Core>, state: &mut PanelState, id: &str) -> anyhow::Result<()> {
         core.registry().set_active_single(Some(id))?;
         let name = core.registry().single(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
-        println!("{} 交互目标已切换：智能体 {}（{id}）· 单体服务，不经调度", ok("完成"), name);
+        println!("{} 交互目标已切换：智能体 {}（{id}）· 不经调度直接服务", ok("完成"), name);
         self.on_target_switched(core, state);
         Ok(())
     }
@@ -1192,26 +1218,29 @@ pub async fn run_panel(core: Arc<Core>, quiet: bool) -> anyhow::Result<()> {
 
 // ---------------------------------------------------------------- 辅助
 
-/// 字符画字母表：EXMACHINA（每字母 5 列 × 5 行，等宽块元素）
-const BANNER_LETTERS: [[&str; 5]; 9] = [
+/// 字符画字母表：EXMACHINA（每字母 6 列 × 7 行，双线笔画）
+///
+/// 字形口径对齐 `docs/wordmark.svg`（终端横幅与字标同一套视觉语汇）：
+/// 笔画取两格宽，与字标的粗板式笔画同量级；单线细字模在终端里过于轻飘。
+const BANNER_LETTERS: [[&str; 7]; 9] = [
     // E
-    ["█████", "█    ", "████ ", "█    ", "█████"],
+    ["██████", "██    ", "██    ", "██████", "██    ", "██    ", "██████"],
     // X
-    ["█   █", " █ █ ", "  █  ", " █ █ ", "█   █"],
+    ["██  ██", "██  ██", " ████ ", "  ██  ", " ████ ", "██  ██", "██  ██"],
     // M
-    ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
+    ["██████", "██  ██", "██  ██", "██ █ █", "██  ██", "██  ██", "██  ██"],
     // A
-    [" ███ ", "█   █", "█████", "█   █", "█   █"],
+    [" ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
     // C
-    [" ████", "█    ", "█    ", "█    ", " ████"],
+    [" ████ ", "██  ██", "██    ", "██    ", "██    ", "██  ██", " ████ "],
     // H
-    ["█   █", "█   █", "█████", "█   █", "█   █"],
+    ["██  ██", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
     // I
-    ["█████", "  █  ", "  █  ", "  █  ", "█████"],
+    ["██████", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "██████"],
     // N
-    ["█   █", "██  █", "█ █ █", "█  ██", "█   █"],
+    ["██  ██", "███ ██", "████ █", "██ ███", "██  ██", "██  ██", "██  ██"],
     // A
-    [" ███ ", "█   █", "█████", "█   █", "█   █"],
+    [" ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
 ];
 
 /// 非 TTY（管道 / 重定向）逐行模式下复用同一套 `/` 命令实现。
@@ -1238,9 +1267,9 @@ pub async fn handle_line(core: &Arc<Core>, line: &str, quiet: bool, session_id: 
     Ok(matches!(panel.dispatch(core, &mut state, line).await?, Flow::Exit))
 }
 
-/// 由字母表拼出横幅 5 行（保证各行列宽严格一致）
+/// 由字母表拼出横幅 7 行（保证各行列宽严格一致）
 fn banner_rows() -> Vec<String> {
-    let mut rows = vec![String::new(); 5];
+    let mut rows = vec![String::new(); BANNER_LETTERS[0].len()];
     for (i, letter) in BANNER_LETTERS.iter().enumerate() {
         for (r, line) in letter.iter().enumerate() {
             if i > 0 {
@@ -1706,7 +1735,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("/target", "当前交互目标 + 全部可选目标（组 / 智能体）"),
             ("/target group <id>", "切到某组（集群协作，经调度）"),
-            ("/target single <id>", "切到某智能体（单体服务，不经调度）"),
+            ("/target single <id>", "切到某智能体（不经调度直接服务）"),
             ("/singles", "智能体清单（可直接作为交互目标）"),
             ("/groups", "智能体组清单"),
             ("/group <id>", "切换激活组（等价 /target group <id>）"),
@@ -1716,7 +1745,6 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("/agents [关键词]", "组内个体编成清单（可按能力过滤）"),
             ("/agent create <名称> --id <identifier> --desc <职责> [--tier orchestrator|unit]", "新建个体"),
             ("/agent remove <identifier>", "删除个体"),
-            ("/agent primary <identifier>", "设为组内主智能体"),
             ("/agent optimize|adaptation|reset-adaptation <identifier>", "经验优化：教训 → 行为改进要点"),
             ("/persona get|set|reset <identifier> [文本]", "人设（说话风格）"),
         ],
@@ -1816,9 +1844,9 @@ mod tests {
     #[test]
     fn 横幅_各行列宽严格一致() {
         let rows = banner_rows();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 7, "字标口径为 7 行");
         let w = disp_width(&rows[0]);
-        assert_eq!(w, 53, "EXMACHINA = 9 字母 × 5 列 + 8 个间隔");
+        assert_eq!(w, 62, "EXMACHINA = 9 字母 × 6 列 + 8 个间隔");
         for r in &rows {
             assert_eq!(disp_width(r), w, "行宽不一致：{r}");
         }

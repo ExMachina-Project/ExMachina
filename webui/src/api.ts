@@ -36,8 +36,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(tr("api.unauthorized"));
   }
   if (!resp.ok && resp.status !== 202) {
-    const body = await resp.text();
-    throw new Error(`${init?.method ?? "GET"} ${path} -> ${resp.status} ${body.slice(0, 200)}`);
+    const raw = await resp.text();
+    // 全站错误契约：{"error": "中文说明"}（业务错误与提取器拒绝都已归一），
+    // 直接取说明文案给用户看；只有反向代理之类吐非 JSON 时才回退原文。
+    let msg = raw.slice(0, 200);
+    try {
+      const parsed = JSON.parse(raw) as { error?: string };
+      if (parsed.error) msg = parsed.error;
+    } catch {
+      /* 非 JSON：保留原文 */
+    }
+    throw new Error(msg);
   }
   return (await resp.json()) as T;
 }
@@ -203,6 +212,12 @@ export interface CronJob {
   prompt: string;
   cron?: string;
   at?: string;
+  /** 任务类型：cron（周期）| at（一次性）| queue（连续任务）；缺省按 cron/at 推断 */
+  kind?: "cron" | "at" | "queue" | string;
+  /** at 类型：投递到的已有会话 id（空 = 按 sessionTitle 新建/复用） */
+  targetSession?: string;
+  /** queue 类型：按序执行的任务 id 列表 */
+  steps?: string[];
   group?: string;
   sessionTitle?: string;
   enabled: boolean;
@@ -366,6 +381,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ key }),
     }),
+  /** 首启引导状态：是否已配置访问密钥 + 提醒是否已被跳过 / 关闭（免鉴权） */
+  authStatus: () =>
+    req<{ ok: boolean; keyConfigured: boolean; setupSnoozed: boolean; setupDismissed: boolean }>("/auth/status"),
+  /** 「下次再说」：本次进程内不再提示（网关重启后恢复提醒） */
+  snoozeKeySetup: () => req<{ ok: boolean }>("/auth/snooze", { method: "POST" }),
+  /** 「不再提醒」：持久化关闭首启设置引导 */
+  dismissKeySetup: () => req<{ ok: boolean }>("/auth/dismiss", { method: "POST" }),
   health: () => req<{ ok: boolean; mock: boolean; agents: number }>("/health"),
   listSessions: () => req<Session[]>("/sessions"),
   createSession: (title: string) =>
@@ -439,9 +461,6 @@ export const api = {
     }>("/version/check"),
   switchGroup: (id: string) =>
     req<{ ok: boolean }>("/groups/active", { method: "PUT", body: JSON.stringify({ id }) }),
-  /** 设置组主智能体 */
-  setGroupPrimary: (gid: string, identifier: string) =>
-    req<{ ok: boolean }>(`/groups/${gid}/primary`, { method: "POST", body: JSON.stringify({ identifier }) }),
   deleteGroup: (id: string) => req<{ ok: boolean }>(`/groups/${id}`, { method: "DELETE" }),
   createAgent: (body: {
     name: string;
@@ -465,7 +484,7 @@ export const api = {
     }),
   resetPersona: (identifier: string) =>
     req<{ ok: boolean }>(`/agents/${identifier}/persona`, { method: "DELETE" }),
-  /** 单体智能体人设（entities/agents/<id>/SOUL.md，与组内个体同语义） */
+  /** 智能体人设（entities/agents/<id>/SOUL.md，与组内个体同语义） */
   singlePersona: (id: string) => req<PersonaInfo>(`/singles/${id}/persona`),
   singlesSetPersona: (id: string, persona: string) =>
     req<{ ok: boolean }>(`/singles/${id}/persona`, { method: "PUT", body: JSON.stringify({ persona }) }),
@@ -523,7 +542,7 @@ export const api = {
     identifier: string,
     body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
   ) => req<AgentDefinition>(`/agents/${identifier}`, { method: "PUT", body: JSON.stringify(body) }),
-  /** 更新单体智能体可编辑字段（同 updateAgent 字段集） */
+  /** 更新智能体可编辑字段（同 updateAgent 字段集） */
   updateSingle: (
     id: string,
     body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
@@ -562,6 +581,12 @@ export const api = {
     prompt: string;
     cron?: string;
     at?: string;
+    /** 任务类型（v0.4.0）：cron | at | queue；缺省由后端按 cron/at 推断 */
+    kind?: string;
+    /** at 类型：投递到的已有会话 id */
+    targetSession?: string;
+    /** queue 类型：按序执行的任务 id 列表 */
+    steps?: string[];
     group?: string;
     sessionTitle?: string;
     notifyChannels?: string[];
@@ -620,7 +645,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(id ? { id } : {}),
     }),
-  // 系统提示词（PROMPT）读写：组内个体按组作用域；单体走 singles 端点
+  // 系统提示词（PROMPT）读写：组内个体按组作用域；智能体走 singles 端点
   getAgentPrompt: (gid: string, identifier: string) =>
     req<{ identifier: string; promptFile: string; prompt: string }>(`/groups/${gid}/agents/${identifier}/prompt`),
   putAgentPrompt: (gid: string, identifier: string, prompt: string) =>

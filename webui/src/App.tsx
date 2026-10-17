@@ -26,12 +26,14 @@ import { useExm } from "./store";
 import { LANGS, useLang, useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
+import { DataStream } from "./components/DataStream";
 import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
 import { TelemetryBar } from "./components/TelemetryBar";
 /* 视图懒加载（React.lazy + 动态 import）：按视图切分 chunk，首屏只拉 shell + 当前视图，
  * 其余视图在导航到时才加载（vendor 三方库另行在 vite.config.ts 的 manualChunks 分组缓存） */
 const LoginView = lazy(() => import("./views/LoginView").then((m) => ({ default: m.LoginView })));
+const SetupKeyView = lazy(() => import("./views/SetupKeyView").then((m) => ({ default: m.SetupKeyView })));
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
 const ModelsView = lazy(() => import("./views/ModelsView").then((m) => ({ default: m.ModelsView })));
 const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default: m.GraphView })));
@@ -130,10 +132,13 @@ export default function App(): React.ReactElement {
   const setPreset = useTheme((s) => s.setPreset);
   const initial = parseHash();
   const [view, setViewState] = useState<ViewKey>(initial.view);
-  /** 切视图并同步 hash（app-shell-routing） */
+  /** 切视图并同步 hash（app-shell-routing）
+   *  保留 `#/chat/<sessionId>` 的会话段：此前三元恒为空串，深链进来第一跳就被抹平，
+   *  移动端无法判断「是否深链直入会话页」，只能一律落在列表页。 */
   const setView = (v: ViewKey) => {
     setViewState(v);
-    const target = "#/" + v + (location.hash.startsWith("#/chat/") && v === "chat" ? "" : "");
+    const seg = location.hash.startsWith("#/chat/") ? location.hash.slice("#/chat/".length) : "";
+    const target = "#/" + v + (v === "chat" && seg ? "/" + seg : "");
     if (location.hash !== target) {
       history.replaceState(null, "", target);
     }
@@ -164,17 +169,23 @@ export default function App(): React.ReactElement {
   const t = useT();
   const lang = useLang((s) => s.lang);
   const setLang = useLang((s) => s.setLang);
-  // 登录门：null = 鉴权中；false = 未解锁；true = 已进入
-  const [authed, setAuthed] = useState<boolean | null>(null);
+  // 登录门：checking = 鉴权中；setup = 首启未设密钥（引导设置）；locked = 未解锁；open = 已进入
+  const [gate, setGate] = useState<"checking" | "setup" | "locked" | "open">("checking");
   /** 通道就绪 = 全局端点已配置密钥（apiKey 由服务端掩码回显，非空即已配置） */
   const llmReady = !!config?.llm?.apiKey;
 
   useEffect(() => {
     void (async () => {
       try {
+        // 首启引导（部署后首次启动）：未配置访问密钥且未「跳过 / 关闭」提醒 → 设置密钥页
+        const st = await api.authStatus();
+        if (!st.keyConfigured && !st.setupSnoozed && !st.setupDismissed) {
+          setGate("setup");
+          return;
+        }
         const key = localStorage.getItem("exm.key") ?? "";
-        const r = await api.verifyAuth(key);
-        setAuthed(r.ok);
+        const r = st.keyConfigured ? await api.verifyAuth(key) : { ok: true };
+        setGate(r.ok ? "open" : "locked");
         if (r.ok) {
           await init();
           // 会话深链（app-shell-routing）：#/chat/<sessionId> → 选中该会话
@@ -189,14 +200,16 @@ export default function App(): React.ReactElement {
           }
         }
       } catch {
-        setAuthed(false);
+        setGate("locked");
       }
     })();
   }, [init]);
 
-  if (authed === null) {
+  if (gate === "checking") {
     return (
       <div className="login-wrap">
+        <DataStream side="left" />
+        <DataStream side="right" />
         <div className="login-core">
           <div className="login-figure">
             <Emblem size={92} charging />
@@ -210,12 +223,24 @@ export default function App(): React.ReactElement {
       </div>
     );
   }
-  if (!authed) {
+  if (gate === "setup") {
+    return (
+      <ViewSuspense>
+        <SetupKeyView
+          onEnter={() => {
+            setGate("open");
+            void init();
+          }}
+        />
+      </ViewSuspense>
+    );
+  }
+  if (gate === "locked") {
     return (
       <ViewSuspense>
         <LoginView
           onUnlock={() => {
-            setAuthed(true);
+            setGate("open");
             void init();
           }}
         />

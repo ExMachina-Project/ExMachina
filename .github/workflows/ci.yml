@@ -27,6 +27,11 @@ jobs:
         run: cargo check --workspace
       - name: Test
         run: cargo test --workspace
+      # 端到端验收（README 的验证入口）：REST 全端点 + 事件流 + 任务图 + 证据/三账/记忆/档案。
+      # 它是 example，cargo test 不会跑 —— 曾长期无人执行而悄悄腐烂（编成目录迁移后 36 项飘红）。
+      # 脚本自持：端点/档案/记忆开关都在进程内覆盖，不随仓库外的本机配置漂移；跑完还原被改动的文件。
+      - name: E2E acceptance
+        run: cargo run -p exm-gateway --example e2e
 
   webui:
     runs-on: ubuntu-22.04
@@ -42,3 +47,7 @@ jobs:
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
       - name: Install & Build
         run: npm install && npm run build:webui
+      # 取词函数的参数类型放宽了动态 key，拼错的静态 key 编译期抓不到；
+      # 未收录的 key 会静默返回原文（界面直接显示 approvals.xxx）。此处兜底拦截。
+      - name: i18n keys
+        run: npm run check:i18n

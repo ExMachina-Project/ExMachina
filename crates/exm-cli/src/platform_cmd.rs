@@ -297,16 +297,21 @@ pub async fn run_model_test(core: &Core, id: Option<&str>) -> anyhow::Result<()>
 pub fn run_cron_list(core: &Core) -> anyhow::Result<()> {
     let jobs = core.cron.list()?;
     if jobs.is_empty() {
-        println!("{}", dim("（无定时任务；exm cron add <名称> --prompt <提示词> --cron \"分 时 日 月 周\" 创建）"));
+        println!("{}", dim("（无定时任务；exm cron add <名称> --prompt <提示词> --cron \"分 时 日 月 周\" 创建；连续任务用 --kind queue --steps id1,id2）"));
         return Ok(());
     }
-    println!("{}", "定时任务（网关 serve 常驻时自动调度）".bold().to_string());
+    println!("{}", "定时任务（exm gateway 常驻时自动调度）".bold().to_string());
     for j in jobs {
         let state = if j.enabled { "启用".green().to_string() } else { "停用".dimmed().to_string() };
-        let schedule = match (&j.cron, &j.at) {
-            (Some(c), _) => format!("cron[{c}]"),
-            (None, Some(a)) => format!("一次性[{a}]"),
-            _ => "—".into(),
+        // 任务三类型（v0.4.0）：cron 周期 / at 一次性 / queue 连续；缺省按 cron/at 推断
+        let kind = j.kind.as_deref().unwrap_or(if j.cron.is_some() { "cron" } else { "at" });
+        let schedule = match kind {
+            "queue" => format!("连续[{}]", j.steps.join(" → ")),
+            _ => match (&j.cron, &j.at) {
+                (Some(c), _) => format!("cron[{c}]"),
+                (None, Some(a)) => format!("一次性[{a}]"),
+                _ => "—".into(),
+            },
         };
         println!(
             "  {} {} {} {} {}",
@@ -334,19 +339,32 @@ pub fn run_cron_add(
     at: Option<String>,
     group: Option<String>,
     session_title: Option<String>,
+    kind: Option<String>,
+    target_session: Option<String>,
+    steps: Vec<String>,
 ) -> anyhow::Result<()> {
-    if cron.is_none() && at.is_none() {
-        anyhow::bail!("需要 --cron \"分 时 日 月 周\" 或 --at <ISO8601 时间>");
+    // 任务三类型（v0.4.0）：cron 周期 / at 一次性 / queue 连续（按步骤 id 顺序执行）
+    let is_queue = matches!(kind.as_deref(), Some("queue"));
+    if !is_queue && cron.is_none() && at.is_none() {
+        anyhow::bail!("需要 --cron \"分 时 日 月 周\" 或 --at <ISO8601 时间>（连续任务用 --kind queue --steps）");
+    }
+    let steps: Vec<String> = steps
+        .into_iter()
+        .flat_map(|s| s.split(',').map(|x| x.trim().to_string()).collect::<Vec<_>>())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if is_queue && steps.is_empty() {
+        anyhow::bail!("连续任务（--kind queue）需要至少一个步骤任务 id：--steps id1,id2");
     }
     let job = core.cron.upsert(CronJob {
         id: String::new(),
         name: name.trim().to_string(),
         prompt: prompt.trim().to_string(),
-        cron,
-        at,
-        kind: None,
-        target_session: None,
-        steps: Vec::new(),
+        cron: if is_queue { None } else { cron },
+        at: if is_queue { None } else { at },
+        kind: kind.or_else(|| Some(if is_queue { "queue".into() } else { "cron".into() })),
+        target_session,
+        steps,
         group,
         session_title,
         enabled: true,
@@ -357,7 +375,7 @@ pub fn run_cron_add(
         created_at: String::new(),
     })?;
     println!("{} 定时任务已创建：{}（{}）", ok("完成"), job.name, job.id.cyan());
-    println!("{}", dim("exm serve 常驻时由网关调度器自动触发；exm cron run <id> 可手动执行。"));
+    println!("{}", dim("exm gateway 常驻时由网关调度器自动触发；exm cron run <id> 可手动执行。"));
     Ok(())
 }
 

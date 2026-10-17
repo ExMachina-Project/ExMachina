@@ -1,4 +1,4 @@
-/** 智能体页（单体）：档案管理 —— 创建/删除/卡片菜单（切换模型 / 编辑描述 / 编辑 SOUL.MD）；交互切换在「对话」页左栏 */
+/** 智能体页：档案管理 —— 创建/删除/卡片菜单（切换模型 / 编辑描述 / 编辑 SOUL.MD）；交互切换在「对话」页左栏 */
 import React, { useCallback, useEffect, useState } from "react";
 import { Button, Card, Dropdown, Form, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";

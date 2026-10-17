@@ -8,9 +8,33 @@ import { PageHeader } from "../components/PageHeader";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
 
+/** 事件行的语义分组类（配 .event-row.ev-* 的左缘色条） */
+function eventGroup(kind: string): string {
+  if (kind.startsWith("dispatch")) return "ev-dispatch";
+  if (kind.startsWith("sync") || kind.startsWith("ledger")) return "ev-sync";
+  if (kind.includes("arbitration")) return "ev-arbitration";
+  if (kind.startsWith("run.error")) return "ev-error";
+  if (kind.startsWith("memory")) return "ev-memory";
+  if (kind.startsWith("run.finished")) return "ev-finished";
+  return "";
+}
+
+/** 事件语义色：按事件名归类，扫一眼能看出这是派发、回流、记忆还是结束 */
+function colorOf(kind: string): string {
+  if (kind.startsWith("dispatch")) return "blue";
+  if (kind.startsWith("sync") || kind.startsWith("ledger")) return "green";
+  if (kind.includes("arbitration") || kind.startsWith("run.error")) return "red";
+  if (kind.startsWith("memory")) return "purple";
+  if (kind.startsWith("run.finished")) return "cyan";
+  return "default";
+}
+
 function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; color: string; text: string } {
-  const kind = e.type ?? e.kind ?? "event";
   const p = (e.payload ?? {}) as Record<string, unknown>;
+  const inner = (p.payload ?? {}) as Record<string, unknown>;
+  // 事件信封有两层：外层 type="event" 只是投递标记，真实事件名在 payload.type
+  // （此前按 payload.kind 取，取不到 → 每一行都退化成「event / 内部事件」）。
+  const kind = String(p.type ?? p.kind ?? e.type ?? e.kind ?? "event");
   let text = "";
   switch (kind) {
     case "dispatch":
@@ -19,19 +43,33 @@ function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; co
         node: String(p.taskNodeId ?? p.nodeId ?? ""),
       });
       break;
-    case "event": {
-      const inner = (p as { kind?: string }).kind ?? "";
-      text = t("activity.innerEvent", { kind: inner });
-      break;
-    }
     case "session.created":
       text = t("activity.sessionCreated");
       break;
     default:
-      text = JSON.stringify(p).slice(0, 120);
+      if (Object.keys(inner).length === 0) {
+        text = t("activity.innerEvent", { kind });
+      } else {
+        // 内层载荷挑可读字段拼摘要，JSON 直出会是一屏花括号
+        const pick = (keys: string[]): string => {
+          for (const k of keys) {
+            const v = inner[k];
+            if (v !== undefined && v !== null && v !== "") {
+              return typeof v === "object" ? JSON.stringify(v).slice(0, 90) : String(v).slice(0, 90);
+            }
+          }
+          return "";
+        };
+        text =
+          pick(["delta", "summary", "message", "status", "nodeId", "taskNodeId", "agentIdentifier", "reason"]) ||
+          Object.entries(inner)
+            .slice(0, 3)
+            .map(([k, v]) => `${k}=${typeof v === "object" ? "…" : String(v).slice(0, 40)}`)
+            .join(" · ")
+            .slice(0, 120);
+      }
   }
-  const color = kind === "dispatch" ? "blue" : kind === "event" ? "default" : "cyan";
-  return { tag: kind, color, text };
+  return { tag: kind, color: colorOf(kind), text };
 }
 
 export function ActivityView(): React.ReactElement {
@@ -170,27 +208,22 @@ function EventsPane(): React.ReactElement {
   }, [sid, load]);
 
   return (
-    <div className="pane-wrap">
-      <PageHeader
-        en="EVENTS"
-        title={t("activity.title")}
-        desc={t("activity.desc")}
-        actions={
-          <>
-            <Select
-              showSearch
-              value={sid || undefined}
-              placeholder={t("activity.pickSession")}
-              style={{ minWidth: 280 }}
-              onChange={(v) => setSid(v)}
-              options={sessions.map((s) => ({ value: s.id, label: `${s.title}（${s.id.slice(0, 8)}…）` }))}
-            />
-            <Button icon={<ReloadOutlined />} onClick={() => void load(sid)}>
-              {t("common.refresh")}
-            </Button>
-          </>
-        }
-      />
+    // 内层不再重复页头：标题与说明由 ActivityView 外层的 PageHeader 统一承担，
+    // 此处只留会话选择与刷新（此前同一段说明在一屏内出现两次）
+    <div className="pane-body">
+      <div className="pane-toolbar">
+        <Select
+          showSearch
+          value={sid || undefined}
+          placeholder={t("activity.pickSession")}
+          style={{ minWidth: 220, flex: "1 1 220px", maxWidth: 420 }}
+          onChange={(v) => setSid(v)}
+          options={sessions.map((s) => ({ value: s.id, label: `${s.title}（${s.id.slice(0, 8)}…）` }))}
+        />
+        <Button icon={<ReloadOutlined />} onClick={() => void load(sid)}>
+          {t("common.refresh")}
+        </Button>
+      </div>
 
       <Card size="small" className="hud activity-live" title={t("activity.liveTitle")}>
         {timeline.length === 0 ? (
@@ -219,7 +252,7 @@ function EventsPane(): React.ReactElement {
             .map((e, i) => {
               const d = describe(e, t);
               return (
-                <div key={i} className="event-row">
+                <div key={i} className={`event-row ${eventGroup(d.tag)}`}>
                   <Tag color={d.color} className="mono">
                     {d.tag}
                   </Tag>

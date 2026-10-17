@@ -87,6 +87,10 @@ pub struct SecurityConfig {
     /// 期间批准 → 执行结果直接回灌模型继续干活；超时 → 按「受阻回流」交还上层。0 = 不等待（旧行为）
     #[serde(default)]
     pub approval_wait_secs: u64,
+    /// 首启密钥设置引导：无密钥部署的首次启动会引导设置访问密钥；
+    /// 选「不再提醒」后为 true（「下次再说」只记进程内，网关重启即恢复提醒）
+    #[serde(default)]
+    pub key_setup_dismissed: bool,
 }
 
 impl Default for SecurityConfig {
@@ -98,6 +102,7 @@ impl Default for SecurityConfig {
             terminal_timeout_secs: 120,
             tool_output_spill_chars: 12000,
             approval_wait_secs: 120,
+            key_setup_dismissed: false,
         }
     }
 }
@@ -793,6 +798,8 @@ struct SecurityFile {
     tool_output_spill_chars: Option<usize>,
     #[serde(default)]
     approval_wait_secs: Option<u64>,
+    #[serde(default)]
+    key_setup_dismissed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -941,6 +948,7 @@ impl ExmConfig {
             approval_wait_secs: file_sec
                 .approval_wait_secs
                 .unwrap_or_else(|| SecurityConfig::default().approval_wait_secs),
+            key_setup_dismissed: file_sec.key_setup_dismissed.unwrap_or(false),
         };
         let automation = AutomationConfig {
             heartbeat_enabled: file_auto.heartbeat_enabled
@@ -1136,6 +1144,7 @@ impl ExmConfig {
                 terminal_timeout_secs: Some(self.security.terminal_timeout_secs),
                 tool_output_spill_chars: Some(self.security.tool_output_spill_chars),
                 approval_wait_secs: Some(self.security.approval_wait_secs),
+                key_setup_dismissed: Some(self.security.key_setup_dismissed),
             }),
             computer: Some(self.computer.clone()),
             automation: Some(AutomationFile {
@@ -1347,7 +1356,7 @@ pub fn config_schema() -> serde_json::Value {
                 "fields": [
                     { "key": "automation.heartbeatEnabled", "label": "启用心跳巡检", "kind": "boolean",
                       "default": "false", "required": false,
-                      "help": "网关调度器按周期向心跳会话发送巡检提示（需 exm serve 常驻）" },
+                      "help": "网关调度器按周期向心跳会话发送巡检提示（需 exm gateway 常驻）" },
                     { "key": "automation.heartbeatIntervalMinutes", "label": "心跳间隔（分钟）", "kind": "number",
                       "default": "30", "required": false, "min": 5, "max": 1440,
                       "help": "心跳巡检的执行周期" },

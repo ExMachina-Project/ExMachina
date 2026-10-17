@@ -919,6 +919,46 @@ impl SkillDef {
     }
 }
 
+/// 协议文档（`<组目录>/protocol/*.md`）：frontmatter 元数据 + 正文。
+/// 按触发词在规划（plan）与派发（unit）两处按需注入，见 protocol/README.md。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtocolDef {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// 触发词：任务输入或节点目标包含任一词即命中
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    /// 注入点：plan（仅规划）| unit（仅派发）| both（缺省）
+    #[serde(default)]
+    pub scope: String,
+    /// 限定的个体 identifier；空 = 全体适用（仅 unit 注入生效）
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// 协议正文（不含 frontmatter）
+    pub body: String,
+}
+
+impl ProtocolDef {
+    pub fn injects_plan(&self) -> bool {
+        self.scope != "unit"
+    }
+
+    pub fn injects_unit(&self) -> bool {
+        self.scope != "plan"
+    }
+
+    pub fn applies_to(&self, agent: &str) -> bool {
+        self.agents.is_empty() || self.agents.iter().any(|a| a == agent)
+    }
+
+    pub fn matches(&self, text: &str) -> bool {
+        self.triggers.iter().any(|t| !t.trim().is_empty() && text.contains(t.trim()))
+    }
+}
+
 // ---------------------------------------------------------------- 自动化（cron/心跳，docs/10）
 
 /// 定时任务：五段 cron 表达式或一次性 `at`（ISO8601）；到期由网关调度器唤醒智能体执行。
