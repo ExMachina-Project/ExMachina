@@ -99,6 +99,9 @@ export function ChatView(): React.ReactElement {
   } = useExm();
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string }[]>([]);
+  // 确认弹窗走 useModal 演出器：静态 Modal.confirm 渲染在 React 树外、吃不到 ConfigProvider，
+  // 暗色主题下会落回默认白底（与全局自绘样式打架）；演出器版本随主题/语言/令牌同步。
+  const [modal, modalContextHolder] = Modal.useModal();
 
   const loadTarget = useCallback(async () => {
     try {
@@ -385,6 +388,7 @@ export function ChatView(): React.ReactElement {
 
   return (
     <div className={`chat-shell screen-${screen}`} data-screen={screen}>
+      {modalContextHolder}
       {/* 左栏 = 移动端「会话列表页」，桌面端是常驻侧栏（见 styles.css 的屏幕切换） */}
       <aside className="chat-rail">
         {/* 列表页标题栏（窄屏显示）：标题 + 会话计数 */}
@@ -508,7 +512,7 @@ export function ChatView(): React.ReactElement {
                             if (key === "export") void exportSession(s.id, s.title);
                             else if (key === "rename") setRenaming({ id: s.id, title: s.title });
                             else {
-                              Modal.confirm({
+                              modal.confirm({
                                 title: t("chat.deleteConfirm"),
                                 okText: t("common.confirm"),
                                 okButtonProps: { danger: true },
