@@ -99,6 +99,16 @@ export const en: Partial<Dict> = {
   "login.badKey": "Invalid key",
   "login.foot": "EX MACHINA · Orchestrator ready",
 
+  // ── First-run key setup ──
+  "setup.sub": "First launch · No access key yet",
+  "setup.keyLabel": "Set Access Key",
+  "setup.keyPlaceholder": "Choose an access key (required to enter afterwards)",
+  "setup.submit": "Set & Enter",
+  "setup.later": "Later",
+  "setup.never": "Don't Remind",
+  "setup.hint": "Without a key, this instance is open to every network visitor.",
+  "setup.empty": "Key must not be empty",
+
   // ── 对话页 ──
   "session.new": "New Session",
   "chat.role.user": "User",

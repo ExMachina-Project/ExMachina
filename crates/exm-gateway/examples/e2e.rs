@@ -1753,6 +1753,13 @@ let mut cfg = ExmConfig::load(&root);
     with_key.headers_mut().insert("x-auth-key", "e2e-secret".parse().unwrap());
     let ok_resp = client.execute(with_key).await?;
     c.check("带密钥访问 200", ok_resp.status().as_u16() == 200);
+    // 首启引导：状态查询免鉴权；已配置密钥时两个引导动作拒绝（防止经豁免端点复位提醒状态）
+    let st_configured: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("已配置密钥时 status.keyConfigured=true", st_configured["keyConfigured"] == true);
+    let snooze_guarded: reqwest::Response = client.post(format!("{base}/auth/snooze")).send().await?;
+    c.check("已配置密钥时「下次再说」拒绝 400", snooze_guarded.status().as_u16() == 400);
+    let dismiss_guarded: reqwest::Response = client.post(format!("{base}/auth/dismiss")).send().await?;
+    c.check("已配置密钥时「不再提醒」拒绝 400", dismiss_guarded.status().as_u16() == 400);
     // 通道入站豁免（D10）：有自有 secret 的 webhook 通道放行；无 secret 通道仍被全局鉴权拦截
     let _mk_hook: serde_json::Value = client
         .post(format!("{base}/channels"))
@@ -1806,6 +1813,22 @@ let mut cfg = ExmConfig::load(&root);
     // 注意：清除后旧客户端仍带 X-Auth-Key 头也无需匹配——中间件放行所有请求
     let after_clear: reqwest::Response = client.get(format!("{base}/agents")).send().await?;
     c.check("清除密钥后恢复免鉴权", after_clear.status().as_u16() == 200);
+
+    // ---- 首启密钥设置引导（部署后首次启动、尚未设密钥）----
+    let st: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("无密钥时 status 提示未配置", st["keyConfigured"] == false);
+    c.check("初始 snoozed / dismissed 均为假", st["setupSnoozed"] == false && st["setupDismissed"] == false);
+    let snooze: serde_json::Value = client.post(format!("{base}/auth/snooze")).send().await?.json().await?;
+    c.check("「下次再说」成功", snooze["ok"] == true);
+    let st: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("「下次再说」后 setupSnoozed=true", st["setupSnoozed"] == true);
+    let dismiss: serde_json::Value = client.post(format!("{base}/auth/dismiss")).send().await?.json().await?;
+    c.check("「不再提醒」成功", dismiss["ok"] == true);
+    let st: serde_json::Value = client.get(format!("{base}/auth/status")).send().await?.json().await?;
+    c.check("「不再提醒」后 setupDismissed=true", st["setupDismissed"] == true);
+    // 持久化落盘：config.json 记录 keySetupDismissed（FileGuard 跑完原样还回）
+    let cfg_raw = std::fs::read_to_string(root.join(".exmachina").join("config.json")).unwrap_or_default();
+    c.check("「不再提醒」已持久化到配置文件", cfg_raw.contains("\"keySetupDismissed\": true"));
 
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);

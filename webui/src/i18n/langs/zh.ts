@@ -97,6 +97,16 @@ export const zh = {
   "login.badKey": "密钥错误",
   "login.foot": "EX MACHINA · 指挥体就绪",
 
+  // ── 首启密钥设置页 ──
+  "setup.sub": "首次启动 · 尚未设置访问密钥",
+  "setup.keyLabel": "设置访问密钥",
+  "setup.keyPlaceholder": "设置访问密钥（保存后凭此进入）",
+  "setup.submit": "设置并进入",
+  "setup.later": "下次再说",
+  "setup.never": "不再提醒",
+  "setup.hint": "未设置密钥时，实例对所有网络访问者开放。",
+  "setup.empty": "密钥不能为空",
+
   // ── 对话页 ──
   "session.new": "新会话",
   "chat.role.user": "用户",
