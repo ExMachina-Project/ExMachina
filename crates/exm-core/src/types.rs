@@ -681,6 +681,9 @@ pub struct EvidenceItem {
     pub kind: EvidenceKind,
     #[serde(rename = "ref")]
     pub reference: String,
+    /// 备注可缺省：模型常省略（提示词模板将其示为「…」占位），缺省按空串收——
+    /// 结构校验只应拦「字段类型错」，不该因可选括注字段把整份报告打回（重写预算 2 次，打回即节点失败）
+    #[serde(default)]
     pub note: String,
 }
 
