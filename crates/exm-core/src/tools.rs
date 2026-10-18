@@ -49,11 +49,32 @@ const TERMINAL_ALLOW: &[AllowRule] = &[
     AllowRule { cmd: "echo", subs: &[] },
     AllowRule { cmd: "findstr", subs: &[] },
     AllowRule { cmd: "where", subs: &[] },
+    AllowRule { cmd: "which", subs: &[] },
+    AllowRule { cmd: "whoami", subs: &[] },
+    AllowRule { cmd: "uname", subs: &[] },
+    AllowRule { cmd: "pwd", subs: &[] },
+    AllowRule { cmd: "date", subs: &[] },
     AllowRule { cmd: "head", subs: &[] },
     AllowRule { cmd: "tail", subs: &[] },
+    AllowRule { cmd: "cat", subs: &[] },
     AllowRule { cmd: "wc", subs: &[] },
+    AllowRule { cmd: "diff", subs: &[] },
+    AllowRule { cmd: "mkdir", subs: &[] },
+    AllowRule { cmd: "cp", subs: &[] },
+    AllowRule { cmd: "mv", subs: &[] },
+    AllowRule { cmd: "touch", subs: &[] },
+    AllowRule { cmd: "rg", subs: &[] },
+    AllowRule { cmd: "grep", subs: &[] },
+    AllowRule { cmd: "find", subs: &[] },
+    AllowRule { cmd: "sed", subs: &["-n"] },
     AllowRule { cmd: "node", subs: &[] },
     AllowRule { cmd: "npx", subs: &[] },
+    AllowRule { cmd: "tsc", subs: &[] },
+    AllowRule { cmd: "deno", subs: &["test", "run", "check", "fmt", "lint", "info", "cache"] },
+    AllowRule { cmd: "bun", subs: &["test", "run", "install", "x", "build"] },
+    AllowRule { cmd: "pytest", subs: &[] },
+    AllowRule { cmd: "jest", subs: &[] },
+    AllowRule { cmd: "vitest", subs: &[] },
     AllowRule { cmd: "npm", subs: &["run", "test", "ci", "install", "ls", "view", "why", "audit", "outdated", "pack"] },
     AllowRule { cmd: "pnpm", subs: &["run", "test", "install", "list", "ls", "why", "audit", "outdated"] },
     AllowRule { cmd: "yarn", subs: &["run", "test", "install", "list", "why", "audit", "outdated"] },
@@ -78,6 +99,25 @@ const TERMINAL_ALLOW: &[AllowRule] = &[
     AllowRule { cmd: "python", subs: &[] },
     AllowRule { cmd: "python3", subs: &[] },
     AllowRule { cmd: "pip", subs: &["list", "show", "freeze", "download"] },
+    AllowRule {
+        cmd: "go",
+        subs: &["build", "test", "run", "vet", "fmt", "mod", "get", "generate", "doc", "env", "list"],
+    },
+    AllowRule { cmd: "gcc", subs: &[] },
+    AllowRule { cmd: "g++", subs: &[] },
+    AllowRule { cmd: "clang", subs: &[] },
+    AllowRule { cmd: "make", subs: &[] },
+    AllowRule { cmd: "cmake", subs: &[] },
+    AllowRule { cmd: "java", subs: &[] },
+    AllowRule { cmd: "javac", subs: &[] },
+    AllowRule { cmd: "mvn", subs: &[] },
+    AllowRule { cmd: "gradle", subs: &[] },
+    AllowRule { cmd: "dotnet", subs: &["build", "test", "run", "restore", "format", "publish"] },
+    AllowRule { cmd: "php", subs: &[] },
+    AllowRule { cmd: "composer", subs: &["install", "update", "test", "dump-autoload"] },
+    AllowRule { cmd: "ruby", subs: &[] },
+    AllowRule { cmd: "gem", subs: &["list", "install", "info"] },
+    AllowRule { cmd: "rake", subs: &[] },
 ];
 
 /// shell 连接符：白名单只放行单一命令，带连接符一律拒绝（防「白名单命令 && 危险命令」绕过）
@@ -2468,6 +2508,11 @@ impl ToolGateway {
         }
     }
 
+    /// 审批闸门是否开启（risky/always）——白名单外命令转人工审批；off 档直接拒绝
+    pub fn is_approval_gated(&self) -> bool {
+        matches!(self.security.exec_approval.as_str(), "risky" | "always")
+    }
+
     async fn tool_terminal(&self, agent_id: &str, session_id: &str, args: &serde_json::Value) -> ToolResult {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("run");
         // 后台任务轮询 / 终止（不经过白名单与审批：对象是已批准过的任务）
@@ -2487,15 +2532,23 @@ impl ToolGateway {
             );
         }
         let lowered = cmd.to_lowercase();
-        if !terminal_allowed(&cmd) {
-            return ToolResult::err(format!(
-                "命令不在白名单: {cmd}（白名单按「命令 + 子命令」匹配，且不支持连接符）"
-            ));
-        }
+        let whitelisted = terminal_allowed(&cmd);
         // 审批闸门（docs/10）：risky 拦高危命令，always 全拦；白名单前缀放行。
         // 拦截后运行时原地等待人工决定（security.approvalWaitSecs）：
         // 批准 → 系统代执行，输出直接回灌本工具结果，模型继续干活；拒绝/超时 → 受阻回流。
         let mode = self.security.exec_approval.as_str();
+        if !whitelisted {
+            // 白名单外命令：off 档直接拒绝（历史行为）；开启审批闸门时不再硬拒——
+            // 转入人工审批（用户批准即由系统代执行）。此前一律硬拒导致 mkdir/go/pytest
+            // 等大量日常开发命令无路可走，agent 无法完成编码任务。
+            if mode == "off" {
+                return ToolResult::err(format!(
+                    "命令不在白名单: {cmd}（白名单按「命令 + 子命令」匹配，且不支持连接符；\
+                     可将 security.execApproval 设为 risky/always 走人工审批放行）"
+                ));
+            }
+            return self.gate_command(agent_id, session_id, &cmd).await;
+        }
         if mode == "risky" || mode == "always" {
             let allowlisted = self
                 .security
@@ -3815,5 +3868,117 @@ mod timeout_output_tests {
         assert!(r.output.contains("aaaaaaaaaaaaaaaaaaaa-0"), "截断应保留头部");
         let tail = &r.output[r.output.len().saturating_sub(400)..];
         assert!(!tail.contains("-1499"), "尾部内容应被截掉，实际尾部: {tail}");
+    }
+}
+
+// ---------------------------------------------------------------- 终端白名单与审批路径
+
+#[cfg(test)]
+mod terminal_gate_tests {
+    use super::*;
+
+    #[test]
+    fn 白名单_日常开发命令放行() {
+        // 本轮修复核心场景：mkdir/cat/go/pytest/tsc 等此前全部被硬拒
+        for cmd in [
+            "cat README.md", "mkdir -p src/new", "cp a.rs b.rs", "mv old.rs new.rs",
+            "touch main.go", "diff -u a.rs b.rs", "grep -rn TODO src", "find . -name x",
+            "go build ./...", "go test ./...", "pytest -x", "jest", "vitest run",
+            "tsc --noEmit", "rg pattern", "which cargo", "uname -a",
+            "cargo check", "cargo test", "git status", "git diff", "ls -la",
+            "npm run build", "node script.js", "python3 -m venv .venv",
+            "make", "cmake .", "dotnet build", "mvn package",
+        ] {
+            assert!(terminal_allowed(cmd), "日常开发命令应放行: {cmd}");
+        }
+    }
+
+    #[test]
+    fn 白名单_危险与未知命令不放行() {
+        for cmd in ["rm -rf /", "curl http://x", "wget x", "chmod 777 a", "sudo rm x", "vim", "unknown-cmd"] {
+            assert!(!terminal_allowed(cmd), "不应放行: {cmd}");
+        }
+    }
+
+    #[test]
+    fn 白名单_子命令约束依旧生效() {
+        // npm 只放行特定子命令
+        assert!(terminal_allowed("npm install"));
+        assert!(!terminal_allowed("npm exec something-weird"));
+        // git push 不在子命令清单
+        assert!(!terminal_allowed("git push origin main"));
+        // cargo 全部子命令受约束
+        assert!(terminal_allowed("cargo build"));
+        assert!(!terminal_allowed("cargoSomething"));
+    }
+
+    fn gw_with_approval(mode: &str, wait_secs: u64) -> ToolGateway {
+        let dir = std::env::temp_dir().join(format!("exm-gate-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let mut sec = SecurityConfig::default();
+        sec.exec_approval = mode.into();
+        sec.approval_wait_secs = wait_secs;
+        ToolGateway::new(&dir, store, registry, events, sec)
+    }
+
+    /// off 档：白名单外命令直接拒绝（历史行为保持）
+    #[tokio::test]
+    async fn 审批路径_off档_白名单外命令直接拒绝() {
+        let gw = gw_with_approval("off", 0);
+        let r = gw
+            .execute("a1", "s1", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
+                "command": "unknown-cmd --flag"
+            }))
+            .await;
+        assert!(!r.ok, "off 档白名单外应拒绝");
+        assert!(r.error.unwrap_or_default().contains("不在白名单"));
+    }
+
+    /// risky 档：白名单外的日常命令转审批单（不等待，受阻回流但审批单已落库）
+    /// ——修复前这条路径是硬拒，agent 无从开发
+    #[tokio::test]
+    async fn 审批路径_risky档_白名单外命令转审批() {
+        let gw = gw_with_approval("risky", 0);
+        let r = gw
+            .execute("a1", "s2", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
+                "command": "terraform apply"
+            }))
+            .await;
+        assert!(!r.ok, "未批准前不应放行");
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("审批"), "应转审批而非白名单硬拒: {err}");
+        // 审批单确实落库（用户可在面板批准）
+        let pending = gw.store.list_approvals(Some("pending"), 10).unwrap_or_default();
+        assert!(pending.iter().any(|p| p.command.contains("terraform")), "审批单应已落库");
+    }
+
+    /// risky 档：白名单内安全命令不受影响，照常执行
+    #[tokio::test]
+    async fn 审批路径_risky档_白名单内命令照常执行() {
+        let gw = gw_with_approval("risky", 0);
+        let cmd = if cfg!(windows) { "echo hello" } else { "echo hello" };
+        let r = gw
+            .execute("a1", "s3", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
+                "command": cmd
+            }))
+            .await;
+        assert!(r.ok, "白名单内命令应直接执行: {}", r.error.unwrap_or_default());
+        assert!(r.output.contains("hello"));
+    }
+
+    /// risky 档：白名单内但高危（git reset --hard）仍走审批
+    #[tokio::test]
+    async fn 审批路径_risky档_白名单内高危命令仍审批() {
+        let gw = gw_with_approval("risky", 0);
+        let r = gw
+            .execute("a1", "s4", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
+                "command": "git reset --hard HEAD"
+            }))
+            .await;
+        assert!(!r.ok);
+        assert!(r.error.unwrap_or_default().contains("审批"), "白名单内高危命令应走审批闸门");
     }
 }
