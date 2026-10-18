@@ -1384,6 +1384,8 @@ async fn 工具面_编辑检索排程与安全边界() {
     assert!(!tmp.parent().unwrap().join("escaped.txt").exists(), "越界文件不得被创建");
 
     // --- 安全：终端白名单细化（子命令）与连接符拒绝 ---
+    // 语义更新：未列入的子命令在审批档（risky/always）转人工审批单（批准即代执行），
+    // off 档才直接按白名单拒绝——两条路径都「未放行」，副作用都不得产生
     let bad_sub = tools
         .execute(
             "machina",
@@ -1393,7 +1395,19 @@ async fn 工具面_编辑检索排程与安全边界() {
             &serde_json::json!({ "command": "cargo install some-crate" }),
         )
         .await;
-    assert!(!bad_sub.ok && bad_sub.error.clone().unwrap_or_default().contains("白名单"), "未列入的子命令应拒: {:?}", bad_sub.error);
+    {
+        let err = bad_sub.error.clone().unwrap_or_default();
+        let approval_mode = tools.is_approval_gated();
+        let refused_for_reason = if approval_mode {
+            err.contains("审批") || err.contains("白名单")
+        } else {
+            err.contains("白名单")
+        };
+        assert!(
+            !bad_sub.ok && refused_for_reason,
+            "未列入的子命令不得放行（审批档转审批单，off 档白名单拒绝）: {err:?} approval={approval_mode}"
+        );
+    }
 
     let chained = tools
         .execute(
