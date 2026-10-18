@@ -897,7 +897,7 @@ pub(crate) fn split_reply(text: &str, max_chars: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut buf = String::new();
     let mut hard_parts: Vec<String> = Vec::new();
-    let mut flush_hard = |buf: &mut String, out: &mut Vec<String>| {
+    let flush_hard = |buf: &mut String, out: &mut Vec<String>| {
         if !buf.trim().is_empty() {
             out.push(buf.trim_end().to_string());
         }
@@ -1231,7 +1231,7 @@ impl ChannelRun {
         // 组内派发会话无来源登记，天然不受限（设计 D10）
         let limits = self.core.config().limits.clone();
         if limits.enabled && limits.quota_tokens > 0 {
-            if let Some((subject, _role)) = self.core.session_origin(&self.session_id) {
+            if let Some((_subject, _role)) = self.core.session_origin(&self.session_id) {
                 let used = self.core.session_tokens_estimate(&self.session_id);
                 if used >= limits.quota_tokens {
                     self.core.emit_run_error(

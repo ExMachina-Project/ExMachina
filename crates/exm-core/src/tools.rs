@@ -551,7 +551,7 @@ pub async fn execute_shell_with(
             // 有界回收：先强杀（POSIX 立即 SIGKILL；Windows 上方 taskkill 已收进程树），
             // 再等被杀进程退出最长 3s——超时路径绝不无限阻塞。
             // 为什么必须显式杀：kill_on_drop 只在 Child 被 drop 时才生效。
-            child.start_kill();
+            let _ = child.start_kill();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
             // 快照已读输出：增量读者持续写入共享缓冲，即使残留孙进程占着管道写端
             // （EOF 永不到来），超时前已产出的部分照样可诊断——长构建/测试卡在哪一步不再黑箱。
