@@ -38,7 +38,7 @@ fn http_client() -> reqwest::Client {
 }
 
 /// 分发到平台探针
-pub async fn probe(core: &Core, ch: &Channel) -> TestResult {
+pub async fn probe(_core: &Core, ch: &Channel) -> TestResult {
     let token = ch.token.as_deref().map(str::trim).filter(|t| !t.is_empty());
     match ch.kind.as_str() {
         "telegram" => match token {

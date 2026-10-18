@@ -9,7 +9,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use exm_core::config::{ExmConfig, LinkTarget};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn links_of(st: &AppState) -> Vec<LinkTarget> {
     st.core.config().nexus.links.clone()
