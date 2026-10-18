@@ -659,3 +659,254 @@ mod timeout_tests {
         assert_eq!(report.status, crate::types::SyncStatus::Done);
     }
 }
+
+// ---------------------------------------------------------------- 原生工具循环回归
+
+/// 复现「agent 无法正常开发」：原生 function calling 的完整多轮工具循环。
+/// 覆盖：同轮只读并发（read+grep）→ 写工具（edit）→ terminal → 工具结果回灌 → SyncReport。
+/// Mock 通道只走文本协议，覆盖不到这条路径——真实端点（OpenAI 兼容）全走这里。
+#[cfg(test)]
+mod tool_loop_tests {
+    use super::*;
+    use crate::config::SecurityConfig;
+    use crate::provider::{ChatResponse, FailoverState, ToolCall};
+    use crate::types::{DispatchBoundary, DispatchConstraints, DispatchInput, SyncStatus};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 脚本化 Provider：按调用次序回放固定的工具调用序列（模拟真实编码模型的作业轨迹）
+    struct ScriptedProvider {
+        step: AtomicUsize,
+        /// 每步收到的消息列表快照（role 序列），供回灌断言
+        seen_roles: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ScriptedProvider {
+        fn new() -> Self {
+            ScriptedProvider {
+                step: AtomicUsize::new(0),
+                seen_roles: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    fn resp(content: &str, calls: Vec<ToolCall>) -> ChatResponse {
+        ChatResponse {
+            content: content.to_string(),
+            reasoning: String::new(),
+            prompt_tokens: 10,
+            completion_tokens: 10,
+            tool_calls: calls,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ScriptedProvider {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("脚本化通道只走流式")
+        }
+        async fn stream(
+            &self,
+            req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.seen_roles
+                .lock()
+                .unwrap()
+                .push(req.messages.iter().map(|m| m.role.clone()).collect());
+            let step = self.step.fetch_add(1, Ordering::SeqCst);
+            let s = match step {
+                0 => resp(
+                    "",
+                    vec![
+                        ToolCall {
+                            id: "c1".into(),
+                            name: "read".into(),
+                            arguments: serde_json::json!({"path": "src/app.rs"}),
+                        },
+                        ToolCall {
+                            id: "c2".into(),
+                            name: "grep".into(),
+                            arguments: serde_json::json!({"pattern": "fn main"}),
+                        },
+                    ],
+                ),
+                1 => resp(
+                    "",
+                    vec![ToolCall {
+                        id: "c3".into(),
+                        name: "edit".into(),
+                        arguments: serde_json::json!({
+                            "path": "src/app.rs",
+                            "old_string": "fn main() {}",
+                            "new_string": "fn main() { println!(\"exm-ok\"); }"
+                        }),
+                    }],
+                ),
+                2 => resp(
+                    "",
+                    vec![ToolCall {
+                        id: "c4".into(),
+                        name: "terminal".into(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                    }],
+                ),
+                _ => {
+                    let report = serde_json::json!({
+                        "sourceAgent": "coding-agent",
+                        "taskNodeId": "T1",
+                        "status": "done",
+                        "statements": [{"tag": "报告", "text": "已完成", "evidenceLevel": "B"}],
+                        "summary": "完成",
+                        "evidence": [{"level": "B", "kind": "code", "ref": "src/app.rs"}],
+                        "risks": [],
+                        "confidence": 0.8
+                    });
+                    return Ok(resp(&format!("```json\n{report}\n```"), vec![]));
+                }
+            };
+            Ok(s)
+        }
+    }
+
+    fn runtime_with_files(provider: Arc<dyn LlmProvider>) -> (AgentRuntime, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("exm-loop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("src/app.rs"), "fn main() {}\n").unwrap();
+        let reg_dir = base.join("entities");
+        std::fs::create_dir_all(reg_dir.join("groups/exmachina/prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            capabilities: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(reg_dir.join("group.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+        std::fs::write(
+            reg_dir.join("groups/exmachina/prompts/coding-agent.md"),
+            "# 测试个体\n你是测试个体。",
+        )
+        .unwrap();
+        let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
+        let store = Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
+        let tools = Arc::new(ToolGateway::new(&base, store, registry.clone(), events, SecurityConfig::default()));
+        (AgentRuntime::new(registry, provider, tools, "test-model"), base)
+    }
+
+    fn coding_def() -> crate::types::AgentDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "编码体", "identifier": "coding-agent", "domain": "实作域",
+            "tier": "unit", "description": "编码", "capabilities": ["编码"],
+            "tools": ["read", "grep", "glob", "edit", "patch", "filesystem", "terminal"],
+            "promptFile": "coding-agent.md"
+        }))
+        .unwrap()
+    }
+
+    fn coding_order(allowlist: Vec<crate::types::ToolName>) -> DispatchOrder {
+        DispatchOrder {
+            task_node_id: "T1".into(),
+            objective: "在 src/app.rs 加输出".into(),
+            acceptance: vec!["文件被修改".into()],
+            boundary: DispatchBoundary { in_scope: vec![], forbidden: vec![] },
+            inputs: vec![DispatchInput { ref_id: "user".into(), kind: "userInput".into(), summary: "改文件".into() }],
+            tool_allowlist: allowlist,
+            constraints: DispatchConstraints { max_steps: 8, timeout_ms: 0 },
+            report_format: "SyncReport".into(),
+        }
+    }
+
+    /// 完整编码作业轨迹：只读并发 → edit 落盘 → terminal → 工具结果回灌 → SyncReport 校验通过
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 原生工具循环_编码作业全链路() {
+        let provider = Arc::new(ScriptedProvider::new());
+        let (rt, base) = runtime_with_files(provider.clone());
+        let def = coding_def();
+        let order = coding_order(def.tools.clone());
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt
+            .execute(&def, &order, chain, "sess-loop", "trace-loop", false, |_| {})
+            .await
+            .expect("原生工具循环应完整走通");
+        assert_eq!(report.status, SyncStatus::Done);
+
+        // edit 真的落盘了
+        let content = std::fs::read_to_string(base.join("src/app.rs")).unwrap();
+        assert!(content.contains("exm-ok"), "edit 应真实落盘，实际: {content}");
+
+        // 工具结果以 role=tool 回灌，assistant 的 tool_calls 有被记录
+        let seen = provider.seen_roles.lock().unwrap();
+        assert!(seen.len() >= 4, "应有多轮交互，实际 {} 轮", seen.len());
+        let last = seen.last().unwrap();
+        assert!(
+            last.iter().any(|r| r == "tool"),
+            "最终轮消息里应有工具结果回灌，实际 roles: {last:?}"
+        );
+        assert!(last.iter().any(|r| r == "assistant"), "应保留 assistant 工具调用记录");
+    }
+
+    /// 白名单外的工具调用必须被拒且不炸循环：模型拿到错误回灌后仍能继续收敛
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 原生工具循环_白名单外工具被拒_循环不中断() {
+        struct RogueProvider {
+            step: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for RogueProvider {
+            fn name(&self) -> &'static str {
+                "rogue"
+            }
+            async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+                anyhow::bail!("只走流式")
+            }
+            async fn stream(
+                &self,
+                _req: ChatRequest,
+                _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+            ) -> anyhow::Result<ChatResponse> {
+                let step = self.step.fetch_add(1, Ordering::SeqCst);
+                if step == 0 {
+                    Ok(resp(
+                        "",
+                        vec![ToolCall {
+                            id: "r1".into(),
+                            name: "web_search".into(), // 不在 coding-agent 白名单
+                            arguments: serde_json::json!({"query": "rust"}),
+                        }],
+                    ))
+                } else {
+                    let report = serde_json::json!({
+                        "sourceAgent": "coding-agent", "taskNodeId": "T1", "status": "done",
+                        "statements": [{"tag": "报告", "text": "收到拒绝后收敛", "evidenceLevel": "C"}],
+                        "summary": "ok", "evidence": [], "risks": [], "confidence": 0.7
+                    });
+                    Ok(resp(&format!("```json\n{report}\n```"), vec![]))
+                }
+            }
+        }
+        let provider = Arc::new(RogueProvider { step: AtomicUsize::new(0) });
+        let (rt, _base) = runtime_with_files(provider.clone());
+        let def = coding_def();
+        let order = coding_order(def.tools.clone());
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt
+            .execute(&def, &order, chain, "sess-rogue", "trace-rogue", false, |_| {})
+            .await
+            .expect("白名单拒绝不应中断循环");
+        assert_eq!(report.status, SyncStatus::Done);
+    }
+}
