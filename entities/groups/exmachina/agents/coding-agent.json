@@ -11,8 +11,11 @@
   ],
   "tools": [
     "read",
+    "grep",
+    "glob",
     "filesystem",
     "terminal",
+    "edit",
     "patch"
   ],
   "whenToCall": "编码实现、配置修改与重构实施；坚持最小可逆变更。",
