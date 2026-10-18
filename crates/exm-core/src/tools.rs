@@ -1300,6 +1300,23 @@ impl ToolGateway {
         specs
     }
 
+    /// 工具层事件发双层：实时广播（WS 推流）+ 事件库落盘（历史可回放）。
+    /// 此前 tool.call/tool.result 只广播不落库——历史会话的事件页看不到任何工具过程，
+    /// 「过程透明」只对在线连接生效。落库量与工具次数同阶（每次调用 2 条），
+    /// 与 token 流水账（一次运行数千条）不同量级，不会刷屏。
+    fn emit_and_persist(&self, evt: CoreEvent) {
+        let _ = self.events.send(evt.clone());
+        let env = crate::types::Envelope::new(
+            format!("session.{}.events", evt.session_id),
+            "tools",
+            "broadcast",
+            "event",
+            evt.session_id.clone(),
+            serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
+        );
+        let _ = self.store.append_event(&env);
+    }
+
     /// 执行内置工具（按枚举）：白名单外拒绝 → preTool 钩子（可拦截）→ 执行 → 结果落盘 → postTool 钩子 → 审计
     pub async fn execute(
         &self,
@@ -1326,7 +1343,7 @@ impl ToolGateway {
         let started = Instant::now();
         let call_id = format!("t{}", crate::types::new_id()[..12].to_string());
         // 工具执行事件（call）：文件操作 / 终端命令 / 截屏对用户全程可见——编程软件式的过程透明
-        let _ = self.events.send(CoreEvent {
+        self.emit_and_persist(CoreEvent {
             kind: "tool.call".into(),
             session_id: session_id.to_string(),
             payload: serde_json::json!({
@@ -1469,7 +1486,7 @@ impl ToolGateway {
         } else {
             result.error.clone().unwrap_or_default()
         };
-        let _ = self.events.send(CoreEvent {
+        self.emit_and_persist(CoreEvent {
             kind: "tool.result".into(),
             session_id: session_id.to_string(),
             payload: serde_json::json!({
@@ -1480,6 +1497,7 @@ impl ToolGateway {
                 "images": result.images,
             }),
         });
+        // 历史回放可见工具的成败与耗时摘要（不止「开始了」）——落库在 emit_and_persist 内完成
     }
 
     /// 结果超阈值时全文落盘并回填「摘要 + 路径 + 行数」，供模型按需用 read 取回。
