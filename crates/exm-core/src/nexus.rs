@@ -41,7 +41,7 @@ fn build_prompt(objective: &str, acceptance: &[String]) -> String {
 
 // ---------------------------------------------------------------- exmachina（远程网关）
 
-async fn execute_exmachina(cfg: &ExmConfig, link: &LinkTarget, prompt: &str) -> Result<(String, String)> {
+async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) -> Result<(String, String)> {
     let base = link.endpoint.trim_end_matches('/');
     if base.is_empty() {
         anyhow::bail!("连结体 {} 未配置网关地址", link.id);
@@ -49,7 +49,7 @@ async fn execute_exmachina(cfg: &ExmConfig, link: &LinkTarget, prompt: &str) -> 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let auth = [("X-Auth-Key", link.api_key.as_str())];
+    // 鉴权头在各请求处直接 .header("X-Auth-Key", ...) 注入
 
     // 1) 复用/创建专属会话（标题约定 nexus-<link_id>，同连结体的任务在同一会话内延续上下文）
     let title = format!("nexus-{}", link.id);

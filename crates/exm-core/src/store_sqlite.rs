@@ -485,7 +485,6 @@ impl SqliteStore {
     /// 复制会话历史前缀(fork 用)
     pub fn copy_messages_prefix(&self, src_session: &str, dst_session: &str, keep: usize) -> Result<usize> {
         let msgs = self.list_messages(src_session, 0)?;
-        eprintln!("[copy] src={} list={} keep={}", src_session, msgs.len(), keep);
         let prefix: Vec<ChatMessage> = msgs.into_iter().take(keep).collect();
         let conn = self.conn.lock().unwrap();
         for (i, m) in prefix.iter().enumerate() {
@@ -493,10 +492,21 @@ impl SqliteStore {
             copy.id = new_id(); // 主键 = id:跨会话副本必须换新 id,否则 REPLACE 会"搬走"源消息
             Self::insert_message_conn(&conn, dst_session, (i + 1) as i64, &copy, false)?;
         }
-        let back: Vec<ChatMessage> = {
-            let mut st = conn.prepare("SELECT * FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq ASC").unwrap();
-            st.query_map(rusqlite::params![dst_session], |r| Self::row_message(r)).unwrap().filter_map(|r| r.ok()).collect()
+        // 回读校验：目标会话实际落库条数（写后即查，防静默丢失）
+        let persisted: Vec<ChatMessage> = {
+            let mut st = conn.prepare("SELECT * FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq ASC")?;
+            let rows: Vec<ChatMessage> = st
+                .query_map(rusqlite::params![dst_session], |r| Self::row_message(r))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
         };
+        anyhow::ensure!(
+            persisted.len() >= prefix.len(),
+            "fork 前缀复制不完整: 期望 {n} 条, 实际 {m} 条",
+            n = prefix.len(),
+            m = persisted.len()
+        );
         Ok(prefix.len())
     }
 
