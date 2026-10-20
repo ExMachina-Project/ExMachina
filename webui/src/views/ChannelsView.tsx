@@ -21,8 +21,14 @@ interface ChanField {
   helpKey?: TKey;
   /** 存顶层字段（telegram.token / 桥接.secret）；缺省存 config.<key> */
   top?: "token" | "secret";
-  /** 布尔开关（存 "true"/空） */
+  /** 布尔开关（存 "true"/"false"） */
   toggle?: boolean;
+  /** 新建/切换平台时的默认值（布尔开关 / 字符串） */
+  default?: boolean | string;
+  /** 下拉选项（存字符串） */
+  options?: { value: string; labelKey: TKey }[];
+  /** 多行文本 */
+  multiline?: boolean;
 }
 interface ChanPlat {
   key: string;
@@ -35,6 +41,8 @@ interface ChanPlat {
   fields: ChanField[];
   /** 回复形态：平台原生回信（适配器直接发回原会话）；缺省 = webhook 回调 */
   replyBuiltin?: boolean;
+  /** 主动型平台（视频观看/评论/回复）：不依赖入站消息 */
+  proactive?: boolean;
 }
 
 const PLATFORMS: ChanPlat[] = [
@@ -108,6 +116,74 @@ const PLATFORMS: ChanPlat[] = [
     ],
   },
   {
+    key: "bilibili",
+    color: "pink",
+    tag: "B站",
+    labelKey: "channels.plat.bilibili",
+    helpKey: "channels.platHelp.bilibili",
+    proactive: true,
+    fields: [
+      { key: "sessdata", labelKey: "channels.f.biliSessdata", secret: true, required: true, helpKey: "channels.f.biliSessdataHelp" },
+      { key: "biliJct", labelKey: "channels.f.biliJct", secret: true, required: true, helpKey: "channels.f.biliJctHelp" },
+      { key: "uid", labelKey: "channels.f.biliUid", helpKey: "channels.f.biliUidHelp" },
+      { key: "watch", labelKey: "channels.f.watch", toggle: true, default: true, helpKey: "channels.f.watchHelp" },
+      { key: "comment", labelKey: "channels.f.comment", toggle: true, default: false, helpKey: "channels.f.commentHelp" },
+      { key: "reply", labelKey: "channels.f.reply", toggle: true, default: false, helpKey: "channels.f.replyHelp" },
+      { key: "dryRun", labelKey: "channels.f.dryRun", toggle: true, default: true, helpKey: "channels.f.dryRunHelp" },
+      {
+        key: "source",
+        labelKey: "channels.f.videoSource",
+        default: "popular",
+        options: [
+          { value: "popular", labelKey: "channels.f.videoSourcePopular" },
+          { value: "search", labelKey: "channels.f.videoSourceSearch" },
+        ],
+        helpKey: "channels.f.videoSourceHelp",
+      },
+      { key: "keywords", labelKey: "channels.f.keywords", helpKey: "channels.f.keywordsHelp" },
+      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
+      { key: "commentStyle", labelKey: "channels.f.commentStyle", multiline: true, helpKey: "channels.f.commentStyleHelp" },
+      { key: "intervalMinutes", labelKey: "channels.f.intervalMinutes", default: "60", helpKey: "channels.f.intervalMinutesHelp" },
+      { key: "maxActionsPerRun", labelKey: "channels.f.maxActionsPerRun", default: "1", helpKey: "channels.f.maxActionsPerRunHelp" },
+      { key: "dailyLimit", labelKey: "channels.f.dailyLimit", default: "6", helpKey: "channels.f.dailyLimitHelp" },
+      { key: "maxCommentChars", labelKey: "channels.f.maxCommentChars", default: "120", helpKey: "channels.f.maxCommentCharsHelp" },
+    ],
+  },
+  {
+    key: "youtube",
+    color: "red",
+    tag: "YouTube",
+    labelKey: "channels.plat.youtube",
+    helpKey: "channels.platHelp.youtube",
+    proactive: true,
+    fields: [
+      { key: "apiKey", labelKey: "channels.f.ytApiKey", secret: true, required: true, helpKey: "channels.f.ytApiKeyHelp" },
+      { key: "accessToken", labelKey: "channels.f.ytAccessToken", secret: true, helpKey: "channels.f.ytAccessTokenHelp" },
+      { key: "region", labelKey: "channels.f.ytRegion", default: "US", helpKey: "channels.f.ytRegionHelp" },
+      { key: "watch", labelKey: "channels.f.watch", toggle: true, default: true, helpKey: "channels.f.watchHelp" },
+      { key: "comment", labelKey: "channels.f.comment", toggle: true, default: false, helpKey: "channels.f.commentHelp" },
+      { key: "reply", labelKey: "channels.f.reply", toggle: true, default: false, helpKey: "channels.f.replyHelp" },
+      { key: "dryRun", labelKey: "channels.f.dryRun", toggle: true, default: true, helpKey: "channels.f.dryRunHelp" },
+      {
+        key: "source",
+        labelKey: "channels.f.videoSource",
+        default: "popular",
+        options: [
+          { value: "popular", labelKey: "channels.f.videoSourcePopular" },
+          { value: "search", labelKey: "channels.f.videoSourceSearch" },
+        ],
+        helpKey: "channels.f.videoSourceHelp",
+      },
+      { key: "keywords", labelKey: "channels.f.keywords", helpKey: "channels.f.keywordsHelp" },
+      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
+      { key: "commentStyle", labelKey: "channels.f.commentStyle", multiline: true, helpKey: "channels.f.commentStyleHelp" },
+      { key: "intervalMinutes", labelKey: "channels.f.intervalMinutes", default: "60", helpKey: "channels.f.intervalMinutesHelp" },
+      { key: "maxActionsPerRun", labelKey: "channels.f.maxActionsPerRun", default: "1", helpKey: "channels.f.maxActionsPerRunHelp" },
+      { key: "dailyLimit", labelKey: "channels.f.dailyLimit", default: "6", helpKey: "channels.f.dailyLimitHelp" },
+      { key: "maxCommentChars", labelKey: "channels.f.maxCommentChars", default: "120", helpKey: "channels.f.maxCommentCharsHelp" },
+    ],
+  },
+  {
     key: "webhook",
     color: "cyan",
     tag: "Webhook",
@@ -135,6 +211,20 @@ const PLATFORMS: ChanPlat[] = [
 
 /** webhook 桥接语义的平台：入站靠外部桥 POST，出站靠回调 */
 const BRIDGE_TYPES = ["webhook", "qq", "wechat"];
+
+/** 平台目录声明的默认值 → 表单 config 预填（新建 / 切换平台时使用） */
+function platformDefaults(kind: string): Record<string, unknown> {
+  const cfg: Record<string, unknown> = {};
+  const plat = PLATFORMS.find((p) => p.key === kind);
+  for (const f of plat?.fields ?? []) {
+    if (f.default === undefined) {
+      if (f.toggle) cfg[f.key] = false;
+    } else {
+      cfg[f.key] = f.default;
+    }
+  }
+  return cfg;
+}
 
 export function ChannelsView(): React.ReactElement {
   const t = useT();
@@ -182,7 +272,12 @@ export function ChannelsView(): React.ReactElement {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
-    form.setFieldsValue({ platform: "qqbot" });
+    form.setFieldsValue({
+      platform: "qqbot",
+      capability: "computer",
+      memoryIsolation: false,
+      config: platformDefaults("qqbot"),
+    });
     setModal(true);
   };
 
@@ -199,7 +294,8 @@ export function ChannelsView(): React.ReactElement {
     plat?.fields
       .filter((f) => f.toggle)
       .forEach((f) => {
-        cfg[f.key] = c.config?.[f.key] === "true";
+        const raw = c.config?.[f.key];
+        cfg[f.key] = raw === undefined ? Boolean(f.default) : raw === "true";
       });
     form.setFieldsValue({
       platform: c.type,
@@ -209,6 +305,8 @@ export function ChannelsView(): React.ReactElement {
       replyWebhook: c.replyWebhook,
       token: c.token,
       allowedChats: (c.allowedChats ?? []).join(", "),
+      capability: c.capability ?? "computer",
+      memoryIsolation: c.memoryIsolation ?? false,
       config: cfg,
       configJson: Object.keys(extra).length > 0 ? JSON.stringify(extra, null, 2) : "",
     });
@@ -254,8 +352,10 @@ export function ChannelsView(): React.ReactElement {
     const config: Record<string, string> = { ...parsedJson.value };
     for (const f of plat.fields) {
       if (f.top) continue;
-      const val = f.toggle ? (v.config?.[f.key] ? "true" : "") : String(v.config?.[f.key] ?? "").trim();
-      if (val) config[f.key] = val; // 空值不入库（清空敏感键即删除，与后端口径一致）
+      // 布尔开关写 "true"/"false"：视频平台的 watch/dryRun 默认 true，
+      // 用「空 = 删除键」会让「关掉」被后端默认值重新打开。
+      const val = f.toggle ? (v.config?.[f.key] ? "true" : "false") : String(v.config?.[f.key] ?? "").trim();
+      if (val) config[f.key] = val; // 其余空值不入库（清空敏感键即删除，与后端口径一致）
     }
     const body = {
       platform: v.platform,
@@ -269,6 +369,8 @@ export function ChannelsView(): React.ReactElement {
         .split(/[,,\s]+/)
         .map((s: string) => s.trim())
         .filter(Boolean),
+      capability: v.capability ?? "computer",
+      memoryIsolation: Boolean(v.memoryIsolation),
     };
     try {
       if (editing) {
@@ -388,8 +490,24 @@ export function ChannelsView(): React.ReactElement {
             { title: t("channels.colPlatform"), render: (_, c) => platformTag(c.type) },
             {
               title: t("channels.colGroup"),
-              render: (_, c) =>
-                c.group ? <Tag color="purple">{c.group}</Tag> : <Tag>{t("channels.followCurrent")}</Tag>,
+              render: (_, c) => {
+                const cap = c.capability ?? "computer";
+                return (
+                  <Space direction="vertical" size={2}>
+                    {c.group ? <Tag color="purple">{c.group}</Tag> : <Tag>{t("channels.followCurrent")}</Tag>}
+                    <Space size={4} wrap>
+                      <Tag color={cap === "chat" ? "default" : cap === "tools" ? "blue" : "volcano"}>
+                        {t(`channels.cap.${cap}` as TKey)}
+                      </Tag>
+                      {c.memoryIsolation ? (
+                        <Tag color="orange">{t("channels.memIsolated")}</Tag>
+                      ) : (
+                        <Tag>{t("channels.memShared")}</Tag>
+                      )}
+                    </Space>
+                  </Space>
+                );
+              },
             },
             { title: t("channels.colSecret"), render: (_, c) => credTag(c) },
             { title: t("channels.colStatus"), render: (_, c) => statusCell(c) },
@@ -429,6 +547,7 @@ export function ChannelsView(): React.ReactElement {
               title: t("channels.colReply"),
               render: (_, c) => {
                 const plat = PLATFORMS.find((x) => x.key === c.type);
+                if (plat?.proactive) return <Tag color="pink">{t("channels.replyProactive")}</Tag>;
                 return plat?.replyBuiltin ? (
                   <Tag>{t("channels.replyBuiltin")}</Tag>
                 ) : (
@@ -491,7 +610,14 @@ export function ChannelsView(): React.ReactElement {
                     <Select
                       disabled={editing !== null}
                       options={PLATFORMS.map((p) => ({ value: p.key, label: t(p.labelKey) }))}
-                      onChange={() => form.setFieldsValue({ token: undefined, secret: undefined, config: {}, configJson: undefined })}
+                      onChange={(kind) =>
+                        form.setFieldsValue({
+                          token: undefined,
+                          secret: undefined,
+                          config: platformDefaults(kind),
+                          configJson: undefined,
+                        })
+                      }
                     />
                   </Form.Item>
                   {!editing && (
@@ -526,7 +652,11 @@ export function ChannelsView(): React.ReactElement {
                         }
                         extra={f.helpKey ? t(f.helpKey) : undefined}
                       >
-                        {f.secret ? (
+                        {f.options ? (
+                          <Select options={f.options.map((o) => ({ value: o.value, label: t(o.labelKey) }))} />
+                        ) : f.multiline ? (
+                          <Input.TextArea rows={2} placeholder={f.ph} />
+                        ) : f.secret ? (
                           <Input.Password autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                         ) : (
                           <Input placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
@@ -540,6 +670,28 @@ export function ChannelsView(): React.ReactElement {
                       placeholder={t("channels.f.groupPh")}
                       options={groups.map((g) => ({ value: g.id, label: `${g.name}（${g.id}）` }))}
                     />
+                  </Form.Item>
+                  <Form.Item
+                    name="capability"
+                    label={t("channels.f.capability")}
+                    extra={t("channels.f.capabilityHelp")}
+                    rules={[{ required: true }]}
+                  >
+                    <Select
+                      options={[
+                        { value: "chat", label: t("channels.cap.chat") },
+                        { value: "tools", label: t("channels.cap.tools") },
+                        { value: "computer", label: t("channels.cap.computer") },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    name="memoryIsolation"
+                    valuePropName="checked"
+                    label={t("channels.f.memoryIsolation")}
+                    extra={t("channels.f.memoryIsolationHelp")}
+                  >
+                    <Switch size="small" />
                   </Form.Item>
 
                   <Collapse
