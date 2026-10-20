@@ -203,7 +203,9 @@ impl Embedder for LexicalEmbedder {
     fn embed(&self, text: &str) -> Vec<f32> {
         let mut v = vec![0.0f32; 64];
         for t in tokens(text) {
-            let h = t.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            let h = t
+                .bytes()
+                .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
             v[(h % 64) as usize] += 1.0;
         }
         v
@@ -249,7 +251,11 @@ impl MemoryStore {
     /// `data_dir` 为工作区数据根目录（与 Store 共用，但各自分集合）
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let dir = data_dir.as_ref().to_path_buf();
-        Ok(MemoryStore { db: FsDb::open(&dir)?, dir, write_lock: parking_lot::Mutex::new(()) })
+        Ok(MemoryStore {
+            db: FsDb::open(&dir)?,
+            dir,
+            write_lock: parking_lot::Mutex::new(()),
+        })
     }
 
     pub fn root(&self) -> String {
@@ -307,7 +313,8 @@ impl MemoryStore {
             embedding: None,
         };
         self.save_entry(&entry)?;
-        self.db.put(HASH_INDEX, &hash, &serde_json::json!(entry.id))?;
+        self.db
+            .put(HASH_INDEX, &hash, &serde_json::json!(entry.id))?;
         self.index_entry(&entry)?;
         Ok(entry)
     }
@@ -334,19 +341,24 @@ impl MemoryStore {
         let mut terms: std::collections::HashMap<String, f64> = Default::default();
         let text = format!("{} {} {}", entry.title, entry.body, entry.tags.join(" "));
         for t in tokens(&text) {
-            let w = if entry.title.to_lowercase().contains(&t) { 3.0 } else { 1.0 };
+            let w = if entry.title.to_lowercase().contains(&t) {
+                3.0
+            } else {
+                1.0
+            };
             *terms.entry(t).or_insert(0.0) += w;
         }
         for (term, weight) in terms {
             let id = entry.id.clone();
-            self.db.with_bucket_map::<Vec<(String, f64)>, _>(TERMS, &term, |term, map| {
-                let list = map.entry(term.to_string()).or_default();
-                if let Some(slot) = list.iter_mut().find(|(eid, _)| *eid == id) {
-                    slot.1 = weight;
-                } else {
-                    list.push((id.clone(), weight));
-                }
-            })?;
+            self.db
+                .with_bucket_map::<Vec<(String, f64)>, _>(TERMS, &term, |term, map| {
+                    let list = map.entry(term.to_string()).or_default();
+                    if let Some(slot) = list.iter_mut().find(|(eid, _)| *eid == id) {
+                        slot.1 = weight;
+                    } else {
+                        list.push((id.clone(), weight));
+                    }
+                })?;
         }
         Ok(())
     }
@@ -359,11 +371,12 @@ impl MemoryStore {
                 continue;
             }
             let id = entry.id.clone();
-            self.db.with_bucket_map::<Vec<(String, f64)>, _>(TERMS, &t, |term, map| {
-                if let Some(list) = map.get_mut(term) {
-                    list.retain(|(eid, _)| *eid != id);
-                }
-            })?;
+            self.db
+                .with_bucket_map::<Vec<(String, f64)>, _>(TERMS, &t, |term, map| {
+                    if let Some(list) = map.get_mut(term) {
+                        list.retain(|(eid, _)| *eid != id);
+                    }
+                })?;
         }
         Ok(())
     }
@@ -439,7 +452,8 @@ impl MemoryStore {
             if e.pinned {
                 continue;
             }
-            let next = decayed_importance(e.importance, age_days(&e.updated_at), half_life_days, floor);
+            let next =
+                decayed_importance(e.importance, age_days(&e.updated_at), half_life_days, floor);
             if (next - e.importance).abs() > 1e-6 {
                 e.importance = next;
                 self.save_entry(&e)?;
@@ -495,7 +509,13 @@ impl MemoryStore {
     }
 
     /// 全量检索（管理视角：群体 + 所有个体私有；组维度按 `group` 过滤）
-    pub fn recall_all(&self, query: &str, limit: usize, group: Option<&str>, qe: Option<&[f32]>) -> anyhow::Result<Vec<RecallHit>> {
+    pub fn recall_all(
+        &self,
+        query: &str,
+        limit: usize,
+        group: Option<&str>,
+        qe: Option<&[f32]>,
+    ) -> anyhow::Result<Vec<RecallHit>> {
         self.recall_filtered(query, limit, None, AgentLayer::All, group, qe)
     }
 
@@ -562,7 +582,13 @@ impl MemoryStore {
                             continue; // SharedOnly
                         }
                     }
-                    let Some(sim) = e.embedding.as_deref().and_then(|v| Self::cosine(v, qe.unwrap())) else { continue };
+                    let Some(sim) = e
+                        .embedding
+                        .as_deref()
+                        .and_then(|v| Self::cosine(v, qe.unwrap()))
+                    else {
+                        continue;
+                    };
                     if sim < 0.15 {
                         continue;
                     }
@@ -572,7 +598,11 @@ impl MemoryStore {
                         reasons: vec![format!("语义相似 {:.0}%", (sim * 100.0) as u32)],
                     });
                 }
-                sem.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                sem.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 sem.truncate(limit);
                 if !sem.is_empty() {
                     return Ok(sem);
@@ -584,7 +614,9 @@ impl MemoryStore {
 
         let mut results: Vec<RecallHit> = Vec::new();
         for (id, (ov, matched)) in overlap {
-            let Some(entry) = self.get_entry(&id)? else { continue };
+            let Some(entry) = self.get_entry(&id)? else {
+                continue;
+            };
             if let Some(sc) = scope {
                 if entry.scope != sc && entry.scope != "global" && entry.scope != "project" {
                     continue;
@@ -601,9 +633,7 @@ impl MemoryStore {
             let visible = match layer {
                 AgentLayer::All => true,
                 AgentLayer::SharedOnly => !individual,
-                AgentLayer::Agent(owner) => {
-                    !individual || entry.agent_id.as_deref() == Some(owner)
-                }
+                AgentLayer::Agent(owner) => !individual || entry.agent_id.as_deref() == Some(owner),
             };
             if !visible {
                 continue;
@@ -616,7 +646,10 @@ impl MemoryStore {
             let layer_bonus = if individual { 0.3 } else { 0.0 };
 
             // 混合打分：词项信号 + 语义信号（向量与查询均可用时，70/30 融合）
-            let sem = entry.embedding.as_deref().and_then(|v| qe.and_then(|q| Self::cosine(v, q)));
+            let sem = entry
+                .embedding
+                .as_deref()
+                .and_then(|v| qe.and_then(|q| Self::cosine(v, q)));
             let score = 3.0 * overlap_ratio
                 + 1.2 * coverage
                 + 1.5 * entry.importance
@@ -631,7 +664,11 @@ impl MemoryStore {
                 format!("词项覆盖 {:.0}%", coverage * 100.0),
                 format!("重要性 {:.2}", entry.importance),
                 format!("时间衰减 {:.2}", recency),
-                if individual { "个体记忆".to_string() } else { "群体记忆".to_string() },
+                if individual {
+                    "个体记忆".to_string()
+                } else {
+                    "群体记忆".to_string()
+                },
             ];
             if let Some(s) = sem {
                 reasons.push(format!("语义相似 {:.0}%", (s * 100.0) as u32));
@@ -642,10 +679,18 @@ impl MemoryStore {
             if entry.pinned {
                 reasons.push("固定记忆".into());
             }
-            results.push(RecallHit { entry, score, reasons });
+            results.push(RecallHit {
+                entry,
+                score,
+                reasons,
+            });
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         for h in &results {
             let mut e = h.entry.clone();
@@ -662,7 +707,12 @@ impl MemoryStore {
 
     /// 分层版近期列表：`agent` 为 Some = 个体视角（该个体私有 + 群体共享）；None = 全量（管理视角）。
     /// 工具面的空查询列示走这里——「列示」与「检索」适用同一套分层口径。
-    pub fn recent_in_layer(&self, agent: Option<&str>, limit: usize, group: Option<&str>) -> Result<Vec<RecallHit>> {
+    pub fn recent_in_layer(
+        &self,
+        agent: Option<&str>,
+        limit: usize,
+        group: Option<&str>,
+    ) -> Result<Vec<RecallHit>> {
         let layer = match agent {
             Some(a) => AgentLayer::Agent(a),
             None => AgentLayer::All,
@@ -694,7 +744,11 @@ impl MemoryStore {
         entries.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
-                .then(b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal))
+                .then(
+                    b.importance
+                        .partial_cmp(&a.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
                 .then(b.updated_at.cmp(&a.updated_at))
         });
         entries.truncate(limit);
@@ -702,7 +756,11 @@ impl MemoryStore {
             .into_iter()
             .map(|e| {
                 let score = e.importance;
-                RecallHit { entry: e, score, reasons: vec!["按重要性/时间排序".into()] }
+                RecallHit {
+                    entry: e,
+                    score,
+                    reasons: vec!["按重要性/时间排序".into()],
+                }
             })
             .collect())
     }
@@ -732,7 +790,11 @@ impl MemoryStore {
         entries.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
-                .then(b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal))
+                .then(
+                    b.importance
+                        .partial_cmp(&a.importance)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
                 .then(b.updated_at.cmp(&a.updated_at))
         });
         entries.truncate(limit);
@@ -771,7 +833,12 @@ impl MemoryStore {
 
     // ---------------- 个体统计（进化反馈） ----------------
 
-    pub fn record_agent_outcome(&self, agent_id: &str, status: &str, confidence: f64) -> Result<()> {
+    pub fn record_agent_outcome(
+        &self,
+        agent_id: &str,
+        status: &str,
+        confidence: f64,
+    ) -> Result<()> {
         let mut stat: AgentStat = self
             .db
             .get::<AgentStat>(STATS, agent_id)?
@@ -806,9 +873,24 @@ impl MemoryStore {
     // ---------------- memory.md 渲染（基础记忆） ----------------
 
     pub fn render_memory_md(&self, path: impl AsRef<Path>) -> Result<usize> {
+        self.render_memory_md_scoped(path, None)
+    }
+
+    /// 按记忆命名空间渲染（`None` = 全量管理视图）。
+    /// 隔离分区只能看到「全局条目 + 本分区条目」，不得把其他组/分区的记忆写进人读视图。
+    pub fn render_memory_md_scoped(
+        &self,
+        path: impl AsRef<Path>,
+        group: Option<&str>,
+    ) -> Result<usize> {
         let mut entries: Vec<MemoryEntry> = self.db.list(ENTRIES)?;
+        if let Some(g) = group {
+            entries.retain(|e| e.group_id.as_deref().is_none_or(|eg| eg == g));
+        }
         entries.sort_by(|a, b| {
-            b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal)
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         let pinned: Vec<&MemoryEntry> = entries.iter().filter(|e| e.pinned).collect();
         let important: Vec<&MemoryEntry> = entries.iter().filter(|e| !e.pinned).take(20).collect();
@@ -818,7 +900,11 @@ impl MemoryStore {
         md.push_str("<!-- 本文件由 `exm memory render` 自动生成，是深层记忆库的人读视图；请勿手工编辑 -->\n\n");
         md.push_str(&format!("- 更新时间：{}\n", now_iso()));
         md.push_str(&format!("- 记忆库：`{}`\n", self.root()));
-        md.push_str(&format!("- 固定记忆 {} 条；下方另列高重要性记忆 {} 条\n\n", pinned.len(), important.len()));
+        md.push_str(&format!(
+            "- 固定记忆 {} 条；下方另列高重要性记忆 {} 条\n\n",
+            pinned.len(),
+            important.len()
+        ));
 
         md.push_str("## 固定记忆（核心）\n\n");
         if pinned.is_empty() {
@@ -859,7 +945,10 @@ impl MemoryStore {
                 .cmp(&a.pinned)
                 .then(b.created_at.cmp(&a.created_at))
         });
-        let private: Vec<&MemoryEntry> = entries.iter().filter(|e| e.agent_id.as_deref() == Some(agent)).collect();
+        let private: Vec<&MemoryEntry> = entries
+            .iter()
+            .filter(|e| e.agent_id.as_deref() == Some(agent))
+            .collect();
         let pinned_shared: Vec<&MemoryEntry> = entries
             .iter()
             .filter(|e| e.agent_id.is_none() && e.pinned)
@@ -870,7 +959,11 @@ impl MemoryStore {
         md.push_str(&format!("# MEMORY · {agent}\n\n"));
         md.push_str("<!-- 浅层记忆（自动渲染的人读快照，容量有限）：深层记忆在记忆库（检索/衰减/压缩），编辑请走记忆面板或 exm memory -->\n\n");
         md.push_str(&format!("- 更新时间：{}\n", now_iso()));
-        md.push_str(&format!("- 私有记忆 {} 条；群体置顶 {} 条\n\n", private.len(), pinned_shared.len()));
+        md.push_str(&format!(
+            "- 私有记忆 {} 条；群体置顶 {} 条\n\n",
+            private.len(),
+            pinned_shared.len()
+        ));
 
         md.push_str("## 个体私有记忆（浅层）\n\n");
         if private.is_empty() {
@@ -899,17 +992,15 @@ impl MemoryStore {
 
     /// 组浅层记忆视图：`groups/<gid>/MEMORY.md` = 组域共享记忆（浅层，容量有限）。
     /// 深层记忆在 MemoryStore；子个体不单独建文件，成员记忆经检索注入。
-    pub fn render_group_memory_md(
-        &self,
-        gid: &str,
-        path: impl AsRef<Path>,
-    ) -> Result<usize> {
+    pub fn render_group_memory_md(&self, gid: &str, path: impl AsRef<Path>) -> Result<usize> {
         let entries: Vec<MemoryEntry> = self.list_filtered(None, None, 200, Some(gid))?;
         let mut sorted = entries.clone();
         sorted.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then(b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal))
+            b.pinned.cmp(&a.pinned).then(
+                b.importance
+                    .partial_cmp(&a.importance)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
         let pinned: Vec<&MemoryEntry> = sorted.iter().filter(|e| e.pinned).take(10).collect();
         let recent: Vec<&MemoryEntry> = sorted.iter().filter(|e| !e.pinned).take(20).collect();
@@ -918,7 +1009,11 @@ impl MemoryStore {
         md.push_str(&format!("# MEMORY · {gid}\n\n"));
         md.push_str("<!-- 组浅层记忆（自动渲染的人读快照，容量有限）：深层记忆在记忆库（检索/衰减/压缩），编辑请走记忆面板或 exm memory -->\n\n");
         md.push_str(&format!("- 更新时间：{}\n", now_iso()));
-        md.push_str(&format!("- 组域记忆 {} 条（置顶 {}）\n\n", entries.len(), pinned.len()));
+        md.push_str(&format!(
+            "- 组域记忆 {} 条（置顶 {}）\n\n",
+            entries.len(),
+            pinned.len()
+        ));
 
         md.push_str("## 置顶（核心）\n\n");
         if pinned.is_empty() {
@@ -958,7 +1053,10 @@ impl MemoryStore {
                 h.score,
                 h.entry.title,
                 h.entry.body.chars().take(200).collect::<String>(),
-                h.entry.source_ref.clone().unwrap_or_else(|| "本机记忆库".into())
+                h.entry
+                    .source_ref
+                    .clone()
+                    .unwrap_or_else(|| "本机记忆库".into())
             ));
         }
         s
@@ -976,7 +1074,11 @@ impl MemoryStore {
 /// - `half_life` 极大（→∞）：age/half_life → 0，因子 → 1，等于不衰减（符合直觉：
 ///   「半衰期无穷长」就是「永不遗忘」）。
 fn decay_factor(age_days: f64, half_life_days: f64) -> f64 {
-    let hl = if half_life_days.is_finite() && half_life_days > 0.0 { half_life_days } else { 1.0 };
+    let hl = if half_life_days.is_finite() && half_life_days > 0.0 {
+        half_life_days
+    } else {
+        1.0
+    };
     0.5f64.powf(age_days.max(0.0) / hl)
 }
 
@@ -998,7 +1100,11 @@ fn cap_chars(s: &str, cap: usize) -> String {
 }
 
 fn render_entry_md(e: &MemoryEntry) -> String {
-    let tags = if e.tags.is_empty() { String::new() } else { format!(" `{}`", e.tags.join("` `")) };
+    let tags = if e.tags.is_empty() {
+        String::new()
+    } else {
+        format!(" `{}`", e.tags.join("` `"))
+    };
     format!(
         "- **{}**（{}｜重要性 {:.2}{}）\n  {}\n",
         e.title,
@@ -1032,7 +1138,9 @@ fn content_hash(title: &str, body: &str, group: Option<&str>) -> String {
 
 fn age_days(ts: &str) -> f64 {
     chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 86400.0)
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() as f64 / 86400.0
+        })
         .unwrap_or(0.0)
 }
 
@@ -1103,11 +1211,17 @@ mod tests {
             )
             .unwrap();
         store
-            .remember(&MemoryDraft::new(MemoryKind::Digest, "会话摘要", "讨论了无关话题").importance(0.3))
+            .remember(
+                &MemoryDraft::new(MemoryKind::Digest, "会话摘要", "讨论了无关话题").importance(0.3),
+            )
             .unwrap();
         // 去重：同内容再写不新增，重要性提升
         let dup = store
-            .remember(&MemoryDraft::new(MemoryKind::Preference, "用户偏好", "偏好中文汇报，风格简短"))
+            .remember(&MemoryDraft::new(
+                MemoryKind::Preference,
+                "用户偏好",
+                "偏好中文汇报，风格简短",
+            ))
             .unwrap();
         assert!(dup.importance > 0.9, "重复写入应提升重要性");
 
@@ -1140,8 +1254,12 @@ mod tests {
     fn 个体统计累加() {
         let dir = std::env::temp_dir().join(format!("exm-stat-{}", uuid::Uuid::new_v4()));
         let store = MemoryStore::open(&dir).unwrap();
-        store.record_agent_outcome("context-agent", "done", 0.9).unwrap();
-        store.record_agent_outcome("context-agent", "blocked", 0.5).unwrap();
+        store
+            .record_agent_outcome("context-agent", "done", 0.9)
+            .unwrap();
+        store
+            .record_agent_outcome("context-agent", "blocked", 0.5)
+            .unwrap();
         let stats = store.agent_stats(10).unwrap();
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].runs, 2);
@@ -1156,17 +1274,25 @@ mod tests {
         let store = MemoryStore::open(&dir).unwrap();
 
         // 个体记忆：归属 context-agent
-        let mut draft = MemoryDraft::new(MemoryKind::Lesson, "上下文体教训", "重构配置前先跑全量测试").importance(0.8);
+        let mut draft =
+            MemoryDraft::new(MemoryKind::Lesson, "上下文体教训", "重构配置前先跑全量测试")
+                .importance(0.8);
         draft.agent_id = Some("context-agent".into());
         store.remember(&draft).unwrap();
 
         // 群体记忆：无归属，人人可见
         store
-            .remember(&MemoryDraft::new(MemoryKind::Decision, "共享决策", "构建入口统一为 cargo build"))
+            .remember(&MemoryDraft::new(
+                MemoryKind::Decision,
+                "共享决策",
+                "构建入口统一为 cargo build",
+            ))
             .unwrap();
 
         // 归属者：个体 + 群体都可见，且个体条目带"个体记忆"标记
-        let hits = store.recall_for_agent("context-agent", "测试 构建", 10, None, None).unwrap();
+        let hits = store
+            .recall_for_agent("context-agent", "测试 构建", 10, None, None)
+            .unwrap();
         let owners: Vec<bool> = hits.iter().map(|h| h.entry.agent_id.is_some()).collect();
         assert!(owners.contains(&true), "归属者应看到个体记忆");
         assert!(owners.contains(&false), "归属者也应看到群体记忆");
@@ -1174,11 +1300,16 @@ mod tests {
         assert!(ind.reasons.iter().any(|r| r == "个体记忆"));
 
         // 其他个体：只能看到群体记忆，看不到他人私有
-        let hits2 = store.recall_for_agent("scout-agent", "测试 构建", 10, None, None).unwrap();
+        let hits2 = store
+            .recall_for_agent("scout-agent", "测试 构建", 10, None, None)
+            .unwrap();
         assert!(
             hits2.iter().all(|h| h.entry.agent_id.is_none()),
             "其他个体不应看到私有记忆，实际: {:?}",
-            hits2.iter().map(|h| h.entry.title.clone()).collect::<Vec<_>>()
+            hits2
+                .iter()
+                .map(|h| h.entry.title.clone())
+                .collect::<Vec<_>>()
         );
 
         // 群体检索（指挥体视角）：仅群体记忆
@@ -1195,49 +1326,85 @@ mod tests {
 
         // A 组条目 / B 组条目 / 全局条目（None = 处处可见）
         store
-            .remember(&MemoryDraft::new(MemoryKind::Lesson, "翻译组教训", "术语表必须先于正文翻译建立").group("gA"))
+            .remember(
+                &MemoryDraft::new(
+                    MemoryKind::Lesson,
+                    "翻译组教训",
+                    "术语表必须先于正文翻译建立",
+                )
+                .group("gA"),
+            )
             .unwrap();
         store
-            .remember(&MemoryDraft::new(MemoryKind::Lesson, "游戏组教训", "数值改动必须附模拟对比").group("gB"))
+            .remember(
+                &MemoryDraft::new(MemoryKind::Lesson, "游戏组教训", "数值改动必须附模拟对比")
+                    .group("gB"),
+            )
             .unwrap();
         store
-            .remember(&MemoryDraft::new(MemoryKind::Fact, "全局事实", "构建入口统一为 cargo build"))
+            .remember(&MemoryDraft::new(
+                MemoryKind::Fact,
+                "全局事实",
+                "构建入口统一为 cargo build",
+            ))
             .unwrap();
 
         // A 组视角：自己的 + 全局；看不到 B 组
-        let a_hits = store.recall("教训 构建", 10, None, Some("gA"), None).unwrap();
+        let a_hits = store
+            .recall("教训 构建", 10, None, Some("gA"), None)
+            .unwrap();
         let titles: Vec<&str> = a_hits.iter().map(|h| h.entry.title.as_str()).collect();
         assert!(titles.contains(&"翻译组教训"), "A 组应看到本组条目");
         assert!(titles.contains(&"全局事实"), "A 组应看到全局条目");
         assert!(!titles.contains(&"游戏组教训"), "A 组不应看到 B 组条目");
 
         // B 组视角对称
-        let b_hits = store.recall("教训 数值", 10, None, Some("gB"), None).unwrap();
-        assert!(b_hits.iter().all(|h| h.entry.group_id.as_deref() != Some("gA")));
+        let b_hits = store
+            .recall("教训 数值", 10, None, Some("gB"), None)
+            .unwrap();
+        assert!(b_hits
+            .iter()
+            .all(|h| h.entry.group_id.as_deref() != Some("gA")));
 
         // 个体检索同样受组约束：同一 identifier 的私有记忆不跨组泄漏
         let mut draft = MemoryDraft::new(MemoryKind::Lesson, "A组私有教训", "该组内教训仅组内可见");
         draft.agent_id = Some("shared-agent".into());
         draft.group_id = Some("gA".into());
         store.remember(&draft).unwrap();
-        let in_ga = store.recall_for_agent("shared-agent", "私有教训", 10, Some("gA"), None).unwrap();
+        let in_ga = store
+            .recall_for_agent("shared-agent", "私有教训", 10, Some("gA"), None)
+            .unwrap();
         assert!(in_ga.iter().any(|h| h.entry.title == "A组私有教训"));
-        let in_gb = store.recall_for_agent("shared-agent", "私有教训", 10, Some("gB"), None).unwrap();
+        let in_gb = store
+            .recall_for_agent("shared-agent", "私有教训", 10, Some("gB"), None)
+            .unwrap();
         assert!(
             in_gb.iter().all(|h| h.entry.title != "A组私有教训"),
             "组外不应检索到他人组内私有记忆，实际: {:?}",
-            in_gb.iter().map(|h| h.entry.title.clone()).collect::<Vec<_>>()
+            in_gb
+                .iter()
+                .map(|h| h.entry.title.clone())
+                .collect::<Vec<_>>()
         );
 
         // 去重哈希按组隔离：同内容跨组各自成条
         let same_title = "同内容条目";
         let same_body = "内容完全一致";
-        store.remember(&MemoryDraft::new(MemoryKind::Fact, same_title, same_body).group("gA")).unwrap();
-        store.remember(&MemoryDraft::new(MemoryKind::Fact, same_title, same_body).group("gB")).unwrap();
-        store.remember(&MemoryDraft::new(MemoryKind::Fact, same_title, same_body)).unwrap();
+        store
+            .remember(&MemoryDraft::new(MemoryKind::Fact, same_title, same_body).group("gA"))
+            .unwrap();
+        store
+            .remember(&MemoryDraft::new(MemoryKind::Fact, same_title, same_body).group("gB"))
+            .unwrap();
+        store
+            .remember(&MemoryDraft::new(MemoryKind::Fact, same_title, same_body))
+            .unwrap();
         let all = store.list(None, 50).unwrap();
         let count = all.iter().filter(|e| e.title == same_title).count();
-        assert_eq!(count, 3, "同内容在 gA/gB/全局 应为 3 条独立条目，实际 {count}");
+        assert_eq!(
+            count, 3,
+            "同内容在 gA/gB/全局 应为 3 条独立条目，实际 {count}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1254,30 +1421,50 @@ mod tests {
         let mut b = MemoryDraft::new(MemoryKind::Lesson, "乙的私有教训", "只属于 agent-b");
         b.agent_id = Some("agent-b".into());
         store.remember(&b).unwrap();
-        store.remember(&MemoryDraft::new(MemoryKind::Decision, "群体决策", "无归属共享")).unwrap();
+        store
+            .remember(&MemoryDraft::new(
+                MemoryKind::Decision,
+                "群体决策",
+                "无归属共享",
+            ))
+            .unwrap();
 
         // 空查询回退近期：个体视角只见「自己私有 + 群体」，他人的私有不得混入
-        let hits_a = store.recall_for_agent("agent-a", "", 10, None, None).unwrap();
+        let hits_a = store
+            .recall_for_agent("agent-a", "", 10, None, None)
+            .unwrap();
         let titles: Vec<&str> = hits_a.iter().map(|h| h.entry.title.as_str()).collect();
         assert!(titles.contains(&"甲的私有教训"), "本人私有可见");
         assert!(titles.contains(&"群体决策"), "群体共享可见");
-        assert!(!titles.contains(&"乙的私有教训"), "空查询不得泄漏他人私有，实际 {titles:?}");
+        assert!(
+            !titles.contains(&"乙的私有教训"),
+            "空查询不得泄漏他人私有，实际 {titles:?}"
+        );
 
         // 群体检索（SharedOnly）空查询：仅群体
         let shared = store.recall("", 10, None, None, None).unwrap();
-        assert!(shared.iter().all(|h| h.entry.agent_id.is_none()), "群体视角空查询不得带出个体私有");
+        assert!(
+            shared.iter().all(|h| h.entry.agent_id.is_none()),
+            "群体视角空查询不得带出个体私有"
+        );
 
         // 全量视角（管理）空查询：全部可见
         let all = store.recall_all("   ", 10, None, None).unwrap();
         assert_eq!(all.len(), 3, "管理视角空查询可见全部");
 
         // 纯符号查询（无有效词项）与空串同路径，分层同样生效
-        let sym = store.recall_for_agent("agent-b", "!!!@@@###", 10, None, None).unwrap();
-        assert!(sym.iter().all(|h| h.entry.agent_id.as_deref() != Some("agent-a")));
+        let sym = store
+            .recall_for_agent("agent-b", "!!!@@@###", 10, None, None)
+            .unwrap();
+        assert!(sym
+            .iter()
+            .all(|h| h.entry.agent_id.as_deref() != Some("agent-a")));
 
         // 列示入口的分层口径：recent_in_layer
         let list_b = store.recent_in_layer(Some("agent-b"), 10, None).unwrap();
-        assert!(list_b.iter().all(|h| h.entry.agent_id.as_deref() != Some("agent-a")));
+        assert!(list_b
+            .iter()
+            .all(|h| h.entry.agent_id.as_deref() != Some("agent-a")));
         let list_all = store.recent_in_layer(None, 10, None).unwrap();
         assert_eq!(list_all.len(), 3);
 
@@ -1300,13 +1487,31 @@ mod tests {
         // 极大半衰期：等于不衰减（永不遗忘）
         assert!((decay_factor(365.0, 1e300) - 1.0).abs() < 1e-9);
         // 未来时间戳：不增寿（因子恒 1）
-        assert!((decay_factor(-7.0, 30.0) - 1.0).abs() < 1e-12, "未来时间戳不得反向增寿");
+        assert!(
+            (decay_factor(-7.0, 30.0) - 1.0).abs() < 1e-12,
+            "未来时间戳不得反向增寿"
+        );
         // 下限保底与上限钳制
         let decayed = decayed_importance(0.5, 40.0, 30.0, 0.05);
-        assert!((decayed - 0.5 * 0.5f64.powf(40.0 / 30.0)).abs() < 1e-9, "应严格落在半衰曲线上");
-        assert_eq!(decayed_importance(0.01, 1000.0, 30.0, 0.05), 0.05, "跌破下限保到 floor");
-        assert_eq!(decayed_importance(0.9, 0.0, 30.0, 1.5), 1.0, "floor 越界不得把重要性抬出 [0,1]");
-        assert_eq!(decayed_importance(0.8, -100.0, 30.0, 0.05), 0.8, "未来时间戳下重要性原样保留");
+        assert!(
+            (decayed - 0.5 * 0.5f64.powf(40.0 / 30.0)).abs() < 1e-9,
+            "应严格落在半衰曲线上"
+        );
+        assert_eq!(
+            decayed_importance(0.01, 1000.0, 30.0, 0.05),
+            0.05,
+            "跌破下限保到 floor"
+        );
+        assert_eq!(
+            decayed_importance(0.9, 0.0, 30.0, 1.5),
+            1.0,
+            "floor 越界不得把重要性抬出 [0,1]"
+        );
+        assert_eq!(
+            decayed_importance(0.8, -100.0, 30.0, 0.05),
+            0.8,
+            "未来时间戳下重要性原样保留"
+        );
     }
 
     /// 衰减整链路：过期条目严格落在半衰曲线上；未来时间戳不被增寿
@@ -1315,10 +1520,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("exm-mem-decay-{}", uuid::Uuid::new_v4()));
         let store = MemoryStore::open(&dir).unwrap();
         let stale = store
-            .remember(&MemoryDraft::new(MemoryKind::Fact, "过期记忆", "四十天前的旧事").importance(0.8))
+            .remember(
+                &MemoryDraft::new(MemoryKind::Fact, "过期记忆", "四十天前的旧事").importance(0.8),
+            )
             .unwrap();
         let future = store
-            .remember(&MemoryDraft::new(MemoryKind::Fact, "未来记忆", "时钟回拨产生的脏数据").importance(0.6))
+            .remember(
+                &MemoryDraft::new(MemoryKind::Fact, "未来记忆", "时钟回拨产生的脏数据")
+                    .importance(0.6),
+            )
             .unwrap();
 
         // 直改条目时间戳模拟「40 天前」与「未来 1 天」（造存储态，避免睡真实时间）
@@ -1339,7 +1549,10 @@ mod tests {
         );
 
         let future_after = store.get_entry_public(&future.id).unwrap().unwrap();
-        assert!((future_after.importance - 0.6).abs() < 1e-12, "未来时间戳不得被衰减反向增寿");
+        assert!(
+            (future_after.importance - 0.6).abs() < 1e-12,
+            "未来时间戳不得被衰减反向增寿"
+        );
         assert!(future_after.importance <= 1.0, "重要性不得越出 [0,1]");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1381,14 +1594,22 @@ mod tests {
         for i in 0..8 {
             let s = store.clone();
             handles.push(std::thread::spawn(move || {
-                s.remember(&MemoryDraft::new(MemoryKind::Fact, format!("独立条目{i}"), format!("第 {i} 条独立内容")))
-                    .unwrap();
+                s.remember(&MemoryDraft::new(
+                    MemoryKind::Fact,
+                    format!("独立条目{i}"),
+                    format!("第 {i} 条独立内容"),
+                ))
+                .unwrap();
             }));
         }
         for h in handles {
             h.join().unwrap();
         }
-        assert_eq!(store.list(None, 100).unwrap().len(), 9, "8 条不同内容应全部落库");
+        assert_eq!(
+            store.list(None, 100).unwrap().len(),
+            9,
+            "8 条不同内容应全部落库"
+        );
 
         // 去重后的哈希索引仍可用：并发写入的条目可被正常召回
         let hits = store.recall("原子去重", 5, None, None, None).unwrap();
@@ -1405,29 +1626,51 @@ mod tests {
         // 超长正文/标题：按字符截断（不劈 UTF-8），返回值即落库内容
         let long_body = "长".repeat(50_000);
         let long_title = format!("{}超长标题", "标".repeat(300));
-        let e = store.remember(&MemoryDraft::new(MemoryKind::Fact, long_title, long_body)).unwrap();
-        assert_eq!(e.body.chars().count(), MemoryStore::BODY_CAP_CHARS, "正文应截到上限");
-        assert_eq!(e.title.chars().count(), MemoryStore::TITLE_CAP_CHARS, "标题应截到上限");
+        let e = store
+            .remember(&MemoryDraft::new(MemoryKind::Fact, long_title, long_body))
+            .unwrap();
+        assert_eq!(
+            e.body.chars().count(),
+            MemoryStore::BODY_CAP_CHARS,
+            "正文应截到上限"
+        );
+        assert_eq!(
+            e.title.chars().count(),
+            MemoryStore::TITLE_CAP_CHARS,
+            "标题应截到上限"
+        );
 
         // 特殊字符：emoji / 换行 / 引号 / 路径分隔符——原样存取、去重键稳定
         let weird = "含\"引号\"与\\斜杠、/path:分隔符*与\n换行 和 emoji 🦾🤖";
-        let w1 = store.remember(&MemoryDraft::new(MemoryKind::Lesson, weird, weird)).unwrap();
-        let w2 = store.remember(&MemoryDraft::new(MemoryKind::Lesson, weird, weird)).unwrap();
+        let w1 = store
+            .remember(&MemoryDraft::new(MemoryKind::Lesson, weird, weird))
+            .unwrap();
+        let w2 = store
+            .remember(&MemoryDraft::new(MemoryKind::Lesson, weird, weird))
+            .unwrap();
         assert_eq!(w1.id, w2.id, "特殊字符内容应稳定去重（同一哈希）");
         let back = store.get_entry_public(&w1.id).unwrap().unwrap();
         assert_eq!(back.body, weird, "特殊字符正文应原样存取");
 
         // 首尾空白规整后等价去重：同一句话多打了空格不裂条
-        let padded =
-            store.remember(&MemoryDraft::new(MemoryKind::Lesson, format!("{weird} "), format!("{weird} "))).unwrap();
+        let padded = store
+            .remember(&MemoryDraft::new(
+                MemoryKind::Lesson,
+                format!("{weird} "),
+                format!("{weird} "),
+            ))
+            .unwrap();
         assert_eq!(padded.id, w1.id, "仅首尾空白差异应视为同一条");
 
         // 截断后的条目仍可被正常召回（索引按落库内容建立）
         let hits = store.recall("超长标题", 5, None, None, None).unwrap();
         assert!(
-            hits.iter().any(|h| h.entry.title.chars().count() == MemoryStore::TITLE_CAP_CHARS),
+            hits.iter()
+                .any(|h| h.entry.title.chars().count() == MemoryStore::TITLE_CAP_CHARS),
             "截断条目应在索引内，实际: {:?}",
-            hits.iter().map(|h| h.entry.title.clone()).collect::<Vec<_>>()
+            hits.iter()
+                .map(|h| h.entry.title.clone())
+                .collect::<Vec<_>>()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
