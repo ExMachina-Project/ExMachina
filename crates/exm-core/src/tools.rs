@@ -4,10 +4,10 @@
 //! filesystem（write/mkdir/list）/ terminal（白名单 + 审批 + 后台长任务）/ web_search（真实后端，
 //! 未配置即不下发）/ web_fetch / agent_manage（组内编成）/ schedule（自主排程）。
 
-use crate::config::{SearchConfig, SecurityConfig, SandboxConfig};
+use crate::config::{SandboxConfig, SearchConfig, SecurityConfig};
 use crate::registry::LocalRegistry;
 use crate::store::Store;
-use crate::types::{normalize_domain, AgentDefinition, ApprovalRequest, CoreEvent, ToolName, Tier};
+use crate::types::{normalize_domain, AgentDefinition, ApprovalRequest, CoreEvent, Tier, ToolName};
 use anyhow::{bail, Context};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,10 +24,20 @@ pub struct ToolResult {
 
 impl ToolResult {
     fn ok(output: impl Into<String>) -> Self {
-        ToolResult { ok: true, output: output.into(), error: None, images: Vec::new() }
+        ToolResult {
+            ok: true,
+            output: output.into(),
+            error: None,
+            images: Vec::new(),
+        }
     }
     fn err(msg: impl Into<String>) -> Self {
-        ToolResult { ok: false, output: String::new(), error: Some(msg.into()), images: Vec::new() }
+        ToolResult {
+            ok: false,
+            output: String::new(),
+            error: Some(msg.into()),
+            images: Vec::new(),
+        }
     }
     fn with_images(mut self, images: Vec<String>) -> Self {
         self.images = images;
@@ -43,81 +53,292 @@ struct AllowRule {
 }
 
 const TERMINAL_ALLOW: &[AllowRule] = &[
-    AllowRule { cmd: "dir", subs: &[] },
-    AllowRule { cmd: "ls", subs: &[] },
-    AllowRule { cmd: "type", subs: &[] },
-    AllowRule { cmd: "echo", subs: &[] },
-    AllowRule { cmd: "findstr", subs: &[] },
-    AllowRule { cmd: "where", subs: &[] },
-    AllowRule { cmd: "which", subs: &[] },
-    AllowRule { cmd: "whoami", subs: &[] },
-    AllowRule { cmd: "uname", subs: &[] },
-    AllowRule { cmd: "pwd", subs: &[] },
-    AllowRule { cmd: "date", subs: &[] },
-    AllowRule { cmd: "head", subs: &[] },
-    AllowRule { cmd: "tail", subs: &[] },
-    AllowRule { cmd: "cat", subs: &[] },
-    AllowRule { cmd: "wc", subs: &[] },
-    AllowRule { cmd: "diff", subs: &[] },
-    AllowRule { cmd: "mkdir", subs: &[] },
-    AllowRule { cmd: "cp", subs: &[] },
-    AllowRule { cmd: "mv", subs: &[] },
-    AllowRule { cmd: "touch", subs: &[] },
-    AllowRule { cmd: "rg", subs: &[] },
-    AllowRule { cmd: "grep", subs: &[] },
-    AllowRule { cmd: "find", subs: &[] },
-    AllowRule { cmd: "sed", subs: &["-n"] },
-    AllowRule { cmd: "node", subs: &[] },
-    AllowRule { cmd: "npx", subs: &[] },
-    AllowRule { cmd: "tsc", subs: &[] },
-    AllowRule { cmd: "deno", subs: &["test", "run", "check", "fmt", "lint", "info", "cache"] },
-    AllowRule { cmd: "bun", subs: &["test", "run", "install", "x", "build"] },
-    AllowRule { cmd: "pytest", subs: &[] },
-    AllowRule { cmd: "jest", subs: &[] },
-    AllowRule { cmd: "vitest", subs: &[] },
-    AllowRule { cmd: "npm", subs: &["run", "test", "ci", "install", "ls", "view", "why", "audit", "outdated", "pack"] },
-    AllowRule { cmd: "pnpm", subs: &["run", "test", "install", "list", "ls", "why", "audit", "outdated"] },
-    AllowRule { cmd: "yarn", subs: &["run", "test", "install", "list", "why", "audit", "outdated"] },
+    AllowRule {
+        cmd: "dir",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "ls",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "type",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "echo",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "findstr",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "where",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "which",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "whoami",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "uname",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "pwd",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "date",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "head",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "tail",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "cat",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "wc",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "diff",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "mkdir",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "cp",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "mv",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "touch",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "rg",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "grep",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "find",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sed",
+        subs: &["-n"],
+    },
+    AllowRule {
+        cmd: "node",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "npx",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "tsc",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "deno",
+        subs: &["test", "run", "check", "fmt", "lint", "info", "cache"],
+    },
+    AllowRule {
+        cmd: "bun",
+        subs: &["test", "run", "install", "x", "build"],
+    },
+    AllowRule {
+        cmd: "pytest",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "jest",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "vitest",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "npm",
+        subs: &[
+            "run", "test", "ci", "install", "ls", "view", "why", "audit", "outdated", "pack",
+        ],
+    },
+    AllowRule {
+        cmd: "pnpm",
+        subs: &[
+            "run", "test", "install", "list", "ls", "why", "audit", "outdated",
+        ],
+    },
+    AllowRule {
+        cmd: "yarn",
+        subs: &["run", "test", "install", "list", "why", "audit", "outdated"],
+    },
     AllowRule {
         cmd: "git",
         subs: &[
-            "status", "log", "diff", "show", "branch", "fetch", "add", "commit", "checkout",
-            "switch", "restore", "stash", "rev-parse", "ls-files", "blame", "describe", "tag",
-            "remote", "config", "apply", "merge-base", "shortlog", "grep", "worktree", "init",
+            "status",
+            "log",
+            "diff",
+            "show",
+            "branch",
+            "fetch",
+            "add",
+            "commit",
+            "checkout",
+            "switch",
+            "restore",
+            "stash",
+            "rev-parse",
+            "ls-files",
+            "blame",
+            "describe",
+            "tag",
+            "remote",
+            "config",
+            "apply",
+            "merge-base",
+            "shortlog",
+            "grep",
+            "worktree",
+            "init",
         ],
     },
     AllowRule {
         cmd: "cargo",
         subs: &[
-            "build", "check", "test", "run", "bench", "fmt", "clippy", "doc", "metadata", "tree",
-            "nextest", "update", "add", "remove", "fetch", "verify-project", "locate-project",
-            "pkgid", "search", "info", "clean",
+            "build",
+            "check",
+            "test",
+            "run",
+            "bench",
+            "fmt",
+            "clippy",
+            "doc",
+            "metadata",
+            "tree",
+            "nextest",
+            "update",
+            "add",
+            "remove",
+            "fetch",
+            "verify-project",
+            "locate-project",
+            "pkgid",
+            "search",
+            "info",
+            "clean",
         ],
     },
-    AllowRule { cmd: "rustc", subs: &[] },
-    AllowRule { cmd: "rustfmt", subs: &[] },
-    AllowRule { cmd: "python", subs: &[] },
-    AllowRule { cmd: "python3", subs: &[] },
-    AllowRule { cmd: "pip", subs: &["list", "show", "freeze", "download"] },
+    AllowRule {
+        cmd: "rustc",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "rustfmt",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "python",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "python3",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "pip",
+        subs: &["list", "show", "freeze", "download"],
+    },
     AllowRule {
         cmd: "go",
-        subs: &["build", "test", "run", "vet", "fmt", "mod", "get", "generate", "doc", "env", "list"],
+        subs: &[
+            "build", "test", "run", "vet", "fmt", "mod", "get", "generate", "doc", "env", "list",
+        ],
     },
-    AllowRule { cmd: "gcc", subs: &[] },
-    AllowRule { cmd: "g++", subs: &[] },
-    AllowRule { cmd: "clang", subs: &[] },
-    AllowRule { cmd: "make", subs: &[] },
-    AllowRule { cmd: "cmake", subs: &[] },
-    AllowRule { cmd: "java", subs: &[] },
-    AllowRule { cmd: "javac", subs: &[] },
-    AllowRule { cmd: "mvn", subs: &[] },
-    AllowRule { cmd: "gradle", subs: &[] },
-    AllowRule { cmd: "dotnet", subs: &["build", "test", "run", "restore", "format", "publish"] },
-    AllowRule { cmd: "php", subs: &[] },
-    AllowRule { cmd: "composer", subs: &["install", "update", "test", "dump-autoload"] },
-    AllowRule { cmd: "ruby", subs: &[] },
-    AllowRule { cmd: "gem", subs: &["list", "install", "info"] },
-    AllowRule { cmd: "rake", subs: &[] },
+    AllowRule {
+        cmd: "gcc",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "g++",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "clang",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "make",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "cmake",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "java",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "javac",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "mvn",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "gradle",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "dotnet",
+        subs: &["build", "test", "run", "restore", "format", "publish"],
+    },
+    AllowRule {
+        cmd: "php",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "composer",
+        subs: &["install", "update", "test", "dump-autoload"],
+    },
+    AllowRule {
+        cmd: "ruby",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "gem",
+        subs: &["list", "install", "info"],
+    },
+    AllowRule {
+        cmd: "rake",
+        subs: &[],
+    },
 ];
 
 /// shell 连接符：白名单只放行单一命令，带连接符一律拒绝（防「白名单命令 && 危险命令」绕过）
@@ -155,9 +376,13 @@ fn contains_shell_chain(cmd: &str) -> bool {
 fn terminal_allowed(cmd: &str) -> bool {
     let lowered = cmd.trim().to_lowercase();
     let mut parts = lowered.split_whitespace();
-    let Some(head_raw) = parts.next() else { return false };
+    let Some(head_raw) = parts.next() else {
+        return false;
+    };
     let head = head_raw.trim_end_matches(".exe");
-    let Some(rule) = TERMINAL_ALLOW.iter().find(|r| r.cmd == head) else { return false };
+    let Some(rule) = TERMINAL_ALLOW.iter().find(|r| r.cmd == head) else {
+        return false;
+    };
     if rule.subs.is_empty() {
         return true;
     }
@@ -170,10 +395,30 @@ fn terminal_allowed(cmd: &str) -> bool {
 
 /// 高危命令特征（审批闸门 risky 模式匹配子串）
 const DESTRUCTIVE_PATTERNS: &[&str] = &[
-    "rm ", "rm -", "del ", "rmdir", "rd /s", "format ", "shutdown", "taskkill", "reg delete",
-    "reg add", "dd if=", "mkfs", "git push --force", "git push -f", "git reset --hard",
-    "git clean", "git rebase", "drop table", "drop database", "truncate table", "remove-item",
-    "invoke-expression", "curl | sh", "curl | bash",
+    "rm ",
+    "rm -",
+    "del ",
+    "rmdir",
+    "rd /s",
+    "format ",
+    "shutdown",
+    "taskkill",
+    "reg delete",
+    "reg add",
+    "dd if=",
+    "mkfs",
+    "git push --force",
+    "git push -f",
+    "git reset --hard",
+    "git clean",
+    "git rebase",
+    "drop table",
+    "drop database",
+    "truncate table",
+    "remove-item",
+    "invoke-expression",
+    "curl | sh",
+    "curl | bash",
 ];
 
 pub fn is_destructive_command(lowered: &str) -> bool {
@@ -271,9 +516,28 @@ impl ShellOpts {
 
 /// 联网类命令特征（strict 模式下需要审批）
 const NETWORK_COMMAND_MARKS: &[&str] = &[
-    "curl", "wget", "pip install", "pip3 install", "npm install", "npm ci", "pnpm install",
-    "yarn add", "cargo install", "cargo add", "apt ", "apt-get", "dnf ", "yum ", "brew ",
-    "git clone", "git fetch", "git pull", "docker ", "ssh ", "scp ", "invoke-webrequest",
+    "curl",
+    "wget",
+    "pip install",
+    "pip3 install",
+    "npm install",
+    "npm ci",
+    "pnpm install",
+    "yarn add",
+    "cargo install",
+    "cargo add",
+    "apt ",
+    "apt-get",
+    "dnf ",
+    "yum ",
+    "brew ",
+    "git clone",
+    "git fetch",
+    "git pull",
+    "docker ",
+    "ssh ",
+    "scp ",
+    "invoke-webrequest",
 ];
 
 pub fn is_network_command(lowered: &str) -> bool {
@@ -282,9 +546,26 @@ pub fn is_network_command(lowered: &str) -> bool {
 
 /// 子进程环境白名单：只透传运行必需项，敏感变量（各类 KEY/TOKEN/SECRET）一律不外泄
 const ENV_ALLOW: &[&str] = &[
-    "PATH", "PATHEXT", "SystemRoot", "SystemDrive", "COMSPEC", "WINDIR", "LANG", "LC_ALL", "TERM",
-    "OS", "ProgramData", "ProgramFiles", "ProgramFiles(x86)", "NUMBER_OF_PROCESSORS",
-    "PROCESSOR_ARCHITECTURE", "CARGO_HOME", "RUSTUP_HOME", "USER", "USERNAME", "SHELL",
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "COMSPEC",
+    "WINDIR",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "OS",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "USER",
+    "USERNAME",
+    "SHELL",
 ];
 
 #[cfg(not(target_os = "windows"))]
@@ -320,7 +601,11 @@ unsafe impl Sync for WinJob {}
 #[cfg(target_os = "windows")]
 impl WinJob {
     /// 建作业 → 设限 → 把子进程收进去；任一步失败返回 None（调用方继续按无作业执行）
-    pub fn attach(process: *mut core::ffi::c_void, memory_mb: usize, max_processes: u32) -> Option<WinJob> {
+    pub fn attach(
+        process: *mut core::ffi::c_void,
+        memory_mb: usize,
+        max_processes: u32,
+    ) -> Option<WinJob> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -369,7 +654,11 @@ impl WinJob {
 
 #[cfg(not(target_os = "windows"))]
 impl WinJob {
-    pub fn attach(_process: *mut core::ffi::c_void, _memory_mb: usize, _max_processes: u32) -> Option<WinJob> {
+    pub fn attach(
+        _process: *mut core::ffi::c_void,
+        _memory_mb: usize,
+        _max_processes: u32,
+    ) -> Option<WinJob> {
         None
     }
 }
@@ -441,7 +730,11 @@ pub fn windows_job_available() -> bool {
 
 /// 跨平台 shell 执行（工具闸门与审批代执行共用）。
 /// 内部走 [`execute_shell_with`]（无加固）——需要沙箱时由调用方给出 [`ShellOpts`]。
-pub async fn execute_shell_command_timed(workspace_root: &Path, cmd: &str, timeout_secs: u64) -> ToolResult {
+pub async fn execute_shell_command_timed(
+    workspace_root: &Path,
+    cmd: &str,
+    timeout_secs: u64,
+) -> ToolResult {
     execute_shell_with(workspace_root, cmd, timeout_secs, &ShellOpts::plain()).await
 }
 
@@ -574,11 +867,19 @@ pub async fn execute_shell_with(
                 partial.chars().take(PARTIAL_CAP).collect::<String>()
             );
             if partial_total > PARTIAL_CAP {
-                msg.push_str(&format!("\n…（已截断：终止前输出共 {partial_total} 字符，仅保留前 {PARTIAL_CAP}）"));
+                msg.push_str(&format!(
+                    "\n…（已截断：终止前输出共 {partial_total} 字符，仅保留前 {PARTIAL_CAP}）"
+                ));
             }
             if !partial_err.trim().is_empty() {
                 let err_total = partial_err.chars().count();
-                msg.push_str(&format!("\n[stderr] {}", partial_err.chars().take(PARTIAL_ERR_CAP).collect::<String>()));
+                msg.push_str(&format!(
+                    "\n[stderr] {}",
+                    partial_err
+                        .chars()
+                        .take(PARTIAL_ERR_CAP)
+                        .collect::<String>()
+                ));
                 if err_total > PARTIAL_ERR_CAP {
                     msg.push_str(&format!("\n…（stderr 已截断：共 {err_total} 字符）"));
                 }
@@ -614,7 +915,12 @@ pub async fn execute_shell_with(
                 }
             }
             if status.success() {
-                ToolResult { ok: true, output: text, error: None, images: Vec::new() }
+                ToolResult {
+                    ok: true,
+                    output: text,
+                    error: None,
+                    images: Vec::new(),
+                }
             } else {
                 // 失败必须可诊断：退出码与输出摘要必须进 error——
                 // 回灌层（runtime::tool_feedback）与事件/审计摘要只取 error 字段，
@@ -643,7 +949,12 @@ pub async fn execute_shell_with(
                         reason.push_str(&format!("\n[stderr 尾部] {err_tail}"));
                     }
                 }
-                ToolResult { ok: false, output: text, error: Some(reason), images: Vec::new() }
+                ToolResult {
+                    ok: false,
+                    output: text,
+                    error: Some(reason),
+                    images: Vec::new(),
+                }
             }
         }
     }
@@ -662,7 +973,8 @@ fn strip_html(html: &str) -> String {
                 skip_until = None;
                 i += end.len();
                 // 吞掉闭合标签的剩余部分
-                while i < bytes.len() && html[i..].chars().next().map(|c| c != '>').unwrap_or(false) {
+                while i < bytes.len() && html[i..].chars().next().map(|c| c != '>').unwrap_or(false)
+                {
                     i += 1;
                 }
                 i = (i + 1).min(bytes.len());
@@ -874,7 +1186,10 @@ impl ToolGateway {
         if data.len() > 8 * 1024 * 1024 {
             return None;
         }
-        Some(format!("data:{mime};base64,{}", crate::computer::b64_encode(&data)))
+        Some(format!(
+            "data:{mime};base64,{}",
+            crate::computer::b64_encode(&data)
+        ))
     }
 
     /// 子进程环境（净化后）：白名单透传 + HOME/TMP 重定向到工作区内沙箱目录。
@@ -914,11 +1229,18 @@ impl ToolGateway {
             if self.sandbox.use_bwrap && bwrap_available() {
                 let root_s = root.display().to_string();
                 let mut args: Vec<String> = vec![
-                    "--ro-bind".into(), "/".into(), "/".into(),
-                    "--bind".into(), root_s.clone(), root_s.clone(),
-                    "--dev".into(), "/dev".into(),
-                    "--proc".into(), "/proc".into(),
-                    "--tmpfs".into(), "/tmp".into(),
+                    "--ro-bind".into(),
+                    "/".into(),
+                    "/".into(),
+                    "--bind".into(),
+                    root_s.clone(),
+                    root_s.clone(),
+                    "--dev".into(),
+                    "/dev".into(),
+                    "--proc".into(),
+                    "/proc".into(),
+                    "--tmpfs".into(),
+                    "/tmp".into(),
                     "--die-with-parent".into(),
                 ];
                 if !self.sandbox.allow_network {
@@ -927,9 +1249,21 @@ impl ToolGateway {
                 args.push("--".into());
                 args.push("sh".into());
                 args.push("-c".into());
-                let lim = if memory > 0 { format!("ulimit -v {} 2>/dev/null; ", memory * 1024) } else { String::new() };
+                let lim = if memory > 0 {
+                    format!("ulimit -v {} 2>/dev/null; ", memory * 1024)
+                } else {
+                    String::new()
+                };
                 args.push(format!("{lim}{cmd}"));
-                return ShellOpts { program: "bwrap".into(), args, env_clear: true, envs, memory_mb: memory, max_processes: max_procs, cmd_override: None };
+                return ShellOpts {
+                    program: "bwrap".into(),
+                    args,
+                    env_clear: true,
+                    envs,
+                    memory_mb: memory,
+                    max_processes: max_procs,
+                    cmd_override: None,
+                };
             }
         }
         // 无 bwrap（或 Windows）：净化环境 + （Linux 下）ulimit 限内存
@@ -968,9 +1302,21 @@ impl ToolGateway {
     }
 
     /// 记录一次 LLM 调用的真实用量（provider 返回的 usage；session 空 = 归入 unattributed）
-    pub fn record_usage(&self, session_id: &str, prompt_tokens: u64, completion_tokens: u64, model: &str) {
-        let scope = if session_id.trim().is_empty() { "unattributed" } else { session_id.trim() };
-        let _ = self.store.add_usage(scope, prompt_tokens, completion_tokens, model);
+    pub fn record_usage(
+        &self,
+        session_id: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        model: &str,
+    ) {
+        let scope = if session_id.trim().is_empty() {
+            "unattributed"
+        } else {
+            session_id.trim()
+        };
+        let _ = self
+            .store
+            .add_usage(scope, prompt_tokens, completion_tokens, model);
     }
 
     /// 运行收束钩子（onRunEnd）：由指挥体在 run 结束时调用
@@ -1029,7 +1375,11 @@ impl ToolGateway {
             Some(r) => ToolResult {
                 ok: r.ok,
                 output: r.text.chars().take(8000).collect(),
-                error: if r.ok { None } else { Some(r.text.chars().take(2000).collect()) },
+                error: if r.ok {
+                    None
+                } else {
+                    Some(r.text.chars().take(2000).collect())
+                },
                 images: Vec::new(),
             },
             None => ToolResult::err(format!("MCP 工具不存在或未开放: {full_name}")),
@@ -1037,9 +1387,21 @@ impl ToolGateway {
         let summary: String = if result.ok {
             result.output.chars().take(200).collect()
         } else {
-            result.error.clone().unwrap_or_default().chars().take(200).collect()
+            result
+                .error
+                .clone()
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect()
         };
-        let _ = self.store.audit_tool(agent_id, full_name, args, &summary, started.elapsed().as_millis() as u64);
+        let _ = self.store.audit_tool(
+            agent_id,
+            full_name,
+            args,
+            &summary,
+            started.elapsed().as_millis() as u64,
+        );
         // 轮次过程轨迹：随收束落盘到最终消息（过程收起栏数据源）
         crate::round_trace::push_tool(
             session_id,
@@ -1071,12 +1433,20 @@ impl ToolGateway {
         group_meta: Option<&crate::types::GroupMeta>,
     ) -> Vec<ToolName> {
         let mut allowlist = def.tools.clone();
-        let is_primary = group_meta.map(|m| m.primary.as_deref() == Some(def.identifier.as_str())).unwrap_or(false);
+        let is_primary = group_meta
+            .map(|m| m.primary.as_deref() == Some(def.identifier.as_str()))
+            .unwrap_or(false);
         if is_primary {
-            if !group_meta.map(|m| m.builtin).unwrap_or(true) && !allowlist.contains(&ToolName::AgentManage) {
+            if !group_meta.map(|m| m.builtin).unwrap_or(true)
+                && !allowlist.contains(&ToolName::AgentManage)
+            {
                 allowlist.push(ToolName::AgentManage);
             }
-            for t in [ToolName::MemoryRead, ToolName::MemoryWrite, ToolName::MemoryLink] {
+            for t in [
+                ToolName::MemoryRead,
+                ToolName::MemoryWrite,
+                ToolName::MemoryLink,
+            ] {
                 if !allowlist.contains(&t) {
                     allowlist.push(t);
                 }
@@ -1088,7 +1458,8 @@ impl ToolGateway {
     /// 原生 function calling：按白名单生成工具 schema（docs/协议与契约.md）。
     /// `search_ready` / `browser_ready` 决定联网搜索与浏览器工具是否下发——
     /// 后端能力未就绪时不承诺该工具（避免模型调用必然失败的工具）。
-    pub fn tool_specs(        allowlist: &[ToolName],
+    pub fn tool_specs(
+        allowlist: &[ToolName],
         search_ready: bool,
         browser_ready: bool,
         computer_ready: bool,
@@ -1107,7 +1478,11 @@ impl ToolGateway {
             if name == ToolName::Computer && !computer_ready {
                 return; // Computer Use 未启用：不下发（整机输入权须显式交出）
             }
-            specs.push(crate::provider::ToolSpec { name: name.key().to_string(), description: description.to_string(), parameters });
+            specs.push(crate::provider::ToolSpec {
+                name: name.key().to_string(),
+                description: description.to_string(),
+                parameters,
+            });
         };
         push(ToolName::Read, "读取工作区内文件或目录。文件按行返回并带行号，可用 offset/limit 分页续读；目录返回条目清单", serde_json::json!({
             "type": "object",
@@ -1136,34 +1511,46 @@ impl ToolGateway {
             },
             "required": ["patch"]
         }));
-        push(ToolName::Grep, "在工作区内按正则搜索文件内容（尊重 .gitignore），返回 文件:行号:内容", serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string", "description": "正则表达式（Rust regex 语法）" },
-                "path": { "type": "string", "description": "搜索起始路径（默认工作区根）" },
-                "glob": { "type": "string", "description": "文件过滤，如 **/*.rs" },
-                "ignoreCase": { "type": "boolean", "description": "忽略大小写（默认 false）" },
-                "maxResults": { "type": "integer", "description": "最多返回条数（默认 100，上限 500）" }
-            },
-            "required": ["pattern"]
-        }));
-        push(ToolName::Glob, "按 glob 模式列出工作区内的文件路径（尊重 .gitignore），用于定位文件", serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string", "description": "glob 模式，如 src/**/*.ts 或 **/*.md" },
-                "path": { "type": "string", "description": "起始目录（默认工作区根）" }
-            },
-            "required": ["pattern"]
-        }));
-        push(ToolName::Filesystem, "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）", serde_json::json!({
-            "type": "object",
-            "properties": {
-                "op": { "type": "string", "enum": ["write", "mkdir", "list"] },
-                "path": { "type": "string", "description": "相对工作区的路径" },
-                "content": { "type": "string", "description": "op=write 时的文件内容" }
-            },
-            "required": ["op", "path"]
-        }));
+        push(
+            ToolName::Grep,
+            "在工作区内按正则搜索文件内容（尊重 .gitignore），返回 文件:行号:内容",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "正则表达式（Rust regex 语法）" },
+                    "path": { "type": "string", "description": "搜索起始路径（默认工作区根）" },
+                    "glob": { "type": "string", "description": "文件过滤，如 **/*.rs" },
+                    "ignoreCase": { "type": "boolean", "description": "忽略大小写（默认 false）" },
+                    "maxResults": { "type": "integer", "description": "最多返回条数（默认 100，上限 500）" }
+                },
+                "required": ["pattern"]
+            }),
+        );
+        push(
+            ToolName::Glob,
+            "按 glob 模式列出工作区内的文件路径（尊重 .gitignore），用于定位文件",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "glob 模式，如 src/**/*.ts 或 **/*.md" },
+                    "path": { "type": "string", "description": "起始目录（默认工作区根）" }
+                },
+                "required": ["pattern"]
+            }),
+        );
+        push(
+            ToolName::Filesystem,
+            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["write", "mkdir", "list"] },
+                    "path": { "type": "string", "description": "相对工作区的路径" },
+                    "content": { "type": "string", "description": "op=write 时的文件内容" }
+                },
+                "required": ["op", "path"]
+            }),
+        );
         push(ToolName::Terminal, "在工作区内执行终端命令（白名单 + 审批闸门）。长任务用 background=true 启动后轮询 taskId", serde_json::json!({
             "type": "object",
             "properties": {
@@ -1175,22 +1562,30 @@ impl ToolGateway {
             },
             "required": []
         }));
-        push(ToolName::WebSearch, "联网搜索并返回结果摘要（标题 + 链接 + 摘要）", serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "maxResults": { "type": "integer", "description": "返回条数（默认取配置值）" }
-            },
-            "required": ["query"]
-        }));
-        push(ToolName::WebFetch, "抓取网页 URL 并提取正文文本（自动剥离标签与脚本）", serde_json::json!({
-            "type": "object",
-            "properties": {
-                "url": { "type": "string", "description": "http(s) 地址" },
-                "maxChars": { "type": "integer", "description": "最多返回字符数，默认 8000" }
-            },
-            "required": ["url"]
-        }));
+        push(
+            ToolName::WebSearch,
+            "联网搜索并返回结果摘要（标题 + 链接 + 摘要）",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "maxResults": { "type": "integer", "description": "返回条数（默认取配置值）" }
+                },
+                "required": ["query"]
+            }),
+        );
+        push(
+            ToolName::WebFetch,
+            "抓取网页 URL 并提取正文文本（自动剥离标签与脚本）",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "http(s) 地址" },
+                    "maxChars": { "type": "integer", "description": "最多返回字符数，默认 8000" }
+                },
+                "required": ["url"]
+            }),
+        );
         push(ToolName::Schedule, "自主排程：创建/查看/删除定时或一次性任务（到期由调度器唤醒本组执行）。用于「每天巡检」「明天提醒跟进」这类自驱工作", serde_json::json!({
             "type": "object",
             "properties": {
@@ -1326,7 +1721,8 @@ impl ToolGateway {
         tool: ToolName,
         args: &serde_json::Value,
     ) -> ToolResult {
-        self.execute_named(agent_id, session_id, allowlist, tool.key(), args).await
+        self.execute_named(agent_id, session_id, allowlist, tool.key(), args)
+            .await
     }
 
     /// 执行任意工具名：内置（按 `allowlist` 放行）或**声明式自定义工具**（按 `agents` 可见性放行）。
@@ -1369,7 +1765,11 @@ impl ToolGateway {
                     ],
                 );
                 if !ok {
-                    let why = if out.trim().is_empty() { h.clone() } else { out.clone() };
+                    let why = if out.trim().is_empty() {
+                        h.clone()
+                    } else {
+                        out.clone()
+                    };
                     let blocked = ToolResult::err(format!("preTool 钩子拦截：{why}"));
                     let _ = self.store.audit_tool(
                         agent_id,
@@ -1406,7 +1806,9 @@ impl ToolGateway {
             }
             // 非内置名：声明式自定义工具（可扩展工具面，免写 MCP 服务器）
             None => match self.custom.iter().find(|c| c.name == name) {
-                Some(ct) if ct.visible_to(agent_id) => self.run_custom(agent_id, session_id, ct, args).await,
+                Some(ct) if ct.visible_to(agent_id) => {
+                    self.run_custom(agent_id, session_id, ct, args).await
+                }
                 Some(_) => ToolResult::err(format!(
                     "工具 {name} 未对本个体开放（自定义工具的 agents 未包含 {agent_id}）"
                 )),
@@ -1423,7 +1825,13 @@ impl ToolGateway {
             let preview: String = if result.ok {
                 result.output.chars().take(4000).collect()
             } else {
-                result.error.clone().unwrap_or_default().chars().take(4000).collect()
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(4000)
+                    .collect()
             };
             for h in self.hooks.post_tool.clone() {
                 let (hook_ok, out) = run_hook_command(
@@ -1439,7 +1847,10 @@ impl ToolGateway {
                     ],
                 );
                 if !hook_ok {
-                    let tail = format!("\n[postTool 钩子失败] {}", out.chars().take(300).collect::<String>());
+                    let tail = format!(
+                        "\n[postTool 钩子失败] {}",
+                        out.chars().take(300).collect::<String>()
+                    );
                     if result.ok {
                         result.output.push_str(&tail);
                     } else if let Some(e) = result.error.as_mut() {
@@ -1451,9 +1862,21 @@ impl ToolGateway {
         let summary = if result.ok {
             result.output.chars().take(200).collect::<String>()
         } else {
-            result.error.clone().unwrap_or_default().chars().take(200).collect()
+            result
+                .error
+                .clone()
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect()
         };
-        let _ = self.store.audit_tool(agent_id, name, args, &summary, started.elapsed().as_millis() as u64);
+        let _ = self.store.audit_tool(
+            agent_id,
+            name,
+            args,
+            &summary,
+            started.elapsed().as_millis() as u64,
+        );
         // 轮次过程轨迹：与 execute_mcp 一致,内置/自定义工具执行同样随收束落盘到最终消息
         crate::round_trace::push_tool(
             session_id,
@@ -1541,7 +1964,13 @@ impl ToolGateway {
         }
     }
 
-    async fn dispatch(&self, agent_id: &str, session_id: &str, tool: ToolName, args: &serde_json::Value) -> ToolResult {
+    async fn dispatch(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        tool: ToolName,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         match tool {
             ToolName::Read => self.tool_read(args),
             ToolName::Edit => self.tool_edit(session_id, args),
@@ -1556,9 +1985,9 @@ impl ToolGateway {
             ToolName::Schedule => self.tool_schedule(args),
             ToolName::Browser => self.tool_browser(session_id, args).await,
             ToolName::Computer => self.tool_computer(agent_id, session_id, args).await,
-            ToolName::MemoryRead => self.tool_memory_read(agent_id, args),
-            ToolName::MemoryWrite => self.tool_memory_write(agent_id, args),
-            ToolName::MemoryLink => self.tool_memory_link(agent_id, args),
+            ToolName::MemoryRead => self.tool_memory_read(agent_id, session_id, args),
+            ToolName::MemoryWrite => self.tool_memory_write(agent_id, session_id, args),
+            ToolName::MemoryLink => self.tool_memory_link(agent_id, session_id, args),
         }
     }
 
@@ -1566,20 +1995,71 @@ impl ToolGateway {
 
     /// 调用者是否当前组主智能体（memory_read 全层视角 / memory_write 默认授权的判定口径）
     fn is_primary(&self, agent_id: &str) -> bool {
-        self.registry.primary().map(|p| p.identifier == agent_id).unwrap_or(false)
+        self.registry
+            .primary()
+            .map(|p| p.identifier == agent_id)
+            .unwrap_or(false)
+    }
+
+    /// 会话的记忆命名空间：通道「记忆隔离」开启时用会话分区，否则用激活组。
+    /// 默认所有平台会话共享同组记忆；隔离只改变记忆键，不改变智能体组归属。
+    fn memory_group(&self, session_id: &str) -> String {
+        self.store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.memory_partition)
+            .unwrap_or_else(|| self.registry.active_group())
+    }
+
+    /// 隔离分区的 memory.md 路径（与 orchestrator 的命名规则一致）。
+    fn memory_md_path_for(&self, session_id: &str) -> Option<std::path::PathBuf> {
+        let base = self.memory_md_path.as_ref()?;
+        let partition = self
+            .store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.memory_partition);
+        Some(match partition {
+            None => base.clone(),
+            Some(p) => {
+                let safe: String = p
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                base.with_file_name(format!("memory-{safe}.md"))
+            }
+        })
     }
 
     /// memory_read：组内检索（主智能体全层视角 = 群体 + 所有个体私有；个体 = 私有 + 群体）。
-    /// 组隔离在工具层强制：范围恒为「激活组 + 全局条目」，其他组条目不可见。
+    /// 组隔离在工具层强制：范围恒为「有效记忆命名空间 + 全局条目」，其他组条目不可见。
     /// 文件记忆模式（深层记忆关闭）：回落 memory.md 全文——与规划注入同源，口径一致。
-    fn tool_memory_read(&self, agent_id: &str, args: &serde_json::Value) -> ToolResult {
+    fn tool_memory_read(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let Some(memory) = &self.memory else {
             return ToolResult::err("记忆系统未接入（内部装配缺失）");
         };
         if !self.memory_deep {
-            return self.file_memory_read();
+            return self.file_memory_read(session_id);
         }
-        let Some(query) = args.get("query").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(query) = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             return ToolResult::err("query 不能为空");
         };
         let limit = args
@@ -1588,16 +2068,21 @@ impl ToolGateway {
             .map(|v| (v as usize).min(20))
             .unwrap_or(5)
             .max(1);
-        let gid = self.registry.active_group();
+        let gid = self.memory_group(session_id);
         let hits = if self.is_primary(agent_id) {
             memory.recall_all(query, limit, Some(&gid), None)
         } else {
             memory.recall_for_agent(agent_id, query, limit, Some(&gid), None)
         };
         match hits {
-            Ok(list) if list.is_empty() => ToolResult::ok(format!("记忆检索「{query}」：组内无命中条目。")),
+            Ok(list) if list.is_empty() => {
+                ToolResult::ok(format!("记忆检索「{query}」：组内无命中条目。"))
+            }
             Ok(list) => {
-                let mut lines = vec![format!("记忆检索「{query}」：{} 条命中（按相关度排序）", list.len())];
+                let mut lines = vec![format!(
+                    "记忆检索「{query}」：{} 条命中（按相关度排序）",
+                    list.len()
+                )];
                 for h in list {
                     let source = match (&h.entry.agent_id, &h.entry.group_id) {
                         (Some(a), _) => format!("个体:{a}"),
@@ -1625,11 +2110,11 @@ impl ToolGateway {
     /// 文件记忆模式的 memory_read：返回 memory.md 内容（与规划注入同源、同一 8000 字符上限）。
     /// 为什么不查数据库：文件记忆模式下规划面只注入 memory.md——
     /// 工具看到的与规划看到的不一致，本身就是行为分裂。
-    fn file_memory_read(&self) -> ToolResult {
-        let Some(path) = &self.memory_md_path else {
+    fn file_memory_read(&self, session_id: &str) -> ToolResult {
+        let Some(path) = self.memory_md_path_for(session_id) else {
             return ToolResult::err("记忆系统未接入（内部装配缺失）");
         };
-        match std::fs::read_to_string(path) {
+        match std::fs::read_to_string(&path) {
             Ok(md) if !md.trim().is_empty() => {
                 let total = md.chars().count();
                 let trimmed: String = md.chars().take(8000).collect();
@@ -1638,7 +2123,9 @@ impl ToolGateway {
                 } else {
                     String::new()
                 };
-                ToolResult::ok(format!("文件记忆（memory.md，深层记忆已关闭）：\n{trimmed}{note}"))
+                ToolResult::ok(format!(
+                    "文件记忆（memory.md，深层记忆已关闭）：\n{trimmed}{note}"
+                ))
             }
             Ok(_) => ToolResult::ok("memory.md 为空：文件记忆模式下尚无记忆内容。"),
             Err(_) => ToolResult::ok("memory.md 不存在：文件记忆模式下尚无记忆内容。"),
@@ -1646,7 +2133,12 @@ impl ToolGateway {
     }
 
     /// memory_write：写入组内记忆（哈希去重由 MemoryStore 承担）；来源标注智能体自写（source=agent）
-    fn tool_memory_write(&self, agent_id: &str, args: &serde_json::Value) -> ToolResult {
+    fn tool_memory_write(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let Some(memory) = &self.memory else {
             return ToolResult::err("记忆系统未接入（内部装配缺失）");
         };
@@ -1655,25 +2147,49 @@ impl ToolGateway {
                 "深层记忆已关闭（文件记忆模式）：写进数据库的记忆不会被规划召回。请改为直接维护 memory.md（filesystem write 可达），或建议用户在设置中开启深层记忆。",
             );
         }
-        let Some(kind) = args.get("kind").and_then(|v| v.as_str()).and_then(crate::memory::MemoryKind::parse) else {
-            return ToolResult::err("kind 须为 fact/decision/preference/evidence/digest/lesson 之一");
+        let Some(kind) = args
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .and_then(crate::memory::MemoryKind::parse)
+        else {
+            return ToolResult::err(
+                "kind 须为 fact/decision/preference/evidence/digest/lesson 之一",
+            );
         };
-        let Some(title) = args.get("title").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(title) = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             return ToolResult::err("title 不能为空");
         };
-        let Some(body) = args.get("body").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(body) = args
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             return ToolResult::err("body 不能为空");
         };
-        let importance = args.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5);
+        let importance = args
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5);
         let tags: Vec<String> = args
             .get("tags")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
         let mut draft = crate::memory::MemoryDraft::new(kind, title, body)
             .importance(importance)
             .agent(agent_id)
-            .group(&self.registry.active_group());
+            .group(&self.memory_group(session_id));
         draft.tags = tags;
         // 来源标注：智能体自写（与归纳写入可区分，管理视图可过滤）
         draft.source_ref = Some("agent".into());
@@ -1690,7 +2206,12 @@ impl ToolGateway {
     }
 
     /// memory_link：关联建立（组隔离校验双端）与主题列示（条目 + 关联链）
-    fn tool_memory_link(&self, agent_id: &str, args: &serde_json::Value) -> ToolResult {
+    fn tool_memory_link(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let Some(memory) = &self.memory else {
             return ToolResult::err("记忆系统未接入（内部装配缺失）");
         };
@@ -1699,11 +2220,15 @@ impl ToolGateway {
                 "深层记忆已关闭（文件记忆模式）：记忆关联属于深层记忆库特性。可改为直接在 memory.md 中以文字标注关联。",
             );
         }
-        let gid = self.registry.active_group();
+        let gid = self.memory_group(session_id);
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("link");
         match op {
             "list" => {
-                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
                 let limit = args
                     .get("limit")
                     .and_then(|v| v.as_u64())
@@ -1726,18 +2251,27 @@ impl ToolGateway {
                 match hits {
                     Ok(list) if list.is_empty() => ToolResult::ok("主题下无记忆条目。".to_string()),
                     Ok(list) => {
-                        let mut lines = vec![format!("主题「{query}」列示（{} 条，含关联链）：", list.len())];
+                        let mut lines = vec![format!(
+                            "主题「{query}」列示（{} 条，含关联链）：",
+                            list.len()
+                        )];
                         for h in list {
                             let links = memory.links_of(&h.entry.id).unwrap_or_default();
                             let chain = links
                                 .iter()
                                 .filter_map(|l| {
                                     let to = l.get("to").and_then(|v| v.as_str())?;
-                                    let rel = l.get("relation").and_then(|v| v.as_str()).unwrap_or("related");
-                                    let dir = if l.get("from").and_then(|v| v.as_str()) == Some(h.entry.id.as_str()) {
+                                    let rel = l
+                                        .get("relation")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("related");
+                                    let dir = if l.get("from").and_then(|v| v.as_str())
+                                        == Some(h.entry.id.as_str())
+                                    {
                                         format!("{rel} → {to}")
                                     } else {
-                                        let from = l.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                                        let from =
+                                            l.get("from").and_then(|v| v.as_str()).unwrap_or("?");
                                         format!("{from} →{rel}→ 本条")
                                     };
                                     Some(dir)
@@ -1749,7 +2283,11 @@ impl ToolGateway {
                                 h.entry.kind.key(),
                                 h.entry.title,
                                 h.entry.id,
-                                if chain.is_empty() { String::new() } else { format!("｜关联：{chain}") }
+                                if chain.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("｜关联：{chain}")
+                                }
                             ));
                         }
                         ToolResult::ok(lines.join("\n"))
@@ -1758,18 +2296,34 @@ impl ToolGateway {
                 }
             }
             _ => {
-                let Some(from) = args.get("from").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+                let Some(from) = args
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
                     return ToolResult::err("from 不能为空（关联起始条目 id）");
                 };
-                let Some(to) = args.get("to").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+                let Some(to) = args
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
                     return ToolResult::err("to 不能为空（关联目标条目 id）");
                 };
-                let relation = args.get("relation").and_then(|v| v.as_str()).unwrap_or("related").trim();
+                let relation = args
+                    .get("relation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("related")
+                    .trim();
                 // 组隔离：双端条目都必须在调用者可见范围（激活组 + 全局），越组拒绝
                 let visible = |id: &str| -> Option<bool> {
-                    memory.get_entry_public(id).ok().flatten().map(|e| {
-                        e.group_id.as_deref().is_none_or(|g| g == gid)
-                    })
+                    memory
+                        .get_entry_public(id)
+                        .ok()
+                        .flatten()
+                        .map(|e| e.group_id.as_deref().is_none_or(|g| g == gid))
                 };
                 match (visible(from), visible(to)) {
                     (Some(true), Some(true)) => match memory.link(from, to, relation) {
@@ -1781,7 +2335,9 @@ impl ToolGateway {
                     (Some(false), _) | (_, Some(false)) => {
                         ToolResult::err("关联被拒绝：条目不在你的组范围内（越组隔离）")
                     }
-                    _ => ToolResult::err("条目不存在（检查 from/to 的条目 id，可先用 memory_link op=list 列示）"),
+                    _ => ToolResult::err(
+                        "条目不存在（检查 from/to 的条目 id，可先用 memory_link op=list 列示）",
+                    ),
                 }
             }
         }
@@ -1815,18 +2371,27 @@ impl ToolGateway {
             .parameters
             .pointer("/required")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         for name in placeholder_names(&tool.target) {
             if !vals.contains_key(&name) {
                 if required.iter().any(|r| r == &name) {
-                    return ToolResult::err(format!("自定义工具 {} 缺少必填参数 {name}", tool.name));
+                    return ToolResult::err(format!(
+                        "自定义工具 {} 缺少必填参数 {name}",
+                        tool.name
+                    ));
                 }
                 vals.insert(name, String::new());
             }
         }
         if tool.kind_norm() == "shell" {
-            return self.run_custom_shell(agent_id, session_id, tool, &vals).await;
+            return self
+                .run_custom_shell(agent_id, session_id, tool, &vals)
+                .await;
         }
         self.run_custom_http(tool, &vals, args).await
     }
@@ -1844,7 +2409,11 @@ impl ToolGateway {
         }
         let method = {
             let m = tool.method.trim().to_ascii_uppercase();
-            if m.is_empty() { "POST".to_string() } else { m }
+            if m.is_empty() {
+                "POST".to_string()
+            } else {
+                m
+            }
         };
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -1853,7 +2422,8 @@ impl ToolGateway {
             Ok(c) => c,
             Err(e) => return ToolResult::err(format!("HTTP 客户端构建失败: {e}")),
         };
-        let parsed = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
+        let parsed =
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
         let mut req = client.request(parsed, &url);
         for (k, v) in &tool.headers {
             req = req.header(k, v);
@@ -1899,11 +2469,9 @@ impl ToolGateway {
         let lowered = cmd.to_lowercase();
         let mode = self.security.exec_approval.as_str();
         if mode == "risky" || mode == "always" {
-            let allowlisted = self
-                .security
-                .exec_allowlist
-                .iter()
-                .any(|p| !p.trim().is_empty() && lowered.starts_with(p.trim().to_lowercase().as_str()));
+            let allowlisted = self.security.exec_allowlist.iter().any(|p| {
+                !p.trim().is_empty() && lowered.starts_with(p.trim().to_lowercase().as_str())
+            });
             let gated = mode == "always" || is_destructive_command(&lowered);
             if gated && !allowlisted {
                 return self.gate_command(agent_id, session_id, &cmd).await;
@@ -1939,7 +2507,12 @@ impl ToolGateway {
         op: &str,
         args: &serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let s = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         match op {
             "list" => {
                 let defs = self.registry.list();
@@ -1972,12 +2545,17 @@ impl ToolGateway {
                 let template = s("template");
                 // 模板创建:仅 identifier 必填,工具面/能力/提示词由模板提供
                 if op == "create" && !template.is_empty() {
-                    let def = self
-                        .registry
-                        .create_agent_from_template(&meta.id, &template, &identifier, &name, &description)?;
+                    let def = self.registry.create_agent_from_template(
+                        &meta.id,
+                        &template,
+                        &identifier,
+                        &name,
+                        &description,
+                    )?;
                     return Ok(serde_json::json!({ "created": def, "fromTemplate": template }));
                 }
-                if (op == "create" && (identifier.is_empty() || name.is_empty() || description.is_empty()))
+                if (op == "create"
+                    && (identifier.is_empty() || name.is_empty() || description.is_empty()))
                     || (op == "update" && identifier.is_empty())
                 {
                     bail!("create 需要 identifier/name/description（或提供 template）；update 需要 identifier");
@@ -1988,13 +2566,21 @@ impl ToolGateway {
                     _ => AgentDefinition {
                         name: name.clone(),
                         identifier: identifier.clone(),
-                        domain: if s("domain").is_empty() { "自定义".into() } else { s("domain") },
+                        domain: if s("domain").is_empty() {
+                            "自定义".into()
+                        } else {
+                            s("domain")
+                        },
                         tier: Tier::Unit,
                         description: description.clone(),
                         capabilities: args
                             .get("capabilities")
                             .and_then(|v| v.as_array())
-                            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
                             .unwrap_or_default(),
                         tools: vec![],
                         when_to_call: s("whenToCall"),
@@ -2099,11 +2685,23 @@ impl ToolGateway {
     /// 读取文件或目录：文件按行带行号返回（offset/limit 分页），目录返回条目清单
     fn tool_read(&self, args: &serde_json::Value) -> ToolResult {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(400).clamp(1, 5000) as usize;
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .max(1) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(400)
+            .clamp(1, 5000) as usize;
         // maxChars 与 limit 同口径设上限：模型传超大值（1e9）不应绕过单次读取的预算
         // （默认 24000，硬上限 100000；再大的内容请分段读）
-        let max_chars = args.get("maxChars").and_then(|v| v.as_u64()).unwrap_or(24_000).clamp(1, 100_000) as usize;
+        let max_chars = args
+            .get("maxChars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(24_000)
+            .clamp(1, 100_000) as usize;
         let p = match self.resolve_safe(path) {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e.to_string()),
@@ -2132,7 +2730,9 @@ impl ToolGateway {
         let start = (offset - 1).min(total);
         // 越界 offset 给出可行动的提示而非「已显示第 无 行」：模型下一跳就能自己纠正
         if start >= total {
-            return ToolResult::ok(format!("{path}：共 {total} 行，offset={offset} 已超出文件末尾；请用 offset≤{total}"));
+            return ToolResult::ok(format!(
+                "{path}：共 {total} 行，offset={offset} 已超出文件末尾；请用 offset≤{total}"
+            ));
         }
         let mut out = String::new();
         let mut used = 0usize;
@@ -2144,7 +2744,11 @@ impl ToolGateway {
             let rendered = format!("{:>5}→{}\n", i + 1, line);
             if used + rendered.chars().count() > max_chars {
                 if i == start {
-                    out.push_str(&format!("{:>5}→{}\n", i + 1, line.chars().take(600).collect::<String>()));
+                    out.push_str(&format!(
+                        "{:>5}→{}\n",
+                        i + 1,
+                        line.chars().take(600).collect::<String>()
+                    ));
                     end = i + 1;
                 }
                 break;
@@ -2153,7 +2757,11 @@ impl ToolGateway {
             out.push_str(&rendered);
             end = i + 1;
         }
-        let shown = if end > start { format!("{}–{}", start + 1, end) } else { "无".to_string() };
+        let shown = if end > start {
+            format!("{}–{}", start + 1, end)
+        } else {
+            "无".to_string()
+        };
         out.push_str(&format!("\n（{path}：共 {total} 行；已显示第 {shown} 行）"));
         if end < total {
             out.push_str(&format!("；续读 offset={}", end + 1));
@@ -2175,7 +2783,10 @@ impl ToolGateway {
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             rows.push((name, is_dir, size));
         }
-        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+        rows.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
         let total = rows.len();
         let body = rows
             .iter()
@@ -2192,15 +2803,27 @@ impl ToolGateway {
         if body.is_empty() {
             return ToolResult::ok("（空目录）");
         }
-        ToolResult::ok(format!("{body}\n（共 {total} 项，已列 {}）", total.min(200)))
+        ToolResult::ok(format!(
+            "{body}\n（共 {total} 项，已列 {}）",
+            total.min(200)
+        ))
     }
 
     /// 精确编辑：old_string → new_string（唯一命中校验；支持 replace_all）
     fn tool_edit(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-        let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-        let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let old = args
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let new = args
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if old.is_empty() {
             return ToolResult::err("old_string 不能为空；新建文件请用 filesystem write");
         }
@@ -2295,7 +2918,10 @@ impl ToolGateway {
                 match std::fs::read_to_string(&p) {
                     Ok(c) => c,
                     Err(e) => {
-                        failures.push(format!("{}: 读取失败（二进制文件不支持补丁）: {e}", fp.path));
+                        failures.push(format!(
+                            "{}: 读取失败（二进制文件不支持补丁）: {e}",
+                            fp.path
+                        ));
                         continue;
                     }
                 }
@@ -2369,7 +2995,11 @@ impl ToolGateway {
                 }
             })
             .collect();
-        ToolResult::ok(format!("补丁已应用 {} 个文件：\n- {}", plans.len(), detail.join("\n- ")))
+        ToolResult::ok(format!(
+            "补丁已应用 {} 个文件：\n- {}",
+            plans.len(),
+            detail.join("\n- ")
+        ))
     }
 
     /// 仓库检索：正则搜索文件内容（尊重 .gitignore），返回 文件:行号:内容
@@ -2379,14 +3009,29 @@ impl ToolGateway {
             return ToolResult::err("pattern 不能为空");
         }
         let sub = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let glob = args.get("glob").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let ic = args.get("ignoreCase").and_then(|v| v.as_bool()).unwrap_or(false);
-        let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 500) as usize;
+        let glob = args
+            .get("glob")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let ic = args
+            .get("ignoreCase")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let max_results = args
+            .get("maxResults")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100)
+            .clamp(1, 500) as usize;
         let root = match self.resolve_safe(sub) {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e.to_string()),
         };
-        let re = match regex::RegexBuilder::new(pattern).case_insensitive(ic).build() {
+        let re = match regex::RegexBuilder::new(pattern)
+            .case_insensitive(ic)
+            .build()
+        {
             Ok(r) => r,
             Err(e) => return ToolResult::err(format!("正则无效: {e}")),
         };
@@ -2405,8 +3050,15 @@ impl ToolGateway {
             if meta.len() > 2 * 1024 * 1024 {
                 continue; // 跳过 >2MB 的文件
             }
-            let Ok(text) = std::fs::read_to_string(path) else { continue };
-            let rel = path.strip_prefix(&base).unwrap_or(path).display().to_string().replace('\\', "/");
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let rel = path
+                .strip_prefix(&base)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+                .replace('\\', "/");
             let mut file_hit = false;
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
@@ -2430,14 +3082,23 @@ impl ToolGateway {
         body.push_str(&format!(
             "\n（{} 条命中，涉及 {hit_files} 个文件{}）",
             out.len(),
-            if truncated { "，已达结果上限——请收窄 pattern/path" } else { "" }
+            if truncated {
+                "，已达结果上限——请收窄 pattern/path"
+            } else {
+                ""
+            }
         ));
         ToolResult::ok(body)
     }
 
     /// 按 glob 模式列出文件路径
     fn tool_glob(&self, args: &serde_json::Value) -> ToolResult {
-        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if pattern.is_empty() {
             return ToolResult::err("pattern 不能为空（如 **/*.rs）");
         }
@@ -2531,7 +3192,12 @@ impl ToolGateway {
         matches!(self.security.exec_approval.as_str(), "risky" | "always")
     }
 
-    async fn tool_terminal(&self, agent_id: &str, session_id: &str, args: &serde_json::Value) -> ToolResult {
+    async fn tool_terminal(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("run");
         // 后台任务轮询 / 终止（不经过白名单与审批：对象是已批准过的任务）
         match op {
@@ -2539,7 +3205,12 @@ impl ToolGateway {
             "kill" => return self.bg_kill(args),
             _ => {}
         }
-        let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let cmd = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if cmd.is_empty() {
             return ToolResult::err("command 不能为空");
         }
@@ -2568,11 +3239,9 @@ impl ToolGateway {
             return self.gate_command(agent_id, session_id, &cmd).await;
         }
         if mode == "risky" || mode == "always" {
-            let allowlisted = self
-                .security
-                .exec_allowlist
-                .iter()
-                .any(|p| !p.trim().is_empty() && lowered.starts_with(p.trim().to_lowercase().as_str()));
+            let allowlisted = self.security.exec_allowlist.iter().any(|p| {
+                !p.trim().is_empty() && lowered.starts_with(p.trim().to_lowercase().as_str())
+            });
             let gated = mode == "always" || is_destructive_command(&lowered);
             if gated && !allowlisted {
                 return self.gate_command(agent_id, session_id, &cmd).await;
@@ -2583,7 +3252,11 @@ impl ToolGateway {
             return self.gate_command(agent_id, session_id, &cmd).await;
         }
         // 后台模式：长任务（构建/测试/服务）不阻塞本轮，返回任务 id 供轮询
-        if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if args
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return self.bg_start(&cmd);
         }
         let timeout = args
@@ -2592,8 +3265,18 @@ impl ToolGateway {
             .unwrap_or(self.security.terminal_timeout_secs as u64)
             .clamp(5, self.security.terminal_timeout_secs.max(5) as u64);
         // strict 模式收紧前台命令时长：长活请显式用后台模式
-        let timeout = if self.sandbox.strict() { timeout.min(60) } else { timeout };
-        execute_shell_with(&self.effective_root(), &cmd, timeout, &self.shell_opts(&cmd)).await
+        let timeout = if self.sandbox.strict() {
+            timeout.min(60)
+        } else {
+            timeout
+        };
+        execute_shell_with(
+            &self.effective_root(),
+            &cmd,
+            timeout,
+            &self.shell_opts(&cmd),
+        )
+        .await
     }
 
     /// 启动后台任务：输出累积到共享缓冲，任务终结记录退出码
@@ -2685,7 +3368,13 @@ impl ToolGateway {
             }
             *state2.lock() = Some(status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1));
         });
-        let task = BgTask { cmd: cmd.to_string(), started: Instant::now(), buf, state, abort: handle.abort_handle() };
+        let task = BgTask {
+            cmd: cmd.to_string(),
+            started: Instant::now(),
+            buf,
+            state,
+            abort: handle.abort_handle(),
+        };
         self.background.lock().insert(id.clone(), task);
         ToolResult::ok(format!(
             "后台任务已启动：taskId={id}\n命令：{cmd}\n用 terminal(op=\"poll\", taskId=\"{id}\") 查看输出；op=\"kill\" 终止。"
@@ -2713,7 +3402,10 @@ impl ToolGateway {
             Some(0) => format!("已完成（exit=0，耗时 {elapsed}s）"),
             Some(c) => format!("已结束（exit={c}，耗时 {elapsed}s）"),
         };
-        ToolResult::ok(format!("{status_line}\n—— 输出（累计 {} 字符）——\n{tail}", buf.chars().count()))
+        ToolResult::ok(format!(
+            "{status_line}\n—— 输出（累计 {} 字符）——\n{tail}",
+            buf.chars().count()
+        ))
     }
 
     /// 终止后台任务（中止读取任务 → kill_on_drop 连带结束子进程）
@@ -2732,11 +3424,21 @@ impl ToolGateway {
     /// Computer Use 工具：截屏（只读）与键鼠动作（过审批闸门 + 动作节流）。
     /// 截图落盘 `.exmachina/screenshots/`，路径随 `ToolResult.images` 带回——
     /// 视觉模型直接看到屏幕画面；渠道在工具卡里同样可预览。
-    async fn tool_computer(&self, agent_id: &str, session_id: &str, args: &serde_json::Value) -> ToolResult {
+    async fn tool_computer(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         if !self.computer_cfg.enabled {
-            return ToolResult::err("Computer Use 未启用：请到「设置 → Computer Use」开启（整机输入权须显式交出）");
+            return ToolResult::err(
+                "Computer Use 未启用：请到「设置 → Computer Use」开启（整机输入权须显式交出）",
+            );
         }
-        let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("screenshot");
+        let op = args
+            .get("op")
+            .and_then(|v| v.as_str())
+            .unwrap_or("screenshot");
         let mut guard = self.computer.lock().await;
         // 懒初始化：首次调用才建立键鼠控制句柄
         if guard.is_none() {
@@ -2751,7 +3453,10 @@ impl ToolGateway {
         // 截屏：只读，不审批
         if op == "screenshot" {
             let index = args.get("monitor").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let stamp = crate::types::now_iso().replace(':', "").replace('-', "").replace('.', "");
+            let stamp = crate::types::now_iso()
+                .replace(':', "")
+                .replace('-', "")
+                .replace('.', "");
             let name = format!("computer-{stamp}");
             let dir = self.workspace_root.join(".exmachina").join("screenshots");
             let result = session.screenshot(index, self.computer_cfg.max_edge, &dir, &name);
@@ -2824,7 +3529,9 @@ impl ToolGateway {
 
         // 审批：human 输入权确认（computer.approval=true 时拦截；等待期间批准即放行）
         if self.computer_cfg.approval {
-            let gated = self.gate_command(agent_id, session_id, &format!("[computer] {desc}")).await;
+            let gated = self
+                .gate_command(agent_id, session_id, &format!("[computer] {desc}"))
+                .await;
             if !gated.ok {
                 return gated;
             }
@@ -2833,7 +3540,9 @@ impl ToolGateway {
         session.throttle(interval);
         let result = action(session);
         match result {
-            Ok(()) => ToolResult::ok(format!("【报告】Computer Use 动作已执行：{desc}。需要确认画面可再 screenshot。")),
+            Ok(()) => ToolResult::ok(format!(
+                "【报告】Computer Use 动作已执行：{desc}。需要确认画面可再 screenshot。"
+            )),
             Err(e) => ToolResult::err(format!("Computer Use 动作失败（{desc}）：{e}")),
         }
     }
@@ -2914,11 +3623,17 @@ impl ToolGateway {
     /// 抓取网页并提取正文（大小/时长受限，标签与脚本剥离）
     async fn tool_web_fetch(&self, args: &serde_json::Value) -> ToolResult {
         let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        let max_chars = args.get("maxChars").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+        let max_chars = args
+            .get("maxChars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8000) as usize;
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return ToolResult::err("url 必须以 http(s):// 开头");
         }
-        let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+        {
             Ok(c) => c,
             Err(e) => return ToolResult::err(format!("HTTP 客户端构建失败: {e}")),
         };
@@ -2948,7 +3663,12 @@ impl ToolGateway {
     /// 联网搜索：调用配置的后端（tavily / brave / searxng / custom）。
     /// 未配置时该工具不会出现在下发 schema 里（此处仍兜底报错，防文本协议路径调用）。
     async fn tool_web_search(&self, args: &serde_json::Value) -> ToolResult {
-        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if query.is_empty() {
             return ToolResult::err("query 不能为空");
         }
@@ -2963,7 +3683,10 @@ impl ToolGateway {
             .and_then(|v| v.as_u64())
             .map(|n| n.clamp(1, 20) as usize)
             .unwrap_or(self.search.max_results.clamp(1, 20));
-        let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build() {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+        {
             Ok(c) => c,
             Err(e) => return ToolResult::err(format!("HTTP 客户端构建失败: {e}")),
         };
@@ -2983,11 +3706,25 @@ impl ToolGateway {
             }
             "brave" => {
                 let ep = if self.search.endpoint.trim().is_empty() {
-                    format!("https://api.search.brave.com/res/v1/web/search?q={}&count={}", urlencode(&query), max)
+                    format!(
+                        "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
+                        urlencode(&query),
+                        max
+                    )
                 } else {
-                    format!("{}?q={}&count={}", self.search.endpoint.trim().trim_end_matches('/'), urlencode(&query), max)
+                    format!(
+                        "{}?q={}&count={}",
+                        self.search.endpoint.trim().trim_end_matches('/'),
+                        urlencode(&query),
+                        max
+                    )
                 };
-                (ep, "GET", serde_json::Value::Null, Some(self.search.api_key.trim().to_string()))
+                (
+                    ep,
+                    "GET",
+                    serde_json::Value::Null,
+                    Some(self.search.api_key.trim().to_string()),
+                )
             }
             "searxng" => {
                 let ep = format!(
@@ -3007,7 +3744,11 @@ impl ToolGateway {
                 )
             }
         };
-        let mut req = if method == "POST" { client.post(&endpoint) } else { client.get(&endpoint) };
+        let mut req = if method == "POST" {
+            client.post(&endpoint)
+        } else {
+            client.get(&endpoint)
+        };
         if method == "POST" {
             req = req.json(&payload);
         }
@@ -3023,7 +3764,10 @@ impl ToolGateway {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
         if !(200..300).contains(&status) {
-            return ToolResult::err(format!("搜索后端返回 HTTP {status}：{}", body.chars().take(300).collect::<String>()));
+            return ToolResult::err(format!(
+                "搜索后端返回 HTTP {status}：{}",
+                body.chars().take(300).collect::<String>()
+            ));
         }
         let parsed: serde_json::Value = match serde_json::from_str(&body) {
             Ok(v) => v,
@@ -3045,7 +3789,11 @@ impl ToolGateway {
                 .or_else(|| it.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("（无标题）");
-            let url = it.get("url").or_else(|| it.get("link")).and_then(|v| v.as_str()).unwrap_or("");
+            let url = it
+                .get("url")
+                .or_else(|| it.get("link"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let snippet = it
                 .get("content")
                 .or_else(|| it.get("snippet"))
@@ -3055,7 +3803,11 @@ impl ToolGateway {
             lines.push(format!(
                 "{}. {title}\n   {url}\n   {}",
                 i + 1,
-                snippet.replace('\n', " ").chars().take(300).collect::<String>()
+                snippet
+                    .replace('\n', " ")
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
             ));
         }
         ToolResult::ok(format!(
@@ -3081,7 +3833,9 @@ impl ToolGateway {
         }
         let mut guard = self.browser.lock().await;
         if guard.is_none() {
-            match crate::browser::BrowserSession::launch(&self.browser_cfg, &self.workspace_root).await {
+            match crate::browser::BrowserSession::launch(&self.browser_cfg, &self.workspace_root)
+                .await
+            {
                 Ok(s) => *guard = Some(s),
                 Err(e) => return ToolResult::err(format!("启动浏览器失败：{e}")),
             }
@@ -3098,7 +3852,11 @@ impl ToolGateway {
             .unwrap_or(max_default);
         match op {
             "open" => {
-                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let url = args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
                 if !(url.starts_with("http://")
                     || url.starts_with("https://")
                     || url.starts_with("file://")
@@ -3121,7 +3879,10 @@ impl ToolGateway {
                 Err(e) => ToolResult::err(format!("读取页面失败：{e}")),
             },
             "eval" => {
-                let expr = args.get("expression").and_then(|v| v.as_str()).unwrap_or("");
+                let expr = args
+                    .get("expression")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if expr.trim().is_empty() {
                     return ToolResult::err("eval 需要 expression");
                 }
@@ -3135,7 +3896,9 @@ impl ToolGateway {
                 match session.screenshot(&self.workspace_root, name).await {
                     Ok(rel) => {
                         // 产物登记（D12）：截图自动进入会话 outbox，通道投递
-                        let _ = self.store.outbox_push(session_id, "image", &rel, "网页截图");
+                        let _ = self
+                            .store
+                            .outbox_push(session_id, "image", &rel, "网页截图");
                         ToolResult::ok(format!("截图已保存：{rel}（可用 read 查看路径，或用 browser screenshot 再次覆盖）"))
                     }
                     Err(e) => ToolResult::err(format!("截图失败：{e}")),
@@ -3155,10 +3918,28 @@ impl ToolGateway {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("list");
         match op {
             "create" => {
-                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                let expr = args.get("cron").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-                let at = args.get("at").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                let name = args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let prompt = args
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let expr = args
+                    .get("cron")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let at = args
+                    .get("at")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
                 if name.is_empty() || prompt.is_empty() {
                     return ToolResult::err("create 需要 name 与 prompt");
                 }
@@ -3233,7 +4014,12 @@ impl ToolGateway {
                 Err(e) => ToolResult::err(format!("读取排程失败: {e}")),
             },
             "remove" | "enable" | "disable" => {
-                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                let id = args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if id.is_empty() {
                     return ToolResult::err(format!("{op} 需要 id"));
                 }
@@ -3248,7 +4034,10 @@ impl ToolGateway {
                     Ok(Some(mut job)) => {
                         job.enabled = op == "enable";
                         match cron.upsert(job) {
-                            Ok(_) => ToolResult::ok(format!("已{}排程：{id}", if op == "enable" { "启用" } else { "停用" })),
+                            Ok(_) => ToolResult::ok(format!(
+                                "已{}排程：{id}",
+                                if op == "enable" { "启用" } else { "停用" }
+                            )),
                             Err(e) => ToolResult::err(format!("更新失败: {e}")),
                         }
                     }
@@ -3256,7 +4045,9 @@ impl ToolGateway {
                     Err(e) => ToolResult::err(format!("读取失败: {e}")),
                 }
             }
-            other => ToolResult::err(format!("未知 schedule 操作: {other}（支持 create/list/remove/enable/disable）")),
+            other => ToolResult::err(format!(
+                "未知 schedule 操作: {other}（支持 create/list/remove/enable/disable）"
+            )),
         }
     }
 }
@@ -3329,7 +4120,11 @@ fn human_size(n: u64) -> String {
 /// glob 非空时只保留匹配项（`*.rs` 这类裸模式自动补 `**/` 前缀）。
 fn build_walker(root: &Path, glob: &str) -> ignore::Walk {
     let mut builder = ignore::WalkBuilder::new(root);
-    builder.hidden(false).git_ignore(true).git_global(true).max_filesize(Some(4 * 1024 * 1024));
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .max_filesize(Some(4 * 1024 * 1024));
     if !glob.trim().is_empty() {
         let mut ov = ignore::overrides::OverrideBuilder::new(root);
         let pat = glob.trim();
@@ -3352,7 +4147,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for b in s.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
             b' ' => out.push_str("%20"),
             other => out.push_str(&format!("%{other:02X}")),
         }
@@ -3382,7 +4179,11 @@ fn placeholder_names(template: &str) -> Vec<String> {
 }
 
 /// 单趟插值：`{name}` → 处理后的值；未提供的占位（已在调用方兜底为空串）替换为空
-fn interpolate(template: &str, vals: &std::collections::BTreeMap<String, String>, f: impl Fn(&str) -> String) -> String {
+fn interpolate(
+    template: &str,
+    vals: &std::collections::BTreeMap<String, String>,
+    f: impl Fn(&str) -> String,
+) -> String {
     let mut out = String::with_capacity(template.len() + 32);
     let mut rest = template;
     while let Some(i) = rest.find('{') {
@@ -3407,7 +4208,23 @@ fn interpolate(template: &str, vals: &std::collections::BTreeMap<String, String>
 fn shell_unsafe_char(c: char) -> bool {
     matches!(
         c,
-        '"' | '\'' | '`' | '$' | '&' | '|' | ';' | '<' | '>' | '(' | ')' | '%' | '!' | '^' | '\\' | '\n' | '\r' | '\t'
+        '"' | '\''
+            | '`'
+            | '$'
+            | '&'
+            | '|'
+            | ';'
+            | '<'
+            | '>'
+            | '('
+            | ')'
+            | '%'
+            | '!'
+            | '^'
+            | '\\'
+            | '\n'
+            | '\r'
+            | '\t'
     )
 }
 
@@ -3441,7 +4258,9 @@ mod memory_tool_tests {
         let store = Arc::new(Store::open(dir.join("data")).unwrap());
         let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
         // 自定义测试组（内置组定义受保护，不可增删个体）：注册主智能体与个体
-        registry.create_group(Some("t".into()), "测试组", "").unwrap();
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
         let _ = registry.upsert_agent(
             "t",
             crate::types::AgentDefinition {
@@ -3467,8 +4286,63 @@ mod memory_tool_tests {
         registry.set_active_group("t").unwrap();
         let (events, _rx) = tokio::sync::broadcast::channel(64);
         let memory = Arc::new(crate::memory::MemoryStore::open(dir.join("data")).unwrap());
-        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default()).with_memory(memory);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default())
+            .with_memory(memory);
         TestRig { gw, dir }
+    }
+
+    /// 通道记忆隔离（memory_isolation）：memory_write/read 必须跟随会话分区，
+    /// 否则隔离平台的会话会把知识写进共享组、或读到共享组的记忆——隔离形同虚设。
+    #[test]
+    fn 记忆隔离_工具读写跟随会话分区() {
+        let r = rig();
+        let mk = |title: &str, body: &str| serde_json::json!({ "kind": "fact", "title": title, "body": body });
+        // 两个会话同组：shared 共享记忆；iso 开了隔离（模拟通道写入分区键）
+        let shared = r.gw.store.create_session("共享会话", "t").unwrap();
+        let iso = r.gw.store.create_session("隔离会话", "t").unwrap();
+        r.gw.store
+            .set_session_memory_partition(&iso.id, Some("t::channel:iso".into()))
+            .unwrap();
+
+        let a =
+            r.gw.tool_memory_write("orch-1", &shared.id, &mk("共享暗号", "shared-secret"));
+        assert!(a.ok, "{}", a.error.unwrap_or_default());
+        let b =
+            r.gw.tool_memory_write("orch-1", &iso.id, &mk("隔离暗号", "iso-secret"));
+        assert!(b.ok, "{}", b.error.unwrap_or_default());
+
+        // 写入落进各自命名空间（组键不同），互不可见
+        let sees_shared = r.gw.tool_memory_read(
+            "orch-1",
+            &shared.id,
+            &serde_json::json!({ "query": "暗号" }),
+        );
+        assert!(
+            sees_shared.output.contains("共享暗号"),
+            "共享会话应读到共享条目"
+        );
+        assert!(
+            !sees_shared.output.contains("隔离暗号"),
+            "共享会话不得读到隔离条目"
+        );
+        let sees_iso =
+            r.gw.tool_memory_read("orch-1", &iso.id, &serde_json::json!({ "query": "暗号" }));
+        assert!(
+            sees_iso.output.contains("隔离暗号"),
+            "隔离会话应读到隔离条目"
+        );
+        assert!(
+            !sees_iso.output.contains("共享暗号"),
+            "隔离会话不得读到共享条目"
+        );
+
+        // 关闭隔离立即回到共享：分区键被清除，随后写入/读取都归组
+        r.gw.store
+            .set_session_memory_partition(&iso.id, None)
+            .unwrap();
+        let back =
+            r.gw.tool_memory_read("orch-1", &iso.id, &serde_json::json!({ "query": "暗号" }));
+        assert!(back.output.contains("共享暗号"), "关闭隔离后应回到共享记忆");
     }
 
     fn def(identifier: &str, tier: Tier, tools: &[ToolName]) -> AgentDefinition {
@@ -3509,10 +4383,17 @@ mod memory_tool_tests {
     fn 工具面快照_主智能体默认可见记忆三工具() {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
-        for t in [ToolName::MemoryRead, ToolName::MemoryWrite, ToolName::MemoryLink] {
+        for t in [
+            ToolName::MemoryRead,
+            ToolName::MemoryWrite,
+            ToolName::MemoryLink,
+        ] {
             assert!(allow.contains(&t), "主智能体应默认获得 {t:?}（内置组）");
         }
-        assert!(!allow.contains(&ToolName::AgentManage), "内置组主智能体不获得个体管理工具");
+        assert!(
+            !allow.contains(&ToolName::AgentManage),
+            "内置组主智能体不获得个体管理工具"
+        );
 
         // 自定义组主智能体：记忆三工具 + 个体管理
         let allow2 = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", false)));
@@ -3524,15 +4405,28 @@ mod memory_tool_tests {
     fn 工具面快照_个体未经编成授权不可见() {
         let unit = def("unit-1", Tier::Unit, &[ToolName::Read, ToolName::Terminal]);
         let allow = ToolGateway::runtime_allowlist(&unit, Some(&group_meta("orch-1", true)));
-        assert!(!allow.contains(&ToolName::MemoryRead), "未授权个体不应看到记忆检索");
-        assert!(!allow.contains(&ToolName::MemoryWrite), "未授权个体不应看到记忆写入");
+        assert!(
+            !allow.contains(&ToolName::MemoryRead),
+            "未授权个体不应看到记忆检索"
+        );
+        assert!(
+            !allow.contains(&ToolName::MemoryWrite),
+            "未授权个体不应看到记忆写入"
+        );
         assert!(!allow.contains(&ToolName::MemoryLink));
 
         // 编成 JSON 显式授权：仅授权的工具可见（memory_write 授权但 memory_read 未授权）
-        let granted = def("unit-2", Tier::Unit, &[ToolName::Read, ToolName::MemoryWrite]);
+        let granted = def(
+            "unit-2",
+            Tier::Unit,
+            &[ToolName::Read, ToolName::MemoryWrite],
+        );
         let allow2 = ToolGateway::runtime_allowlist(&granted, Some(&group_meta("orch-1", true)));
         assert!(allow2.contains(&ToolName::MemoryWrite));
-        assert!(!allow2.contains(&ToolName::MemoryRead), "逐工具授权，不整组放行");
+        assert!(
+            !allow2.contains(&ToolName::MemoryRead),
+            "逐工具授权，不整组放行"
+        );
     }
 
     #[test]
@@ -3541,12 +4435,24 @@ mod memory_tool_tests {
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
         let specs = ToolGateway::tool_specs(&allow, false, false, false);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"memory_read") && names.contains(&"memory_write") && names.contains(&"memory_link"));
-        assert!(!names.contains(&"web_search"), "后端未就绪不下发（口径不因新工具改变）");
+        assert!(
+            names.contains(&"memory_read")
+                && names.contains(&"memory_write")
+                && names.contains(&"memory_link")
+        );
+        assert!(
+            !names.contains(&"web_search"),
+            "后端未就绪不下发（口径不因新工具改变）"
+        );
 
         // 未授权个体：schema 不含记忆工具
         let unit = def("unit-1", Tier::Unit, &[ToolName::Read]);
-        let specs2 = ToolGateway::tool_specs(&ToolGateway::runtime_allowlist(&unit, None), false, false, false);
+        let specs2 = ToolGateway::tool_specs(
+            &ToolGateway::runtime_allowlist(&unit, None),
+            false,
+            false,
+            false,
+        );
         assert!(specs2.iter().all(|s| !s.name.starts_with("memory_")));
     }
 
@@ -3554,16 +4460,28 @@ mod memory_tool_tests {
     fn 记忆写入_哈希去重提升既有条目() {
         let r = rig();
         let args = serde_json::json!({ "kind": "fact", "title": "部署约定", "body": "生产环境用 docker compose 部署", "tags": ["deploy"], "importance": 0.4 });
-        let out = r.gw.tool_memory_write("orch-1", &args);
+        let out = r.gw.tool_memory_write("orch-1", "test-session", &args);
         assert!(out.ok, "{}", out.error.unwrap_or_default());
-        let again = r.gw.tool_memory_write("orch-1", &args);
+        let again = r.gw.tool_memory_write("orch-1", "test-session", &args);
         assert!(again.ok);
         // 同内容二次写入：库内仅一条，重要性按既有规则提升（+0.08）
         let entries = r.gw.memory.as_ref().unwrap().list(None, 100).unwrap();
         assert_eq!(entries.len(), 1, "哈希去重：相同内容不得产生重复条目");
-        assert!(entries[0].importance > 0.4, "重复写入应提升重要性：{}", entries[0].importance);
-        assert_eq!(entries[0].source_ref.as_deref(), Some("agent"), "来源标注 source=agent");
-        assert_eq!(entries[0].agent_id.as_deref(), Some("orch-1"), "归属调用个体");
+        assert!(
+            entries[0].importance > 0.4,
+            "重复写入应提升重要性：{}",
+            entries[0].importance
+        );
+        assert_eq!(
+            entries[0].source_ref.as_deref(),
+            Some("agent"),
+            "来源标注 source=agent"
+        );
+        assert_eq!(
+            entries[0].agent_id.as_deref(),
+            Some("orch-1"),
+            "归属调用个体"
+        );
         assert_eq!(entries[0].group_id.as_deref(), Some("t"), "归属激活组");
     }
 
@@ -3571,32 +4489,62 @@ mod memory_tool_tests {
     fn 记忆检索_相关度排序与来源标注() {
         let r = rig();
         let mk = |t: &str, b: &str| serde_json::json!({ "kind": "fact", "title": t, "body": b });
-        r.gw.tool_memory_write("orch-1", &mk("redis 部署手册", "redis 用 compose 起单实例"));
-        r.gw.tool_memory_write("orch-1", &mk("前端构建", "npm run build:webui 产出 dist"));
-        r.gw.tool_memory_write("unit-1", &mk("redis 持久化教训", "redis 未开 AOF 重启丢数据"));
+        r.gw.tool_memory_write(
+            "orch-1",
+            "test-session",
+            &mk("redis 部署手册", "redis 用 compose 起单实例"),
+        );
+        r.gw.tool_memory_write(
+            "orch-1",
+            "test-session",
+            &mk("前端构建", "npm run build:webui 产出 dist"),
+        );
+        r.gw.tool_memory_write(
+            "unit-1",
+            "test-session",
+            &mk("redis 持久化教训", "redis 未开 AOF 重启丢数据"),
+        );
         // 群体共享条目（无个体归属）：来源应标 "组:t"
-        r.gw
-            .memory
+        r.gw.memory
             .as_ref()
             .unwrap()
-            .remember(&crate::memory::MemoryDraft::new(
-                crate::memory::MemoryKind::Fact,
-                "redis 端口约定",
-                "统一用 6379",
+            .remember(
+                &crate::memory::MemoryDraft::new(
+                    crate::memory::MemoryKind::Fact,
+                    "redis 端口约定",
+                    "统一用 6379",
+                )
+                .group("t"),
             )
-            .group("t"))
             .unwrap();
 
-        let out = r.gw.tool_memory_read("orch-1", &serde_json::json!({ "query": "redis", "limit": 5 }));
+        let out = r.gw.tool_memory_read(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "query": "redis", "limit": 5 }),
+        );
         assert!(out.ok, "{}", out.error.unwrap_or_default());
         let text = out.output;
-        assert!(text.contains("2 条命中") || text.contains("3 条命中"), "应含全部 redis 条目：{text}");
+        assert!(
+            text.contains("2 条命中") || text.contains("3 条命中"),
+            "应含全部 redis 条目：{text}"
+        );
         assert!(text.contains("redis 部署手册"), "标题命中应排前：{text}");
-        assert!(text.contains("个体:unit-1"), "主智能体可见个体私有层并标注来源：{text}");
+        assert!(
+            text.contains("个体:unit-1"),
+            "主智能体可见个体私有层并标注来源：{text}"
+        );
         assert!(text.contains("组:t"), "群体条目标注来源：{text}");
         // 个体视角：只见自己私有 + 群体，不见他体私有
-        let unit_view = r.gw.tool_memory_read("unit-1", &serde_json::json!({ "query": "redis" }));
-        assert!(unit_view.output.contains("redis 持久化教训"), "自己的私有层可见");
+        let unit_view = r.gw.tool_memory_read(
+            "unit-1",
+            "test-session",
+            &serde_json::json!({ "query": "redis" }),
+        );
+        assert!(
+            unit_view.output.contains("redis 持久化教训"),
+            "自己的私有层可见"
+        );
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 
@@ -3604,18 +4552,42 @@ mod memory_tool_tests {
     fn 记忆检索_越组隔离() {
         let r = rig();
         // 在 default 组写入一条
-        let w = r.gw.tool_memory_write("orch-1", &serde_json::json!({ "kind": "fact", "title": "机密暗号", "body": "仅 default 组可见的暗号 xyzzy" }));
+        let w = r.gw.tool_memory_write("orch-1", "test-session", &serde_json::json!({ "kind": "fact", "title": "机密暗号", "body": "仅 default 组可见的暗号 xyzzy" }));
         assert!(w.ok, "{}", w.error.unwrap_or_default());
-        assert!(r.gw.registry.create_group(Some("other".into()), "他组", "").is_ok());
+        assert!(r
+            .gw
+            .registry
+            .create_group(Some("other".into()), "他组", "")
+            .is_ok());
         r.gw.registry.set_active_group("other").unwrap();
-        let out = r.gw.tool_memory_read("orch-1", &serde_json::json!({ "query": "机密暗号 xyzzy" }));
-        assert!(out.output.contains("无命中"), "越组检索不得返回他组条目：{}", out.output);
+        let out = r.gw.tool_memory_read(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "query": "机密暗号 xyzzy" }),
+        );
+        assert!(
+            out.output.contains("无命中"),
+            "越组检索不得返回他组条目：{}",
+            out.output
+        );
         // 写入归属切换后的组：不串组
-        let w2 = r.gw.tool_memory_write("orch-1", &serde_json::json!({ "kind": "fact", "title": "他组约定", "body": "other 组的约定" }));
+        let w2 = r.gw.tool_memory_write(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "kind": "fact", "title": "他组约定", "body": "other 组的约定" }),
+        );
         assert!(w2.ok);
         r.gw.registry.set_active_group("exmachina").unwrap();
-        let back = r.gw.tool_memory_read("orch-1", &serde_json::json!({ "query": "他组约定" }));
-        assert!(back.output.contains("无命中"), "other 组条目不得泄漏进 default 视图：{}", back.output);
+        let back = r.gw.tool_memory_read(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "query": "他组约定" }),
+        );
+        assert!(
+            back.output.contains("无命中"),
+            "other 组条目不得泄漏进 default 视图：{}",
+            back.output
+        );
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 
@@ -3635,30 +4607,60 @@ mod memory_tool_tests {
     #[test]
     fn 记忆关联_建立与列示_越组拒绝() {
         let r = rig();
-        let mk = |t: &str, b: &str| serde_json::json!({ "kind": "decision", "title": t, "body": b });
-        let a = r.gw.tool_memory_write("orch-1", &mk("决策A", "采用方案 A"));
-        let b = r.gw.tool_memory_write("orch-1", &mk("决策B", "由 A 派生方案 B"));
-        assert!(a.ok && b.ok, "{} {}", a.error.unwrap_or_default(), b.error.unwrap_or_default());
+        let mk =
+            |t: &str, b: &str| serde_json::json!({ "kind": "decision", "title": t, "body": b });
+        let a =
+            r.gw.tool_memory_write("orch-1", "test-session", &mk("决策A", "采用方案 A"));
+        let b =
+            r.gw.tool_memory_write("orch-1", "test-session", &mk("决策B", "由 A 派生方案 B"));
+        assert!(
+            a.ok && b.ok,
+            "{} {}",
+            a.error.unwrap_or_default(),
+            b.error.unwrap_or_default()
+        );
         let id_a = id_of(&a);
         let id_b = id_of(&b);
-        assert!(!id_a.is_empty() && !id_b.is_empty(), "id 解析：{} / {}", a.output, b.output);
+        assert!(
+            !id_a.is_empty() && !id_b.is_empty(),
+            "id 解析：{} / {}",
+            a.output,
+            b.output
+        );
 
-        let link = r.gw.tool_memory_link("orch-1", &serde_json::json!({ "op": "link", "from": id_a, "to": id_b, "relation": "derives-from" }));
+        let link = r.gw.tool_memory_link("orch-1", "test-session", &serde_json::json!({ "op": "link", "from": id_a, "to": id_b, "relation": "derives-from" }));
         assert!(link.ok, "{}", link.error.unwrap_or_default());
 
         // 列示可见关联链
-        let list = r.gw.tool_memory_link("orch-1", &serde_json::json!({ "op": "list", "query": "决策", "limit": 10 }));
+        let list = r.gw.tool_memory_link(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "op": "list", "query": "决策", "limit": 10 }),
+        );
         assert!(list.ok);
-        assert!(list.output.contains("derives-from"), "列示应含关联链：{}", list.output);
+        assert!(
+            list.output.contains("derives-from"),
+            "列示应含关联链：{}",
+            list.output
+        );
 
         // 越组关联拒绝
-        assert!(r.gw.registry.create_group(Some("elsewhere".into()), "他组", "").is_ok());
+        assert!(r
+            .gw
+            .registry
+            .create_group(Some("elsewhere".into()), "他组", "")
+            .is_ok());
         r.gw.registry.set_active_group("elsewhere").unwrap();
-        let c = r.gw.tool_memory_write("orch-1", &mk("他组条目", "other 组的决策"));
+        let c =
+            r.gw.tool_memory_write("orch-1", "test-session", &mk("他组条目", "other 组的决策"));
         r.gw.registry.set_active_group("exmachina").unwrap();
         assert!(c.ok);
         let id_c = id_of(&c);
-        let denied = r.gw.tool_memory_link("orch-1", &serde_json::json!({ "op": "link", "from": id_a, "to": id_c, "relation": "related" }));
+        let denied = r.gw.tool_memory_link(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "op": "link", "from": id_a, "to": id_c, "relation": "related" }),
+        );
         assert!(!denied.ok, "越组关联应被拒绝");
         assert!(denied.error.unwrap_or_default().contains("越组隔离"));
 
@@ -3668,9 +4670,17 @@ mod memory_tool_tests {
     #[test]
     fn 记忆写入_参数校验() {
         let r = rig();
-        let bad_kind = r.gw.tool_memory_write("orch-1", &serde_json::json!({ "kind": "nope", "title": "t", "body": "b" }));
+        let bad_kind = r.gw.tool_memory_write(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "kind": "nope", "title": "t", "body": "b" }),
+        );
         assert!(!bad_kind.ok, "非法类型应拒绝");
-        let no_body = r.gw.tool_memory_write("orch-1", &serde_json::json!({ "kind": "fact", "title": "t" }));
+        let no_body = r.gw.tool_memory_write(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "kind": "fact", "title": "t" }),
+        );
         assert!(!no_body.ok, "缺 body 应拒绝");
         let _ = std::fs::remove_dir_all(&r.dir);
     }
@@ -3695,20 +4705,38 @@ mod memory_tool_tests {
     #[test]
     fn 文件记忆模式_读取回落memory_md() {
         let r = file_mode(Some("# 记忆\n- 用中文汇报"));
-        let out = r.gw.tool_memory_read("orch-1", &serde_json::json!({ "query": "任意" }));
+        let out = r.gw.tool_memory_read(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "query": "任意" }),
+        );
         assert!(out.ok, "{}", out.error.unwrap_or_default());
-        assert!(out.output.contains("用中文汇报"), "应返回 memory.md 内容：{}", out.output);
-        assert!(out.output.contains("深层记忆已关闭"), "应标注文件记忆模式：{}", out.output);
+        assert!(
+            out.output.contains("用中文汇报"),
+            "应返回 memory.md 内容：{}",
+            out.output
+        );
+        assert!(
+            out.output.contains("深层记忆已关闭"),
+            "应标注文件记忆模式：{}",
+            out.output
+        );
 
         // 无文件：友好提示而非报错（文件模式下空记忆是正常态）
         let r2 = file_mode(None);
-        let out2 = r2.gw.tool_memory_read("orch-1", &serde_json::json!({ "query": "任意" }));
+        let out2 = r2.gw.tool_memory_read(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "query": "任意" }),
+        );
         assert!(out2.ok, "{}", out2.error.unwrap_or_default());
         assert!(out2.output.contains("尚无记忆内容"), "{}", out2.output);
 
         // 超长 memory.md：与规划注入同一 8000 字符上限并声明截断
         let r3 = file_mode(Some("长".repeat(20_000).as_str()));
-        let out3 = r3.gw.tool_memory_read("orch-1", &serde_json::json!({}));
+        let out3 = r3
+            .gw
+            .tool_memory_read("orch-1", "test-session", &serde_json::json!({}));
         assert!(out3.ok);
         assert!(out3.output.contains("已截断"), "超长 md 应声明截断");
 
@@ -3721,14 +4749,24 @@ mod memory_tool_tests {
     fn 文件记忆模式_写入关联拒绝并引导() {
         let r = file_mode(Some("已有内容"));
         let args = serde_json::json!({ "kind": "fact", "title": "t", "body": "b" });
-        let w = r.gw.tool_memory_write("orch-1", &args);
+        let w = r.gw.tool_memory_write("orch-1", "test-session", &args);
         assert!(!w.ok, "文件记忆模式下写库应拒绝（规划面不召回 = 写入黑洞）");
-        assert!(w.error.unwrap_or_default().contains("文件记忆模式"), "错误应引导用户：");
+        assert!(
+            w.error.unwrap_or_default().contains("文件记忆模式"),
+            "错误应引导用户："
+        );
 
-        let l = r.gw.tool_memory_link("orch-1", &serde_json::json!({ "op": "list" }));
+        let l = r.gw.tool_memory_link(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "op": "list" }),
+        );
         assert!(!l.ok, "文件记忆模式下关联应拒绝");
         // 拒绝是真拒绝：数据库确实没被写入
-        assert_eq!(r.gw.memory.as_ref().unwrap().list(None, 10).unwrap().len(), 0);
+        assert_eq!(
+            r.gw.memory.as_ref().unwrap().list(None, 10).unwrap().len(),
+            0
+        );
 
         let _ = std::fs::remove_dir_all(&r.dir);
     }
@@ -3743,43 +4781,86 @@ mod memory_tool_tests {
         assert!(deep.iter().any(|s| s.name == "memory_link"));
         // 文件模式：write/link 不承诺（必然失败的工具不下发），read 保留（读 md 有意义）
         let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false);
-        assert!(file.iter().any(|s| s.name == "memory_read"), "memory_read 保留");
-        assert!(!file.iter().any(|s| s.name == "memory_write"), "文件模式不下发 memory_write");
-        assert!(!file.iter().any(|s| s.name == "memory_link"), "文件模式不下发 memory_link");
+        assert!(
+            file.iter().any(|s| s.name == "memory_read"),
+            "memory_read 保留"
+        );
+        assert!(
+            !file.iter().any(|s| s.name == "memory_write"),
+            "文件模式不下发 memory_write"
+        );
+        assert!(
+            !file.iter().any(|s| s.name == "memory_link"),
+            "文件模式不下发 memory_link"
+        );
     }
 
     #[test]
     fn 列示空查询_分层不越权() {
         let r = rig();
         // unit-1 的私有记忆 + 一条群体记忆；unit-1 编成里显式授权三工具由 def() 提供
-        let mut draft = crate::memory::MemoryDraft::new(crate::memory::MemoryKind::Lesson, "unit私有", "只属于 unit-1");
+        let mut draft = crate::memory::MemoryDraft::new(
+            crate::memory::MemoryKind::Lesson,
+            "unit私有",
+            "只属于 unit-1",
+        );
         draft.agent_id = Some("unit-1".into());
         r.gw.memory.as_ref().unwrap().remember(&draft).unwrap();
-        r.gw
-            .memory
+        r.gw.memory
             .as_ref()
             .unwrap()
-            .remember(&crate::memory::MemoryDraft::new(crate::memory::MemoryKind::Fact, "群体事实", "无归属共享").group("t"))
+            .remember(
+                &crate::memory::MemoryDraft::new(
+                    crate::memory::MemoryKind::Fact,
+                    "群体事实",
+                    "无归属共享",
+                )
+                .group("t"),
+            )
             .unwrap();
 
         // 个体空查询列示：见群体，不见他人（主智能体 orch-1）尚未写私有 → 只验不泄漏
-        let out = r.gw.tool_memory_link("unit-1", &serde_json::json!({ "op": "list", "query": "" }));
+        let out = r.gw.tool_memory_link(
+            "unit-1",
+            "test-session",
+            &serde_json::json!({ "op": "list", "query": "" }),
+        );
         assert!(out.ok, "{}", out.error.unwrap_or_default());
-        assert!(out.output.contains("群体事实"), "个体列示应含群体条目：{}", out.output);
+        assert!(
+            out.output.contains("群体事实"),
+            "个体列示应含群体条目：{}",
+            out.output
+        );
 
         // 主智能体再写一条私有；unit-1 的空查询列示不得看到
-        let mut o = crate::memory::MemoryDraft::new(crate::memory::MemoryKind::Fact, "orch私有", "只属于 orch-1");
+        let mut o = crate::memory::MemoryDraft::new(
+            crate::memory::MemoryKind::Fact,
+            "orch私有",
+            "只属于 orch-1",
+        );
         o.agent_id = Some("orch-1".into());
         r.gw.memory.as_ref().unwrap().remember(&o).unwrap();
-        let out2 = r.gw.tool_memory_link("unit-1", &serde_json::json!({ "op": "list", "query": "" }));
+        let out2 = r.gw.tool_memory_link(
+            "unit-1",
+            "test-session",
+            &serde_json::json!({ "op": "list", "query": "" }),
+        );
         assert!(
             !out2.output.contains("orch私有"),
             "个体空查询列示不得泄漏主智能体私有记忆：{}",
             out2.output
         );
         // 主智能体全层视角：双方私有都可见
-        let out3 = r.gw.tool_memory_link("orch-1", &serde_json::json!({ "op": "list", "query": "" }));
-        assert!(out3.output.contains("orch私有") && out3.output.contains("unit私有"), "主智能体全层列示：{}", out3.output);
+        let out3 = r.gw.tool_memory_link(
+            "orch-1",
+            "test-session",
+            &serde_json::json!({ "op": "list", "query": "" }),
+        );
+        assert!(
+            out3.output.contains("orch私有") && out3.output.contains("unit私有"),
+            "主智能体全层列示：{}",
+            out3.output
+        );
 
         let _ = std::fs::remove_dir_all(&r.dir);
     }
@@ -3795,15 +4876,26 @@ mod memory_tool_tests {
         assert!(ok.output.contains("共 3 行"));
 
         // 越界 offset：给可行动的提示而非「已显示第 无 行」
-        let beyond = r.gw.tool_read(&serde_json::json!({ "path": "sample.txt", "offset": 99 }));
+        let beyond =
+            r.gw.tool_read(&serde_json::json!({ "path": "sample.txt", "offset": 99 }));
         assert!(beyond.ok, "{}", beyond.error.unwrap_or_default());
         assert!(beyond.output.contains("超出文件末尾"), "{}", beyond.output);
-        assert!(beyond.output.contains("offset≤3"), "应提示合法上界：{}", beyond.output);
+        assert!(
+            beyond.output.contains("offset≤3"),
+            "应提示合法上界：{}",
+            beyond.output
+        );
 
         // maxChars 传超大值：被钳到硬上限，不绕过单次读取预算（小文件内容不受影响）
-        let clamped = r.gw.tool_read(&serde_json::json!({ "path": "sample.txt", "maxChars": 1_000_000_000u64 }));
+        let clamped = r
+            .gw
+            .tool_read(&serde_json::json!({ "path": "sample.txt", "maxChars": 1_000_000_000u64 }));
         assert!(clamped.ok, "{}", clamped.error.unwrap_or_default());
-        assert!(clamped.output.contains("l3"), "小文件不受钳制影响：{}", clamped.output);
+        assert!(
+            clamped.output.contains("l3"),
+            "小文件不受钳制影响：{}",
+            clamped.output
+        );
 
         let _ = std::fs::remove_dir_all(&r.dir);
     }
@@ -3836,14 +4928,21 @@ mod timeout_output_tests {
             err.contains("out-start"),
             "超时错误应包含终止前的部分输出，实际: {err}"
         );
-        assert!(elapsed < std::time::Duration::from_secs(10), "应在时限附近快速返回，实际 {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "应在时限附近快速返回，实际 {elapsed:?}"
+        );
     }
 
     /// 正常路径不受影响：快速完成的命令照常返回成功输出
     #[tokio::test]
     async fn 终端超时_正常完成不受影响() {
         let root = std::env::temp_dir();
-        let cmd = if cfg!(windows) { "echo quick-ok" } else { "echo quick-ok" };
+        let cmd = if cfg!(windows) {
+            "echo quick-ok"
+        } else {
+            "echo quick-ok"
+        };
         let r = execute_shell_command_timed(&root, cmd, 15).await;
         assert!(r.ok, "快速命令应成功");
         assert!(r.output.contains("quick-ok"), "输出应完整: {}", r.output);
@@ -3867,7 +4966,11 @@ mod timeout_output_tests {
         assert!(err.contains("退出码 3"), "错误应含退出码: {err}");
         assert!(err.contains("boom"), "错误应含 stderr 摘要: {err}");
         assert!(err.contains("out-tail"), "错误应含 stdout 尾部摘要: {err}");
-        assert!(r.output.contains("out-tail"), "output 保留原文（向后兼容）: {}", r.output);
+        assert!(
+            r.output.contains("out-tail"),
+            "output 保留原文（向后兼容）: {}",
+            r.output
+        );
     }
 
     /// 超长输出截断必须带标记：模型不得把半截输出当完整结论
@@ -3878,14 +4981,21 @@ mod timeout_output_tests {
         let cmd = if cfg!(windows) {
             "cmd /C \"for /L %i in (1,1,1500) do @echo aaaaaaaaaaaaaaaaaaaa-%i\"".to_string()
         } else {
-            "i=0; while [ $i -lt 1500 ]; do echo aaaaaaaaaaaaaaaaaaaa-$i; i=$((i+1)); done".to_string()
+            "i=0; while [ $i -lt 1500 ]; do echo aaaaaaaaaaaaaaaaaaaa-$i; i=$((i+1)); done"
+                .to_string()
         };
         let r = execute_shell_command_timed(&root, &cmd, 30).await;
         assert!(r.ok, "{}", r.error.unwrap_or_default());
         assert!(r.output.contains("输出已截断"), "超长输出必须带截断标记");
-        assert!(r.output.contains("aaaaaaaaaaaaaaaaaaaa-0"), "截断应保留头部");
+        assert!(
+            r.output.contains("aaaaaaaaaaaaaaaaaaaa-0"),
+            "截断应保留头部"
+        );
         let tail = &r.output[r.output.len().saturating_sub(400)..];
-        assert!(!tail.contains("-1499"), "尾部内容应被截掉，实际尾部: {tail}");
+        assert!(
+            !tail.contains("-1499"),
+            "尾部内容应被截掉，实际尾部: {tail}"
+        );
     }
 }
 
@@ -3899,13 +5009,35 @@ mod terminal_gate_tests {
     fn 白名单_日常开发命令放行() {
         // 本轮修复核心场景：mkdir/cat/go/pytest/tsc 等此前全部被硬拒
         for cmd in [
-            "cat README.md", "mkdir -p src/new", "cp a.rs b.rs", "mv old.rs new.rs",
-            "touch main.go", "diff -u a.rs b.rs", "grep -rn TODO src", "find . -name x",
-            "go build ./...", "go test ./...", "pytest -x", "jest", "vitest run",
-            "tsc --noEmit", "rg pattern", "which cargo", "uname -a",
-            "cargo check", "cargo test", "git status", "git diff", "ls -la",
-            "npm run build", "node script.js", "python3 -m venv .venv",
-            "make", "cmake .", "dotnet build", "mvn package",
+            "cat README.md",
+            "mkdir -p src/new",
+            "cp a.rs b.rs",
+            "mv old.rs new.rs",
+            "touch main.go",
+            "diff -u a.rs b.rs",
+            "grep -rn TODO src",
+            "find . -name x",
+            "go build ./...",
+            "go test ./...",
+            "pytest -x",
+            "jest",
+            "vitest run",
+            "tsc --noEmit",
+            "rg pattern",
+            "which cargo",
+            "uname -a",
+            "cargo check",
+            "cargo test",
+            "git status",
+            "git diff",
+            "ls -la",
+            "npm run build",
+            "node script.js",
+            "python3 -m venv .venv",
+            "make",
+            "cmake .",
+            "dotnet build",
+            "mvn package",
         ] {
             assert!(terminal_allowed(cmd), "日常开发命令应放行: {cmd}");
         }
@@ -3913,7 +5045,15 @@ mod terminal_gate_tests {
 
     #[test]
     fn 白名单_危险与未知命令不放行() {
-        for cmd in ["rm -rf /", "curl http://x", "wget x", "chmod 777 a", "sudo rm x", "vim", "unknown-cmd"] {
+        for cmd in [
+            "rm -rf /",
+            "curl http://x",
+            "wget x",
+            "chmod 777 a",
+            "sudo rm x",
+            "vim",
+            "unknown-cmd",
+        ] {
             assert!(!terminal_allowed(cmd), "不应放行: {cmd}");
         }
     }
@@ -3947,9 +5087,15 @@ mod terminal_gate_tests {
     async fn 审批路径_off档_白名单外命令直接拒绝() {
         let gw = gw_with_approval("off", 0);
         let r = gw
-            .execute("a1", "s1", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
-                "command": "unknown-cmd --flag"
-            }))
+            .execute(
+                "a1",
+                "s1",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": "unknown-cmd --flag"
+                }),
+            )
             .await;
         assert!(!r.ok, "off 档白名单外应拒绝");
         assert!(r.error.unwrap_or_default().contains("不在白名单"));
@@ -3961,29 +5107,55 @@ mod terminal_gate_tests {
     async fn 审批路径_risky档_白名单外命令转审批() {
         let gw = gw_with_approval("risky", 0);
         let r = gw
-            .execute("a1", "s2", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
-                "command": "terraform apply"
-            }))
+            .execute(
+                "a1",
+                "s2",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": "terraform apply"
+                }),
+            )
             .await;
         assert!(!r.ok, "未批准前不应放行");
         let err = r.error.unwrap_or_default();
         assert!(err.contains("审批"), "应转审批而非白名单硬拒: {err}");
         // 审批单确实落库（用户可在面板批准）
-        let pending = gw.store.list_approvals(Some("pending"), 10).unwrap_or_default();
-        assert!(pending.iter().any(|p| p.command.contains("terraform")), "审批单应已落库");
+        let pending = gw
+            .store
+            .list_approvals(Some("pending"), 10)
+            .unwrap_or_default();
+        assert!(
+            pending.iter().any(|p| p.command.contains("terraform")),
+            "审批单应已落库"
+        );
     }
 
     /// risky 档：白名单内安全命令不受影响，照常执行
     #[tokio::test]
     async fn 审批路径_risky档_白名单内命令照常执行() {
         let gw = gw_with_approval("risky", 0);
-        let cmd = if cfg!(windows) { "echo hello" } else { "echo hello" };
+        let cmd = if cfg!(windows) {
+            "echo hello"
+        } else {
+            "echo hello"
+        };
         let r = gw
-            .execute("a1", "s3", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
-                "command": cmd
-            }))
+            .execute(
+                "a1",
+                "s3",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": cmd
+                }),
+            )
             .await;
-        assert!(r.ok, "白名单内命令应直接执行: {}", r.error.unwrap_or_default());
+        assert!(
+            r.ok,
+            "白名单内命令应直接执行: {}",
+            r.error.unwrap_or_default()
+        );
         assert!(r.output.contains("hello"));
     }
 
@@ -3992,11 +5164,20 @@ mod terminal_gate_tests {
     async fn 审批路径_risky档_白名单内高危命令仍审批() {
         let gw = gw_with_approval("risky", 0);
         let r = gw
-            .execute("a1", "s4", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({
-                "command": "git reset --hard HEAD"
-            }))
+            .execute(
+                "a1",
+                "s4",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": "git reset --hard HEAD"
+                }),
+            )
             .await;
         assert!(!r.ok);
-        assert!(r.error.unwrap_or_default().contains("审批"), "白名单内高危命令应走审批闸门");
+        assert!(
+            r.error.unwrap_or_default().contains("审批"),
+            "白名单内高危命令应走审批闸门"
+        );
     }
 }
