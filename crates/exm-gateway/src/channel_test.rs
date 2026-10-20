@@ -15,19 +15,39 @@ pub struct TestResult {
 }
 
 fn missing(what: &str) -> TestResult {
-    TestResult { ok: false, category: "missing", identity: None, message: format!("凭证或配置缺失：{what}") }
+    TestResult {
+        ok: false,
+        category: "missing",
+        identity: None,
+        message: format!("凭证或配置缺失：{what}"),
+    }
 }
 
 fn network(e: impl std::fmt::Display) -> TestResult {
-    TestResult { ok: false, category: "network", identity: None, message: format!("网络不可达：{e}") }
+    TestResult {
+        ok: false,
+        category: "network",
+        identity: None,
+        message: format!("网络不可达：{e}"),
+    }
 }
 
 fn auth_fail(detail: String) -> TestResult {
-    TestResult { ok: false, category: "auth", identity: None, message: format!("凭证无效：{}", detail.chars().take(160).collect::<String>()) }
+    TestResult {
+        ok: false,
+        category: "auth",
+        identity: None,
+        message: format!("凭证无效：{}", detail.chars().take(160).collect::<String>()),
+    }
 }
 
 fn ok(identity: String) -> TestResult {
-    TestResult { ok: true, category: "ok", identity: Some(identity), message: "连通正常".into() }
+    TestResult {
+        ok: true,
+        category: "ok",
+        identity: Some(identity),
+        message: "连通正常".into(),
+    }
 }
 
 fn http_client() -> reqwest::Client {
@@ -61,36 +81,80 @@ pub async fn probe(_core: &Core, ch: &Channel) -> TestResult {
                 (false, None) => missing("访问令牌"),
             }
         }
+        // 视频平台：登录态 / Data API 只读探针（不发布任何内容）
+        "bilibili" => match crate::video::probe_bilibili(ch).await {
+            Ok(name) => ok(name),
+            Err(crate::video::ProbeError::Missing(what)) => missing(&what),
+            Err(crate::video::ProbeError::Auth(msg)) => auth_fail(msg),
+            Err(crate::video::ProbeError::Network(msg)) => network(msg),
+        },
+        "youtube" => match crate::video::probe_youtube(ch).await {
+            Ok(name) => ok(name),
+            Err(crate::video::ProbeError::Missing(what)) => missing(&what),
+            Err(crate::video::ProbeError::Auth(msg)) => auth_fail(msg),
+            Err(crate::video::ProbeError::Network(msg)) => network(msg),
+        },
         // 长连接平台：以适配器上报的运行时状态为准（连接成功即上报 ok）
         "napcat" | "qqbot" => match platform::status_of(&ch.id) {
             Some(st) if st.state == "ok" => ok(st.detail),
-            Some(st) => TestResult { ok: false, category: "network", identity: None, message: st.detail },
-            None => TestResult { ok: false, category: "network", identity: None, message: "适配器尚未建立连接（查看通道状态列）".into() },
+            Some(st) => TestResult {
+                ok: false,
+                category: "network",
+                identity: None,
+                message: st.detail,
+            },
+            None => TestResult {
+                ok: false,
+                category: "network",
+                identity: None,
+                message: "适配器尚未建立连接（查看通道状态列）".into(),
+            },
         },
         // webhook 桥接类：无平台侧探针可调，回显配置完整性
         "webhook" | "qq" | "wechat" => {
-            if ch.reply_webhook.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false) {
+            if ch
+                .reply_webhook
+                .as_deref()
+                .map(|u| !u.trim().is_empty())
+                .unwrap_or(false)
+            {
                 ok("回调地址已配置".into())
             } else {
                 missing("replyWebhook 回调地址")
             }
         }
-        other => TestResult { ok: false, category: "unsupported", identity: None, message: format!("未知平台类型：{other}") },
+        other => TestResult {
+            ok: false,
+            category: "unsupported",
+            identity: None,
+            message: format!("未知平台类型：{other}"),
+        },
     }
 }
 
 async fn probe_telegram(client: reqwest::Client, token: &str) -> TestResult {
-    match client.get(format!("https://api.telegram.org/bot{token}/getMe")).send().await {
+    match client
+        .get(format!("https://api.telegram.org/bot{token}/getMe"))
+        .send()
+        .await
+    {
         Ok(r) => {
             let status = r.status().as_u16();
             let body: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
             if status == 200 && body["ok"].as_bool().unwrap_or(false) {
-                let name = body.pointer("/result/username").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = body
+                    .pointer("/result/username")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 ok(name)
             } else if status == 401 || status == 403 {
                 auth_fail(format!("HTTP {status}"))
             } else {
-                auth_fail(format!("HTTP {status} {}", body.to_string().chars().take(100).collect::<String>()))
+                auth_fail(format!(
+                    "HTTP {status} {}",
+                    body.to_string().chars().take(100).collect::<String>()
+                ))
             }
         }
         Err(e) => network(e),
@@ -120,7 +184,12 @@ async fn probe_discord(client: reqwest::Client, token: &str) -> TestResult {
 }
 
 async fn probe_slack(client: reqwest::Client, token: &str) -> TestResult {
-    match client.post("https://slack.com/api/auth.test").bearer_auth(token).send().await {
+    match client
+        .post("https://slack.com/api/auth.test")
+        .bearer_auth(token)
+        .send()
+        .await
+    {
         Ok(r) => {
             let body: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
             if body["ok"].as_bool().unwrap_or(false) {
@@ -138,7 +207,10 @@ async fn probe_slack(client: reqwest::Client, token: &str) -> TestResult {
 }
 
 async fn probe_matrix(client: reqwest::Client, homeserver: &str, token: &str) -> TestResult {
-    let url = format!("{}/_matrix/client/v3/account/whoami", homeserver.trim_end_matches('/'));
+    let url = format!(
+        "{}/_matrix/client/v3/account/whoami",
+        homeserver.trim_end_matches('/')
+    );
     match client.get(url).bearer_auth(token).send().await {
         Ok(r) => {
             let status = r.status().as_u16();
@@ -174,6 +246,8 @@ mod tests {
             token: token.map(|t| t.into()),
             config: Default::default(),
             group_gate: None,
+            capability: "computer".into(),
+            memory_isolation: false,
             created_at: String::new(),
         }
     }
@@ -199,7 +273,12 @@ mod tests {
                 _ => "凭证",
             })
         } else {
-            TestResult { ok: true, category: "ok", identity: None, message: String::new() }
+            TestResult {
+                ok: true,
+                category: "ok",
+                identity: None,
+                message: String::new(),
+            }
         }
     }
 
@@ -242,9 +321,19 @@ mod tests {
         // token 缺失走 missing 分支（不发起网络）
         let token = ch.token.as_deref().map(str::trim).filter(|t| !t.is_empty());
         if token.is_none() {
-            return TestResult { ok: false, category: "missing", identity: None, message: String::new() };
+            return TestResult {
+                ok: false,
+                category: "missing",
+                identity: None,
+                message: String::new(),
+            };
         }
-        TestResult { ok: true, category: "ok", identity: None, message: String::new() }
+        TestResult {
+            ok: true,
+            category: "ok",
+            identity: None,
+            message: String::new(),
+        }
     }
 }
 
@@ -259,8 +348,15 @@ use serde_json::json;
 
 /// 通道连通测试（POST /api/channels/:id/test）
 pub async fn test_channel(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    let Some(ch) = platform::load_channels(&st.core).into_iter().find(|c| c.id == id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "通道不存在" }))).into_response();
+    let Some(ch) = platform::load_channels(&st.core)
+        .into_iter()
+        .find(|c| c.id == id)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "通道不存在" })),
+        )
+            .into_response();
     };
     if !ch.enabled {
         return (
