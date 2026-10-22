@@ -30,6 +30,9 @@ pub struct AgentPatch {
     pub capabilities: Option<Vec<String>>,
     pub tools: Option<Vec<ToolName>>,
     pub model_hint: Option<String>,
+    /// 连结体代理绑定（智能连结网络）：None = 不动；Some(None) = 解绑；
+    /// Some(Some(link_id)) = 绑定（校验由调用面承担——gateway 持有 config）
+    pub link: Option<Option<String>>,
 }
 
 impl AgentPatch {
@@ -63,6 +66,9 @@ impl AgentPatch {
         if let Some(v) = self.model_hint.as_deref() {
             let t = v.trim();
             def.model_hint = if t.is_empty() { None } else { Some(t.to_string()) };
+        }
+        if let Some(v) = &self.link {
+            def.link = v.clone();
         }
     }
 }
@@ -1354,6 +1360,81 @@ impl LocalRegistry {
         std::fs::write(&path, serde_json::to_string_pretty(def)?)
             .with_context(|| format!("写入个体定义失败: {}", path.display()))?;
         Ok(def.clone())
+    }
+
+    // ---------------- 智能连结网络：连结体代理绑定 ----------------
+
+    /// 绑定/解绑连结体代理（校验 + 落盘一次完成）。
+    /// Some(link_id) 绑定（须存在于 valid_links）；None 解绑。
+    /// 校验放调用面（gateway 持有 config）——registry 不反向依赖配置热更新。
+    pub fn set_agent_link(
+        &self,
+        identifier: &str,
+        link_id: Option<&str>,
+        valid_links: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<AgentDefinition> {
+        if let Some(id) = link_id {
+            let t = id.trim();
+            if t.is_empty() {
+                anyhow::bail!("连结体 id 不能为空");
+            }
+            if !valid_links.contains(t) {
+                anyhow::bail!("连结体不存在: {t}（先在「智能连结」页添加）");
+            }
+        }
+        let patch = AgentPatch {
+            name: None,
+            domain: None,
+            description: None,
+            capabilities: None,
+            tools: None,
+            model_hint: None,
+            link: Some(link_id.map(str::to_string)),
+        };
+        self.update_agent(identifier, &patch)
+    }
+
+    /// 连结体被删除后清理死绑定：所有指向 removed_link 的个体 link 置空（含智能体与组内个体）
+    pub fn prune_stale_links(&self, removed_link: &str) -> usize {
+        let mut n = 0;
+        // 智能体
+        {
+            let mut singles = self.singles.write();
+            for def in singles.values_mut() {
+                if def.link.as_deref() == Some(removed_link) {
+                    def.link = None;
+                    n += 1;
+                    let p = self.single_def_path(def.identifier.as_str());
+                    if let Ok(text) = serde_json::to_string_pretty(def) {
+                        let _ = std::fs::write(&p, text);
+                    }
+                }
+            }
+        }
+        // 组内个体
+        {
+            let mut groups = self.groups.write();
+            for g in groups.values_mut() {
+                let mut dirty = false;
+                for def in g.defs.values_mut() {
+                    if def.link.as_deref() == Some(removed_link) {
+                        def.link = None;
+                        dirty = true;
+                        n += 1;
+                    }
+                }
+                if dirty {
+                    // 落盘：组目录下每个体一个 json，逐个重写
+                    for def in g.defs.values() {
+                        let p = Self::def_path_in(&g.dir, def.identifier.as_str());
+                        if let Ok(text) = serde_json::to_string_pretty(def) {
+                            let _ = std::fs::write(&p, text);
+                        }
+                    }
+                }
+            }
+        }
+        n
     }
 
     /// 指定组内主智能体：**仅供系统内部调用**（建组、组的首个个体、装载修正）。

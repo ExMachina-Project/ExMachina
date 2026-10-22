@@ -100,9 +100,26 @@ pub struct SingleBody {
     /// 默认模型（"档案ID" 或 "档案ID/模型名"；缺省 = 跟随全局生效档案）
     #[serde(default)]
     pub model: Option<String>,
+    /// 连结体代理绑定（智能连结网络）：提供即绑定（校验存在）
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 pub async fn create_single(State(st): State<AppState>, Json(b): Json<SingleBody>) -> impl IntoResponse {
+    // 连结体代理绑定校验：link_id 必须指向已存在的连结体
+    let link = match b.link.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some(id) => {
+            if !st.core.config().nexus.links.iter().any(|l| l.id == id) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("连结体不存在: {id}（先在「智能连结」页添加）") })),
+                )
+                    .into_response();
+            }
+            Some(id.to_string())
+        }
+        None => None,
+    };
     let def = AgentDefinition {
         name: b.name,
         identifier: b.identifier,
@@ -118,7 +135,7 @@ pub async fn create_single(State(st): State<AppState>, Json(b): Json<SingleBody>
         output_schema: Default::default(),
         prompt_file: String::new(),
         model_hint: b.model.filter(|s| !s.trim().is_empty()),
-        link: None,
+        link,
     };
     match st.core.registry().upsert_single(def, b.prompt) {
         Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
@@ -141,6 +158,16 @@ pub async fn update_single(
     Path(id): Path<String>,
     Json(b): Json<crate::AgentUpdateBody>,
 ) -> impl IntoResponse {
+    // 连结体代理绑定校验（与 update_agent 同口径）
+    if let Some(link_id) = b.link.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if !st.core.config().nexus.links.iter().any(|l| l.id == link_id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("连结体不存在: {link_id}（先在「智能连结」页添加）") })),
+            )
+                .into_response();
+        }
+    }
     match st.core.registry().update_agent(&id, &b.into_patch()) {
         Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),

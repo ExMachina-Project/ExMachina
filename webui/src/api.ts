@@ -252,6 +252,12 @@ export interface NexusLink {
   enabled: boolean;
 }
 
+/** 连通性测试结果 */
+export interface NexusProbeResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   sessionId: string;
@@ -442,6 +448,9 @@ export const api = {
   saveNexusLink: (body: NexusLink) =>
     req<{ ok: boolean; link: NexusLink }>("/nexus/links", { method: "POST", body: JSON.stringify(body) }),
   deleteNexusLink: (id: string) => req<{ ok: boolean }>(`/nexus/links/${id}`, { method: "DELETE" }),
+  /** 连通性测试：地址可达 / 鉴权通过 / 命令存在（秒级，不做任务级执行） */
+  probeNexusLink: (id: string) =>
+    req<NexusProbeResult>(`/nexus/links/${id}/probe`, { method: "POST" }),
   stopSession: (id: string) =>
     req<{ ok: boolean; toolsExecuted: number }>(`/sessions/${id}/stop`, { method: "POST", body: JSON.stringify({}) }),
   audit: (params: { agent?: string; tool?: string; limit?: number }) =>
@@ -556,15 +565,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
-  /** 更新个体可编辑字段（name/domain/description/capabilities/tools/modelHint；identifier/tier/promptFile 不可改） */
+  /** 更新个体可编辑字段（name/domain/description/capabilities/tools/modelHint/link；identifier/tier/promptFile 不可改） */
   updateAgent: (
     identifier: string,
-    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
+    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string; link?: string },
   ) => req<AgentDefinition>(`/agents/${identifier}`, { method: "PUT", body: JSON.stringify(body) }),
   /** 更新智能体可编辑字段（同 updateAgent 字段集） */
   updateSingle: (
     id: string,
-    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
+    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string; link?: string },
   ) => req<AgentDefinition>(`/singles/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   setGroupModel: (gid: string, model: string) =>
     req<{ ok: boolean }>(`/groups/${gid}/model`, {
@@ -576,7 +585,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
-  createSingle: (body: { name: string; identifier: string; description: string; domain?: string; prompt?: string }) =>
+  createSingle: (body: { name: string; identifier: string; description: string; domain?: string; prompt?: string; link?: string }) =>
     req<AgentDefinition>("/singles", { method: "POST", body: JSON.stringify(body) }),
   deleteSingle: (id: string) => req<{ ok: boolean }>(`/singles/${id}`, { method: "DELETE" }),
   groupOverview: (gid: string) => req<GroupOverview>(`/groups/${gid}/overview`),
