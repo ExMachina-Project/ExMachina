@@ -613,13 +613,13 @@ function renderChrome() {
   if (!tel) return;
   tel.innerHTML =
     `<span class="tel-brand">${brandMark("", 12)}EXM</span>` +
-    `<span class="tel-seg"><span class="tel-led ${S.connected ? "" : "err"}"></span>` +
+    `<span class="tel-seg tel-link"><span class="tel-led ${S.connected ? "" : "err"}"></span>` +
     `<span class="tel-k">LINK</span><span class="tel-v ${S.connected ? "ok" : "err"}">${S.connected ? "ONLINE" : "RECONN"}</span></span>` +
-    `<span class="tel-seg"><span class="tel-k">TGT</span><span class="tel-v">${esc(target)}</span></span>` +
-    `<span class="tel-seg"><span class="tel-k">SESS</span><span class="tel-v">${nSess}</span></span>` +
-    `<span class="tel-seg"><span class="tel-k">MODEL</span><span class="tel-v ${model === "未配置" ? "warn" : ""}">${esc(model)}</span></span>` +
+    `<span class="tel-seg tel-tgt"><span class="tel-k">TGT</span><span class="tel-v">${esc(target)}</span></span>` +
+    `<span class="tel-seg tel-sess"><span class="tel-k">SESS</span><span class="tel-v">${nSess}</span></span>` +
+    `<span class="tel-seg tel-model"><span class="tel-k">MODEL</span><span class="tel-v ${model === "未配置" ? "warn" : ""}">${esc(model)}</span></span>` +
     `<span class="tel-spacer"></span>` +
-    `<span class="tel-seg sys"><span class="tel-k">VER</span><span class="tel-v">${esc(chromeVer || "dev")}</span></span>`;
+    `<span class="tel-seg sys tel-ver"><span class="tel-k">VER</span><span class="tel-v">${esc(chromeVer || "dev")}</span></span>`;
   // 遥测条是对话视图的常驻底栏；独立整页（设置 / 编码 / 任务）各自独占窗口，隐藏之
   tel.classList.toggle("hidden", S.view !== "chat");
 }
@@ -954,6 +954,7 @@ function alertErr(e) {
 
 async function selectSession(id) {
   S.sessionId = id;
+  if (isNarrowSide()) closeSidebar();
   resetLive();
   setRunning(false);
   S.graph = null;
@@ -1019,8 +1020,8 @@ const ST_LABELS = {
 
 function scheduleRight(force) {
   if (!S.running && !S.graph?.nodes?.length) { renderRight(); return; }
-  // 有活动任务时确保面板可见
-  if (!S.rightOpen && (S.running || activeNodeCount() > 0)) setRightOpen(true);
+  // 窄窗不自动弹抽屉，避免执行面板盖住对话
+  if (!isNarrowRight() && !S.rightOpen && (S.running || activeNodeCount() > 0)) setRightOpen(true);
   if (scheduleRight.timer) { if (!force) return; clearTimeout(scheduleRight.timer); }
   scheduleRight.timer = setTimeout(() => { scheduleRight.timer = null; renderRight(); }, 120);
 }
@@ -1029,11 +1030,39 @@ function activeNodeCount() {
   return (S.graph?.nodes ?? []).filter((n) => ["dispatched", "running", "syncing", "arbitrating"].includes(n.status)).length;
 }
 
-function setRightOpen(on) {
+function storedRightOpen() {
+  try { return localStorage.getItem("exm.rightOpen") !== "0"; } catch { return true; }
+}
+
+function isNarrowSide() {
+  return window.matchMedia("(max-width: 900px)").matches;
+}
+
+function isNarrowRight() {
+  return window.matchMedia("(max-width: 1240px)").matches;
+}
+
+function syncBackdrop() {
+  const backdrop = $("drawer-backdrop");
+  if (!backdrop) return;
+  const inChat = S.view === "chat";
+  const sideOpen = inChat && isNarrowSide() && !$("sidebar").classList.contains("collapsed");
+  const rightOpen = inChat && isNarrowRight() && S.rightOpen;
+  backdrop.classList.toggle("hidden", !(sideOpen || rightOpen));
+}
+
+function closeSidebar() {
+  $("sidebar").classList.add("collapsed");
+  syncBackdrop();
+}
+
+function setRightOpen(on, persist = true) {
   S.rightOpen = on;
-  try { localStorage.setItem("exm.rightOpen", on ? "1" : "0"); } catch { /* 忽略 */ }
+  if (persist) try { localStorage.setItem("exm.rightOpen", on ? "1" : "0"); } catch { /* 忽略 */ }
+  if (on && isNarrowSide()) $("sidebar").classList.add("collapsed");
   $("rightpanel").classList.toggle("collapsed", !on);
   $("btn-right").classList.toggle("on", on);
+  syncBackdrop();
 }
 
 // 右栏动效签名（流式期间 120ms 重建频繁：状态集合没变就不重放入场动画）
@@ -1045,16 +1074,6 @@ function renderRight() {
   const units = Object.entries(S.live.units);
   const unitThink = Object.entries(S.live.unitThinking);
   $("rp-count").textContent = nodes.length ? `${nodes.filter((n) => n.status === "done").length}/${nodes.length}` : "";
-  // 头部读数：节点 / 运行中 / 子个体流 —— 与底边遥测条同语汇
-  const rpR = $("rp-readouts");
-  if (rpR) {
-    const liveN = nodes.filter((n) => ["dispatched", "running", "syncing", "arbitrating"].includes(n.status)).length;
-    rpR.innerHTML = nodes.length || units.length || unitThink.length
-      ? `<span class="readout"><span class="k">NODES</span><span class="v">${nodes.length}</span></span>` +
-        `<span class="readout"><span class="k">LIVE</span><span class="v${liveN ? " warn" : ""}">${liveN}</span></span>` +
-        `<span class="readout"><span class="k">UNIT</span><span class="v">${units.length}</span></span>`
-      : "";
-  }
   if (!nodes.length && !units.length && !unitThink.length && !S.reports.length) {
     body.innerHTML = `<div class="rp-empty"><div class="empty-mark">${brandMark("", 34)}</div><div>本轮暂无派发任务<br/>指挥体拆解任务后，子个体的执行情况会在这里实时展示；点击个体卡可进入其会话</div></div>`;
     rightSig = "";
@@ -1134,6 +1153,10 @@ function showView(v) {
   // 编码页有未保存修改时，切走前先确认（切文件在 openFile、换目录在 applyWorkspace 各自拦截）
   if (S.view === "code" && v !== "code" && !confirmDiscardDirty("离开编码页")) return;
   S.view = v;
+  if (v !== "chat") {
+    if (isNarrowSide()) closeSidebar();
+    if (isNarrowRight() && S.rightOpen) setRightOpen(false, false);
+  }
   updateTopbar();
   // 独立整页（设置 / 编码 / 任务）接管整个窗口，chat 恢复三栏对话
   $("settings-page").classList.toggle("hidden", v !== "settings");
@@ -3687,7 +3710,13 @@ async function init() {
       alertErr(e);
     }
   });
-  $("btn-side").addEventListener("click", () => $("sidebar").classList.toggle("collapsed"));
+  $("btn-side").addEventListener("click", () => {
+    const side = $("sidebar");
+    const opening = side.classList.contains("collapsed");
+    side.classList.toggle("collapsed", !opening);
+    if (opening && isNarrowSide() && S.rightOpen) setRightOpen(false, false);
+    syncBackdrop();
+  });
   $("btn-settings").addEventListener("click", () => showView(S.view === "settings" ? "chat" : "settings"));
   // 界面音效开关：本地合成提示音，状态记忆 localStorage exm.sfx（默认开；prefers-reduced-motion 默认关）
   const paintSfx = () => { $("btn-sfx").textContent = sfx.enabled ? "🔊 音效" : "🔇 静音"; };
@@ -3698,7 +3727,24 @@ async function init() {
   });
   paintSfx();
   $("btn-right").addEventListener("click", () => setRightOpen(!S.rightOpen));
-  setRightOpen(S.rightOpen);
+  const sideMq = window.matchMedia("(max-width: 900px)");
+  const rightMq = window.matchMedia("(max-width: 1240px)");
+  if (sideMq.matches) $("sidebar").classList.add("collapsed");
+  setRightOpen(S.rightOpen && !rightMq.matches, false);
+  $("drawer-backdrop").addEventListener("click", () => {
+    $("sidebar").classList.add("collapsed");
+    if (isNarrowRight()) setRightOpen(false, false);
+    syncBackdrop();
+  });
+  sideMq.addEventListener("change", (e) => {
+    if (e.matches) closeSidebar();
+    else $("sidebar").classList.remove("collapsed");
+    syncBackdrop();
+  });
+  rightMq.addEventListener("change", (e) => {
+    setRightOpen(!e.matches && storedRightOpen(), false);
+  });
+  window.addEventListener("resize", syncBackdrop);
   // 新视图入口：编码 / 任务 / 待审批（直达设置审批 tab）
   $("btn-code").addEventListener("click", () => showView(S.view === "code" ? "chat" : "code"));
   $("btn-tasks").addEventListener("click", () => showView(S.view === "tasks" ? "chat" : "tasks"));

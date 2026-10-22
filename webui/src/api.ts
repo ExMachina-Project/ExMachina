@@ -252,6 +252,12 @@ export interface NexusLink {
   enabled: boolean;
 }
 
+/** 连通性测试结果 */
+export interface NexusProbeResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   sessionId: string;
@@ -279,6 +285,10 @@ export interface Channel {
   allowedChats?: string[];
   /** 群聊唤醒门控逐通道覆盖：true = 群内仅提及/回复触发；缺省 = 跟随全局默认 */
   groupGate?: boolean;
+  /** 能力边界：chat = 仅聊天；tools = 可调工具；computer = 电脑操控（缺省） */
+  capability?: "chat" | "tools" | "computer";
+  /** 记忆隔离：true = 本通道独立记忆；false/缺省 = 同组跨平台共享 */
+  memoryIsolation?: boolean;
   createdAt: string;
 }
 
@@ -438,6 +448,9 @@ export const api = {
   saveNexusLink: (body: NexusLink) =>
     req<{ ok: boolean; link: NexusLink }>("/nexus/links", { method: "POST", body: JSON.stringify(body) }),
   deleteNexusLink: (id: string) => req<{ ok: boolean }>(`/nexus/links/${id}`, { method: "DELETE" }),
+  /** 连通性测试：地址可达 / 鉴权通过 / 命令存在（秒级，不做任务级执行） */
+  probeNexusLink: (id: string) =>
+    req<NexusProbeResult>(`/nexus/links/${id}/probe`, { method: "POST" }),
   stopSession: (id: string) =>
     req<{ ok: boolean; toolsExecuted: number }>(`/sessions/${id}/stop`, { method: "POST", body: JSON.stringify({}) }),
   audit: (params: { agent?: string; tool?: string; limit?: number }) =>
@@ -552,15 +565,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
-  /** 更新个体可编辑字段（name/domain/description/capabilities/tools/modelHint；identifier/tier/promptFile 不可改） */
+  /** 更新个体可编辑字段（name/domain/description/capabilities/tools/modelHint/link；identifier/tier/promptFile 不可改） */
   updateAgent: (
     identifier: string,
-    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
+    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string; link?: string },
   ) => req<AgentDefinition>(`/agents/${identifier}`, { method: "PUT", body: JSON.stringify(body) }),
   /** 更新智能体可编辑字段（同 updateAgent 字段集） */
   updateSingle: (
     id: string,
-    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string },
+    body: { name?: string; domain?: string; description?: string; capabilities?: string[]; tools?: string[]; modelHint?: string; link?: string },
   ) => req<AgentDefinition>(`/singles/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   setGroupModel: (gid: string, model: string) =>
     req<{ ok: boolean }>(`/groups/${gid}/model`, {
@@ -572,7 +585,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
-  createSingle: (body: { name: string; identifier: string; description: string; domain?: string; prompt?: string }) =>
+  createSingle: (body: { name: string; identifier: string; description: string; domain?: string; prompt?: string; link?: string }) =>
     req<AgentDefinition>("/singles", { method: "POST", body: JSON.stringify(body) }),
   deleteSingle: (id: string) => req<{ ok: boolean }>(`/singles/${id}`, { method: "DELETE" }),
   groupOverview: (gid: string) => req<GroupOverview>(`/groups/${gid}/overview`),
@@ -643,9 +656,11 @@ export const api = {
     enabled?: boolean;
     allowedChats?: string[];
     groupGate?: boolean;
+    capability?: "chat" | "tools" | "computer";
+    memoryIsolation?: boolean;
     config?: Record<string, string>;
   }) => req<Channel>("/channels", { method: "POST", body: JSON.stringify(body) }),
-  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; groupGate?: boolean; config?: Record<string, string> }) =>
+  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; groupGate?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
     req<Channel>(`/channels/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
 

@@ -471,8 +471,7 @@ async fn mx_send_media(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "media".into());
     static TXN: AtomicU64 = AtomicU64::new(0);
-    let n = TXN.fetch_add(1, Ordering::Relaxed);
-    let txn = format!("exm-media-{}-{n}", exm_core::types::now_ms());
+    let _ = TXN.fetch_add(1, Ordering::Relaxed); // 保留计数器自增：媒体上传序号语义（txn 已移除）
     let upload = format!("{hs}/_matrix/media/v3/upload?filename={}", url_encode(&name));
     let resp = match client
         .post(upload)

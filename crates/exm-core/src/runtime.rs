@@ -5,7 +5,7 @@ use crate::parse;
 use crate::provider::{ChatMessage, ChatRequest, LlmProvider, StreamDelta, ToolCall};
 use crate::registry::LocalRegistry;
 use crate::tools::ToolGateway;
-use crate::types::{AgentDefinition, DispatchOrder, SyncReport, ToolName};
+use crate::types::{AgentDefinition, DispatchOrder, SyncReport, ToolName, ToolScope};
 use std::sync::Arc;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -16,7 +16,10 @@ fn tool_feedback(name: &str, r: &crate::tools::ToolResult) -> String {
     if r.ok {
         format!("【报告】工具 {name} 执行结果：\n{}", r.output)
     } else {
-        format!("【警告】工具 {name} 执行失败：{}", r.error.as_deref().unwrap_or_default())
+        format!(
+            "【警告】工具 {name} 执行失败：{}",
+            r.error.as_deref().unwrap_or_default()
+        )
     }
 }
 
@@ -35,7 +38,12 @@ impl AgentRuntime {
         tools: Arc<ToolGateway>,
         model: impl Into<String>,
     ) -> Self {
-        AgentRuntime { registry, provider, tools, model: model.into() }
+        AgentRuntime {
+            registry,
+            provider,
+            tools,
+            model: model.into(),
+        }
     }
 
     /// 默认执行目标（全局生效档案）：未解析出个体/组专属模型时回退用
@@ -57,6 +65,7 @@ impl AgentRuntime {
         session_id: &str,
         trace: &str,
         attach_images: bool,
+        scope: ToolScope,
         mut on_delta: F,
     ) -> anyhow::Result<SyncReport>
     where
@@ -66,7 +75,12 @@ impl AgentRuntime {
         let agent_hint = Some(def.identifier.clone());
         // 系统提示词 = 职责提示词（内置最优，已含统一智械纪律）。
         // 子个体无人格层（SOUL 仅限用户面智能体：组主智能体 / 独立智能体）。
-        let system_prompt = self.registry.load_prompt(&def.prompt_file)?;
+        let mut system_prompt = self.registry.load_prompt(&def.prompt_file)?;
+        let boundary = scope.system_note();
+        if !boundary.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(boundary);
+        }
         let order_json = serde_json::to_string_pretty(order)?;
         let mut messages = vec![
             ChatMessage::system(system_prompt),
@@ -79,8 +93,10 @@ impl AgentRuntime {
         // 派发时限（指挥体按步数分档声明，timeout_ms = 步数 × 30s）：0 = 不限（旧调用方兼容）。
         // 没有这道闸，挂死的 LLM 流会让节点无限期占住编排并发槽，整轮调度随之卡死——
         // max_steps 只约束「思考-调工具」轮数，约束不了单次 LLM 调用内部的无限等待。
-        let deadline = (order.constraints.timeout_ms > 0)
-            .then(|| std::time::Instant::now() + std::time::Duration::from_millis(order.constraints.timeout_ms));
+        let deadline = (order.constraints.timeout_ms > 0).then(|| {
+            std::time::Instant::now()
+                + std::time::Duration::from_millis(order.constraints.timeout_ms)
+        });
         let mut rewrites: u32 = 0;
         let mut usage_prompt: u64 = 0;
         let mut usage_completion: u64 = 0;
@@ -88,16 +104,20 @@ impl AgentRuntime {
         // 原生 function calling：按白名单生成工具 schema + 该个体可见的 MCP 工具
         // （web_search / computer 仅在后端就绪时下发——不承诺不存在的能力；
         //   文件记忆模式下 memory_write/link 必然失败，同样不下发）
+        let scoped_allowlist = scope.filter_allowlist(&order.tool_allowlist);
         let mut specs = crate::tools::ToolGateway::tool_specs_gated(
-            &order.tool_allowlist,
+            &scoped_allowlist,
             self.tools.search_ready(),
             self.tools.browser_ready(),
             self.tools.computer_ready(),
             self.tools.memory_deep(),
         );
-        // 声明式自定义工具（按 agents 可见性）与 MCP 第三方工具一并下发
-        specs.extend(self.tools.custom_specs_for(&def.identifier));
-        specs.extend(self.tools.mcp().tool_snapshot_for(&def.identifier));
+        // 声明式自定义工具（按 agents 可见性）与 MCP 第三方工具一并下发；
+        // 仅聊天档连 schema 都不下发——不承诺、不执行任何工具。
+        if scope.allows_tools() {
+            specs.extend(self.tools.custom_specs_for(&def.identifier));
+            specs.extend(self.tools.mcp().tool_snapshot_for(&def.identifier));
+        }
 
         for _step in 0..max_steps {
             // 停止检查点：会话被请求停止时终止本节点执行
@@ -107,7 +127,12 @@ impl AgentRuntime {
             // 时限检查点：派发预算耗尽即快速失败（把并发槽还给调度器），而非等 LLM 挂到天荒地老
             if let Some(dl) = deadline {
                 if std::time::Instant::now() >= dl {
-                    self.tools.record_usage(session_id, usage_prompt, usage_completion, &last_model);
+                    self.tools.record_usage(
+                        session_id,
+                        usage_prompt,
+                        usage_completion,
+                        &last_model,
+                    );
                     anyhow::bail!(
                         "个体 {} 超过派发时限 {}ms（{} 步内未产出合法 SyncReport）",
                         def.identifier,
@@ -117,13 +142,25 @@ impl AgentRuntime {
                 }
             }
             let (text, calls, usage) = match self
-                .call_llm(&messages, &agent_hint, &chain, &specs, deadline, &mut on_delta)
+                .call_llm(
+                    &messages,
+                    &agent_hint,
+                    &chain,
+                    &specs,
+                    deadline,
+                    &mut on_delta,
+                )
                 .await
             {
                 Ok(v) => v,
                 Err(e) => {
                     // LLM 调用失败（含超时）：已消耗的用量照记，失败原因回流调度器
-                    self.tools.record_usage(session_id, usage_prompt, usage_completion, &last_model);
+                    self.tools.record_usage(
+                        session_id,
+                        usage_prompt,
+                        usage_completion,
+                        &last_model,
+                    );
                     return Err(e);
                 }
             };
@@ -143,9 +180,10 @@ impl AgentRuntime {
                     .run_tool_calls(
                         &def.identifier,
                         trace,
-                        &order.tool_allowlist,
+                        &scoped_allowlist,
                         &calls,
                         attach_images,
+                        scope,
                     )
                     .await;
                 for (c, (feedback, images)) in calls.iter().zip(feedbacks) {
@@ -162,32 +200,36 @@ impl AgentRuntime {
                 continue;
             }
 
-            // 1b) 文本协议兜底（Mock / 不支持原生调用的端点）
-            if let Some(raw) = parse::extract_json(&text) {
-                if let Some((tool, args)) = parse::as_tool_call(&raw) {
-                    let result = self
-                        .tools
-                        .execute(&def.identifier, trace, &order.tool_allowlist, tool, &args)
-                        .await;
-                    messages.push(ChatMessage::assistant(text));
-                    let feedback = if result.ok {
-                        format!("【报告】工具 {} 执行结果：\n{}", tool.key(), result.output)
-                    } else {
-                        format!(
-                            "【警告】工具 {} 执行失败：{}",
-                            tool.key(),
-                            result.error.unwrap_or_default()
-                        )
-                    };
-                    messages.push(ChatMessage::user(feedback));
-                    if attach_images {
-                        if let Some((note, data_urls)) = self.image_note(&tool.key().to_string(), &result.images) {
-                            let mut um = ChatMessage::user(note);
-                            um.images = data_urls;
-                            messages.push(um);
+            // 1b) 文本协议兜底（Mock / 不支持原生调用的端点）；仅聊天档不解析工具调用
+            if scope.allows_tools() {
+                if let Some(raw) = parse::extract_json(&text) {
+                    if let Some((tool, args)) = parse::as_tool_call(&raw) {
+                        let result = self
+                            .tools
+                            .execute(&def.identifier, trace, &scoped_allowlist, tool, &args)
+                            .await;
+                        messages.push(ChatMessage::assistant(text));
+                        let feedback = if result.ok {
+                            format!("【报告】工具 {} 执行结果：\n{}", tool.key(), result.output)
+                        } else {
+                            format!(
+                                "【警告】工具 {} 执行失败：{}",
+                                tool.key(),
+                                result.error.unwrap_or_default()
+                            )
+                        };
+                        messages.push(ChatMessage::user(feedback));
+                        if attach_images {
+                            if let Some((note, data_urls)) =
+                                self.image_note(&tool.key().to_string(), &result.images)
+                            {
+                                let mut um = ChatMessage::user(note);
+                                um.images = data_urls;
+                                messages.push(um);
+                            }
                         }
+                        continue;
                     }
-                    continue;
                 }
             }
 
@@ -197,15 +239,18 @@ impl AgentRuntime {
                     // 归属强制校正
                     report.source_agent = def.identifier.clone();
                     report.task_node_id = order.task_node_id.clone();
-                    self.tools.record_usage(session_id, usage_prompt, usage_completion, &last_model);
+                    self.tools.record_usage(
+                        session_id,
+                        usage_prompt,
+                        usage_completion,
+                        &last_model,
+                    );
                     return Ok(report);
                 }
                 Err(err) => {
                     rewrites += 1;
                     if rewrites > SYNC_REWRITE_LIMIT {
-                        anyhow::bail!(
-                            "SyncReport 契约连续校验失败（{rewrites} 次）：{err}"
-                        );
+                        anyhow::bail!("SyncReport 契约连续校验失败（{rewrites} 次）：{err}");
                     }
                     messages.push(ChatMessage::assistant(text));
                     messages.push(ChatMessage::user(format!(
@@ -215,8 +260,12 @@ impl AgentRuntime {
             }
         }
 
-        self.tools.record_usage(session_id, usage_prompt, usage_completion, &last_model);
-        anyhow::bail!("个体 {} 超过最大步数 {max_steps} 仍未产出合法 SyncReport", def.identifier)
+        self.tools
+            .record_usage(session_id, usage_prompt, usage_completion, &last_model);
+        anyhow::bail!(
+            "个体 {} 超过最大步数 {max_steps} 仍未产出合法 SyncReport",
+            def.identifier
+        )
     }
 
     /// 截图回灌材料：读文件 → data URL；不可读时返回 None
@@ -254,12 +303,19 @@ impl AgentRuntime {
         trace: &str,
         chain: crate::provider::ModelChain,
         attach_images: bool,
+        scope: ToolScope,
         mut on_delta: F,
     ) -> anyhow::Result<String>
     where
         F: FnMut(StreamDelta),
     {
         let agent_hint = Some(def.identifier.clone());
+        let mut system_prompt = system_prompt;
+        let boundary = scope.system_note();
+        if !boundary.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(boundary);
+        }
         let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(history);
 
@@ -270,15 +326,19 @@ impl AgentRuntime {
 
         // 原生 function calling：按白名单生成工具 schema + 该个体可见的 MCP 工具
         // （后端未就绪 / 模式不支持的工具不下发——不承诺不存在的能力）
+        let scoped_allowlist = scope.filter_allowlist(&def.tools);
         let mut specs = crate::tools::ToolGateway::tool_specs_gated(
-            &def.tools,
+            &scoped_allowlist,
             self.tools.search_ready(),
             self.tools.browser_ready(),
             self.tools.computer_ready(),
             self.tools.memory_deep(),
         );
-        specs.extend(self.tools.custom_specs_for(&def.identifier));
-        specs.extend(self.tools.mcp().tool_snapshot_for(&def.identifier));
+        // 仅聊天档连自定义 / MCP schema 都不下发
+        if scope.allows_tools() {
+            specs.extend(self.tools.custom_specs_for(&def.identifier));
+            specs.extend(self.tools.mcp().tool_snapshot_for(&def.identifier));
+        }
 
         for _step in 0..max_steps {
             // 停止检查点:会话被请求停止时终止本循环
@@ -303,9 +363,10 @@ impl AgentRuntime {
                     .run_tool_calls(
                         &def.identifier,
                         trace,
-                        &def.tools,
+                        &scoped_allowlist,
                         &calls,
                         attach_images,
+                        scope,
                     )
                     .await;
                 for (c, (feedback, images)) in calls.iter().zip(feedbacks) {
@@ -321,34 +382,36 @@ impl AgentRuntime {
                 continue;
             }
 
-            // 文本协议兜底(Mock / 不支持原生调用的端点)
-            if let Some(raw) = parse::extract_json(&text) {
-                if let Some((tool, args)) = parse::as_tool_call(&raw) {
-                    let result = self
-                        .tools
-                        .execute(&def.identifier, trace, &def.tools, tool, &args)
-                        .await;
-                    messages.push(ChatMessage::assistant(text));
-                    let feedback = if result.ok {
-                        format!("【报告】工具 {} 执行结果：\n{}", tool.key(), result.output)
-                    } else {
-                        format!(
-                            "【警告】工具 {} 执行失败：{}",
-                            tool.key(),
-                            result.error.unwrap_or_default()
-                        )
-                    };
-                    messages.push(ChatMessage::user(feedback));
-                    if attach_images {
-                        if let Some((note, data_urls)) =
-                            self.image_note(&tool.key().to_string(), &result.images)
-                        {
-                            let mut um = ChatMessage::user(note);
-                            um.images = data_urls;
-                            messages.push(um);
+            // 文本协议兜底(Mock / 不支持原生调用的端点)；仅聊天档不解析工具调用
+            if scope.allows_tools() {
+                if let Some(raw) = parse::extract_json(&text) {
+                    if let Some((tool, args)) = parse::as_tool_call(&raw) {
+                        let result = self
+                            .tools
+                            .execute(&def.identifier, trace, &scoped_allowlist, tool, &args)
+                            .await;
+                        messages.push(ChatMessage::assistant(text));
+                        let feedback = if result.ok {
+                            format!("【报告】工具 {} 执行结果：\n{}", tool.key(), result.output)
+                        } else {
+                            format!(
+                                "【警告】工具 {} 执行失败：{}",
+                                tool.key(),
+                                result.error.unwrap_or_default()
+                            )
+                        };
+                        messages.push(ChatMessage::user(feedback));
+                        if attach_images {
+                            if let Some((note, data_urls)) =
+                                self.image_note(&tool.key().to_string(), &result.images)
+                            {
+                                let mut um = ChatMessage::user(note);
+                                um.images = data_urls;
+                                messages.push(um);
+                            }
                         }
+                        continue;
                     }
-                    continue;
                 }
             }
 
@@ -376,13 +439,31 @@ impl AgentRuntime {
         allowlist: &[ToolName],
         calls: &[ToolCall],
         attach_images: bool,
+        scope: ToolScope,
     ) -> Vec<(String, Option<(String, Vec<String>)>)> {
+        // 仅聊天档：即使模型绕过 schema 硬造 tool call，也在执行层全部拒绝。
+        if !scope.allows_tools() {
+            return calls
+                .iter()
+                .map(|c| {
+                    (
+                        format!(
+                            "【警告】当前通道能力边界为「仅聊天」，工具 {} 被拒绝执行。",
+                            c.name
+                        ),
+                        None,
+                    )
+                })
+                .collect();
+        }
         let mut out: Vec<Option<(String, Option<(String, Vec<String>)>)>> = vec![None; calls.len()];
         let mut readonly: Vec<usize> = Vec::new();
         let mut serial: Vec<usize> = Vec::new();
         for (i, c) in calls.iter().enumerate() {
             let ro = !c.name.starts_with("mcp:")
-                && ToolName::parse(&c.name).map(|t| t.is_readonly()).unwrap_or(false);
+                && ToolName::parse(&c.name)
+                    .map(|t| t.is_readonly())
+                    .unwrap_or(false);
             if ro {
                 readonly.push(i);
             } else {
@@ -410,8 +491,26 @@ impl AgentRuntime {
         // 写 / MCP / 自定义 / 未知：串行
         for i in serial {
             let c = &calls[i];
-            let (r, name) = if c.name.starts_with("mcp:") {
-                (self.tools.execute_mcp(agent_id, trace, &c.name, &c.arguments).await, c.name.clone())
+            let (r, name) = if ToolName::parse(&c.name) == Some(ToolName::Computer)
+                && !scope.allows_computer()
+            {
+                // 工具档硬闸门：即使 allowlist 意外混入 computer，也不执行桌面操作
+                (
+                    crate::tools::ToolResult {
+                        ok: false,
+                        output: String::new(),
+                        error: Some("当前通道未授权电脑操控（computer）".into()),
+                        images: Vec::new(),
+                    },
+                    c.name.clone(),
+                )
+            } else if c.name.starts_with("mcp:") {
+                (
+                    self.tools
+                        .execute_mcp(agent_id, trace, &c.name, &c.arguments)
+                        .await,
+                    c.name.clone(),
+                )
             } else {
                 // 统一入口：内置按白名单放行，声明式自定义按 agents 可见性放行
                 (
@@ -512,7 +611,9 @@ impl AgentRuntime {
                         return Err(e);
                     }
                     if !pid.is_empty() {
-                        chain.failover.cool(&pid, crate::provider::FAILOVER_COOLDOWN_SECS);
+                        chain
+                            .failover
+                            .cool(&pid, crate::provider::FAILOVER_COOLDOWN_SECS);
                     }
                     last_err = Some(e);
                 }
@@ -579,9 +680,14 @@ mod timeout_tests {
         // 提示词按组布局解析：groups/<gid>/prompts/<file>.md
         let prompts_dir = reg_dir.join("groups").join("exmachina").join("prompts");
         std::fs::create_dir_all(&prompts_dir).unwrap();
-        std::fs::write(prompts_dir.join("timeout-agent.md"), "# 测试个体\n你是测试个体。").unwrap();
+        std::fs::write(
+            prompts_dir.join("timeout-agent.md"),
+            "# 测试个体\n你是测试个体。",
+        )
+        .unwrap();
         let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
-        let store = Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let store =
+            Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
         let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
         let tools = Arc::new(ToolGateway::new(
             &base,
@@ -598,14 +704,20 @@ mod timeout_tests {
             task_node_id: "T1".into(),
             objective: "时限演练".into(),
             acceptance: vec!["产出 SyncReport".into()],
-            boundary: DispatchBoundary { in_scope: vec![], forbidden: vec![] },
+            boundary: DispatchBoundary {
+                in_scope: vec![],
+                forbidden: vec![],
+            },
             inputs: vec![DispatchInput {
                 ref_id: "user".into(),
                 kind: "userInput".into(),
                 summary: "时限演练".into(),
             }],
             tool_allowlist: vec![],
-            constraints: DispatchConstraints { max_steps: 3, timeout_ms },
+            constraints: DispatchConstraints {
+                max_steps: 3,
+                timeout_ms,
+            },
             report_format: "SyncReport".into(),
         }
     }
@@ -631,10 +743,24 @@ mod timeout_tests {
             failover: Arc::new(FailoverState::default()),
         };
         let started = std::time::Instant::now();
-        let r = rt.execute(&def, &order, chain, "ses-timeout", "ses-timeout", false, |_| {}).await;
+        let r = rt
+            .execute(
+                &def,
+                &order,
+                chain,
+                "ses-timeout",
+                "ses-timeout",
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await;
         let elapsed = started.elapsed();
         let err = r.expect_err("挂死流应在时限内失败");
-        assert!(err.to_string().contains("超时"), "错误应可诊断为超时: {err}");
+        assert!(
+            err.to_string().contains("超时"),
+            "错误应可诊断为超时: {err}"
+        );
         assert!(
             elapsed >= Duration::from_millis(400) && elapsed < Duration::from_secs(10),
             "应约在时限处失败而非挂满 60s，实际 {elapsed:?}"
@@ -648,14 +774,328 @@ mod timeout_tests {
         let def = def_with();
         let order = order_with(10_000);
         let chain = crate::provider::ModelChain {
-            candidates: vec![(String::new(), Arc::new(crate::provider::MockLlmProvider), "m".into())],
+            candidates: vec![(
+                String::new(),
+                Arc::new(crate::provider::MockLlmProvider),
+                "m".into(),
+            )],
             failover: Arc::new(FailoverState::default()),
         };
         let report = rt
-            .execute(&def, &order, chain, "ses-ok", "ses-ok", false, |_| {})
+            .execute(
+                &def,
+                &order,
+                chain,
+                "ses-ok",
+                "ses-ok",
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
             .await
             .expect("时限充裕时应正常执行");
         assert_eq!(report.task_node_id, "T1");
         assert_eq!(report.status, crate::types::SyncStatus::Done);
+    }
+}
+
+// ---------------------------------------------------------------- 原生工具循环回归
+
+/// 复现「agent 无法正常开发」：原生 function calling 的完整多轮工具循环。
+/// 覆盖：同轮只读并发（read+grep）→ 写工具（edit）→ terminal → 工具结果回灌 → SyncReport。
+/// Mock 通道只走文本协议，覆盖不到这条路径——真实端点（OpenAI 兼容）全走这里。
+#[cfg(test)]
+mod tool_loop_tests {
+    use super::*;
+    use crate::config::SecurityConfig;
+    use crate::provider::{ChatResponse, FailoverState, ToolCall};
+    use crate::types::{DispatchBoundary, DispatchConstraints, DispatchInput, SyncStatus};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 脚本化 Provider：按调用次序回放固定的工具调用序列（模拟真实编码模型的作业轨迹）
+    struct ScriptedProvider {
+        step: AtomicUsize,
+        /// 每步收到的消息列表快照（role 序列），供回灌断言
+        seen_roles: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ScriptedProvider {
+        fn new() -> Self {
+            ScriptedProvider {
+                step: AtomicUsize::new(0),
+                seen_roles: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    fn resp(content: &str, calls: Vec<ToolCall>) -> ChatResponse {
+        ChatResponse {
+            content: content.to_string(),
+            reasoning: String::new(),
+            prompt_tokens: 10,
+            completion_tokens: 10,
+            tool_calls: calls,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ScriptedProvider {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("脚本化通道只走流式")
+        }
+        async fn stream(
+            &self,
+            req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.seen_roles
+                .lock()
+                .unwrap()
+                .push(req.messages.iter().map(|m| m.role.clone()).collect());
+            let step = self.step.fetch_add(1, Ordering::SeqCst);
+            let s = match step {
+                0 => resp(
+                    "",
+                    vec![
+                        ToolCall {
+                            id: "c1".into(),
+                            name: "read".into(),
+                            arguments: serde_json::json!({"path": "src/app.rs"}),
+                        },
+                        ToolCall {
+                            id: "c2".into(),
+                            name: "grep".into(),
+                            arguments: serde_json::json!({"pattern": "fn main"}),
+                        },
+                    ],
+                ),
+                1 => resp(
+                    "",
+                    vec![ToolCall {
+                        id: "c3".into(),
+                        name: "edit".into(),
+                        arguments: serde_json::json!({
+                            "path": "src/app.rs",
+                            "old_string": "fn main() {}",
+                            "new_string": "fn main() { println!(\"exm-ok\"); }"
+                        }),
+                    }],
+                ),
+                2 => resp(
+                    "",
+                    vec![ToolCall {
+                        id: "c4".into(),
+                        name: "terminal".into(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                    }],
+                ),
+                _ => {
+                    let report = serde_json::json!({
+                        "sourceAgent": "coding-agent",
+                        "taskNodeId": "T1",
+                        "status": "done",
+                        "statements": [{"tag": "报告", "text": "已完成", "evidenceLevel": "B"}],
+                        "summary": "完成",
+                        "evidence": [{"level": "B", "kind": "code", "ref": "src/app.rs"}],
+                        "risks": [],
+                        "confidence": 0.8
+                    });
+                    return Ok(resp(&format!("```json\n{report}\n```"), vec![]));
+                }
+            };
+            Ok(s)
+        }
+    }
+
+    fn runtime_with_files(provider: Arc<dyn LlmProvider>) -> (AgentRuntime, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("exm-loop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("src/app.rs"), "fn main() {}\n").unwrap();
+        let reg_dir = base.join("entities");
+        std::fs::create_dir_all(reg_dir.join("groups/exmachina/prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            capabilities: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(
+            reg_dir.join("group.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            reg_dir.join("groups/exmachina/prompts/coding-agent.md"),
+            "# 测试个体\n你是测试个体。",
+        )
+        .unwrap();
+        let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
+        let store =
+            Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
+        let tools = Arc::new(ToolGateway::new(
+            &base,
+            store,
+            registry.clone(),
+            events,
+            SecurityConfig::default(),
+        ));
+        (
+            AgentRuntime::new(registry, provider, tools, "test-model"),
+            base,
+        )
+    }
+
+    fn coding_def() -> crate::types::AgentDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "编码体", "identifier": "coding-agent", "domain": "实作域",
+            "tier": "unit", "description": "编码", "capabilities": ["编码"],
+            "tools": ["read", "grep", "glob", "edit", "patch", "filesystem", "terminal"],
+            "promptFile": "coding-agent.md"
+        }))
+        .unwrap()
+    }
+
+    fn coding_order(allowlist: Vec<crate::types::ToolName>) -> DispatchOrder {
+        DispatchOrder {
+            task_node_id: "T1".into(),
+            objective: "在 src/app.rs 加输出".into(),
+            acceptance: vec!["文件被修改".into()],
+            boundary: DispatchBoundary {
+                in_scope: vec![],
+                forbidden: vec![],
+            },
+            inputs: vec![DispatchInput {
+                ref_id: "user".into(),
+                kind: "userInput".into(),
+                summary: "改文件".into(),
+            }],
+            tool_allowlist: allowlist,
+            constraints: DispatchConstraints {
+                max_steps: 8,
+                timeout_ms: 0,
+            },
+            report_format: "SyncReport".into(),
+        }
+    }
+
+    /// 完整编码作业轨迹：只读并发 → edit 落盘 → terminal → 工具结果回灌 → SyncReport 校验通过
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 原生工具循环_编码作业全链路() {
+        let provider = Arc::new(ScriptedProvider::new());
+        let (rt, base) = runtime_with_files(provider.clone());
+        let def = coding_def();
+        let order = coding_order(def.tools.clone());
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt
+            .execute(
+                &def,
+                &order,
+                chain,
+                "sess-loop",
+                "trace-loop",
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .expect("原生工具循环应完整走通");
+        assert_eq!(report.status, SyncStatus::Done);
+
+        // edit 真的落盘了
+        let content = std::fs::read_to_string(base.join("src/app.rs")).unwrap();
+        assert!(
+            content.contains("exm-ok"),
+            "edit 应真实落盘，实际: {content}"
+        );
+
+        // 工具结果以 role=tool 回灌，assistant 的 tool_calls 有被记录
+        let seen = provider.seen_roles.lock().unwrap();
+        assert!(seen.len() >= 4, "应有多轮交互，实际 {} 轮", seen.len());
+        let last = seen.last().unwrap();
+        assert!(
+            last.iter().any(|r| r == "tool"),
+            "最终轮消息里应有工具结果回灌，实际 roles: {last:?}"
+        );
+        assert!(
+            last.iter().any(|r| r == "assistant"),
+            "应保留 assistant 工具调用记录"
+        );
+    }
+
+    /// 白名单外的工具调用必须被拒且不炸循环：模型拿到错误回灌后仍能继续收敛
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 原生工具循环_白名单外工具被拒_循环不中断() {
+        struct RogueProvider {
+            step: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for RogueProvider {
+            fn name(&self) -> &'static str {
+                "rogue"
+            }
+            async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+                anyhow::bail!("只走流式")
+            }
+            async fn stream(
+                &self,
+                _req: ChatRequest,
+                _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+            ) -> anyhow::Result<ChatResponse> {
+                let step = self.step.fetch_add(1, Ordering::SeqCst);
+                if step == 0 {
+                    Ok(resp(
+                        "",
+                        vec![ToolCall {
+                            id: "r1".into(),
+                            name: "web_search".into(), // 不在 coding-agent 白名单
+                            arguments: serde_json::json!({"query": "rust"}),
+                        }],
+                    ))
+                } else {
+                    let report = serde_json::json!({
+                        "sourceAgent": "coding-agent", "taskNodeId": "T1", "status": "done",
+                        "statements": [{"tag": "报告", "text": "收到拒绝后收敛", "evidenceLevel": "C"}],
+                        "summary": "ok", "evidence": [], "risks": [], "confidence": 0.7
+                    });
+                    Ok(resp(&format!("```json\n{report}\n```"), vec![]))
+                }
+            }
+        }
+        let provider = Arc::new(RogueProvider {
+            step: AtomicUsize::new(0),
+        });
+        let (rt, _base) = runtime_with_files(provider.clone());
+        let def = coding_def();
+        let order = coding_order(def.tools.clone());
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt
+            .execute(
+                &def,
+                &order,
+                chain,
+                "sess-rogue",
+                "trace-rogue",
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .expect("白名单拒绝不应中断循环");
+        assert_eq!(report.status, SyncStatus::Done);
     }
 }

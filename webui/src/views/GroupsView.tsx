@@ -40,6 +40,8 @@ export function GroupsView(): React.ReactElement {
   const [editForm] = Form.useForm();
   const [editFormProfiles, setEditFormProfiles] = useState<LlmProfile[]>([]);
   const [promptLoading, setPromptLoading] = useState(false);
+  // 连结体代理绑定（智能连结网络）：编辑表单下拉数据源
+  const [nexusLinks, setNexusLinks] = useState<import("../api").NexusLink[]>([]);
   // 成员 SOUL.md（人设）编辑
   const [personaOf, setPersonaOf] = useState<AgentDefinition | null>(null);
   const [personaInfo, setPersonaInfo] = useState<import("../api").PersonaInfo | null>(null);
@@ -61,9 +63,23 @@ export function GroupsView(): React.ReactElement {
     }
   }, []);
 
+  // 连结体清单（编辑弹窗打开时拉取；失败静默——空清单只是没有可绑定项）
+  const loadNexusLinks = useCallback(async () => {
+    try {
+      const r = await api.nexusLinks();
+      setNexusLinks(r.links);
+    } catch {
+      /* 静默 */
+    }
+  }, []);
+
   useEffect(() => {
     if (entered) void loadMembers(entered);
   }, [entered, loadMembers]);
+
+  useEffect(() => {
+    if (editing) void loadNexusLinks();
+  }, [editing, loadNexusLinks]);
 
   useEffect(() => {
     void (async () => {
@@ -232,6 +248,7 @@ export function GroupsView(): React.ReactElement {
       name: a.name,
       description: a.description,
       modelHint: a.modelHint ?? undefined,
+      link: a.link ?? undefined,
       prompt: "",
     });
     setPromptLoading(true);
@@ -254,6 +271,7 @@ export function GroupsView(): React.ReactElement {
         name: v.name,
         description: v.description,
         modelHint: v.modelHint ?? "",
+        link: v.link ?? "",
       });
       if ((v.prompt ?? "").trim()) {
         await api.putAgentPrompt(meta.id, editing.identifier, v.prompt);
@@ -489,6 +507,15 @@ export function GroupsView(): React.ReactElement {
                 style={{ width: "100%" }}
                 options={buildModelOptions(editFormProfiles)}
                 placeholder={t("agents.f.modelPh")}
+              />
+            </Form.Item>
+            <Form.Item name="link" label={t("agents.f.link")} extra={t("agents.f.linkExtra")}>
+              <Select
+                allowClear
+                style={{ width: "100%" }}
+                options={nexusLinks.map((l) => ({ value: l.id, label: `${l.name}（${l.id}）`, disabled: !l.enabled }))}
+                placeholder={t("agents.f.linkPh")}
+                notFoundContent={t("agents.f.linkEmpty")}
               />
             </Form.Item>
           </Form>
