@@ -233,7 +233,6 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                     }
                 }
                 if !media.is_empty() {
-                    let api = format!("https://api.telegram.org/bot{}", ch.token.as_deref().unwrap_or_default());
                     let mut saved: Vec<(String, String, String)> = Vec::new();
                     let base = format!("https://api.telegram.org/bot{}", ch.token.as_deref().unwrap_or_default());
                     for (kind, file_id, name) in &media {

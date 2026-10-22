@@ -13,8 +13,11 @@
   ],
   "tools": [
     "read",
+    "grep",
+    "glob",
     "filesystem",
     "terminal",
+    "edit",
     "web_search"
   ],
   "whenToCall": "用户每次输入",

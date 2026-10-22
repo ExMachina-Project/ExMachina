@@ -116,23 +116,35 @@ impl SqliteStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        let conn = Connection::open(root.join("store.sqlite"))
-            .context("打开 store.sqlite 失败")?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+        let conn = Connection::open(root.join("store.sqlite")).context("打开 store.sqlite 失败")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )?;
         conn.execute_batch(SCHEMA).context("初始化 schema 失败")?;
 
-        let store = SqliteStore { conn: Mutex::new(conn), fsdb: FsDb::open(&root)?, root: root.clone() };
+        let store = SqliteStore {
+            conn: Mutex::new(conn),
+            fsdb: FsDb::open(&root)?,
+            root: root.clone(),
+        };
 
         let migrated: bool = store
             .conn
             .lock()
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM meta WHERE k='migrated' AND v='1'", [], |r| r.get::<_, bool>(0))
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE k='migrated' AND v='1'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
             .unwrap_or(false);
         if !migrated {
             let n = store.migrate_from_fsdb()?;
             let conn = store.conn.lock().unwrap();
-            conn.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('migrated','1')", [])?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(k,v) VALUES('migrated','1')",
+                [],
+            )?;
             drop(conn);
             if n > 0 {
                 eprintln!("[store] 已从 FSDB 迁移 {n} 条记录至 store.sqlite(原文件归档留存)");
@@ -158,11 +170,19 @@ impl SqliteStore {
         }
         // 消息(按会话遍历,含归档)
         for s in legacy.list::<Session>("sessions").unwrap_or_default() {
-            for (i, m) in legacy.read_lines::<ChatMessage>("messages", &s.id, 0).unwrap_or_default().into_iter().enumerate() {
+            for (i, m) in legacy
+                .read_lines::<ChatMessage>("messages", &s.id, 0)
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+            {
                 let _ = Self::insert_message_conn(&conn, &s.id, (i + 1) as i64, &m, false);
                 n += 1;
             }
-            for m in legacy.read_lines::<ChatMessage>("message_archive", &s.id, 0).unwrap_or_default() {
+            for m in legacy
+                .read_lines::<ChatMessage>("message_archive", &s.id, 0)
+                .unwrap_or_default()
+            {
                 let _ = Self::insert_message_conn(&conn, &s.id, 0, &m, true);
                 n += 1;
             }
@@ -171,12 +191,19 @@ impl SqliteStore {
         for g in legacy.list::<TaskGraph>("graphs").unwrap_or_default() {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO graphs(session_id, graph, updated_at) VALUES(?1,?2,?3)",
-                rusqlite::params![g.session_id, serde_json::to_string(&g).unwrap_or_default(), now_iso()],
+                rusqlite::params![
+                    g.session_id,
+                    serde_json::to_string(&g).unwrap_or_default(),
+                    now_iso()
+                ],
             );
             n += 1;
         }
         // 回流
-        for v in legacy.list::<serde_json::Value>("sync_reports").unwrap_or_default() {
+        for v in legacy
+            .list::<serde_json::Value>("sync_reports")
+            .unwrap_or_default()
+        {
             let id = v["id"].as_str().unwrap_or_default();
             let node = v["taskNodeId"].as_str().unwrap_or_default();
             let _ = conn.execute(
@@ -186,7 +213,10 @@ impl SqliteStore {
             n += 1;
         }
         // 快照
-        for snap in legacy.list::<TurnSnapshot>("turn_snapshots").unwrap_or_default() {
+        for snap in legacy
+            .list::<TurnSnapshot>("turn_snapshots")
+            .unwrap_or_default()
+        {
             let _ = Self::put_snapshot_conn(&conn, &snap);
             n += 1;
         }
@@ -222,6 +252,7 @@ impl SqliteStore {
             title: row.get("title")?,
             status: row.get("status")?,
             group_id: row.get("group_id")?,
+            memory_partition: None,
             rolling_summary: row.get("rolling_summary")?,
             summary_upto: row.get("summary_upto")?,
             parent_session: row.get("parent_session")?,
@@ -240,7 +271,12 @@ impl SqliteStore {
             id: new_id(),
             title: title.to_string(),
             status: "active".into(),
-            group_id: if group_id.trim().is_empty() { "exmachina".into() } else { group_id.to_string() },
+            group_id: if group_id.trim().is_empty() {
+                "exmachina".into()
+            } else {
+                group_id.to_string()
+            },
+            memory_partition: None,
             rolling_summary: None,
             summary_upto: None,
             parent_session: None,
@@ -302,7 +338,8 @@ impl SqliteStore {
         F: FnOnce(&mut SessionLedger),
     {
         let conn = self.conn.lock().unwrap();
-        let mut session = Self::get_session_conn(&conn, session_id)?.ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        let mut session = Self::get_session_conn(&conn, session_id)?
+            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
         f(&mut session.ledger);
         session.updated_at = now_iso();
         let ledger = session.ledger.clone();
@@ -312,7 +349,9 @@ impl SqliteStore {
 
     pub fn ledger_of(&self, session_id: &str) -> Result<SessionLedger> {
         let conn = self.conn.lock().unwrap();
-        Ok(Self::get_session_conn(&conn, session_id)?.map(|s| s.ledger).unwrap_or_default())
+        Ok(Self::get_session_conn(&conn, session_id)?
+            .map(|s| s.ledger)
+            .unwrap_or_default())
     }
 
     fn get_session_conn(conn: &Connection, id: &str) -> anyhow::Result<Option<Session>> {
@@ -336,7 +375,11 @@ impl SqliteStore {
             "UPDATE sessions SET rolling_summary=?2, summary_upto=?3, updated_at=?4 WHERE id=?1",
             rusqlite::params![
                 session_id,
-                if summary.trim().is_empty() { None } else { Some(summary.to_string()) },
+                if summary.trim().is_empty() {
+                    None
+                } else {
+                    Some(summary.to_string())
+                },
                 upto,
                 now_iso()
             ],
@@ -382,13 +425,15 @@ impl SqliteStore {
                 serde_json::from_value(serde_json::Value::String(raw)).unwrap_or(MessageRole::User)
             },
             agent_id: r.get("agent_id")?,
-            statements: serde_json::from_str(&r.get::<_, String>("statements")?).unwrap_or_default(),
+            statements: serde_json::from_str(&r.get::<_, String>("statements")?)
+                .unwrap_or_default(),
             created_at: r.get("created_at")?,
             token_usage: r
                 .get::<_, Option<String>>("token_usage")?
                 .and_then(|s| serde_json::from_str(&s).ok()),
             thinking: r.get("thinking")?,
-            tool_calls: serde_json::from_str(&r.get::<_, String>("tool_calls")?).unwrap_or_default(),
+            tool_calls: serde_json::from_str(&r.get::<_, String>("tool_calls")?)
+                .unwrap_or_default(),
             steps: Vec::new(),
             last_message_preview: None,
             last_active_at: None,
@@ -483,9 +528,13 @@ impl SqliteStore {
     }
 
     /// 复制会话历史前缀(fork 用)
-    pub fn copy_messages_prefix(&self, src_session: &str, dst_session: &str, keep: usize) -> Result<usize> {
+    pub fn copy_messages_prefix(
+        &self,
+        src_session: &str,
+        dst_session: &str,
+        keep: usize,
+    ) -> Result<usize> {
         let msgs = self.list_messages(src_session, 0)?;
-        eprintln!("[copy] src={} list={} keep={}", src_session, msgs.len(), keep);
         let prefix: Vec<ChatMessage> = msgs.into_iter().take(keep).collect();
         let conn = self.conn.lock().unwrap();
         for (i, m) in prefix.iter().enumerate() {
@@ -493,10 +542,23 @@ impl SqliteStore {
             copy.id = new_id(); // 主键 = id:跨会话副本必须换新 id,否则 REPLACE 会"搬走"源消息
             Self::insert_message_conn(&conn, dst_session, (i + 1) as i64, &copy, false)?;
         }
-        let back: Vec<ChatMessage> = {
-            let mut st = conn.prepare("SELECT * FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq ASC").unwrap();
-            st.query_map(rusqlite::params![dst_session], |r| Self::row_message(r)).unwrap().filter_map(|r| r.ok()).collect()
+        // 回读校验：目标会话实际落库条数（写后即查，防静默丢失）
+        let persisted: Vec<ChatMessage> = {
+            let mut st = conn.prepare(
+                "SELECT * FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq ASC",
+            )?;
+            let rows: Vec<ChatMessage> = st
+                .query_map(rusqlite::params![dst_session], |r| Self::row_message(r))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
         };
+        anyhow::ensure!(
+            persisted.len() >= prefix.len(),
+            "fork 前缀复制不完整: 期望 {n} 条, 实际 {m} 条",
+            n = prefix.len(),
+            m = persisted.len()
+        );
         Ok(prefix.len())
     }
 
@@ -509,9 +571,11 @@ impl SqliteStore {
     }
 
     pub fn drain_checkpoint_refs(&self, session_id: &str) -> Result<Vec<String>> {
-        let items: Vec<serde_json::Value> = self.fsdb.read_lines("turn_checkpoints", session_id, 0)?;
+        let items: Vec<serde_json::Value> =
+            self.fsdb.read_lines("turn_checkpoints", session_id, 0)?;
         if !items.is_empty() {
-            self.fsdb.rewrite_lines::<serde_json::Value>("turn_checkpoints", session_id, &[])?;
+            self.fsdb
+                .rewrite_lines::<serde_json::Value>("turn_checkpoints", session_id, &[])?;
         }
         Ok(items
             .into_iter()
@@ -554,9 +618,11 @@ impl SqliteStore {
     pub fn latest_graph(&self, session_id: &str) -> Result<Option<TaskGraph>> {
         let conn = self.conn.lock().unwrap();
         let json: Option<String> = conn
-            .query_row("SELECT graph FROM graphs WHERE session_id=?1", rusqlite::params![session_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT graph FROM graphs WHERE session_id=?1",
+                rusqlite::params![session_id],
+                |r| r.get(0),
+            )
             .ok();
         Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
     }
@@ -708,7 +774,13 @@ impl SqliteStore {
 
     // ------------------------------------------------- 用量台账(SQLite)
 
-    pub fn add_usage(&self, session_id: &str, prompt_tokens: u64, completion_tokens: u64, model: &str) -> Result<()> {
+    pub fn add_usage(
+        &self,
+        session_id: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        model: &str,
+    ) -> Result<()> {
         if prompt_tokens == 0 && completion_tokens == 0 {
             return Ok(());
         }
@@ -729,7 +801,11 @@ impl SqliteStore {
             return (0, 0, 0);
         };
         st.query_row(rusqlite::params![session_id], |r| {
-            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as usize))
+            Ok((
+                r.get::<_, i64>(0)? as u64,
+                r.get::<_, i64>(1)? as u64,
+                r.get::<_, i64>(2)? as usize,
+            ))
         })
         .unwrap_or((0, 0, 0))
     }
@@ -792,10 +868,22 @@ impl SqliteStore {
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
-        conn.execute("DELETE FROM messages WHERE session_id=?1", rusqlite::params![id])?;
-        conn.execute("DELETE FROM graphs WHERE session_id=?1", rusqlite::params![id])?;
-        conn.execute("DELETE FROM graph_history WHERE session_id=?1", rusqlite::params![id])?;
-        conn.execute("DELETE FROM turn_snapshots WHERE session_id=?1", rusqlite::params![id])?;
+        conn.execute(
+            "DELETE FROM messages WHERE session_id=?1",
+            rusqlite::params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM graphs WHERE session_id=?1",
+            rusqlite::params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM graph_history WHERE session_id=?1",
+            rusqlite::params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM turn_snapshots WHERE session_id=?1",
+            rusqlite::params![id],
+        )?;
         drop(conn);
         // FsDb 侧(本批次保留的集合)
         for (col, key) in [("events", id), ("evidence", id), ("turn_checkpoints", id)] {
@@ -804,7 +892,11 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn list_approvals(&self, status: Option<&str>, limit: usize) -> Result<Vec<ApprovalRequest>> {
+    pub fn list_approvals(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ApprovalRequest>> {
         let mut list: Vec<ApprovalRequest> = self.fsdb.list("approvals")?;
         if let Some(s) = status {
             list.retain(|r| r.status == s);
@@ -841,7 +933,8 @@ impl SqliteStore {
             session_id: r.get("session_id")?,
             turn: r.get("turn")?,
             message_count: r.get("message_count")?,
-            checkpoint_ids: serde_json::from_str(&r.get::<_, String>("checkpoint_ids")?).unwrap_or_default(),
+            checkpoint_ids: serde_json::from_str(&r.get::<_, String>("checkpoint_ids")?)
+                .unwrap_or_default(),
             prompt_tokens: r.get("prompt_tokens")?,
             completion_tokens: r.get("completion_tokens")?,
             status: r.get("status")?,
@@ -883,7 +976,8 @@ impl SqliteStore {
     }
 
     pub fn get_identity(&self, channel: &str, external_id: &str) -> Result<Option<UserIdentity>> {
-        self.fsdb.get("identities", &format!("{channel}:{external_id}"))
+        self.fsdb
+            .get("identities", &format!("{channel}:{external_id}"))
     }
 
     pub fn get_identity_by_id(&self, id: &str) -> Result<Option<UserIdentity>> {
@@ -900,7 +994,13 @@ impl SqliteStore {
         self.fsdb.delete("identities", id)
     }
 
-    pub fn outbox_push(&self, session_id: &str, kind: &str, path: &str, caption: &str) -> Result<()> {
+    pub fn outbox_push(
+        &self,
+        session_id: &str,
+        kind: &str,
+        path: &str,
+        caption: &str,
+    ) -> Result<()> {
         self.fsdb.append_line(
             "session_outbox",
             session_id,
@@ -909,14 +1009,21 @@ impl SqliteStore {
     }
 
     pub fn outbox_drain(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
-        let items: Vec<serde_json::Value> = self.fsdb.read_lines("session_outbox", session_id, 0)?;
+        let items: Vec<serde_json::Value> =
+            self.fsdb.read_lines("session_outbox", session_id, 0)?;
         if !items.is_empty() {
-            self.fsdb.rewrite_lines::<serde_json::Value>("session_outbox", session_id, &[])?;
+            self.fsdb
+                .rewrite_lines::<serde_json::Value>("session_outbox", session_id, &[])?;
         }
         Ok(items)
     }
 
-    pub fn put_session_origin(&self, session_id: &str, external_id: &str, role: &str) -> Result<()> {
+    pub fn put_session_origin(
+        &self,
+        session_id: &str,
+        external_id: &str,
+        role: &str,
+    ) -> Result<()> {
         self.fsdb.put(
             "session_origins",
             session_id,
@@ -928,8 +1035,14 @@ impl SqliteStore {
         let v: Option<serde_json::Value> = self.fsdb.get("session_origins", session_id)?;
         Ok(v.map(|v| {
             (
-                v.get("externalId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                v.get("role").and_then(|x| x.as_str()).unwrap_or("member").to_string(),
+                v.get("externalId")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("role")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("member")
+                    .to_string(),
             )
         }))
     }
@@ -1014,7 +1127,10 @@ mod store_tests {
         assert_eq!(list[0].turn, 1, "按轮次升序");
         let latest = store.latest_turn_snapshot("s1").unwrap().unwrap();
         assert_eq!(latest.turn, 3);
-        assert!(store.latest_turn_snapshot("s2").unwrap().is_none(), "会话隔离");
+        assert!(
+            store.latest_turn_snapshot("s2").unwrap().is_none(),
+            "会话隔离"
+        );
 
         store.prune_turn_snapshots_after("s1", 2).unwrap();
         let list = store.list_turn_snapshots("s1").unwrap();
@@ -1071,4 +1187,3 @@ mod store_tests {
         assert!(store.get_event_trigger("t2").unwrap().is_none());
     }
 }
-
