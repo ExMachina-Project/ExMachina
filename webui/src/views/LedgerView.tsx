@@ -29,8 +29,8 @@ export function LedgerView(): React.ReactElement {
       {!ledger ? (
         <BrandEmpty description={t("ledger.empty")} className="pane-empty" />
       ) : (
-        <Row gutter={16} className="ledger-wrap">
-          <Col span={8}>
+        <Row gutter={[16, 16]} className="ledger-wrap">
+          <Col xs={24} xl={8}>
             <Card title={t("ledger.taskCard")} size="small" className="hud">
               <p><b>{t("ledger.goal")}</b></p>
               <p>{ledger.task.goal || t("ledger.unset")}</p>
@@ -42,23 +42,23 @@ export function LedgerView(): React.ReactElement {
               <List size="small" dataSource={ledger.task.forbidden} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
             </Card>
           </Col>
-          <Col span={8}>
+          <Col xs={24} xl={8}>
             <Card title={t("ledger.evidenceCard")} size="small" className="hud">
               <List
                 size="small"
                 dataSource={ledger.evidence.confirmed}
                 locale={{ emptyText: t("ledger.noEvidence") }}
                 renderItem={(e) => (
-                  <List.Item>
+                  <List.Item className="ledger-evidence-row">
                     <Tag color={LEVEL_COLORS[e.level]}>{e.level}</Tag>
                     <span className="ledger-evidence">{e.text}</span>
-                    <Tag>{e.source}</Tag>
+                    <Tag className="ledger-evidence-src">{e.source}</Tag>
                   </List.Item>
                 )}
               />
             </Card>
           </Col>
-          <Col span={8}>
+          <Col xs={24} xl={8}>
             <Card title={t("ledger.riskCard")} size="small" className="hud">
               <p><b>{t("ledger.impact")}</b></p>
               <List size="small" dataSource={dedupe(ledger.risk.impact)} renderItem={(x) => <List.Item>{x}</List.Item>} locale={{ emptyText: t("ledger.none") }} />
