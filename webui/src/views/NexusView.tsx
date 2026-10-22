@@ -15,6 +15,12 @@ const KIND_COLORS: Record<string, string> = {
   custom: "default",
 };
 
+const CLI_DEFAULTS: Record<string, string> = {
+  opencode: "opencode run",
+  codex: "codex exec",
+  claude: "claude -p",
+};
+
 export function NexusView(): React.ReactElement {
   const t = useT();
   const [links, setLinks] = useState<NexusLink[]>([]);
@@ -115,8 +121,8 @@ export function NexusView(): React.ReactElement {
                     <Tag color={l.enabled ? KIND_COLORS[l.kind] ?? "default" : "default"}>{t("nexus.kind." + l.kind)}</Tag>
                     <b>{l.name}</b>
                     <span className="mono dim">{l.id}</span>
-                    {(l.endpoint || l.command) && (
-                      <span className="dim mono nexus-endpoint">{l.endpoint || l.command}</span>
+                    {(l.endpoint || l.command || CLI_DEFAULTS[l.kind]) && (
+                      <span className="dim mono nexus-endpoint">{l.endpoint || l.command || CLI_DEFAULTS[l.kind]}</span>
                     )}
                     <Space size={4} style={{ marginLeft: "auto" }}>
                       {!l.enabled && <Tag>disabled</Tag>}
@@ -173,22 +179,47 @@ export function NexusView(): React.ReactElement {
             />
           </Form.Item>
           <Form.Item noStyle shouldUpdate={(a, b) => a.kind !== b.kind}>
-            {({ getFieldValue }) =>
-              getFieldValue("kind") === "exmachina" ? (
-                <>
-                  <Form.Item name="endpoint" label={t("nexus.f.endpoint")} rules={[{ required: true, whitespace: true, message: t("nexus.f.endpointReq") }]}>
-                    <Input placeholder="http://192.168.2.10:4173" />
+            {({ getFieldValue }) => {
+              const kind = getFieldValue("kind") as string;
+              if (kind === "exmachina") {
+                return (
+                  <>
+                    <Form.Item name="endpoint" label={t("nexus.f.endpoint")} rules={[{ required: true, whitespace: true, message: t("nexus.f.endpointReq") }]}>
+                      <Input placeholder="http://192.168.2.10:4173" />
+                    </Form.Item>
+                    <Form.Item name="apiKey" label={t("nexus.f.apiKey")} extra={t("nexus.f.apiKeyExtra")}>
+                      <Input.Password placeholder="******" />
+                    </Form.Item>
+                  </>
+                );
+              }
+              if (kind === "custom") {
+                return (
+                  <Form.Item name="command" label={t("nexus.f.command")} extra={t("nexus.f.commandExtra")} rules={[{ required: true, whitespace: true, message: t("nexus.f.commandReq") }]}>
+                    <Input placeholder="my-agent --task" />
                   </Form.Item>
-                  <Form.Item name="apiKey" label={t("nexus.f.apiKey")} extra={t("nexus.f.apiKeyExtra")}>
-                    <Input.Password placeholder="******" />
+                );
+              }
+              const defaultCommand = CLI_DEFAULTS[kind];
+              if (!defaultCommand) return null;
+              return (
+                <>
+                  <Alert
+                    type="info"
+                    showIcon
+                    className="nexus-cli-hint"
+                    message={t("nexus.cliHint", { cmd: defaultCommand })}
+                  />
+                  <Form.Item
+                    name="command"
+                    label={t("nexus.f.commandOverride")}
+                    extra={t("nexus.f.commandOverrideExtra", { cmd: defaultCommand })}
+                  >
+                    <Input placeholder={defaultCommand} />
                   </Form.Item>
                 </>
-              ) : getFieldValue("kind") === "custom" ? (
-                <Form.Item name="command" label={t("nexus.f.command")} extra={t("nexus.f.commandExtra")} rules={[{ required: true, whitespace: true, message: t("nexus.f.commandReq") }]}>
-                  <Input placeholder="my-agent --task" />
-                </Form.Item>
-              ) : null
-            }
+              );
+            }}
           </Form.Item>
           <Form.Item name="enabled" label={t("nexus.f.enabled")} valuePropName="checked" extra={t("nexus.f.enabledExtra")} initialValue={true}>
             <Switch />

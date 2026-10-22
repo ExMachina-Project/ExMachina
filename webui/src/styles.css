@@ -2081,6 +2081,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 
 /* 智能连结网络（实验性） */
 .nexus-card { margin-bottom: 12px; }
+.nexus-cli-hint { margin-bottom: 16px; }
 .nexus-links { display: flex; flex-direction: column; gap: 4px; }
 .nexus-link-row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-bottom: 1px solid var(--line); }
 .nexus-endpoint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
