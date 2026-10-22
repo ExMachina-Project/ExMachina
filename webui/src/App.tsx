@@ -161,9 +161,7 @@ export default function App(): React.ReactElement {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
-  const [themeOpen, setThemeOpen] = useState(false);
-  const [accentOpen, setAccentOpen] = useState(false);
-  const [langOpen, setLangOpen] = useState(false);
+  const [openMenu, setOpenMenu] = useState<"theme" | "accent" | "lang" | null>(null);
   /** 移动端侧栏抽屉（≤860px 时侧栏覆盖呈现） */
   const [navOpen, setNavOpen] = useState(false);
   const t = useT();
@@ -286,11 +284,11 @@ export default function App(): React.ReactElement {
         />
         <AsciiDivider className="sider-divider" />
         {/* 主题预设：决定明暗与中性色阶 */}
-        <div className={`theme-switcher ${themeOpen ? "open" : ""}`}>
-          <button className="theme-toggle" onClick={() => setThemeOpen(!themeOpen)}>
+        <div className={`theme-switcher ${openMenu === "theme" ? "open" : ""}`}>
+          <button className="theme-toggle" onClick={() => setOpenMenu(openMenu === "theme" ? null : "theme")}>
             <span className="theme-label">{t("theme.label")}</span>
             <span className="theme-current">{t(`theme.preset.${preset}` as TKey)}</span>
-            <span className={`theme-caret ${themeOpen ? "up" : ""}`}>▸</span>
+            <span className={`theme-caret ${openMenu === "theme" ? "up" : ""}`}>▸</span>
           </button>
           <div className="theme-panel">
             {THEMES.map((th) => (
@@ -299,7 +297,7 @@ export default function App(): React.ReactElement {
                 className={`theme-option ${preset === th.key ? "active" : ""}`}
                 onClick={() => {
                   setPreset(th.key as ThemeKey);
-                  setThemeOpen(false);
+                  setOpenMenu(null);
                 }}
               >
                 <span
@@ -313,13 +311,13 @@ export default function App(): React.ReactElement {
           </div>
         </div>
         {/* 强调色：交互与状态点缀（同一键在不同主题下取不同明度） */}
-        <div className={`theme-switcher ${accentOpen ? "open" : ""}`}>
-          <button className="theme-toggle" onClick={() => setAccentOpen(!accentOpen)}>
+        <div className={`theme-switcher ${openMenu === "accent" ? "open" : ""}`}>
+          <button className="theme-toggle" onClick={() => setOpenMenu(openMenu === "accent" ? null : "accent")}>
             <span className="theme-label">{t("theme.accentLabel")}</span>
             <span className="theme-current" style={{ color: accentColor(preset, accent) }}>
               {t(`theme.accent.${accent}` as TKey)}
             </span>
-            <span className={`theme-caret ${accentOpen ? "up" : ""}`}>▸</span>
+            <span className={`theme-caret ${openMenu === "accent" ? "up" : ""}`}>▸</span>
           </button>
           <div className="theme-panel">
             {ACCENTS.map((a) => (
@@ -328,7 +326,7 @@ export default function App(): React.ReactElement {
                 className={`theme-option ${accent === a.key ? "active" : ""}`}
                 onClick={() => {
                   setAccent(a.key);
-                  setAccentOpen(false);
+                  setOpenMenu(null);
                 }}
               >
                 <span className="theme-swatch" style={{ background: accentColor(preset, a.key) }} />
@@ -338,11 +336,11 @@ export default function App(): React.ReactElement {
             ))}
           </div>
         </div>
-        <div className={`theme-switcher ${langOpen ? "open" : ""}`}>
-          <button className="theme-toggle" onClick={() => setLangOpen(!langOpen)}>
+        <div className={`theme-switcher ${openMenu === "lang" ? "open" : ""}`}>
+          <button className="theme-toggle" onClick={() => setOpenMenu(openMenu === "lang" ? null : "lang")}>
             <span className="theme-label">{t("lang.label")}</span>
             <span className="theme-current">{LANGS.find((l) => l.code === lang)?.name ?? lang}</span>
-            <span className={`theme-caret ${langOpen ? "up" : ""}`}>▸</span>
+            <span className={`theme-caret ${openMenu === "lang" ? "up" : ""}`}>▸</span>
           </button>
           <div className="theme-panel">
             {LANGS.map((l) => (
@@ -351,7 +349,7 @@ export default function App(): React.ReactElement {
                 className={`theme-option ${lang === l.code ? "active" : ""}`}
                 onClick={() => {
                   setLang(l.code);
-                  setLangOpen(false);
+                  setOpenMenu(null);
                 }}
               >
                 <span>{l.name}</span>
