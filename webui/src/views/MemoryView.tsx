@@ -185,24 +185,24 @@ export function MemoryView(): React.ReactElement {
         title={t("nav.memory")}
         desc={t("memory.desc")}
       />
-      <Row gutter={16}>
-        <Col span={6}>
-          <Card size="small">
+      <Row gutter={[16, 16]} align="stretch">
+        <Col xs={12} md={6}>
+          <Card size="small" className="memory-stat">
             <Statistic title={t("memory.statTotal")} value={stats?.memory?.total ?? 0} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card size="small">
+        <Col xs={12} md={6}>
+          <Card size="small" className="memory-stat">
             <Statistic title={t("memory.statShared")} value={stats?.memory?.shared ?? 0} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card size="small">
+        <Col xs={12} md={6}>
+          <Card size="small" className="memory-stat">
             <Statistic title={t("memory.statIndividual")} value={stats?.memory?.individual ?? 0} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card size="small">
+        <Col xs={12} md={6}>
+          <Card size="small" className="memory-stat">
             <Statistic title={t("memory.statPinned")} value={stats?.memory?.pinned ?? 0} />
           </Card>
         </Col>
@@ -222,7 +222,8 @@ export function MemoryView(): React.ReactElement {
           <span className="k">{t("memory.embedModel")}</span>
           <Select
             size="small"
-            style={{ minWidth: 280 }}
+            className="memory-semantic-select"
+            style={{ width: "min(420px, 100%)" }}
             value={semanticDraft}
             onChange={setSemanticDraft}
             options={semanticOptions}
@@ -238,7 +239,7 @@ export function MemoryView(): React.ReactElement {
         className="memory-card"
         title={t("memory.searchCard")}
         extra={
-          <Space>
+          <Space wrap size={[6, 6]}>
             <Button size="small" icon={<ReloadOutlined />} onClick={() => void reload()}>
               {t("common.refresh")}
             </Button>
@@ -323,36 +324,41 @@ export function MemoryView(): React.ReactElement {
       </Card>
 
       <Card size="small" className="memory-card" title={t("memory.entriesCard")}>
-        <Space className="memory-filters" wrap>
-          {["", "fact", "decision", "preference", "evidence", "digest", "lesson"].map((k) => (
-            <Tag.CheckableTag
-              key={k || "all"}
-              checked={(kindFilter ?? "") === k}
-              onChange={() => setKindFilter(k || undefined)}
-            >
-              {k === "" ? t("memory.allKinds") : k}
-            </Tag.CheckableTag>
-          ))}
-          <span className="memory-scope-label">{t("memory.agentScope")}</span>
-          <Select
-            size="small"
-            allowClear
-            placeholder={t("memory.allAgents")}
-            style={{ minWidth: 220 }}
-            value={agentFilter}
-            onChange={(v) => setAgentFilter(v ?? undefined)}
-            options={agents
-              .filter(
-                (a) => a.identifier !== groups.find((g) => g.id === activeGroup)?.primary,
-              )
-              .map((a) => ({ value: a.identifier, label: `${a.name} (${a.identifier})` }))}
-          />
-        </Space>
+        <div className="memory-filters">
+          <div className="memory-filter-kinds">
+            {["", "fact", "decision", "preference", "evidence", "digest", "lesson"].map((k) => (
+              <Tag.CheckableTag
+                key={k || "all"}
+                checked={(kindFilter ?? "") === k}
+                onChange={() => setKindFilter(k || undefined)}
+              >
+                {k === "" ? t("memory.allKinds") : k}
+              </Tag.CheckableTag>
+            ))}
+          </div>
+          <div className="memory-filter-agent">
+            <span className="memory-scope-label">{t("memory.agentScope")}</span>
+            <Select
+              size="small"
+              allowClear
+              placeholder={t("memory.allAgents")}
+              style={{ width: 220, maxWidth: "100%" }}
+              value={agentFilter}
+              onChange={(v) => setAgentFilter(v ?? undefined)}
+              options={agents
+                .filter(
+                  (a) => a.identifier !== groups.find((g) => g.id === activeGroup)?.primary,
+                )
+                .map((a) => ({ value: a.identifier, label: `${a.name} (${a.identifier})` }))}
+            />
+          </div>
+        </div>
         <Table
           size="small"
           rowKey="id"
           dataSource={entries}
           pagination={{ pageSize: 10 }}
+          tableLayout="fixed"
           locale={{ emptyText: <BrandEmpty description={t("memory.emptyEntries")} /> }}
           columns={[
             {
@@ -365,6 +371,7 @@ export function MemoryView(): React.ReactElement {
               title: t("memory.colLayer"),
               key: "layer",
               width: 80,
+              responsive: ["md"],
               render: (_, e) =>
                 e.agentId ? (
                   <Tag color="purple" title={t("memory.belongTo", { id: e.agentId })}>
@@ -391,11 +398,18 @@ export function MemoryView(): React.ReactElement {
               title: t("memory.colImportance"),
               dataIndex: "importance",
               width: 90,
+              responsive: ["sm"],
               render: (v: number) => v.toFixed(2),
               sorter: (a: MemoryEntry, b: MemoryEntry) => a.importance - b.importance,
             },
-            { title: t("memory.colConf"), dataIndex: "confidence", width: 90, render: (v: number) => v.toFixed(2) },
-            { title: t("memory.colAccess"), dataIndex: "accessCount", width: 70 },
+            {
+              title: t("memory.colConf"),
+              dataIndex: "confidence",
+              width: 90,
+              responsive: ["xl"],
+              render: (v: number) => v.toFixed(2),
+            },
+            { title: t("memory.colAccess"), dataIndex: "accessCount", width: 70, responsive: ["xl"] },
             {
               title: t("memory.colOps"),
               key: "ops",
@@ -438,6 +452,7 @@ export function MemoryView(): React.ReactElement {
           rowKey="agentId"
           dataSource={stats?.agentStats ?? []}
           pagination={{ pageSize: 8 }}
+          tableLayout="fixed"
           locale={{ emptyText: t("memory.emptyStats") }}
           columns={[
             { title: t("memory.colAgent"), dataIndex: "agentId" },
@@ -449,6 +464,7 @@ export function MemoryView(): React.ReactElement {
               title: t("memory.colAvgConf"),
               dataIndex: "avgConfidence",
               width: 120,
+              responsive: ["md"],
               render: (v: number) => v.toFixed(2),
             },
           ]}
