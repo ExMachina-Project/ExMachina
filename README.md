@@ -3,7 +3,6 @@
 
 > [!WARNING]
 > 项目处于开发阶段（pre-alpha），接口与数据格式可能破坏性变更，请勿用于生产环境。
-> 契约以 [docs/](./docs) 为唯一事实源。
 
 <div align="center">
 
@@ -16,6 +15,12 @@
   <source media="(prefers-color-scheme: dark)" srcset="./docs/wordmark-dark.svg">
   <img src="./docs/wordmark.svg" alt="EXMACHINA" width="600">
 </picture>
+
+</div>
+
+> 让我们摒弃拟人表达，让AI回归绝对理性。
+
+<div align="center">
 
 ![阶段](https://img.shields.io/badge/%E9%98%B6%E6%AE%B5-%E5%BC%80%E5%8F%91%E4%B8%AD%20%7C%20pre--alpha-orange)
 ![Rust](https://img.shields.io/badge/Rust-stable-dea584?logo=rust&logoColor=white)
