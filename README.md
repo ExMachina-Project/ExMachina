@@ -18,8 +18,6 @@
 
 </div>
 
-> 让我们摒弃拟人表达，让AI回归绝对理性。
-
 <div align="center">
 
 ![阶段](https://img.shields.io/badge/%E9%98%B6%E6%AE%B5-%E5%BC%80%E5%8F%91%E4%B8%AD%20%7C%20pre--alpha-orange)
@@ -33,6 +31,8 @@
 <p align="center">
   <a href="./README.md">简体中文</a> · <a href="./README_EN.md">English</a>
 </p>
+
+> 让我们摒弃拟人表达，让AI回归绝对理性。
 
 ---
 
