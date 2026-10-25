@@ -178,7 +178,7 @@ fn field_matches(field: &str, value: u32, lo: u32, hi: u32) -> bool {
         if value < start || value > end {
             continue;
         }
-        if step == 1 || (value - start) % step == 0 {
+        if step == 1 || (value - start).is_multiple_of(step) {
             return true;
         }
     }

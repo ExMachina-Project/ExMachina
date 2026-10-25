@@ -110,7 +110,7 @@ impl HttpClient {
             text.lines()
                 .filter_map(|l| l.strip_prefix("data:"))
                 .map(str::trim)
-                .last()
+                .next_back()
                 .unwrap_or("")
                 .to_string()
         } else {
@@ -187,9 +187,10 @@ impl StdioClient {
 
 // ---------------------------------------------------------------- 注册表
 
+// 两个变体都持大块句柄（reqwest 连接池 / 子进程与管道）——装盒避免枚举按最大变体占内存
 enum Transport {
-    Http(HttpClient),
-    Stdio(StdioClient),
+    Http(Box<HttpClient>),
+    Stdio(Box<StdioClient>),
 }
 
 /// 单服务器连接：懒初始化 + 工具/资源/提示词清单
@@ -222,10 +223,10 @@ impl McpConnection {
         }
         let t = match self.cfg.transport.as_str() {
             "http" => match &self.cfg.url {
-                Some(url) => Transport::Http(HttpClient::new(url)),
+                Some(url) => Transport::Http(Box::new(HttpClient::new(url))),
                 None => anyhow::bail!("http 服务器缺少 url: {}", self.cfg.id),
             },
-            _ => Transport::Stdio(StdioClient::spawn(&self.cfg).await?),
+            _ => Transport::Stdio(Box::new(StdioClient::spawn(&self.cfg).await?)),
         };
         self.transport = Some(t);
         // initialize 握手（失败则退化为 Failed，避免反复拉起）
@@ -541,11 +542,11 @@ impl McpRegistry {
 
     /// 调用 MCP 工具（全名 mcp:server:tool）
     pub async fn call(&self, full_name: &str, agent_id: &str, arguments: &serde_json::Value) -> Option<McpToolResult> {
-        let Some(rest) = full_name.strip_prefix("mcp:") else { return None };
-        let Some((sid, tool)) = rest.split_once(':') else { return None };
+        let rest = full_name.strip_prefix("mcp:")?;
+        let (sid, tool) = rest.split_once(':')?;
         let allowed = {
             let snap = self.snapshot.lock();
-            let Some((cfg, _)) = snap.get(sid) else { return None };
+            let (cfg, _) = snap.get(sid)?;
             if !cfg.allowed_agents.is_empty() && !cfg.allowed_agents.iter().any(|a| a == agent_id) {
                 return Some(McpToolResult { ok: false, text: format!("MCP 服务器 {sid} 未对个体 {agent_id} 开放") });
             }

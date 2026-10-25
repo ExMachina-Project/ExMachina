@@ -48,7 +48,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
-    println!("{}", "EXMACHINA 体检".on_blue().white().to_string());
+    println!("{}", "EXMACHINA 体检".on_blue().white());
     let mut d = Doctor::new();
     let cfg = ExmConfig::load(workspace_root);
 

@@ -166,9 +166,10 @@ fn cmd_status(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
 /// 去重表：平台 → (集合, 环形队列)。环形容量 1024：
 /// 正常流量下是几分钟的窗口，足够覆盖 Resume 重放（重放只发生在断线瞬间附近），
 /// 又不会无限吃内存。
-fn seen() -> &'static Mutex<HashMap<String, (HashSet<String>, VecDeque<String>)>> {
-    static SEEN: OnceLock<Mutex<HashMap<String, (HashSet<String>, VecDeque<String>)>>> =
-        OnceLock::new();
+type DedupState = Mutex<HashMap<String, (HashSet<String>, VecDeque<String>)>>;
+
+fn seen() -> &'static DedupState {
+    static SEEN: OnceLock<DedupState> = OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

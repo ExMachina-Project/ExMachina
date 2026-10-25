@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 
 pub fn run_list(core: &Core) -> anyhow::Result<()> {
     let active = core.active_group();
-    println!("{}", "智能体组（激活组标注 ●）".bold().to_string());
+    println!("{}", "智能体组（激活组标注 ●）".bold());
     for g in core.list_groups() {
         let mark = if g.id == active { "●".green().to_string() } else { " ".to_string() };
         let builtin = if g.builtin { dim("内置") } else { String::new() };
@@ -34,7 +34,7 @@ pub fn run_create(core: &Core, name: &str, id: Option<String>, description: &str
     println!(
         "  {}  {}",
         dim("1."),
-        format!("exm agent create \"<名称>\" --identifier <id> --description \"<职责>\"").cyan()
+        "exm agent create \"<名称>\" --identifier <id> --description \"<职责>\"".cyan()
     );
     println!("  {}  {}", dim("2."), "exm group switch <groupId>".cyan());
     Ok(())
@@ -56,7 +56,7 @@ pub fn run_info(core: &Core, id: Option<String>) -> anyhow::Result<()> {
     let Some(meta) = core.group_meta(&gid) else {
         anyhow::bail!("组不存在: {gid}");
     };
-    println!("{}", format!("组 {}（{}）", meta.name, meta.id).bold().to_string());
+    println!("{}", format!("组 {}（{}）", meta.name, meta.id).bold());
     println!("  {} {}", dim("内置"), meta.builtin);
     println!("  {} {}", dim("描述"), if meta.description.is_empty() { "-" } else { &meta.description });
     println!("  {} {}", dim("主智能体"), meta.primary.clone().unwrap_or_else(|| "未设置".into()));
@@ -104,6 +104,7 @@ pub fn run_delete(core: &Core, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent_create(
     core: &Core,
     name: &str,

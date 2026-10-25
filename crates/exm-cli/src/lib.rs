@@ -16,7 +16,7 @@ pub mod render;
 use clap::{Parser, Subcommand};
 use exm_core::Core;
 use owo_colors::OwoColorize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -442,8 +442,8 @@ enum MemoryAction {
 /// Windows 上 `canonicalize` 会返回 `\\?\D:\...`（UNC 则为 `\\?\UNC\srv\share`），
 /// 这个前缀一旦进了 config.json 或 `doctor` / 面板的输出，跨端（桌面端、WebUI）比对
 /// 就会处处对不上，可读性也差。故在 CLI 入口统一剥掉。
-fn normalize_root(ws: &PathBuf) -> PathBuf {
-    let root = ws.canonicalize().unwrap_or_else(|_| ws.clone());
+fn normalize_root(ws: &Path) -> PathBuf {
+    let root = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
     let s = root.to_string_lossy().to_string();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
@@ -454,8 +454,8 @@ fn normalize_root(ws: &PathBuf) -> PathBuf {
     }
 }
 
-fn build_core(workspace: &PathBuf) -> anyhow::Result<Arc<Core>> {
-    Ok(Arc::new(Core::create(&normalize_root(workspace))?))
+fn build_core(workspace: &Path) -> anyhow::Result<Arc<Core>> {
+    Ok(Arc::new(Core::create(normalize_root(workspace))?))
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -514,7 +514,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 let label = d.domain.clone();
                 if label != last_domain {
                     last_domain = label.clone();
-                    println!("\n{}", label.bold().underline().to_string());
+                    println!("\n{}", label.bold().underline());
                 }
                 let tier = if matches!(d.tier, exm_core::types::Tier::Orchestrator) {
                     format!(" {} ", "指挥体".on_blue().white())
@@ -539,7 +539,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let core = build_core(&workspace)?;
             match core.store.latest_graph(&session_id)? {
                 Some(g) => {
-                    println!("{}", format!("图 {}｜状态 {:?}", g.id, g.status).bold().to_string());
+                    println!("{}", format!("图 {}｜状态 {:?}", g.id, g.status).bold());
                     for n in &g.nodes {
                         println!("{}", render::node_line(n));
                     }
