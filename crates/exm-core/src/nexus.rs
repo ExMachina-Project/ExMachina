@@ -70,7 +70,12 @@ pub async fn probe_link(cfg: &ExmConfig, link_id: &str) -> Result<String> {
             if program.is_empty() {
                 anyhow::bail!("未配置命令");
             }
-            let found = tokio::process::Command::new("which")
+            // Windows 标准环境无 which（对应物是 where.exe），跨平台探测
+            #[cfg(windows)]
+            let finder = "where";
+            #[cfg(not(windows))]
+            let finder = "which";
+            let found = tokio::process::Command::new(finder)
                 .arg(&program)
                 .stdin(std::process::Stdio::null())
                 .output()
@@ -139,15 +144,18 @@ async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) ->
     };
 
     // 2) 记录已见末条消息 id（新回复识别游标——消息接口是尾部窗口语义，
-    //    按条数比对在窗口滚满后失灵），发起对话
+    //    按条数比对在窗口滚满后失灵）。游标必须成功建立：拉取失败就放弃本轮，
+    //    不降级为「全窗视为增量」——复用会话里旧任务的回复混进增量，
+    //    会把上一次的结论错当本次产出（张冠李戴且无感知）。
     let before: serde_json::Value = client
         .get(format!("{base}/api/sessions/{session_id}/messages"))
         .header("X-Auth-Key", &link.api_key)
         .send()
-        .await?
+        .await
+        .context("游标建立失败：对端既有消息拉取不可达")?
         .json()
         .await
-        .unwrap_or(serde_json::Value::Null);
+        .context("游标建立失败：消息清单解析失败")?;
     let cursor = before
         .as_array()
         .and_then(|a| a.last())
@@ -168,52 +176,48 @@ async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) ->
     // 3) 轮询等待新回复（对端收束后会有新 orchestrator 消息）
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS);
     let poll_interval = std::time::Duration::from_secs(3);
+    // 瞬时抖动容忍：单次轮询失败不放弃（对端可能仍在正常执行），连续失败才退出
+    let mut poll_failures = 0u32;
+    const POLL_FAILURE_TOLERANCE: u32 = 10; // ≈30s 连续失败
     loop {
         tokio::time::sleep(poll_interval).await;
         if std::time::Instant::now() > deadline {
             anyhow::bail!("连结体执行超时（{}s）", DEFAULT_TIMEOUT_SECS);
         }
-        let msgs: serde_json::Value = client
+        let msgs: serde_json::Value = match client
             .get(format!("{base}/api/sessions/{session_id}/messages"))
             .header("X-Auth-Key", &link.api_key)
             .send()
-            .await?
-            .json()
             .await
-            .unwrap_or(serde_json::Value::Null);
+        {
+            Ok(r) => r.json().await.unwrap_or(serde_json::Value::Null),
+            Err(_) => {
+                poll_failures += 1;
+                if poll_failures >= POLL_FAILURE_TOLERANCE {
+                    anyhow::bail!("轮询对端连续 {POLL_FAILURE_TOLERANCE} 次失败，放弃等待");
+                }
+                continue;
+            }
+        };
+        poll_failures = 0;
         let Some(list) = msgs.as_array() else { continue };
         let fresh = messages_after(list, cursor.as_deref());
         // 无新增：继续等
         if fresh.is_empty() {
             continue;
         }
+        // 以本轮 user 回显为锚（见 [`anchor_of_echo`]）：锚之前的一律当旧账
+        let Some(anchor) = anchor_of_echo(&fresh, prompt) else {
+            continue; // 本轮回显尚未落库——继续等
+        };
+        let since = &fresh[anchor + 1..];
         // 对端执行失败早退：chat 是 202 异步受理，spawn 失败只经 WS 广播 run.error、
         // 不落 orchestrator 消息——识别 system 警告（含失败标记）直接带错返回，不再干等超时
-        if let Some(err) = fresh
-            .iter()
-            .filter(|m| m["role"] == serde_json::json!("system"))
-            .filter_map(|m| {
-                m["statements"]
-                    .as_array()
-                    .map(|sts| sts.iter().filter_map(|s| s["text"].as_str()).collect::<Vec<_>>().join(" "))
-            })
-            .find(|text| text.contains("失败") || text.contains("错误") || text.to_lowercase().contains("error"))
-        {
+        if let Some(err) = failure_text_since(since) {
             anyhow::bail!("对端执行失败: {}", err.chars().take(300).collect::<String>());
         }
-        // 取新增消息里最后一条 orchestrator 陈述文本
-        if let Some(text) = fresh
-            .iter()
-            .rev()
-            .filter(|m| m["role"] == serde_json::json!("orchestrator"))
-            .find_map(|m| m["statements"].as_array())
-            .map(|sts| {
-                sts.iter()
-                    .filter_map(|s| s["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            })
-        {
+        // 取锚后最后一条 orchestrator 陈述文本
+        if let Some(text) = orchestrator_reply_since(since) {
             if !text.trim().is_empty() {
                 let summary: String = text.chars().take(400).collect();
                 return Ok((summary, text));
@@ -230,6 +234,48 @@ fn messages_after(list: &[serde_json::Value], cursor: Option<&str>) -> Vec<serde
         Some(idx) => list[idx + 1..].to_vec(),
         None => list.to_vec(),
     }
+}
+
+/// 本轮 user 回显的锚点：窗口内最后一条陈述含本轮 prompt 的 user 消息下标。
+/// 必须按 prompt 文本匹配而非「任意 user 消息」——游标滚出窗口 + 回显未落库时，
+/// 最后一条 user 是上一轮的提问，按任意 user 锚定会把旧结论错当本次产出。
+fn anchor_of_echo(fresh: &[serde_json::Value], prompt: &str) -> Option<usize> {
+    fresh.iter().rposition(|m| {
+        m["role"] == serde_json::json!("user")
+            && m["statements"]
+                .as_array()
+                .map(|sts| sts.iter().filter_map(|s| s["text"].as_str()).collect::<Vec<_>>().join(" "))
+                .map(|t| t.contains(prompt))
+                .unwrap_or(false)
+    })
+}
+
+/// 锚后 system 消息里的失败标记（含「失败 / 错误 / error」的第一个命中文本）
+fn failure_text_since(since: &[serde_json::Value]) -> Option<String> {
+    since
+        .iter()
+        .filter(|m| m["role"] == serde_json::json!("system"))
+        .filter_map(|m| {
+            m["statements"]
+                .as_array()
+                .map(|sts| sts.iter().filter_map(|s| s["text"].as_str()).collect::<Vec<_>>().join(" "))
+        })
+        .find(|text| text.contains("失败") || text.contains("错误") || text.to_lowercase().contains("error"))
+}
+
+/// 锚后最后一条 orchestrator 陈述的合并文本
+fn orchestrator_reply_since(since: &[serde_json::Value]) -> Option<String> {
+    since
+        .iter()
+        .rev()
+        .filter(|m| m["role"] == serde_json::json!("orchestrator"))
+        .find_map(|m| m["statements"].as_array())
+        .map(|sts| {
+            sts.iter()
+                .filter_map(|s| s["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
 }
 
 // ---------------------------------------------------------------- CLI 智能体
@@ -259,6 +305,8 @@ async fn execute_cli(link: &LinkTarget, prompt: &str) -> Result<(String, String)
         tokio::process::Command::new(&program)
             .args(&cmd)
             .stdin(std::process::Stdio::null())
+            // 超时取消 output() future 时随 drop 杀掉子进程——否则孤儿进程继续跑，超时形同虚设
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -340,6 +388,33 @@ mod tests {
         assert_eq!(messages_after(&window, Some("m-old")).len(), 200);
         // 无游标（首次）：全部
         assert_eq!(messages_after(&window, None).len(), 200);
+    }
+
+    /// 回复认领必须锚定本轮 user 回显（按 prompt 文本匹配）：游标失效降级时
+    /// 旧任务的回复混在窗口里，锚之前的一律当旧账——防「上次结论错当本次产出」
+    #[test]
+    fn 轮询认领_锚定本轮user回显() {
+        let mk = |id: &str, role: &str, text: &str| {
+            serde_json::json!({ "id": id, "role": role, "statements": [{ "tag": "报告", "text": text }] })
+        };
+        // 旧账（上一轮提问 + 回复）+ 本轮回显 + system 警告 + 新回复
+        let fresh = vec![
+            mk("m1", "user", "旧目标"),
+            mk("m2", "orchestrator", "旧结论"),
+            mk("m3", "user", "新目标\n\n验收标准：\n- 完"),
+            mk("m4", "system", "警告：上游错误"),
+            mk("m5", "orchestrator", "新结论"),
+        ];
+        let anchor = anchor_of_echo(&fresh, "新目标").expect("本轮回显应建立锚点");
+        let since = &fresh[anchor + 1..];
+        assert_eq!(orchestrator_reply_since(since).as_deref(), Some("新结论"));
+        assert_eq!(failure_text_since(since).as_deref(), Some("警告：上游错误"));
+
+        // 本轮回显未落库（窗口里只有上一轮的旧账）：无锚点 → 不认领任何旧结论
+        let stale_window = vec![mk("m1", "user", "旧目标"), mk("m2", "orchestrator", "旧结论")];
+        assert!(anchor_of_echo(&stale_window, "新目标").is_none());
+        // 回显是旧账的另一轮目标：同样不为本轮建立锚点
+        assert!(anchor_of_echo(&stale_window, "旧目标").is_some(), "匹配旧目标时锚点存在（语义自检）");
     }
 
     #[tokio::test]

@@ -749,11 +749,17 @@ async fn post_comment(
 // ---------------------------------------------------------------- B 站
 
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent(UA)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    // 共享单例：reqwest::Client 内部自带连接池，每请求新建会反复拆建 TCP+TLS
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .user_agent(UA)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone()
 }
 
 fn bili_cookie(ch: &Channel) -> String {
