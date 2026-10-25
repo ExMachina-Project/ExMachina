@@ -89,6 +89,8 @@ async fn git操作_暂存提交直发() {
 async fn git操作_破坏性走审批单() {
     let dir = unique_dir("danger");
     git(&dir, &["init", "-q"]);
+    // Windows 全局 core.autocrlf 常为 true：discard 回检出的文件会变 CRLF，断言必须跨平台确定
+    git(&dir, &["config", "core.autocrlf", "false"]);
     std::fs::write(dir.join("f.txt"), "v1\n").unwrap();
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-q", "-m", "c1"]);
