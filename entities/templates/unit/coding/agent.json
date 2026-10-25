@@ -15,6 +15,7 @@
     "glob",
     "filesystem",
     "terminal",
+    "edit",
     "patch"
   ],
   "whenToCall": "{{description}}",

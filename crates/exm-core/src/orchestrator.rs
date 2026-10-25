@@ -3,7 +3,9 @@
 
 use crate::memory::{MemoryDraft, MemoryKind, MemoryStore};
 use crate::parse;
-use crate::provider::{ChatMessage, ChatRequest, FailoverState, LlmProvider, ModelChain, ModelPool, StreamDelta};
+use crate::provider::{
+    ChatMessage, ChatRequest, FailoverState, LlmProvider, ModelChain, ModelPool, StreamDelta,
+};
 use crate::registry::LocalRegistry;
 use crate::runtime::AgentRuntime;
 use crate::store::Store;
@@ -20,8 +22,9 @@ pub const ORCHESTRATOR_ID: &str = "orchestrator";
 
 /// 本轮模式暂存（会话 → 模式）：对话请求携带、`plan()` 取走即消费。
 /// direct = 强制 L0 直答（一轮工具循环内闭环）；full = 强制拆解派发（禁止 L0）。
-static SESSION_MODES: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<String, String>>> =
-    std::sync::OnceLock::new();
+static SESSION_MODES: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
 
 fn session_modes() -> &'static parking_lot::Mutex<std::collections::HashMap<String, String>> {
     SESSION_MODES.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
@@ -31,7 +34,9 @@ fn session_modes() -> &'static parking_lot::Mutex<std::collections::HashMap<Stri
 pub fn set_session_mode(session_id: &str, mode: &str) {
     match mode {
         "direct" | "full" => {
-            session_modes().lock().insert(session_id.to_string(), mode.to_string());
+            session_modes()
+                .lock()
+                .insert(session_id.to_string(), mode.to_string());
         }
         _ => {}
     }
@@ -132,21 +137,33 @@ impl Orchestrator {
             "embedding" => Some(self.memory_semantic_model.clone()),
             _ => None,
         });
-        target.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        target
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// 指挥体身份 = 激活组主智能体 identifier（组感知；内置组即 orchestrator）。
     /// 语音转写：组覆盖 → 全局槽位指定的档案/模型；未配置回落全局生效档案的 whisper-1
     pub async fn transcribe_audio(&self, audio: &[u8], filename: &str) -> anyhow::Result<String> {
-        match self.capability_target("transcribe").and_then(|t| self.resolve_capability(&t)) {
+        match self
+            .capability_target("transcribe")
+            .and_then(|t| self.resolve_capability(&t))
+        {
             Some((provider, model)) => provider.transcribe(&model, audio, filename).await,
-            None => self.orch_provider.transcribe("whisper-1", audio, filename).await,
+            None => {
+                self.orch_provider
+                    .transcribe("whisper-1", audio, filename)
+                    .await
+            }
         }
     }
 
     /// 语音合成：组覆盖 → 全局槽位指定的档案/模型；未配置回落全局生效档案的 tts-1
     pub async fn speak_audio(&self, text: &str) -> anyhow::Result<Vec<u8>> {
-        match self.capability_target("speech").and_then(|t| self.resolve_capability(&t)) {
+        match self
+            .capability_target("speech")
+            .and_then(|t| self.resolve_capability(&t))
+        {
             Some((provider, model)) => provider.speak(&model, text).await,
             None => self.orch_provider.speak("tts-1", text).await,
         }
@@ -215,18 +232,69 @@ impl Orchestrator {
 
         // 归档：深层开 → 存数据库（digest 条目，全局可见）；关 → 追加工作区归档文件
         if self.memory_enabled {
-            let draft = MemoryDraft::new(MemoryKind::Digest, format!("memory.md 归档 {}", now_iso()), md.clone())
-                .importance(0.4);
+            let draft = MemoryDraft::new(
+                MemoryKind::Digest,
+                format!("memory.md 归档 {}", now_iso()),
+                md.clone(),
+            )
+            .importance(0.4);
             let _ = self.memory.remember(&draft);
         } else {
             let archive = self.memory_md_path.with_file_name("memory_archive.md");
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&archive) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&archive)
+            {
                 use std::io::Write as _;
                 let _ = writeln!(f, "\n## 归档 {}\n\n{md}\n", now_iso());
             }
         }
         std::fs::write(&self.memory_md_path, &compressed)?;
         Ok((len, compressed.chars().count()))
+    }
+
+    /// 会话的有效记忆命名空间 + 分区标记（None = 同组共享）。
+    /// 外部通道「记忆隔离」把分区键写进会话，规划/派发/工具面统一走这里。
+    fn memory_scope_for(&self, session_id: &str) -> (String, Option<String>) {
+        let partition = self
+            .store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.memory_partition);
+        let group = partition
+            .clone()
+            .unwrap_or_else(|| self.registry.active_group());
+        (group, partition)
+    }
+
+    /// 会话有效记忆命名空间（规划召回 / 派发召回 / 自动写入共用）。
+    fn memory_group_for_session(&self, session_id: &str) -> String {
+        self.memory_scope_for(session_id).0
+    }
+
+    /// 分区记忆的 memory.md 路径：共享档沿用全局路径；隔离档落到独立文件，
+    /// 避免把整个记忆库渲染进隔离平台的文件记忆视图（泄漏）。
+    fn memory_md_path_for(&self, session_id: &str) -> std::path::PathBuf {
+        let (_, partition) = self.memory_scope_for(session_id);
+        match partition {
+            None => self.memory_md_path.clone(),
+            Some(p) => {
+                let safe: String = p
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                self.memory_md_path
+                    .with_file_name(format!("memory-{safe}.md"))
+            }
+        }
     }
 
     /// 工作者端执行入口：远程派发在本地执行（供 WorkerSession 调用）
@@ -242,8 +310,20 @@ impl Orchestrator {
         F: FnMut(StreamDelta),
     {
         let chain = self.unit_chain_for(def);
-        // 工作者端本地执行：过程归集键与用量同键（无子会话概念）
-        self.unit_runtime.execute(def, order, chain, session_id, session_id, attach_images, |d| on_delta(d)).await
+        // 工作者端本地执行：过程归集键与用量同键（无子会话概念）。
+        // 能力边界已在上游裁剪进 order.tool_allowlist，工作者端按完整档执行即可。
+        self.unit_runtime
+            .execute(
+                def,
+                order,
+                chain,
+                session_id,
+                session_id,
+                attach_images,
+                ToolScope::Computer,
+                |d| on_delta(d),
+            )
+            .await
     }
 
     pub fn orch_id(&self) -> String {
@@ -282,7 +362,9 @@ impl Orchestrator {
         let total = ids.len();
         let mut out: Vec<(String, Arc<dyn LlmProvider>, String)> = Vec::new();
         for (n, id) in ids.into_iter().enumerate() {
-            let Some((provider, model)) = self.model_pool.entry(&id) else { continue };
+            let Some((provider, model)) = self.model_pool.entry(&id) else {
+                continue;
+            };
             if !out.is_empty() && n + 1 < total && self.failover.cooling(&id) {
                 continue; // 冷却中且后面还有候选：跳过
             }
@@ -293,7 +375,9 @@ impl Orchestrator {
 
     /// 写入路径向量回填：本轮新条目批量嵌入（标题+正文），失败静默（词项召回仍可用）
     async fn backfill_embeddings(&self, ids: &[String]) {
-        let Some(cfg) = self.semantic_recall() else { return };
+        let Some(cfg) = self.semantic_recall() else {
+            return;
+        };
         let (provider, model) = cfg;
         let mut pending: Vec<(String, String)> = Vec::new();
         for id in ids {
@@ -321,13 +405,19 @@ impl Orchestrator {
     /// 查询嵌入（混合记忆检索）：语义检索指向的档案 + 模型，否则 None（纯词项）
     async fn embed_query(&self, text: &str) -> Option<Vec<f32>> {
         let (provider, model) = self.semantic_recall()?;
-        provider.embed(&model, &[text.to_string()]).await.ok()?.into_iter().next()
+        provider
+            .embed(&model, &[text.to_string()])
+            .await
+            .ok()?
+            .into_iter()
+            .next()
     }
 
     /// 解析语义检索目标（组覆盖 → 全局记忆设置指定的档案与模型）；未配置返回 None
     fn semantic_recall(&self) -> Option<(Arc<dyn LlmProvider>, String)> {
         let target = self.capability_target("embedding")?;
-        self.resolve_capability(&target).filter(|(_, m)| !m.is_empty())
+        self.resolve_capability(&target)
+            .filter(|(_, m)| !m.is_empty())
     }
 
     /// 解析能力槽位目标（"档案ID" 或 "档案ID/模型名"）→ (Provider, 生效模型名)。
@@ -342,7 +432,11 @@ impl Orchestrator {
             _ => (id, String::new()),
         };
         let (provider, profile_model) = self.model_pool.entry(&pid)?;
-        let model = if model.is_empty() { profile_model } else { model };
+        let model = if model.is_empty() {
+            profile_model
+        } else {
+            model
+        };
         Some((provider, model))
     }
 
@@ -359,7 +453,10 @@ impl Orchestrator {
     }
 
     /// 子个体候选链（个体 → 组 → 全局 → 回退链）
-    fn unit_candidates(&self, def: &AgentDefinition) -> Vec<(String, Arc<dyn LlmProvider>, String)> {
+    fn unit_candidates(
+        &self,
+        def: &AgentDefinition,
+    ) -> Vec<(String, Arc<dyn LlmProvider>, String)> {
         let start = def
             .model_hint
             .clone()
@@ -374,7 +471,10 @@ impl Orchestrator {
 
     /// 子个体回退链（run_node → AgentRuntime）
     fn unit_chain_for(&self, def: &AgentDefinition) -> ModelChain {
-        ModelChain { candidates: self.unit_candidates(def), failover: self.failover.clone() }
+        ModelChain {
+            candidates: self.unit_candidates(def),
+            failover: self.failover.clone(),
+        }
     }
 
     // ---------------------------------------------------------- 事件
@@ -404,15 +504,20 @@ impl Orchestrator {
     }
 
     /// 只广播不落库的事件名（流式增量）。
-    const TRANSIENT_EVENT_KINDS: [&'static str; 4] =
-        ["orchestrator.token", "orchestrator.thinking", "unit.token", "unit.thinking"];
+    const TRANSIENT_EVENT_KINDS: [&'static str; 4] = [
+        "orchestrator.token",
+        "orchestrator.thinking",
+        "unit.token",
+        "unit.thinking",
+    ];
 
     // ---------------------------------------------------------- 主入口
 
     /// collect：上一条非 user（orchestrator/unit/system）消息之后的所有 user 输入合并
     fn collect_pending_inputs(&self, session_id: &str) -> Option<String> {
         // list_messages 为时间正序（read_lines 语义）：从尾部反向收集连续 user 消息
-        let msgs: Vec<crate::types::ChatMessage> = self.store.list_messages(session_id, 200).ok()?;
+        let msgs: Vec<crate::types::ChatMessage> =
+            self.store.list_messages(session_id, 200).ok()?;
         let mut pending: Vec<String> = Vec::new();
         for m in msgs.iter().rev() {
             if m.role != MessageRole::User {
@@ -435,7 +540,10 @@ impl Orchestrator {
         type StoredMessage = crate::types::ChatMessage;
         const TRIGGER: usize = 20; // 超过才压缩
         const KEEP: usize = 12; // 保留最近 N 条原文
-        let msgs: Vec<StoredMessage> = self.store.list_messages(session_id, 500).unwrap_or_default();
+        let msgs: Vec<StoredMessage> = self
+            .store
+            .list_messages(session_id, 500)
+            .unwrap_or_default();
         if msgs.len() <= TRIGGER {
             return (None, render_recent(&msgs));
         }
@@ -446,7 +554,10 @@ impl Orchestrator {
         let session = self.store.get_session(session_id).ok().flatten();
         let upto = older.len();
         let prev_upto = session.as_ref().and_then(|s| s.summary_upto).unwrap_or(0);
-        let prev_summary = session.as_ref().and_then(|s| s.rolling_summary.clone()).unwrap_or_default();
+        let prev_summary = session
+            .as_ref()
+            .and_then(|s| s.rolling_summary.clone())
+            .unwrap_or_default();
         if prev_upto == upto {
             return (Some(prev_summary), render_recent_hlp(&recent));
         }
@@ -460,20 +571,38 @@ impl Orchestrator {
                     MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
                     MessageRole::System => "系统",
                 };
-                let body = m.statements.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("；");
+                let body = m
+                    .statements
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("；");
                 format!("[{who}] {}", body.chars().take(400).collect::<String>())
             })
             .collect::<Vec<_>>()
             .join("\n");
         let system = "你是会话压缩器【会话压缩】。把历史对话压成不超过 400 字的连续上下文摘要：保留目标、关键结论、证据与未决事项；只输出摘要正文，不要任何前后缀。";
-        let user = format!("已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。");
+        let user = format!(
+            "已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。"
+        );
         let summary = match self.resolve_orch_model() {
             (provider, model) => {
-                let req = ChatRequest::new(model, vec![ChatMessage::system(system), ChatMessage::user(user)]);
-                provider.chat(req).await.map(|r| r.content).unwrap_or_else(|e| {
-                    eprintln!("[orchestrator] 会话压缩失败（沿用旧摘要）：{e}");
-            			if prev_summary.is_empty() { String::new() } else { prev_summary.clone() }
-                })
+                let req = ChatRequest::new(
+                    model,
+                    vec![ChatMessage::system(system), ChatMessage::user(user)],
+                );
+                provider
+                    .chat(req)
+                    .await
+                    .map(|r| r.content)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[orchestrator] 会话压缩失败（沿用旧摘要）：{e}");
+                        if prev_summary.is_empty() {
+                            String::new()
+                        } else {
+                            prev_summary.clone()
+                        }
+                    })
             }
         };
         if !summary.trim().is_empty() {
@@ -489,31 +618,59 @@ impl Orchestrator {
         session_id: &str,
         text: &str,
     ) -> anyhow::Result<()> {
+        self.handle_user_message_scoped(session_id, text, ToolScope::Computer)
+            .await
+    }
+
+    /// 带能力边界处理一轮（外部通道入口）：scope 贯穿规划/派发/单聊执行。
+    pub async fn handle_user_message_scoped(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        scope: ToolScope,
+    ) -> anyhow::Result<()> {
         let session = self.store.get_session(session_id)?;
         if session.is_none() {
             anyhow::bail!("会话不存在: {session_id}");
         }
 
-        self.store
-            .add_message(session_id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, text)])?;
+        self.store.add_message(
+            session_id,
+            MessageRole::User,
+            None,
+            vec![Statement::new(SpeechTag::要求, text)],
+        )?;
 
         // collect 语义：把「上一条非 user 消息之后到达的全部用户输入」合并为本轮目标
         // （串行锁保证的排队窗口内的多条消息 = 一轮处理，避免逐条各跑一遍）
-        let goal = self.collect_pending_inputs(session_id).unwrap_or_else(|| text.to_string());
+        let goal = self
+            .collect_pending_inputs(session_id)
+            .unwrap_or_else(|| text.to_string());
 
         let ledger = self.store.mutate_ledger(session_id, |l| {
             l.task.goal = goal.clone();
         })?;
         self.emit(session_id, "ledger.updated", serde_json::to_value(&ledger)?);
 
-        let result = self.run_round(session_id, &goal).await;
+        let result = self.run_round(session_id, &goal, scope).await;
         // onRunEnd 钩子：一轮收束（成功或失败）时触发，可做通知/留痕/指标
         let hook_status = if result.is_ok() { "done" } else { "error" };
-        for note in self.tools.run_end_hooks(hook_status, session_id, &self.orch_id()) {
-            self.emit(session_id, "hook.failed", serde_json::json!({ "message": note }));
+        for note in self
+            .tools
+            .run_end_hooks(hook_status, session_id, &self.orch_id())
+        {
+            self.emit(
+                session_id,
+                "hook.failed",
+                serde_json::json!({ "message": note }),
+            );
         }
         if let Err(err) = &result {
-            self.emit(session_id, "run.error", serde_json::json!({ "message": err.to_string() }));
+            self.emit(
+                session_id,
+                "run.error",
+                serde_json::json!({ "message": err.to_string() }),
+            );
             let _ = self.store.add_message(
                 session_id,
                 MessageRole::System,
@@ -528,7 +685,10 @@ impl Orchestrator {
 
     /// 停止轮次的统一收束：停止陈述作为最终消息（含过程数据），审计事件落账
     fn finish_stopped_round(&self, session_id: &str, tools_executed: usize) -> anyhow::Result<()> {
-        let text = format!("【警告】本轮已被用户停止（已执行 {} 次工具调用）。", tools_executed);
+        let text = format!(
+            "【警告】本轮已被用户停止（已执行 {} 次工具调用）。",
+            tools_executed
+        );
         let statements = vec![Statement::warn(text)];
         let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
         self.store.add_message_full(
@@ -568,12 +728,24 @@ impl Orchestrator {
             Ok(Some(last)) => last.turn + 1,
             _ => 1,
         };
-        let count = self.store.list_messages(session_id, 0).map(|m| m.len()).unwrap_or(0);
-        let checkpoint_ids = self.store.drain_checkpoint_refs(session_id).unwrap_or_default();
+        let count = self
+            .store
+            .list_messages(session_id, 0)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let checkpoint_ids = self
+            .store
+            .drain_checkpoint_refs(session_id)
+            .unwrap_or_default();
         let (p, c, _) = self.store.usage_total(session_id);
         let (prev_p, prev_c) = match turn {
             1 => (0, 0),
-            _ => match self.store.list_turn_snapshots(session_id).ok().and_then(|l| l.last().cloned()) {
+            _ => match self
+                .store
+                .list_turn_snapshots(session_id)
+                .ok()
+                .and_then(|l| l.last().cloned())
+            {
                 Some(last) => (last.prompt_tokens, last.completion_tokens),
                 None => (0, 0),
             },
@@ -599,7 +771,12 @@ impl Orchestrator {
 
     /// 智能体模式直接执行轮(常见单 agent 应用同款):系统提示 + 会话历史 + 工具循环,
     /// 自主决策直至产出最终回复。无规划 JSON、无派发语义;过程分轨与留痕对齐既有体验。
-    async fn single_direct_round(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<()> {
+    async fn single_direct_round(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        scope: ToolScope,
+    ) -> anyhow::Result<()> {
         let def = self
             .registry
             .primary()
@@ -649,8 +826,9 @@ impl Orchestrator {
             match self.relay_images(&images).await {
                 Some(desc) => {
                     if let Some(m) = last {
-                        m.content
-                            .push_str(&format!("\n\n## 图片内容（由视觉转述模型转写，原始图片未直接下发）\n{desc}"));
+                        m.content.push_str(&format!(
+                            "\n\n## 图片内容（由视觉转述模型转写，原始图片未直接下发）\n{desc}"
+                        ));
                     }
                 }
                 None => {
@@ -678,10 +856,18 @@ impl Orchestrator {
         let on_delta = move |delta: StreamDelta| match delta {
             StreamDelta::Thinking(t) => {
                 crate::round_trace::push_thinking(&sid, &t);
-                em.emit(&sid, "orchestrator.thinking", serde_json::json!({ "delta": t }));
+                em.emit(
+                    &sid,
+                    "orchestrator.thinking",
+                    serde_json::json!({ "delta": t }),
+                );
             }
             StreamDelta::Text(t) => {
-                em.emit(&sid, "orchestrator.token", serde_json::json!({ "delta": t }));
+                em.emit(
+                    &sid,
+                    "orchestrator.token",
+                    serde_json::json!({ "delta": t }),
+                );
             }
         };
 
@@ -696,6 +882,7 @@ impl Orchestrator {
                 session_id,
                 chain,
                 true,
+                scope,
                 on_delta,
             )
             .await?;
@@ -746,7 +933,12 @@ impl Orchestrator {
         let mut system_prompt = self
             .registry
             .load_prompt(&def.prompt_file)
-            .unwrap_or_else(|_| format!("# {}\n\n你是组内子个体，独立、专业地与操作者对话。", def.name));
+            .unwrap_or_else(|_| {
+                format!(
+                    "# {}\n\n你是组内子个体，独立、专业地与操作者对话。",
+                    def.name
+                )
+            });
         let soul = self
             .registry
             .single_persona(&def.identifier)
@@ -771,7 +963,11 @@ impl Orchestrator {
                     let acc: Vec<String> = p
                         .get("acceptance")
                         .and_then(|v| v.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     if !acc.is_empty() {
                         ctx.push_str(&format!("\n验收：{}", acc.join("；")));
@@ -844,10 +1040,18 @@ impl Orchestrator {
         let on_delta = move |delta: StreamDelta| match delta {
             StreamDelta::Thinking(t) => {
                 crate::round_trace::push_thinking(&sid, &t);
-                em.emit(&sid, "unit.thinking", serde_json::json!({ "agentId": aid, "delta": t }));
+                em.emit(
+                    &sid,
+                    "unit.thinking",
+                    serde_json::json!({ "agentId": aid, "delta": t }),
+                );
             }
             StreamDelta::Text(t) => {
-                em.emit(&sid, "unit.token", serde_json::json!({ "agentId": aid, "delta": t }));
+                em.emit(
+                    &sid,
+                    "unit.token",
+                    serde_json::json!({ "agentId": aid, "delta": t }),
+                );
             }
         };
 
@@ -862,6 +1066,7 @@ impl Orchestrator {
                 session_id,
                 chain,
                 true,
+                ToolScope::Computer,
                 on_delta,
             )
             .await?;
@@ -886,10 +1091,15 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn run_round(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<()> {
+    async fn run_round(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        scope: ToolScope,
+    ) -> anyhow::Result<()> {
         // 智能体模式:直接工具循环(常见单 agent 应用同款),不进规划/派发语义
         if self.registry.single_mode() {
-            return self.single_direct_round(session_id, text).await;
+            return self.single_direct_round(session_id, text, scope).await;
         }
         let plan = self.plan(session_id, text).await?;
 
@@ -931,7 +1141,11 @@ impl Orchestrator {
 
         let mut graph = TaskGraphModel::from_plan(&plan, session_id);
         self.store.save_graph(&graph.to_graph())?;
-        self.emit(session_id, "graph.updated", serde_json::to_value(graph.to_graph())?);
+        self.emit(
+            session_id,
+            "graph.updated",
+            serde_json::to_value(graph.to_graph())?,
+        );
 
         let reports: Arc<Mutex<Reports>> = Arc::new(Mutex::new(Reports::new()));
         let exec = ExecCtx {
@@ -939,6 +1153,7 @@ impl Orchestrator {
             session_id: session_id.to_string(),
             plan: plan.clone(),
             reports: reports.clone(),
+            scope,
         };
         let exec = Arc::new(exec);
 
@@ -955,19 +1170,15 @@ impl Orchestrator {
         };
 
         scheduler
-            .run(
-                &mut graph,
-                executor,
-                move |g| {
-                    let _ = store.save_graph(&g.to_graph());
-                    let evt = CoreEvent {
-                        kind: "graph.updated".into(),
-                        session_id: session_for_cb.clone(),
-                        payload: serde_json::to_value(g.to_graph()).unwrap_or(serde_json::Value::Null),
-                    };
-                    let _ = events.send(evt);
-                },
-            )
+            .run(&mut graph, executor, move |g| {
+                let _ = store.save_graph(&g.to_graph());
+                let evt = CoreEvent {
+                    kind: "graph.updated".into(),
+                    session_id: session_for_cb.clone(),
+                    payload: serde_json::to_value(g.to_graph()).unwrap_or(serde_json::Value::Null),
+                };
+                let _ = events.send(evt);
+            })
             .await;
 
         let final_reports = reports.lock().await.clone();
@@ -979,7 +1190,8 @@ impl Orchestrator {
                 crate::round_trace::tool_count(session_id)
             )
         } else {
-            self.converge(session_id, &plan, &final_reports, &graph).await?
+            self.converge(session_id, &plan, &final_reports, &graph)
+                .await?
         };
         let statements = text_to_statements(&final_text);
         let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
@@ -1005,16 +1217,22 @@ impl Orchestrator {
 
         // ---- 自我进化：写入记忆（摘要/决策/证据/教训/个体统计） ----
         if self.memory_enabled {
-            let ids = self.write_memories(session_id, text, &plan, &graph, &final_reports, &statements);
+            let ids =
+                self.write_memories(session_id, text, &plan, &graph, &final_reports, &statements);
             // 语义向量后台回填（混合记忆检索；无嵌入模型时静默跳过）
             if !ids.is_empty() {
                 let o = self.clone();
-                tokio::spawn(async move { o.backfill_embeddings(&ids).await; });
+                tokio::spawn(async move {
+                    o.backfill_embeddings(&ids).await;
+                });
             }
             // 经验优化自动触发：新教训达阈值时后台合成（docs/10 §5，只调优既有个体）
             if self.auto_adapt {
-                let mut agent_ids: Vec<String> =
-                    graph.list().iter().map(|n| n.agent_identifier.clone()).collect();
+                let mut agent_ids: Vec<String> = graph
+                    .list()
+                    .iter()
+                    .map(|n| n.agent_identifier.clone())
+                    .collect();
                 agent_ids.sort();
                 agent_ids.dedup();
                 let o = self.clone();
@@ -1048,15 +1266,18 @@ impl Orchestrator {
     ) -> Vec<String> {
         let mut written: Vec<serde_json::Value> = Vec::new();
         let entry_ids: Vec<String> = Vec::new();
-        // 组级记忆隔离：任务产物归属激活组（docs/09 §6）
-        let gid = self.registry.active_group();
+        // 记忆命名空间：默认归属激活组（同组跨平台共享）；通道开启记忆隔离时使用会话分区。
+        let (gid, partition) = self.memory_scope_for(session_id);
 
         // 1) 会话摘要（薄记）
         let digest = format!(
             "目标：{}\n路由：{:?}{}\n节点：{}\n收束要点：{}",
             plan.goal,
             plan.route_level,
-            plan.playbook.as_ref().map(|p| format!("（链路 {p}）")).unwrap_or_default(),
+            plan.playbook
+                .as_ref()
+                .map(|p| format!("（链路 {p}）"))
+                .unwrap_or_default(),
             graph
                 .list()
                 .iter()
@@ -1072,11 +1293,18 @@ impl Orchestrator {
                 .join("；")
         );
         if let Ok(e) = self.memory.remember(
-            &MemoryDraft::new(MemoryKind::Digest, format!("会话摘要：{}", plan.goal.chars().take(40).collect::<String>()), digest)
-                .importance(0.45)
-                .session(session_id)
-                .tags(&["session", "digest"])
-                .group(&gid),
+            &MemoryDraft::new(
+                MemoryKind::Digest,
+                format!(
+                    "会话摘要：{}",
+                    plan.goal.chars().take(40).collect::<String>()
+                ),
+                digest,
+            )
+            .importance(0.45)
+            .session(session_id)
+            .tags(&["session", "digest"])
+            .group(&gid),
         ) {
             written.push(serde_json::to_value(&e).unwrap_or(serde_json::Value::Null));
         }
@@ -1085,7 +1313,10 @@ impl Orchestrator {
         if let Ok(e) = self.memory.remember(
             &MemoryDraft::new(
                 MemoryKind::Decision,
-                format!("任务边界裁决：{}", plan.goal.chars().take(40).collect::<String>()),
+                format!(
+                    "任务边界裁决：{}",
+                    plan.goal.chars().take(40).collect::<String>()
+                ),
                 format!(
                     "范围内：{}\n禁区：{}\n验收：{}",
                     plan.boundary.in_scope.join("；"),
@@ -1103,20 +1334,32 @@ impl Orchestrator {
 
         // 3) 证据（仅 A/B 级）与教训（失败/受阻），并按个体落统计
         for node in graph.list() {
-            let Some(report) = reports.get(&node.id) else { continue };
+            let Some(report) = reports.get(&node.id) else {
+                continue;
+            };
             let status = match report.status {
                 SyncStatus::Done => "done",
                 SyncStatus::Blocked => "blocked",
                 SyncStatus::NeedArbitration => "blocked",
                 SyncStatus::InProgress => "blocked",
             };
-            let _ = self.memory.record_agent_outcome(&node.agent_identifier, status, report.confidence);
+            let _ =
+                self.memory
+                    .record_agent_outcome(&node.agent_identifier, status, report.confidence);
 
             let strong: Vec<String> = report
                 .evidence
                 .iter()
                 .filter(|e| matches!(e.level, EvidenceLevel::A | EvidenceLevel::B))
-                .map(|e| format!("[{}|{}] {} — {}", e.level.label(), e.kind.label(), e.reference, e.note))
+                .map(|e| {
+                    format!(
+                        "[{}|{}] {} — {}",
+                        e.level.label(),
+                        e.kind.label(),
+                        e.reference,
+                        e.note
+                    )
+                })
                 .collect();
             if !strong.is_empty() {
                 if let Ok(e) = self.memory.remember(
@@ -1138,7 +1381,10 @@ impl Orchestrator {
             if !matches!(report.status, SyncStatus::Done) || !report.blockers.is_empty() {
                 let mut body = report.summary.clone();
                 for b in &report.blockers {
-                    body.push_str(&format!("\n阻塞：{}（解除条件：{}）", b.reason, b.unblock_condition));
+                    body.push_str(&format!(
+                        "\n阻塞：{}（解除条件：{}）",
+                        b.reason, b.unblock_condition
+                    ));
                 }
                 if let Ok(e) = self.memory.remember(
                     &MemoryDraft::new(
@@ -1159,24 +1405,38 @@ impl Orchestrator {
 
         // 4) 用户偏好：输入含"记住/以后/每次"等指令词时固化
         let lower = user_text.to_lowercase();
-        if ["记住", "以后", "每次", "默认", "偏好"].iter().any(|k| lower.contains(k)) {
+        if ["记住", "以后", "每次", "默认", "偏好"]
+            .iter()
+            .any(|k| lower.contains(k))
+        {
             if let Ok(e) = self.memory.remember(
-                &MemoryDraft::new(MemoryKind::Preference, "用户偏好指令", user_text.chars().take(400).collect::<String>())
-                    .importance(0.9)
-                    .session(session_id)
-                    .tags(&["preference", "user"])
-                    .group(&gid),
+                &MemoryDraft::new(
+                    MemoryKind::Preference,
+                    "用户偏好指令",
+                    user_text.chars().take(400).collect::<String>(),
+                )
+                .importance(0.9)
+                .session(session_id)
+                .tags(&["preference", "user"])
+                .group(&gid),
             ) {
                 written.push(serde_json::to_value(&e).unwrap_or(serde_json::Value::Null));
             }
         }
 
-        // 5) 重渲染基础记忆文件（memory.md）
-        let pinned = self.memory.render_memory_md(&self.memory_md_path).unwrap_or(0);
+        // 5) 重渲染基础记忆文件（memory.md）：隔离档只渲染本分区可见条目
+        let md_path = self.memory_md_path_for(session_id);
+        let pinned = if partition.is_some() {
+            self.memory
+                .render_memory_md_scoped(&md_path, Some(&gid))
+                .unwrap_or(0)
+        } else {
+            self.memory.render_memory_md(&md_path).unwrap_or(0)
+        };
         self.emit(
             session_id,
             "memory.written",
-            serde_json::json!({ "entries": written, "pinned": pinned, "path": self.memory_md_path.display().to_string() }),
+            serde_json::json!({ "entries": written, "pinned": pinned, "path": md_path.display().to_string(), "partition": partition }),
         );
         entry_ids
     }
@@ -1189,8 +1449,17 @@ impl Orchestrator {
             anyhow::bail!("个体不存在（激活组内）: {identifier}");
         };
         let gid = self.registry.active_group();
-        let stats = self.memory.agent_stats(1000)?.into_iter().find(|s| s.agent_id == identifier);
-        let lessons = self.memory.list_filtered(Some(MemoryKind::Lesson), Some(identifier), 20, Some(&gid))?;
+        let stats = self
+            .memory
+            .agent_stats(1000)?
+            .into_iter()
+            .find(|s| s.agent_id == identifier);
+        let lessons = self.memory.list_filtered(
+            Some(MemoryKind::Lesson),
+            Some(identifier),
+            20,
+            Some(&gid),
+        )?;
 
         let stat_line = stats
             .as_ref()
@@ -1210,12 +1479,18 @@ impl Orchestrator {
                     format!(
                         "- {}：{}",
                         e.title,
-                        e.body.replace('\n', " ").chars().take(120).collect::<String>()
+                        e.body
+                            .replace('\n', " ")
+                            .chars()
+                            .take(120)
+                            .collect::<String>()
                     )
                 })
                 .collect::<Vec<_>>()
-                .join("
-")
+                .join(
+                    "
+",
+                )
         };
         let basis = stats.as_ref().map(|s| {
             serde_json::json!({
@@ -1237,7 +1512,10 @@ impl Orchestrator {
             def.name, def.identifier, def.description, stat_line, lessons_block
         );
         let (provider, model) = self.resolve_orch_model();
-        let req = ChatRequest::new(model, vec![ChatMessage::system(system), ChatMessage::user(user)]);
+        let req = ChatRequest::new(
+            model,
+            vec![ChatMessage::system(system), ChatMessage::user(user)],
+        );
         let resp = provider.chat(req).await?;
         let content = sanitize_adaptation(&resp.content);
         anyhow::ensure!(!content.is_empty(), "未能提炼出有效的改进要点");
@@ -1275,7 +1553,12 @@ impl Orchestrator {
         for id in agent_ids {
             let lessons = self
                 .memory
-                .list_filtered(Some(MemoryKind::Lesson), Some(id), 50, Some(&self.registry.active_group()))
+                .list_filtered(
+                    Some(MemoryKind::Lesson),
+                    Some(id),
+                    50,
+                    Some(&self.registry.active_group()),
+                )
                 .unwrap_or_default()
                 .len() as u32;
             let seen = self
@@ -1296,14 +1579,24 @@ impl Orchestrator {
 
     // ---------------------------------------------------------- 分解
 
-    async fn plan(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<OrchestratorPlan> {
+    async fn plan(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+    ) -> anyhow::Result<OrchestratorPlan> {
         // 组感知：规划提示统一取组内主智能体的职责提示词；内置组即指挥体
         let primary = self.registry.primary().ok_or_else(|| {
             anyhow::anyhow!("当前组未设置主智能体（ exm group info 查看；用 agent_manage 或 exm agent create 创建）")
         })?;
-        let mut system_prompt = self.registry.load_prompt(&primary.prompt_file).unwrap_or_else(|_| {
-            format!("# {}\n\n你是本组的主智能体，直接对接用户并调度组内个体。", primary.name)
-        });
+        let mut system_prompt = self
+            .registry
+            .load_prompt(&primary.prompt_file)
+            .unwrap_or_else(|_| {
+                format!(
+                    "# {}\n\n你是本组的主智能体，直接对接用户并调度组内个体。",
+                    primary.name
+                )
+            });
         // 主智能体人格（用户面 SOUL）：智能体模式读 entities/agents/<id>/SOUL.md，组模式读组根 SOUL.md（热读取）
         let soul = if self.registry.single_mode() {
             self.registry
@@ -1315,7 +1608,11 @@ impl Orchestrator {
         .unwrap_or_else(|| LocalRegistry::DEFAULT_PERSONA.to_string());
         system_prompt.push_str(&format!("\n\n## SOUL（人格）\n{soul}"));
         if !self.registry.single_mode()
-            && !self.registry.active_group_meta().map(|m| m.builtin).unwrap_or(true)
+            && !self
+                .registry
+                .active_group_meta()
+                .map(|m| m.builtin)
+                .unwrap_or(true)
         {
             // 自定义组：追加系统级规划契约（内置组提示词已内含）
             system_prompt.push_str(PLANNING_CONTRACT);
@@ -1340,21 +1637,33 @@ impl Orchestrator {
                 let lines = sk
                     .iter()
                     .map(|s| {
-                        let agents = if s.agents.is_empty() { "全体".to_string() } else { s.agents.join("、") };
+                        let agents = if s.agents.is_empty() {
+                            "全体".to_string()
+                        } else {
+                            s.agents.join("、")
+                        };
                         format!(
                             "- {}（{}）：触发 [{}]；适用 {}",
                             s.id,
                             s.name,
-                            if s.triggers.is_empty() { "—".into() } else { s.triggers.join("、") },
+                            if s.triggers.is_empty() {
+                                "—".into()
+                            } else {
+                                s.triggers.join("、")
+                            },
                             agents
                         )
                     })
                     .collect::<Vec<_>>()
-                    .join("
-");
-                format!("## 可用技能包
+                    .join(
+                        "
+",
+                    );
+                format!(
+                    "## 可用技能包
 {lines}
-")
+"
+                )
             }
             _ => String::new(),
         };
@@ -1370,7 +1679,11 @@ impl Orchestrator {
                             p.id,
                             p.name,
                             p.description,
-                            if p.trigger_signals.is_empty() { "—".to_string() } else { p.trigger_signals.join("、") }
+                            if p.trigger_signals.is_empty() {
+                                "—".to_string()
+                            } else {
+                                p.trigger_signals.join("、")
+                            }
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1388,8 +1701,16 @@ impl Orchestrator {
 
         // ---- 记忆召回（docs/08 §5）：注入历史记忆与个体可靠性统计 ----
         let mut memory_block = String::new();
+        // 记忆命名空间：默认同组共享；通道开启隔离时会话带独立分区键
+        let memory_group = self.memory_group_for_session(session_id);
         if self.memory_enabled {
-            if let Ok(hits) = self.memory.recall(text, self.memory_recall_limit, None, Some(&self.registry.active_group()), self.embed_query(text).await.as_deref()) {
+            if let Ok(hits) = self.memory.recall(
+                text,
+                self.memory_recall_limit,
+                None,
+                Some(&memory_group),
+                self.embed_query(text).await.as_deref(),
+            ) {
                 memory_block = MemoryStore::render_prompt_block(&hits);
                 self.emit(
                     session_id,
@@ -1407,8 +1728,9 @@ impl Orchestrator {
                 );
             }
         } else {
-            // 深层记忆关闭：回落 memory.md 文件记忆（文件记忆模式）
-            if let Ok(md) = std::fs::read_to_string(&self.memory_md_path) {
+            // 深层记忆关闭：回落 memory.md 文件记忆（文件记忆模式）；隔离档读独立文件
+            let md_path = self.memory_md_path_for(session_id);
+            if let Ok(md) = std::fs::read_to_string(&md_path) {
                 let trimmed: String = md.chars().take(8000).collect();
                 if !trimmed.trim().is_empty() {
                     memory_block = format!("## Memory (memory.md)\n{trimmed}\n\n");
@@ -1435,8 +1757,12 @@ impl Orchestrator {
         // 会话上下文（多轮记忆）：滚动摘要（压缩后的更早历史）+ 最近窗口原文
         let (summary, recent) = self.ensure_compacted(session_id).await;
         let context_block = match (&summary, recent.is_empty()) {
-            (Some(s), false) if !s.trim().is_empty() => format!("## 会话上下文（更早对话摘要）\n{s}\n\n## 最近对话\n{recent}\n\n"),
-            (Some(s), _) if !s.trim().is_empty() => format!("## 会话上下文（更早对话摘要）\n{s}\n\n"),
+            (Some(s), false) if !s.trim().is_empty() => {
+                format!("## 会话上下文（更早对话摘要）\n{s}\n\n## 最近对话\n{recent}\n\n")
+            }
+            (Some(s), _) if !s.trim().is_empty() => {
+                format!("## 会话上下文（更早对话摘要）\n{s}\n\n")
+            }
             (_, false) => format!("## 最近对话\n{recent}\n\n"),
             _ => String::new(),
         };
@@ -1449,9 +1775,8 @@ impl Orchestrator {
         let images = crate::image_stash::take(session_id);
         match self.relay_images(&images).await {
             Some(desc) => {
-                let note = format!(
-                    "\n\n## 图片内容（由视觉转述模型转写，原始图片未直接下发）\n{desc}"
-                );
+                let note =
+                    format!("\n\n## 图片内容（由视觉转述模型转写，原始图片未直接下发）\n{desc}");
                 user_msg.content.push_str(&note);
             }
             None => {
@@ -1500,7 +1825,9 @@ impl Orchestrator {
                         .map(|n| n.agent_identifier.clone())
                         .collect();
                     let mode_violation = match forced_mode.as_deref() {
-                        Some("direct") => !(matches!(plan.route_level, RouteLevel::L0) || plan.nodes.is_empty()),
+                        Some("direct") => {
+                            !(matches!(plan.route_level, RouteLevel::L0) || plan.nodes.is_empty())
+                        }
                         Some("full") => {
                             matches!(plan.route_level, RouteLevel::L0)
                                 && plan.nodes.is_empty()
@@ -1513,7 +1840,8 @@ impl Orchestrator {
                     } else if unknown.is_empty() {
                         return Ok(plan);
                     } else {
-                        last_err = format!("以下 agentIdentifier 不在注册表：{}", unknown.join("、"));
+                        last_err =
+                            format!("以下 agentIdentifier 不在注册表：{}", unknown.join("、"));
                     }
                 }
                 Err(e) => last_err = e,
@@ -1562,7 +1890,14 @@ impl Orchestrator {
                     .get(&n.id)
                     .map(|r| r.summary.clone())
                     .unwrap_or_else(|| "无回流".to_string());
-                format!("- {} {}({}) [{}]: {}", n.id, n.title, n.agent_identifier, n.status.label(), summary)
+                format!(
+                    "- {} {}({}) [{}]: {}",
+                    n.id,
+                    n.title,
+                    n.agent_identifier,
+                    n.status.label(),
+                    summary
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1617,13 +1952,21 @@ impl Orchestrator {
                     StreamDelta::Thinking(t) => {
                         // 思维增量随轮次留存（过程收起栏/落盘数据源）
                         crate::round_trace::push_thinking(session_id, &t);
-                        self.emit(session_id, "orchestrator.thinking", serde_json::json!({ "delta": t }));
+                        self.emit(
+                            session_id,
+                            "orchestrator.thinking",
+                            serde_json::json!({ "delta": t }),
+                        );
                     }
                     StreamDelta::Text(t) => {
                         acc.push_str(&t);
                         // 规划阶段输出的是内部协议（OrchestratorPlan JSON），不是用户面文本：
                         // 改道思维轨（收起栏），可见输出区只保留收束阶段的用户面文本
-                        let kind = if visible_tokens { "orchestrator.token" } else { "orchestrator.thinking" };
+                        let kind = if visible_tokens {
+                            "orchestrator.token"
+                        } else {
+                            "orchestrator.thinking"
+                        };
                         self.emit(session_id, kind, serde_json::json!({ "delta": t }));
                     }
                 }
@@ -1647,11 +1990,21 @@ impl Orchestrator {
                         );
                         if !fallback.reasoning.is_empty() {
                             crate::round_trace::push_thinking(session_id, &fallback.reasoning);
-                            self.emit(session_id, "orchestrator.thinking", serde_json::json!({ "delta": fallback.reasoning }));
+                            self.emit(
+                                session_id,
+                                "orchestrator.thinking",
+                                serde_json::json!({ "delta": fallback.reasoning }),
+                            );
                         }
                         // 非流式回退：内联 <think> 与协议正文按阶段分轨（不裸奔到可见输出）
                         for (is_think, part) in crate::provider::inline_think::route(
-                            &mut (if resp.reasoning.is_empty() && fallback.content.starts_with("<think>") { 0u8 } else { 2u8 }),
+                            &mut (if resp.reasoning.is_empty()
+                                && fallback.content.starts_with("<think>")
+                            {
+                                0u8
+                            } else {
+                                2u8
+                            }),
                             &mut String::new(),
                             &fallback.content,
                         ) {
@@ -1664,13 +2017,18 @@ impl Orchestrator {
                         }
                         return Ok(fallback.content);
                     }
-                    return Ok(if resp.content.is_empty() { acc } else { resp.content });
+                    return Ok(if resp.content.is_empty() {
+                        acc
+                    } else {
+                        resp.content
+                    });
                 }
                 Ok(Err(e)) => {
                     if !acc.is_empty() || e.to_string().contains("未配置 API Key") {
                         return Err(e);
                     }
-                    self.failover.cool(&pid, crate::provider::FAILOVER_COOLDOWN_SECS);
+                    self.failover
+                        .cool(&pid, crate::provider::FAILOVER_COOLDOWN_SECS);
                     self.emit(
                         session_id,
                         "model.failover",
@@ -1683,18 +2041,32 @@ impl Orchestrator {
         }
         // 候选链耗尽：用首候选做最后一次非流式尝试，仍失败才报错
         if let Some(last) = last_err {
-            let (_, provider, model) = self
-                .orch_candidates()
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| (String::new(), self.orch_provider.clone(), self.orch_model.clone()));
+            let (_, provider, model) =
+                self.orch_candidates()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| {
+                        (
+                            String::new(),
+                            self.orch_provider.clone(),
+                            self.orch_model.clone(),
+                        )
+                    });
             let mut req = ChatRequest::new(model, messages.to_vec());
             req.key_hint = Some("__orch__".into());
             if let Ok(resp) = provider.chat(req).await {
                 if !resp.reasoning.is_empty() {
-                    self.emit(session_id, "orchestrator.thinking", serde_json::json!({ "delta": resp.reasoning }));
+                    self.emit(
+                        session_id,
+                        "orchestrator.thinking",
+                        serde_json::json!({ "delta": resp.reasoning }),
+                    );
                 }
-                self.emit(session_id, "orchestrator.token", serde_json::json!({ "delta": resp.content }));
+                self.emit(
+                    session_id,
+                    "orchestrator.token",
+                    serde_json::json!({ "delta": resp.content }),
+                );
                 return Ok(resp.content);
             }
             return Err(last);
@@ -1703,7 +2075,11 @@ impl Orchestrator {
         let mut req = ChatRequest::new(self.orch_model.clone(), messages.to_vec());
         req.key_hint = Some("__orch__".into());
         let resp = self.orch_provider.chat(req).await?;
-        self.emit(session_id, "orchestrator.token", serde_json::json!({ "delta": resp.content }));
+        self.emit(
+            session_id,
+            "orchestrator.token",
+            serde_json::json!({ "delta": resp.content }),
+        );
         Ok(resp.content)
     }
 }
@@ -1715,6 +2091,8 @@ pub struct ExecCtx {
     pub session_id: String,
     pub plan: OrchestratorPlan,
     pub reports: Arc<Mutex<Reports>>,
+    /// 本轮能力边界（沿派发链下传；派发节点工具面按此裁剪）
+    pub scope: ToolScope,
 }
 
 impl ExecCtx {
@@ -1737,17 +2115,32 @@ impl ExecCtx {
         // 智能连结（实验性）：连结体代理个体 → 任务转交外部连结体执行，
         // 回流走与本地一致的 SyncReport 口径（存储/消息/事件齐全）
         if let Some(link_id) = &def.link {
-            let objective = if node.objective.is_empty() { node.title.clone() } else { node.objective.clone() };
-            let (status, statements, summary, confidence) =
-                match crate::nexus::execute_link(&o.config_snapshot(), link_id, &objective, &node.acceptance).await {
-                    Ok((summary, output)) => (SyncStatus::Done, vec![Statement::report(output)], summary, 0.85),
-                    Err(e) => (
-                        SyncStatus::Blocked,
-                        vec![Statement::warn(format!("连结体执行失败：{e}"))],
-                        format!("连结体执行失败: {e}"),
-                        0.2,
-                    ),
-                };
+            let objective = if node.objective.is_empty() {
+                node.title.clone()
+            } else {
+                node.objective.clone()
+            };
+            let (status, statements, summary, confidence) = match crate::nexus::execute_link(
+                &o.config_snapshot(),
+                link_id,
+                &objective,
+                &node.acceptance,
+            )
+            .await
+            {
+                Ok((summary, output)) => (
+                    SyncStatus::Done,
+                    vec![Statement::report(output)],
+                    summary,
+                    0.85,
+                ),
+                Err(e) => (
+                    SyncStatus::Blocked,
+                    vec![Statement::warn(format!("连结体执行失败：{e}"))],
+                    format!("连结体执行失败: {e}"),
+                    0.2,
+                ),
+            };
             let report = SyncReport {
                 source_agent: def.identifier.clone(),
                 task_node_id: node.id.clone(),
@@ -1810,20 +2203,37 @@ impl ExecCtx {
                         });
                     }
                 }
-                // 个体记忆 + 群体记忆：该个体的私有教训与共享决策/偏好（docs/08）
+                // 个体记忆 + 群体记忆：该个体的私有教训与共享决策/偏好（docs/08）。
+                // 记忆命名空间取会话分区（平台记忆隔离）——默认与组共享。
                 if o.memory_enabled {
                     let query = format!("{} {} {}", def.name, def.identifier, node.title);
-                    if let Ok(hits) = o.memory.recall_for_agent(&def.identifier, &query, 3, Some(&o.registry.active_group()), o.embed_query(&query).await.as_deref()) {
+                    let memory_group = o.memory_group_for_session(&self.session_id);
+                    if let Ok(hits) = o.memory.recall_for_agent(
+                        &def.identifier,
+                        &query,
+                        3,
+                        Some(&memory_group),
+                        o.embed_query(&query).await.as_deref(),
+                    ) {
                         if !hits.is_empty() {
                             let summary = hits
                                 .iter()
                                 .map(|h| {
-                                    let layer = if h.entry.agent_id.is_some() { "个体记忆" } else { "群体记忆" };
+                                    let layer = if h.entry.agent_id.is_some() {
+                                        "个体记忆"
+                                    } else {
+                                        "群体记忆"
+                                    };
                                     format!(
                                         "[{layer}|{}] {}：{}",
                                         h.entry.kind.key(),
                                         h.entry.title,
-                                        h.entry.body.replace('\n', " ").chars().take(160).collect::<String>()
+                                        h.entry
+                                            .body
+                                            .replace('\n', " ")
+                                            .chars()
+                                            .take(160)
+                                            .collect::<String>()
                                     )
                                 })
                                 .collect::<Vec<_>>()
@@ -1839,7 +2249,10 @@ impl ExecCtx {
                 // 技能包注入（docs/10）：任务目标命中触发词时，把技能指令随派发下发
                 if let Ok(skills) = o.registry.load_skills() {
                     let haystack = format!("{} {} {}", self.plan.goal, node.title, node.objective);
-                    for s in skills.iter().filter(|s| s.applies_to(&def.identifier) && s.matches(&haystack)) {
+                    for s in skills
+                        .iter()
+                        .filter(|s| s.applies_to(&def.identifier) && s.matches(&haystack))
+                    {
                         inputs.push(DispatchInput {
                             ref_id: format!("skill:{}", s.id),
                             kind: "skill".into(),
@@ -1861,8 +2274,13 @@ impl ExecCtx {
                 inputs
             },
             // 主智能体权限注入：组主智能体获得组内个体管理工具（自定义组）与记忆三工具（默认授权）；
-            // 个体工具面 = 编成 JSON 的 tools 清单（8.2）
-            tool_allowlist: crate::tools::ToolGateway::runtime_allowlist(&def, o.registry.active_group_meta().as_ref()),
+            // 个体工具面 = 编成 JSON 的 tools 清单（8.2），再按通道能力边界裁剪（chat / tools / computer）
+            tool_allowlist: self.scope.filter_allowlist(
+                &crate::tools::ToolGateway::runtime_allowlist(
+                    &def,
+                    o.registry.active_group_meta().as_ref(),
+                ),
+            ),
             constraints: DispatchConstraints {
                 // 步数预算按配置分档（复杂任务需要更多「思考-调工具」轮次）；超时随步数放宽
                 max_steps: (o.max_unit_steps as u32).max(3),
@@ -1887,7 +2305,12 @@ impl ExecCtx {
         let goal_short: String = if goal_hint.trim().is_empty() {
             node.title.clone()
         } else {
-            goal_hint.chars().take(24).collect::<String>().trim_end().to_string()
+            goal_hint
+                .chars()
+                .take(24)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
         };
         let trace_key = match o.store.create_child_session(
             &self.session_id,
@@ -1901,7 +2324,10 @@ impl ExecCtx {
                     None,
                     vec![Statement::new(
                         SpeechTag::要求,
-                        format!("【要求】{}｜节点 {}：{}", self.plan.goal, node.id, node.title),
+                        format!(
+                            "【要求】{}｜节点 {}：{}",
+                            self.plan.goal, node.id, node.title
+                        ),
                     )],
                 );
                 s.id
@@ -1911,7 +2337,11 @@ impl ExecCtx {
                 String::new()
             }
         };
-        let trace_key = if trace_key.is_empty() { self.session_id.clone() } else { trace_key };
+        let trace_key = if trace_key.is_empty() {
+            self.session_id.clone()
+        } else {
+            trace_key
+        };
 
         o.emit(
             &self.session_id,
@@ -1982,20 +2412,18 @@ impl ExecCtx {
             };
             // 先判定远程可用性（注册表同步查询，避免闭包在分支间移动）
             let use_remote = orch.remote_enabled
-                && orch.remote.as_ref().map(|r| r.accepts(&def)).unwrap_or(false);
+                && orch
+                    .remote
+                    .as_ref()
+                    .map(|r| r.accepts(&def))
+                    .unwrap_or(false);
             if use_remote {
                 let remote = orch.remote.clone().unwrap();
                 let def2 = def.clone();
                 let order2 = order.clone();
                 let sid2 = session_id.clone();
                 match remote
-                    .execute(
-                        &sid2,
-                        &def2,
-                        &order2,
-                        attach_images,
-                        &relay,
-                    )
+                    .execute(&sid2, &def2, &order2, attach_images, &relay)
                     .await
                 {
                     Ok(report) => Ok(report),
@@ -2009,7 +2437,16 @@ impl ExecCtx {
                         // 回落本地执行：思考增量照常挂到 trace（与本地直连路径一致），
                         // 否则回落轮的子会话过程轨迹缺失
                         orch.unit_runtime
-                            .execute(&def, &order, chain, &self.session_id, &trace_key, attach_images, &relay)
+                            .execute(
+                                &def,
+                                &order,
+                                chain,
+                                &self.session_id,
+                                &trace_key,
+                                attach_images,
+                                self.scope,
+                                &relay,
+                            )
                             .await
                     }
                 }
@@ -2017,7 +2454,16 @@ impl ExecCtx {
                 let chain = orch.unit_chain_for(&def);
                 let sid_for_usage = self.session_id.clone();
                 orch.unit_runtime
-                    .execute(&def, &order, chain, &sid_for_usage, &trace_key, attach_images, relay)
+                    .execute(
+                        &def,
+                        &order,
+                        chain,
+                        &sid_for_usage,
+                        &trace_key,
+                        attach_images,
+                        self.scope,
+                        relay,
+                    )
                     .await
             }
         };
@@ -2028,7 +2474,10 @@ impl ExecCtx {
                     Ok(id) => id,
                     Err(e) => return NodeOutcome::failed(node.id.clone(), e.to_string()),
                 };
-                if let Err(e) = o.store.add_evidence(&self.session_id, &report.evidence, Some(&report_id)) {
+                if let Err(e) =
+                    o.store
+                        .add_evidence(&self.session_id, &report.evidence, Some(&report_id))
+                {
                     eprintln!("[orchestrator] 证据写入失败: {e}");
                 }
                 // 子个体输出落子会话（含有序过程步骤）；主会话不再直接展示个体消息
@@ -2090,9 +2539,16 @@ impl ExecCtx {
                         }
                     })
                     .unwrap_or_default();
-                o.emit(&self.session_id, "ledger.updated", serde_json::to_value(&ledger).unwrap_or_default());
+                o.emit(
+                    &self.session_id,
+                    "ledger.updated",
+                    serde_json::to_value(&ledger).unwrap_or_default(),
+                );
 
-                self.reports.lock().await.insert(node.id.clone(), report.clone());
+                self.reports
+                    .lock()
+                    .await
+                    .insert(node.id.clone(), report.clone());
 
                 if matches!(report.status, SyncStatus::Blocked) {
                     return NodeOutcome::blocked(node.id.clone());
@@ -2100,12 +2556,21 @@ impl ExecCtx {
 
                 let mut appends: Vec<NewNode> = Vec::new();
                 let need_arbitration = matches!(report.status, SyncStatus::NeedArbitration)
-                    || report.conflicts.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
+                    || report
+                        .conflicts
+                        .as_ref()
+                        .map(|c| !c.is_empty())
+                        .unwrap_or(false);
                 if need_arbitration {
                     let points = report
                         .conflicts
                         .as_ref()
-                        .map(|cs| cs.iter().map(|c| c.point.clone()).collect::<Vec<_>>().join("；"))
+                        .map(|cs| {
+                            cs.iter()
+                                .map(|c| c.point.clone())
+                                .collect::<Vec<_>>()
+                                .join("；")
+                        })
                         .unwrap_or_default();
                     o.emit(
                         &self.session_id,
@@ -2165,7 +2630,9 @@ fn sanitize_adaptation(text: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim();
-        let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("• ")) else { continue };
+        let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("• ")) else {
+            continue;
+        };
         let rest = rest.trim();
         if rest.is_empty() || rest.contains("暂无") {
             continue;
@@ -2178,8 +2645,14 @@ fn sanitize_adaptation(text: &str) -> String {
             break;
         }
     }
-    lines.into_iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("
-")
+    lines
+        .into_iter()
+        .map(|l| format!("- {l}"))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
 }
 
 // ---------------------------------------------------------------- 收束文本 → 陈述序列
@@ -2210,7 +2683,10 @@ fn fallback_converge_text(
             _ => {}
         }
         let Some(r) = reports.get(&n.id) else {
-            lines.push(format!("- {} {}({})：无回流", n.id, n.title, n.agent_identifier));
+            lines.push(format!(
+                "- {} {}({})：无回流",
+                n.id, n.title, n.agent_identifier
+            ));
             continue;
         };
         let mut line = format!(
@@ -2222,7 +2698,10 @@ fn fallback_converge_text(
             r.summary.chars().take(400).collect::<String>()
         );
         for b in &r.blockers {
-            line.push_str(&format!("（阻塞：{}；解除条件：{}）", b.reason, b.unblock_condition));
+            line.push_str(&format!(
+                "（阻塞：{}；解除条件：{}）",
+                b.reason, b.unblock_condition
+            ));
         }
         lines.push(line);
     }
@@ -2255,7 +2734,12 @@ fn render_recent_hlp(msgs: &[&crate::types::ChatMessage]) -> String {
                 MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
                 MessageRole::System => "系统",
             };
-            let body = m.statements.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("；");
+            let body = m
+                .statements
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("；");
             format!("[{who}] {}", body.chars().take(300).collect::<String>())
         })
         .collect::<Vec<_>>()
@@ -2326,13 +2810,23 @@ fn protocol_plan_block(protocols: &[ProtocolDef], text: &str) -> String {
             "- {}（{}）：{}；触发 [{}]；注入 {}\n",
             p.id,
             p.name,
-            if p.description.is_empty() { "—" } else { p.description.as_str() },
-            if p.triggers.is_empty() { "—".to_string() } else { p.triggers.join("、") },
+            if p.description.is_empty() {
+                "—"
+            } else {
+                p.description.as_str()
+            },
+            if p.triggers.is_empty() {
+                "—".to_string()
+            } else {
+                p.triggers.join("、")
+            },
             slot
         ));
     }
-    let mut hits: Vec<&ProtocolDef> =
-        protocols.iter().filter(|p| p.injects_plan() && p.matches(text)).collect();
+    let mut hits: Vec<&ProtocolDef> = protocols
+        .iter()
+        .filter(|p| p.injects_plan() && p.matches(text))
+        .collect();
     hits.sort_by_key(|p| usize::from(p.injects_unit()));
     let hits: Vec<&ProtocolDef> = hits.into_iter().take(PROTOCOL_INJECT_CAP).collect();
     if !hits.is_empty() {
@@ -2384,9 +2878,15 @@ mod protocol_inject_tests {
         ];
         let block = protocol_plan_block(&ps, "帮我修复登录");
         for id in ["reasoning", "debug", "spec"] {
-            assert!(block.contains(&format!("- {id}（")), "索引缺 {id}：\n{block}");
+            assert!(
+                block.contains(&format!("- {id}（")),
+                "索引缺 {id}：\n{block}"
+            );
         }
-        assert!(block.contains("### 本次任务命中的协议"), "应有命中段：\n{block}");
+        assert!(
+            block.contains("### 本次任务命中的协议"),
+            "应有命中段：\n{block}"
+        );
         assert!(block.contains("BODY-SPEC"), "命中协议应带全文");
         assert!(!block.contains("BODY-DEBUG"), "未命中协议不应注入");
         assert!(!block.contains("BODY-REASONING"), "未命中协议不应注入");
@@ -2402,7 +2902,11 @@ mod protocol_inject_tests {
             proto("spec", "plan", &["修复"], "BODY-SPEC"),
         ];
         let block = protocol_plan_block(&ps, "修复");
-        assert_eq!(block.matches("#### ").count(), 4, "注入份数应被上限截断：\n{block}");
+        assert_eq!(
+            block.matches("#### ").count(),
+            4,
+            "注入份数应被上限截断：\n{block}"
+        );
         assert!(block.contains("BODY-SPEC"), "plan 专属应优先入选");
         assert!(!block.contains("BODY-D"), "超出上限的按文件名序截断");
     }
@@ -2419,7 +2923,11 @@ mod protocol_inject_tests {
         ];
         let hits = protocol_unit_inputs(&ps, "coding-agent", "调试并发布，另外修复");
         let ids: Vec<&str> = hits.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, vec!["debug", "release"], "个体限定与 plan 范围都应过滤");
+        assert_eq!(
+            ids,
+            vec!["debug", "release"],
+            "个体限定与 plan 范围都应过滤"
+        );
         let hits = protocol_unit_inputs(&ps, "review-agent", "审查");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "code-review");
@@ -2435,7 +2943,13 @@ mod fallback_converge_tests {
     use crate::task::{NewNode, TaskGraphModel};
     use crate::types::{BlockerItem, SyncReport, SyncStatus, TaskStatus};
 
-    fn report(node: &str, agent: &str, summary: &str, status: SyncStatus, blockers: Vec<BlockerItem>) -> SyncReport {
+    fn report(
+        node: &str,
+        agent: &str,
+        summary: &str,
+        status: SyncStatus,
+        blockers: Vec<BlockerItem>,
+    ) -> SyncReport {
         SyncReport {
             source_agent: agent.into(),
             task_node_id: node.into(),
@@ -2459,7 +2973,10 @@ mod fallback_converge_tests {
             route_level: RouteLevel::L2,
             playbook: None,
             goal: "审计存储层一致性".into(),
-            boundary: crate::types::DispatchBoundary { in_scope: vec![], forbidden: vec![] },
+            boundary: crate::types::DispatchBoundary {
+                in_scope: vec![],
+                forbidden: vec![],
+            },
             acceptance: vec!["结论带证据等级".into()],
             nodes: vec![],
             final_answer: None,
@@ -2493,7 +3010,13 @@ mod fallback_converge_tests {
         let mut reports = Reports::new();
         reports.insert(
             "T1".into(),
-            report("T1", "scout-agent", "背景事实已补齐：存储层共 3 个入口", SyncStatus::Done, vec![]),
+            report(
+                "T1",
+                "scout-agent",
+                "背景事实已补齐：存储层共 3 个入口",
+                SyncStatus::Done,
+                vec![],
+            ),
         );
         reports.insert(
             "T2".into(),
@@ -2520,7 +3043,10 @@ mod fallback_converge_tests {
             "完成 1",
             "受阻/待裁决 1",
         ] {
-            assert!(text.contains(needle), "降级文本应含「{needle}」\n---\n{text}");
+            assert!(
+                text.contains(needle),
+                "降级文本应含「{needle}」\n---\n{text}"
+            );
         }
     }
 
@@ -2531,7 +3057,10 @@ mod fallback_converge_tests {
             route_level: RouteLevel::L1,
             playbook: None,
             goal: "单节点任务".into(),
-            boundary: crate::types::DispatchBoundary { in_scope: vec![], forbidden: vec![] },
+            boundary: crate::types::DispatchBoundary {
+                in_scope: vec![],
+                forbidden: vec![],
+            },
             acceptance: vec![],
             nodes: vec![],
             final_answer: None,
@@ -2549,7 +3078,10 @@ mod fallback_converge_tests {
             &[],
         );
         let text = fallback_converge_text(&plan, &Reports::new(), &graph, "收束模型不可用");
-        assert!(text.contains("T1 独立执行(solo-agent)：无回流"), "无回流节点应显式标注：\n{text}");
+        assert!(
+            text.contains("T1 独立执行(solo-agent)：无回流"),
+            "无回流节点应显式标注：\n{text}"
+        );
         assert!(text.contains("降级说明"), "应包含降级说明段");
     }
 }

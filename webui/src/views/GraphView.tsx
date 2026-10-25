@@ -21,9 +21,9 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   cancelled: "#333333",
 };
 
-const NODE_W = 200;
+const NODE_W = 180;
 const NODE_H = 56;
-const GAP_X = 80;
+const GAP_X = 60;
 const GAP_Y = 24;
 
 function depthOf(n: TaskNode, byId: Map<string, TaskNode>, memo: Map<string, number>): number {
@@ -112,7 +112,12 @@ export function GraphView(): React.ReactElement {
         }
       />
       <div className="graph-wrap hud">
-        <svg width={layout.width} height={layout.height} className="graph-svg">
+        <svg
+          viewBox={`0 0 ${layout.width} ${layout.height}`}
+          preserveAspectRatio="xMinYMin meet"
+          className="graph-svg"
+          style={{ width: "100%", maxWidth: layout.width, height: "auto" }}
+        >
           {/* 顶部与左侧坐标刻度：工程图纸的量度参照 */}
           <g className="graph-rule" aria-hidden>
             {Array.from({ length: Math.ceil(layout.width / 40) + 1 }, (_, i) => (
