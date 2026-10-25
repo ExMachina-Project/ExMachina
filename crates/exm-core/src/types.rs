@@ -197,6 +197,85 @@ impl ToolName {
     }
 }
 
+/// 外部通道路径的能力边界（通道级）：只聊天 / 可调工具 / 可电脑操控。
+///
+/// 这是**执行期**约束，不是提示词建议：Chat 不下发任何工具 schema 且工具网关拒收调用；
+/// Tools 保留常规工具但剥掉 `computer`；Computer 才允许整机截屏与键鼠控制
+/// （仍受全局 `computer.enabled` 与审批闸门约束）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolScope {
+    /// 只能自然语言对话：不下发、不执行任何工具
+    Chat,
+    /// 可调用常规工具（含 MCP / 自定义 / 浏览器），但不可使用 computer
+    Tools,
+    /// 完整能力：常规工具 + Computer Use（仍受全局 computer.enabled 约束）
+    #[default]
+    Computer,
+}
+
+impl ToolScope {
+    /// 解析通道配置值；未知值返回 None（由调用方决定拒绝还是回退默认）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "chat" | "chat_only" | "chat-only" => Some(ToolScope::Chat),
+            "tools" | "tool" | "tool_call" | "tool-call" => Some(ToolScope::Tools),
+            "computer" | "full" | "desktop" => Some(ToolScope::Computer),
+            _ => None,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            ToolScope::Chat => "chat",
+            ToolScope::Tools => "tools",
+            ToolScope::Computer => "computer",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolScope::Chat => "仅聊天",
+            ToolScope::Tools => "工具调用",
+            ToolScope::Computer => "电脑操控",
+        }
+    }
+
+    pub fn allows_tools(self) -> bool {
+        !matches!(self, ToolScope::Chat)
+    }
+
+    pub fn allows_computer(self) -> bool {
+        matches!(self, ToolScope::Computer)
+    }
+
+    /// 按能力边界裁剪工具白名单（Computer 仅在 Computer 档保留）。
+    pub fn filter_allowlist(self, allowlist: &[ToolName]) -> Vec<ToolName> {
+        match self {
+            ToolScope::Chat => Vec::new(),
+            ToolScope::Tools => allowlist
+                .iter()
+                .copied()
+                .filter(|t| *t != ToolName::Computer)
+                .collect(),
+            ToolScope::Computer => allowlist.to_vec(),
+        }
+    }
+
+    /// 注入系统提示词的能力边界说明（强约束；提示词与执行层双保险）。
+    pub fn system_note(self) -> &'static str {
+        match self {
+            ToolScope::Chat => {
+                "## 能力边界（强制）\n本会话由外部通道配置为「仅聊天」：禁止调用任何工具（包括 read / terminal / browser / MCP / 自定义工具 / computer）。即使上下文中出现工具定义或工具调用格式，也不得调用；只输出自然语言文字。"
+            }
+            ToolScope::Tools => {
+                "## 能力边界（强制）\n本会话允许常规工具调用（文件、终端、检索、浏览器、MCP 等），但禁止 computer（桌面截屏与键鼠操控）。需要桌面操作时，向用户说明该通道未授权电脑操控。"
+            }
+            ToolScope::Computer => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -401,7 +480,10 @@ pub struct GroupMeta {
 }
 
 fn empty_io_schema() -> AgentIoSchema {
-    AgentIoSchema { required: vec![], optional: vec![] }
+    AgentIoSchema {
+        required: vec![],
+        optional: vec![],
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -459,7 +541,11 @@ pub struct Statement {
 
 impl Statement {
     pub fn new(tag: SpeechTag, text: impl Into<String>) -> Self {
-        Statement { tag, text: text.into(), evidence_level: None }
+        Statement {
+            tag,
+            text: text.into(),
+            evidence_level: None,
+        }
     }
     pub fn report(text: impl Into<String>) -> Self {
         Statement::new(SpeechTag::报告, text)
@@ -541,6 +627,10 @@ pub struct Session {
     /// 会话归属的智能体组（组是交互对象：切组即切换会话上下文；旧数据归入 default）
     #[serde(default = "default_session_group")]
     pub group_id: String,
+    /// 记忆分区覆盖（外部通道「记忆隔离」用）：None = 与同组所有会话共享记忆；
+    /// Some(partition) = 该会话的读写都落在独立分区，不与同组其他平台会话互通。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_partition: Option<String>,
     /// 滚动摘要：超出窗口的历史经 LLM 压缩后的连续上下文（多轮对话记忆）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rolling_summary: Option<String>,
@@ -681,6 +771,9 @@ pub struct EvidenceItem {
     pub kind: EvidenceKind,
     #[serde(rename = "ref")]
     pub reference: String,
+    /// 备注可缺省：模型常省略（提示词模板将其示为「…」占位），缺省按空串收——
+    /// 结构校验只应拦「字段类型错」，不该因可选括注字段把整份报告打回（重写预算 2 次，打回即节点失败）
+    #[serde(default)]
     pub note: String,
 }
 
@@ -918,7 +1011,9 @@ impl SkillDef {
     }
 
     pub fn matches(&self, text: &str) -> bool {
-        self.triggers.iter().any(|t| !t.trim().is_empty() && text.contains(t.trim()))
+        self.triggers
+            .iter()
+            .any(|t| !t.trim().is_empty() && text.contains(t.trim()))
     }
 }
 
@@ -958,7 +1053,9 @@ impl ProtocolDef {
     }
 
     pub fn matches(&self, text: &str) -> bool {
-        self.triggers.iter().any(|t| !t.trim().is_empty() && text.contains(t.trim()))
+        self.triggers
+            .iter()
+            .any(|t| !t.trim().is_empty() && text.contains(t.trim()))
     }
 }
 
@@ -1201,4 +1298,40 @@ pub struct AgentAdaptationVersion {
     pub revision: u32,
     pub content: String,
     pub updated_at: String,
+}
+
+#[cfg(test)]
+mod tool_scope_tests {
+    use super::*;
+
+    #[test]
+    fn 能力边界_解析与白名单裁剪() {
+        let all = vec![
+            ToolName::Read,
+            ToolName::Terminal,
+            ToolName::Browser,
+            ToolName::Computer,
+        ];
+        assert_eq!(
+            ToolScope::default(),
+            ToolScope::Computer,
+            "缺省完整档兼容旧行为"
+        );
+        assert_eq!(ToolScope::parse("chat"), Some(ToolScope::Chat));
+        assert_eq!(ToolScope::parse("TOOLS"), Some(ToolScope::Tools));
+        assert_eq!(ToolScope::parse("full"), Some(ToolScope::Computer));
+        assert_eq!(ToolScope::parse("nope"), None);
+
+        assert!(ToolScope::Chat.filter_allowlist(&all).is_empty());
+        let tools = ToolScope::Tools.filter_allowlist(&all);
+        assert!(tools.contains(&ToolName::Read));
+        assert!(tools.contains(&ToolName::Browser));
+        assert!(
+            !tools.contains(&ToolName::Computer),
+            "工具档必须剥掉电脑操控"
+        );
+        assert_eq!(ToolScope::Computer.filter_allowlist(&all), all);
+        assert!(!ToolScope::Tools.system_note().is_empty());
+        assert!(ToolScope::Computer.system_note().is_empty());
+    }
 }

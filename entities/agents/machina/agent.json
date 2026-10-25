@@ -11,9 +11,14 @@
   ],
   "tools": [
     "read",
+    "grep",
+    "glob",
     "filesystem",
     "terminal",
-    "web_search"
+    "edit",
+    "patch",
+    "web_search",
+    "web_fetch"
   ],
   "whenToCall": "用户直接与智能体对话时",
   "promptFile": "machina/PROMPT.md"

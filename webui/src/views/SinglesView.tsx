@@ -29,6 +29,9 @@ export function SinglesView(): React.ReactElement {
   const [modelDraft, setModelDraft] = useState<string>("");
   const [descTarget, setDescTarget] = useState<SingleInfo | null>(null);
   const [descDraft, setDescDraft] = useState<string>("");
+
+  // 连结体代理绑定（智能连结网络）：创建表单下拉数据源
+  const [nexusLinks, setNexusLinks] = useState<import("../api").NexusLink[]>([]);
   const [soulOf, setSoulOf] = useState<SingleInfo | null>(null);
   const [soulInfo, setSoulInfo] = useState<PersonaInfo | null>(null);
   const [soulDraft, setSoulDraft] = useState<string>("");
@@ -42,6 +45,12 @@ export function SinglesView(): React.ReactElement {
       setSingles(r.singles);
       setActiveSingle(r.active ?? undefined);
       setProfiles((await api.llmProfiles()).profiles);
+      // 连结体清单（失败静默——空清单只是没有可绑定项）
+      try {
+        setNexusLinks((await api.nexusLinks()).links);
+      } catch {
+        /* 静默 */
+      }
     } finally {
       setLoading(false);
     }
@@ -59,6 +68,7 @@ export function SinglesView(): React.ReactElement {
         identifier: v.identifier,
         description: v.description,
         prompt: v.prompt || undefined,
+        link: v.link || undefined,
       });
       message.success(t("singles.created", { id: v.identifier }));
       setModal(false);
@@ -412,6 +422,15 @@ export function SinglesView(): React.ReactElement {
           </Form.Item>
           <Form.Item name="prompt" label={t("singles.f.prompt")}>
             <Input.TextArea rows={4} placeholder={t("singles.f.promptPh")} />
+          </Form.Item>
+          <Form.Item name="link" label={t("agents.f.link")} extra={t("agents.f.linkExtra")}>
+            <Select
+              allowClear
+              style={{ width: "100%" }}
+              options={nexusLinks.map((l) => ({ value: l.id, label: `${l.name}（${l.id}）`, disabled: !l.enabled }))}
+              placeholder={t("agents.f.linkPh")}
+              notFoundContent={t("agents.f.linkEmpty")}
+            />
           </Form.Item>
         </Form>
       </Modal>

@@ -8,9 +8,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router};
 use exm_core::types::CoreEvent;
+use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
@@ -19,7 +19,11 @@ use std::sync::OnceLock;
 pub async fn list_skills(State(st): State<AppState>) -> impl IntoResponse {
     match st.core.skills() {
         Ok(s) => Json(serde_json::to_value(s).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -37,37 +41,69 @@ pub struct SkillBody {
     pub agents: Vec<String>,
 }
 
-pub async fn create_skill(State(st): State<AppState>, Json(b): Json<SkillBody>) -> impl IntoResponse {
+pub async fn create_skill(
+    State(st): State<AppState>,
+    Json(b): Json<SkillBody>,
+) -> impl IntoResponse {
     let skill = exm_core::types::SkillDef {
         id: b.id.trim().to_string(),
         name: b.name.trim().to_string(),
         description: b.description,
-        triggers: b.triggers.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        triggers: b
+            .triggers
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
         instructions: b.instructions.trim().to_string(),
-        agents: b.agents.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        agents: b
+            .agents
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
         created_at: exm_core::types::now_iso(),
     };
     match st.core.add_skill(skill.clone()) {
         Ok(_) => Json(serde_json::to_value(skill).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 pub async fn delete_skill(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.remove_skill(&id) {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "技能不存在" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "技能不存在" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// 组总览（组是交互对象）：编成 / 链路 / 会话 / 记忆 / 成员可靠性 一块仪表数据
-pub async fn group_overview(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn group_overview(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     if st.core.group_meta(&id).is_none() {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "组不存在" }))).into_response();
     }
     let agents = st.core.registry().agents_in_group(&id);
-    let playbooks = st.core.registry().playbooks_in_group(&id).unwrap_or_default();
+    let playbooks = st
+        .core
+        .registry()
+        .playbooks_in_group(&id)
+        .unwrap_or_default();
     let sessions = st.core.list_sessions_in_group(&id).unwrap_or_default();
     let stats = st.core.memory_stats().unwrap_or(json!({}));
     // memory_stats() 返回原始统计：byGroup / shared 在顶层
@@ -76,10 +112,7 @@ pub async fn group_overview(State(st): State<AppState>, Path(id): Path<String>) 
         .and_then(|m| m.get(&id))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let global_memory = stats
-        .get("shared")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let global_memory = stats.get("shared").and_then(|v| v.as_u64()).unwrap_or(0);
     let member_ids: std::collections::HashSet<String> =
         agents.iter().map(|a| a.identifier.clone()).collect();
     let agent_stats: Vec<Value> = stats["agentStats"]
@@ -206,7 +239,11 @@ pub async fn set_group_capabilities(
             "capabilities": st.core.group_meta(&id).and_then(|m| m.capabilities),
         }))
         .into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -231,33 +268,66 @@ pub async fn session_events(
             }
             Json(serde_json::to_value(events).unwrap_or(Value::Null)).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 // ---------------------------------------------------------------- 经验优化（子个体自适应）
 
 /// 手动触发：基于教训与统计合成个体的经验改进要点
-pub async fn optimize_agent(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn optimize_agent(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.orchestrator().optimize_agent(&id).await {
         Ok(a) => Json(serde_json::to_value(a).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn get_adaptation(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn get_adaptation(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.registry().load_adaptation(&id) {
         Ok(Some(a)) => Json(serde_json::to_value(a).unwrap_or(Value::Null)).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "该个体尚无经验要点" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "该个体尚无经验要点" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn reset_adaptation(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn reset_adaptation(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.registry().reset_adaptation(&id) {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "该个体尚无经验要点" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "该个体尚无经验要点" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -332,16 +402,27 @@ pub struct CronRunsQuery {
     pub limit: Option<usize>,
 }
 
-pub async fn list_cron_runs(State(st): State<AppState>, Query(q): Query<CronRunsQuery>) -> impl IntoResponse {
+pub async fn list_cron_runs(
+    State(st): State<AppState>,
+    Query(q): Query<CronRunsQuery>,
+) -> impl IntoResponse {
     match st.core.cron.runs(q.job.as_deref(), q.limit.unwrap_or(20)) {
         Ok(runs) => Json(serde_json::to_value(runs).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 pub async fn create_cron(State(st): State<AppState>, Json(b): Json<CronBody>) -> impl IntoResponse {
     if b.name.trim().is_empty() || b.prompt.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name/prompt 不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name/prompt 不能为空" })),
+        )
+            .into_response();
     }
     // 连续任务（queue）靠 steps 驱动，无 cron/at；其余类型维持「二选一」约束
     let is_queue = matches!(b.kind.as_deref(), Some("queue"));
@@ -393,7 +474,11 @@ pub async fn create_cron(State(st): State<AppState>, Json(b): Json<CronBody>) ->
     };
     match st.core.cron.upsert(job) {
         Ok(j) => Json(serde_json::to_value(j).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -416,19 +501,39 @@ pub async fn update_cron(
             }
             match st.core.cron.upsert(job) {
                 Ok(j) => Json(serde_json::to_value(j).unwrap_or(Value::Null)).into_response(),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response(),
             }
         }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "任务不存在" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "任务不存在" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 pub async fn delete_cron(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.cron.remove(&id) {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "任务不存在" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "任务不存在" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -440,8 +545,16 @@ pub async fn run_cron_now(State(st): State<AppState>, Path(id): Path<String>) ->
             notify_cron_result(&st.core, &job, &run).await;
             Json(serde_json::to_value(run).unwrap_or(Value::Null)).into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "任务不存在" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "任务不存在" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -524,7 +637,12 @@ fn group_of_agent(core: &exm_core::Core, identifier: &str) -> Option<String> {
     core.registry
         .list_groups()
         .into_iter()
-        .find(|g| core.registry.agents_in_group(&g.id).iter().any(|a| a.identifier == identifier))
+        .find(|g| {
+            core.registry
+                .agents_in_group(&g.id)
+                .iter()
+                .any(|a| a.identifier == identifier)
+        })
         .map(|g| g.id)
 }
 
@@ -533,7 +651,12 @@ fn group_of_agent(core: &exm_core::Core, identifier: &str) -> Option<String> {
 /// 会话独立「心跳巡检-<个体>」）；未配置或个体不存在 → 维持全局巡检（激活组 + 会话「心跳巡检」）。
 fn build_heartbeat_job(core: &exm_core::Core, minute_key: &str) -> exm_core::types::CronJob {
     let cfg = core.config();
-    let target = cfg.automation.heartbeat_agent.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let target = cfg
+        .automation
+        .heartbeat_agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let agent_group = target.and_then(|id| group_of_agent(core, id));
     let (name, session_title, group) = match (target, agent_group) {
         (Some(id), Some(g)) => (format!("心跳巡检·{id}"), format!("心跳巡检-{id}"), Some(g)),
@@ -563,14 +686,27 @@ fn build_heartbeat_job(core: &exm_core::Core, minute_key: &str) -> exm_core::typ
 
 /// 任务完成后的订阅通道摘要推送：全局开关 + 任务订阅清单双闸门；
 /// 未订阅 = 不产生任何通道消息（维持现状）。受限流约束的出站复用同一文本通路。
-async fn notify_cron_result(core: &exm_core::Core, job: &exm_core::types::CronJob, run: &exm_core::types::CronRun) {
+async fn notify_cron_result(
+    core: &exm_core::Core,
+    job: &exm_core::types::CronJob,
+    run: &exm_core::types::CronRun,
+) {
     let cfg = core.config();
     if !cfg.notify.enabled || job.notify_channels.is_empty() {
         return;
     }
     let max_chars = cfg.notify.max_chars.max(50);
     let summary: String = run.summary.chars().take(max_chars).collect();
-    let text = format!("⏰ 定时任务「{}」{}\n{}", job.name, if run.status == "done" { "已完成" } else { "失败" }, summary);
+    let text = format!(
+        "⏰ 定时任务「{}」{}\n{}",
+        job.name,
+        if run.status == "done" {
+            "已完成"
+        } else {
+            "失败"
+        },
+        summary
+    );
     for ch in load_channels(core) {
         if !ch.enabled || !job.notify_channels.iter().any(|id| *id == ch.id) {
             continue;
@@ -603,7 +739,9 @@ pub(crate) async fn push_channel_text(ch: &Channel, text: &str) -> bool {
         }
         // telegram：Bot API sendMessage 到首个白名单会话
         "telegram" => {
-            let (Some(token), Some(chat)) = (ch.token.clone().filter(|t| !t.trim().is_empty()), chat) else {
+            let (Some(token), Some(chat)) =
+                (ch.token.clone().filter(|t| !t.trim().is_empty()), chat)
+            else {
                 return false;
             };
             reqwest::Client::new()
@@ -624,7 +762,9 @@ pub(crate) async fn push_channel_text(ch: &Channel, text: &str) -> bool {
                 return false;
             };
             reqwest::Client::new()
-                .post(format!("https://discord.com/api/v10/channels/{target}/messages"))
+                .post(format!(
+                    "https://discord.com/api/v10/channels/{target}/messages"
+                ))
                 .header("Authorization", format!("Bot {token}"))
                 .json(&serde_json::json!({ "content": text }))
                 .timeout(std::time::Duration::from_secs(15))
@@ -694,24 +834,45 @@ pub struct ApprovalsQuery {
     pub limit: Option<usize>,
 }
 
-pub async fn list_approvals(State(st): State<AppState>, Query(q): Query<ApprovalsQuery>) -> impl IntoResponse {
-    match st.core.approval_list(q.status.as_deref(), q.limit.unwrap_or(50)) {
+pub async fn list_approvals(
+    State(st): State<AppState>,
+    Query(q): Query<ApprovalsQuery>,
+) -> impl IntoResponse {
+    match st
+        .core
+        .approval_list(q.status.as_deref(), q.limit.unwrap_or(50))
+    {
         Ok(items) => Json(serde_json::to_value(items).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn approve_request(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn approve_request(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.approval_decide(&id, true).await {
         Ok(r) => Json(serde_json::to_value(r).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 pub async fn deny_request(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.approval_decide(&id, false).await {
         Ok(r) => Json(serde_json::to_value(r).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -724,9 +885,13 @@ pub async fn deny_request(State(st): State<AppState>, Path(id): Path<String>) ->
 /// - `napcat`：OneBot 11 实现（NapCat / Lagrange 等，正向 WebSocket，napcat.rs）；
 /// - `discord`：Discord 机器人（Gateway WebSocket，discord.rs）；
 /// - `slack`：Slack 应用（Socket Mode，免公网回调，slack.rs）；
-/// - `matrix`：Matrix 房间（Client-Server API 长轮询 /sync，matrix.rs）。
-pub const CHANNEL_PLATFORMS: &[&str] =
-    &["webhook", "telegram", "qqbot", "napcat", "discord", "slack", "matrix", "qq", "wechat"];
+/// - `matrix`：Matrix 房间（Client-Server API 长轮询 /sync，matrix.rs）；
+/// - `bilibili` / `youtube`：视频平台主动观看与互动（video.rs，按配置轮询热门/关键词视频，
+///   读取字幕/简介与评论 → 生成评论/回复 → 可选真发；默认 dry-run）。
+pub const CHANNEL_PLATFORMS: &[&str] = &[
+    "webhook", "telegram", "qqbot", "napcat", "discord", "slack", "matrix", "qq", "wechat",
+    "bilibili", "youtube",
+];
 
 /// 通道定义：外部消息源接入点。平台 = `type`（webhook / telegram / qqbot / napcat …）。
 /// 多平台多账号：同类平台可并存多条（每条一个账号），每条可绑定不同智能体组。
@@ -763,6 +928,13 @@ pub struct Channel {
     /// 群聊唤醒门控：Some(true)=群内仅提及/回复触发；None=取全局默认（config.identity.groupGateDefault）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_gate: Option<bool>,
+    /// 能力边界：chat = 仅聊天；tools = 可调工具（不含 computer）；computer = 完整能力。
+    /// 缺省 computer：兼容旧通道配置，不改变既有接入账号的行为。
+    #[serde(default = "default_channel_capability")]
+    pub capability: String,
+    /// 记忆隔离：false（默认）= 同组所有平台会话共享记忆；true = 本通道独立记忆分区。
+    #[serde(default)]
+    pub memory_isolation: bool,
     pub created_at: String,
 }
 
@@ -771,6 +943,9 @@ fn default_platform() -> String {
 }
 fn default_true_channel() -> bool {
     true
+}
+fn default_channel_capability() -> String {
+    "computer".into()
 }
 
 fn channels_path(core: &exm_core::Core) -> std::path::PathBuf {
@@ -796,12 +971,28 @@ fn save_channels(core: &exm_core::Core, channels: &[Channel]) -> anyhow::Result<
 impl Channel {
     /// 平台扩展配置读取（config 键，去除首尾空白）
     pub(crate) fn cfg(&self, key: &str) -> Option<String> {
-        self.config.get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+        self.config
+            .get(key)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     }
 
     /// 群聊唤醒门控是否开启（通道级覆盖 > 全局默认）
     pub(crate) fn gate_enabled(&self, core: &exm_core::Core) -> bool {
-        self.group_gate.unwrap_or_else(|| core.config().identity.group_gate_default)
+        self.group_gate
+            .unwrap_or_else(|| core.config().identity.group_gate_default)
+    }
+
+    /// 能力边界（未知值回退完整档：老配置不因新字段失效）。
+    pub(crate) fn tool_scope(&self) -> exm_core::types::ToolScope {
+        exm_core::types::ToolScope::parse(&self.capability).unwrap_or_default()
+    }
+
+    /// 本通道的记忆分区键：开启隔离时与同组其他平台/网页会话互不可见。
+    /// 键里带通道 id，同平台多账号也各自隔离（账号 = 一条通道）。
+    pub(crate) fn memory_partition(&self, group_id: &str) -> Option<String> {
+        self.memory_isolation
+            .then(|| format!("{}::channel:{}", group_id, self.id))
     }
 }
 
@@ -824,14 +1015,44 @@ pub(crate) struct ChannelCaps {
 /// · qqbot 全降级：官方机器人被动消息仅支持文本，富媒体需另走 richmedia 上报链路。
 pub(crate) fn caps(kind: &str) -> ChannelCaps {
     match kind {
-        "telegram" => ChannelCaps { image: true, file: true, voice: true, typing: true },
-        "discord" => ChannelCaps { image: true, file: true, voice: false, typing: true },
-        "slack" => ChannelCaps { image: true, file: true, voice: false, typing: false },
-        "napcat" => ChannelCaps { image: true, file: true, voice: true, typing: false },
+        "telegram" => ChannelCaps {
+            image: true,
+            file: true,
+            voice: true,
+            typing: true,
+        },
+        "discord" => ChannelCaps {
+            image: true,
+            file: true,
+            voice: false,
+            typing: true,
+        },
+        "slack" => ChannelCaps {
+            image: true,
+            file: true,
+            voice: false,
+            typing: false,
+        },
+        "napcat" => ChannelCaps {
+            image: true,
+            file: true,
+            voice: true,
+            typing: false,
+        },
         // matrix：m.image / m.file / m.audio 出站已实现（mx_send_media：upload → content_uri → 事件），
         // typing 有官方端点（PUT /rooms/{id}/typing/{uid}）——曾因这里全 false 把已实现能力封成死代码。
-        "matrix" => ChannelCaps { image: true, file: true, voice: true, typing: true },
-        _ => ChannelCaps { image: false, file: false, voice: false, typing: false },
+        "matrix" => ChannelCaps {
+            image: true,
+            file: true,
+            voice: true,
+            typing: true,
+        },
+        _ => ChannelCaps {
+            image: false,
+            file: false,
+            voice: false,
+            typing: false,
+        },
     }
 }
 
@@ -852,7 +1073,11 @@ pub(crate) fn media_fallback(kind: &str, kind_want: &str) -> MediaFallback {
         "voice" => c.voice,
         _ => false,
     };
-    if supported { MediaFallback::Native } else { MediaFallback::LinkNote }
+    if supported {
+        MediaFallback::Native
+    } else {
+        MediaFallback::LinkNote
+    }
 }
 
 /// 长回复分段（spec 6.6）：段落边界优先；代码块与结构化陈述前缀保持完整；
@@ -897,7 +1122,7 @@ pub(crate) fn split_reply(text: &str, max_chars: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut buf = String::new();
     let mut hard_parts: Vec<String> = Vec::new();
-    let mut flush_hard = |buf: &mut String, out: &mut Vec<String>| {
+    let flush_hard = |buf: &mut String, out: &mut Vec<String>| {
         if !buf.trim().is_empty() {
             out.push(buf.trim_end().to_string());
         }
@@ -993,7 +1218,10 @@ mod reply_split_tests {
             let fences = s.matches("```").count();
             assert_eq!(fences % 2, 0, "代码块围栏应成对出现: {s:?}");
         }
-        assert!(out.iter().any(|s| s.contains("println!")), "代码块应完整在某条里: {out:?}");
+        assert!(
+            out.iter().any(|s| s.contains("println!")),
+            "代码块应完整在某条里: {out:?}"
+        );
     }
 
     #[test]
@@ -1050,7 +1278,11 @@ pub(crate) enum GateDecision {
 
 /// 入站统一闸门：① `/pair` 兑换拦截（未绑定也可用）→ ② 群聊唤醒门控 → ③ 身份管控裁决。
 /// 位置前置于一切执行（ChannelRun::begin 之前由各适配器调用）。
-pub(crate) async fn admit(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>) -> GateDecision {
+pub(crate) async fn admit(
+    core: &exm_core::Core,
+    ch: &Channel,
+    ctx: &InboundCtx<'_>,
+) -> GateDecision {
     let identity_cfg = &core.config().identity;
 
     // ⓪ /stop 停止指令（先于一切校验）：直接终止该通道会话运行中的轮次并回执
@@ -1073,8 +1305,13 @@ pub(crate) async fn admit(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<
 
     // ① 配对码兑换（控制台签发短码 → 通道内 /pair <码> 绑定；单次有效、限期）
     let trimmed = ctx.text.trim();
-    if let Some(code) = trimmed.strip_prefix("/pair ").map(str::trim).filter(|c| !c.is_empty()) {
-        return match core.redeem_pairing(code, &ch.id, ctx.external_id, ctx.display_name, "member") {
+    if let Some(code) = trimmed
+        .strip_prefix("/pair ")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        return match core.redeem_pairing(code, &ch.id, ctx.external_id, ctx.display_name, "member")
+        {
             Ok(idn) => GateDecision::Deny(format!(
                 "【报告】绑定成功：{}（角色 {}）。现在可以正常对话。",
                 idn.display_name, idn.role
@@ -1169,6 +1406,8 @@ pub(crate) struct ChannelRun {
     switched: bool,
     /// 平台 kind（能力矩阵判定用）
     pub kind: String,
+    /// 本轮能力边界（通道配置在 begin 时快照，执行期不变）
+    scope: exm_core::types::ToolScope,
 }
 
 impl ChannelRun {
@@ -1200,6 +1439,12 @@ impl ChannelRun {
             }
             return None;
         };
+        // 记忆隔离即时生效：通道每次执行前把分区键同步到会话；
+        // 关闭隔离时清空分区，立即回到同组共享记忆。
+        let partition = ch.memory_partition(&gid);
+        let _ = core
+            .store
+            .set_session_memory_partition(&session.id, partition.as_deref());
         let rx = core.subscribe();
         Some((
             ChannelRun {
@@ -1208,6 +1453,7 @@ impl ChannelRun {
                 prev_group,
                 switched,
                 kind: ch.kind.clone(),
+                scope: ch.tool_scope(),
             },
             rx,
         ))
@@ -1218,20 +1464,29 @@ impl ChannelRun {
         match evt.kind.as_str() {
             "run.finished" => Some(flatten_statements(&evt.payload, max_chars)),
             "run.error" => {
-                let msg = evt.payload.get("message").and_then(|v| v.as_str()).unwrap_or("运行失败");
+                let msg = evt
+                    .payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("运行失败");
                 Some(format!("【警告】{msg}").chars().take(max_chars).collect())
             }
             _ => None,
         }
     }
 
-    /// 执行本轮；返回后组上下文已还原
+    /// 执行本轮；返回后组上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
     pub(crate) async fn run(self, text: &str) {
+        let _restore = GroupRestore {
+            core: self.core.clone(),
+            prev: self.prev_group.clone(),
+            switched: self.switched,
+        };
         // 周期 token 配额（外部来源会话）：耗尽即拒绝新轮次并经 run.error 回帖提示；
         // 组内派发会话无来源登记，天然不受限（设计 D10）
         let limits = self.core.config().limits.clone();
         if limits.enabled && limits.quota_tokens > 0 {
-            if let Some((subject, _role)) = self.core.session_origin(&self.session_id) {
+            if let Some((_subject, _role)) = self.core.session_origin(&self.session_id) {
                 let used = self.core.session_tokens_estimate(&self.session_id);
                 if used >= limits.quota_tokens {
                     self.core.emit_run_error(
@@ -1241,19 +1496,33 @@ impl ChannelRun {
                             limits.quota_tokens
                         ),
                     );
-                    if self.switched {
-                        let _ = self.core.registry().set_active_group(&self.prev_group);
-                    }
                     return;
                 }
             }
         }
         let _ = limits;
-        if let Err(e) = self.core.chat(&self.session_id, text).await {
+        if let Err(e) = self
+            .core
+            .chat_scoped(&self.session_id, text, self.scope)
+            .await
+        {
             eprintln!("[channel:{}] 执行失败：{e}", self.session_id);
         }
+    }
+}
+
+/// 组上下文兜底还原：任务正常结束、提前返回、甚至被 abort 时都执行 Drop，
+/// 避免视频轮询等后台任务超时中止后把全局激活组留在通道绑定组上。
+struct GroupRestore {
+    core: std::sync::Arc<exm_core::Core>,
+    prev: String,
+    switched: bool,
+}
+
+impl Drop for GroupRestore {
+    fn drop(&mut self) {
         if self.switched {
-            let _ = self.core.registry().set_active_group(&self.prev_group);
+            let _ = self.core.registry().set_active_group(&self.prev);
         }
     }
 }
@@ -1294,18 +1563,37 @@ where
             let mut media_notes: Vec<String> = Vec::new();
             if let Some(list) = evt.payload.get("artifacts").and_then(|v| v.as_array()) {
                 for a in list {
-                    let kind = a.get("kind").and_then(|x| x.as_str()).unwrap_or("file").to_string();
-                    let rel = a.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let kind = a
+                        .get("kind")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("file")
+                        .to_string();
+                    let rel = a
+                        .get("path")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if rel.is_empty() {
                         continue;
                     }
-                    let caption = a.get("caption").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let caption = a
+                        .get("caption")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let abs = run.core.config().workspace_root.join(&rel);
-                    let item = MediaItem { kind: kind.clone(), path: abs, caption };
+                    let item = MediaItem {
+                        kind: kind.clone(),
+                        path: abs,
+                        caption,
+                    };
                     match media_fallback(&run.kind, &kind) {
                         MediaFallback::Native => {
                             if !send_media(item.clone()).await {
-                                media_notes.push(format!("📎 {}：{rel}（直发失败，可在工作区查看）", item.caption));
+                                media_notes.push(format!(
+                                    "📎 {}：{rel}（直发失败，可在工作区查看）",
+                                    item.caption
+                                ));
                             }
                         }
                         MediaFallback::LinkNote => {
@@ -1348,12 +1636,15 @@ pub(crate) async fn save_inbound_media(
     tokio::fs::create_dir_all(&dir).await.ok()?;
     let safe: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || "._-".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let file = dir.join(format!(
-        "{}-{safe}",
-        exm_core::types::now_ms()
-    ));
+    let file = dir.join(format!("{}-{safe}", exm_core::types::now_ms()));
     tokio::fs::write(&file, &bytes).await.ok()?;
     Some(file.display().to_string())
 }
@@ -1444,7 +1735,11 @@ fn chan_statuses() -> &'static Mutex<HashMap<String, ChanStatus>> {
 pub(crate) fn report_status(id: &str, state: &str, detail: impl Into<String>) {
     chan_statuses().lock().insert(
         id.to_string(),
-        ChanStatus { state: state.to_string(), detail: detail.into(), at: exm_core::types::now_iso() },
+        ChanStatus {
+            state: state.to_string(),
+            detail: detail.into(),
+            at: exm_core::types::now_iso(),
+        },
     );
 }
 
@@ -1473,6 +1768,9 @@ fn secret_config_keys(kind: &str) -> &'static [&'static str] {
         "napcat" => &["token"],
         // Slack Socket Mode 应用级令牌（xapp-）；机器人令牌走顶层 token
         "slack" => &["appToken"],
+        // B 站：登录态 Cookie（SESSDATA 鉴权 / biliJct 为 CSRF）；YouTube：API Key / OAuth
+        "bilibili" => &["sessdata", "biliJct"],
+        "youtube" => &["apiKey", "accessToken"],
         _ => &[],
     }
 }
@@ -1480,12 +1778,24 @@ fn secret_config_keys(kind: &str) -> &'static [&'static str] {
 /// 通道脱敏序列化：顶层 token/secret 与平台敏感 config 键掩码回显，任何接口都不出明文密钥
 fn channel_json(ch: &Channel) -> Value {
     let mut v = serde_json::to_value(ch).unwrap_or(Value::Null);
-    let Some(obj) = v.as_object_mut() else { return v };
+    let Some(obj) = v.as_object_mut() else {
+        return v;
+    };
     let mask = Value::String(crate::llm_admin::KEY_MASK.into());
-    if ch.secret.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+    if ch
+        .secret
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
         obj.insert("secret".into(), mask.clone());
     }
-    if ch.token.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+    if ch
+        .token
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
         obj.insert("token".into(), mask.clone());
     }
     if let Some(cfg) = obj.get_mut("config").and_then(|c| c.as_object_mut()) {
@@ -1535,12 +1845,29 @@ pub struct ChannelBody {
     /// 群聊唤醒门控（None = 取全局默认）
     #[serde(default)]
     pub group_gate: Option<bool>,
+    /// 能力边界：chat | tools | computer（None = 创建用完整档；更新不传 = 保持）
+    #[serde(default)]
+    pub capability: Option<String>,
+    /// 记忆隔离（None = 创建用共享，更新不传 = 保持）
+    #[serde(default)]
+    pub memory_isolation: Option<bool>,
 }
 
-pub async fn create_channel(State(st): State<AppState>, Json(b): Json<ChannelBody>) -> impl IntoResponse {
+pub async fn create_channel(
+    State(st): State<AppState>,
+    Json(b): Json<ChannelBody>,
+) -> impl IntoResponse {
     let id = b.id.trim().to_string();
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "非法通道 id" }))).into_response();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "非法通道 id" })),
+        )
+            .into_response();
     }
     let platform = b.platform.clone().unwrap_or_else(|| "webhook".into());
     if !CHANNEL_PLATFORMS.contains(&platform.as_str()) {
@@ -1550,8 +1877,17 @@ pub async fn create_channel(State(st): State<AppState>, Json(b): Json<ChannelBod
         )
             .into_response();
     }
-    if platform == "telegram" && b.token.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "telegram 通道需要 bot token" }))).into_response();
+    if platform == "telegram"
+        && b.token
+            .as_deref()
+            .map(|t| t.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "telegram 通道需要 bot token" })),
+        )
+            .into_response();
     }
     let config: BTreeMap<String, String> = b
         .config
@@ -1560,15 +1896,31 @@ pub async fn create_channel(State(st): State<AppState>, Json(b): Json<ChannelBod
         .filter(|(_, v)| !v.trim().is_empty())
         .collect();
     // 新平台必填项：qqbot 需要 appId + appSecret；napcat 需要 WS 地址
-    if platform == "qqbot" && (config.get("appId").map_or(true, |v| v.trim().is_empty()) || config.get("appSecret").map_or(true, |v| v.trim().is_empty())) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "qqbot 通道需要 config.appId 与 config.appSecret" }))).into_response();
+    if platform == "qqbot"
+        && (config.get("appId").map_or(true, |v| v.trim().is_empty())
+            || config
+                .get("appSecret")
+                .map_or(true, |v| v.trim().is_empty()))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "qqbot 通道需要 config.appId 与 config.appSecret" })),
+        )
+            .into_response();
     }
     if platform == "napcat" && config.get("url").map_or(true, |v| v.trim().is_empty()) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "napcat 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "napcat 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" })),
+        )
+            .into_response();
     }
     // discord / slack / matrix 的顶层 token 均为必填（bot token 或 access token）
     if matches!(platform.as_str(), "discord" | "slack" | "matrix")
-        && b.token.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true)
+        && b.token
+            .as_deref()
+            .map(|t| t.trim().is_empty())
+            .unwrap_or(true)
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1583,10 +1935,44 @@ pub async fn create_channel(State(st): State<AppState>, Json(b): Json<ChannelBod
         )
             .into_response();
     }
-    if platform == "matrix" && config.get("homeserver").map_or(true, |v| v.trim().is_empty()) {
+    if platform == "matrix"
+        && config
+            .get("homeserver")
+            .map_or(true, |v| v.trim().is_empty())
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "matrix 通道需要 config.homeserver（如 https://matrix.org）" })),
+        )
+            .into_response();
+    }
+    if platform == "bilibili"
+        && (config.get("sessdata").map_or(true, |v| v.trim().is_empty())
+            || config.get("biliJct").map_or(true, |v| v.trim().is_empty()))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "bilibili 通道需要 config.sessdata 与 config.biliJct（登录 Cookie）" })),
+        )
+            .into_response();
+    }
+    if platform == "youtube" && config.get("apiKey").map_or(true, |v| v.trim().is_empty()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "youtube 通道需要 config.apiKey（YouTube Data API v3）" })),
+        )
+            .into_response();
+    }
+    let capability = b
+        .capability
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("computer");
+    if exm_core::types::ToolScope::parse(capability).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "capability 须为 chat / tools / computer" })),
         )
             .into_response();
     }
@@ -1606,11 +1992,17 @@ pub async fn create_channel(State(st): State<AppState>, Json(b): Json<ChannelBod
         token: b.token.filter(|s| !s.trim().is_empty()),
         config,
         group_gate: b.group_gate,
+        capability: capability.to_string(),
+        memory_isolation: b.memory_isolation.unwrap_or(false),
         created_at: exm_core::types::now_iso(),
     };
     channels.push(ch.clone());
     if let Err(e) = save_channels(&st.core, &channels) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
     Json(channel_json(&ch)).into_response()
 }
@@ -1623,7 +2015,11 @@ pub async fn update_channel(
 ) -> impl IntoResponse {
     let mut channels = load_channels(&st.core);
     let Some(ch) = channels.iter_mut().find(|c| c.id == id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "通道不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "通道不存在" })),
+        )
+            .into_response();
     };
     if b.enabled == Some(false) {
         // 停用即下线：清掉运行状态，避免「已停用」的账号还挂着旧状态
@@ -1635,14 +2031,36 @@ pub async fn update_channel(
     if let Some(v) = b.group_gate {
         ch.group_gate = Some(v);
     }
+    if let Some(v) = &b.capability {
+        let cap = v.trim();
+        if exm_core::types::ToolScope::parse(cap).is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "capability 须为 chat / tools / computer" })),
+            )
+                .into_response();
+        }
+        ch.capability = cap.to_ascii_lowercase();
+    }
+    if let Some(v) = b.memory_isolation {
+        ch.memory_isolation = v;
+    }
     if let Some(v) = &b.group {
-        ch.group = if v.trim().is_empty() { None } else { Some(v.clone()) };
+        ch.group = if v.trim().is_empty() {
+            None
+        } else {
+            Some(v.clone())
+        };
     }
     if let Some(v) = &b.allowed_chats {
         ch.allowed_chats = v.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
     }
     if let Some(v) = &b.account {
-        ch.account = if v.trim().is_empty() { None } else { Some(v.clone()) };
+        ch.account = if v.trim().is_empty() {
+            None
+        } else {
+            Some(v.clone())
+        };
     }
     // 敏感字段三态：掩码 = 沿用旧值；空 = 清除；其余 = 新值（与提供商页同一语义）
     if let Some(v) = &b.secret {
@@ -1656,7 +2074,11 @@ pub async fn update_channel(
         }
     }
     if let Some(v) = &b.reply_webhook {
-        ch.reply_webhook = if v.trim().is_empty() { None } else { Some(v.clone()) };
+        ch.reply_webhook = if v.trim().is_empty() {
+            None
+        } else {
+            Some(v.clone())
+        };
     }
     if let Some(v) = &b.token {
         let t = v.trim();
@@ -1690,23 +2112,38 @@ pub async fn update_channel(
     let saved = ch.clone();
     match save_channels(&st.core, &channels) {
         Ok(_) => Json(channel_json(&saved)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn delete_channel(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn delete_channel(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     let mut channels = load_channels(&st.core);
     let before = channels.len();
     channels.retain(|c| c.id != id);
     if channels.len() == before {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "通道不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "通道不存在" })),
+        )
+            .into_response();
     }
     match save_channels(&st.core, &channels) {
         Ok(_) => {
             clear_status(&id);
             Json(json!({ "ok": true })).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1731,18 +2168,34 @@ pub async fn channel_inbound(
     Json(b): Json<InboundBody>,
 ) -> impl IntoResponse {
     let Some(channel) = load_channels(&st.core).into_iter().find(|c| c.id == id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "通道不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "通道不存在" })),
+        )
+            .into_response();
     };
     if !channel.enabled {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "通道已停用" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "通道已停用" })),
+        )
+            .into_response();
     }
     if let Some(secret) = &channel.secret {
         if b.secret.as_deref() != Some(secret.as_str()) {
-            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "通道密钥不符" }))).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "通道密钥不符" })),
+            )
+                .into_response();
         }
     }
     if b.text.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "text 不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text 不能为空" })),
+        )
+            .into_response();
     }
     // 账号绑定组：入站消息在绑定的组上下文执行（会话也归属该组）
     let prev_group = st.core.active_group();
@@ -1773,13 +2226,26 @@ pub async fn channel_inbound(
                 if switched {
                     let _ = st.core.registry().set_active_group(&prev_group);
                 }
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() })))
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e.to_string() })),
+                )
                     .into_response();
             }
         },
     };
+    // 能力边界 + 记忆隔离：webhook 与内置适配器走同一套通道配置语义
+    let scope = channel.tool_scope();
+    let partition = channel.memory_partition(&gid);
+    let _ = st
+        .core
+        .store
+        .set_session_memory_partition(&session.id, partition.as_deref());
     // 出站回调：通道级 replyWebhook 或请求级覆盖；运行结束后推送最终事件载荷
-    let reply_url = b.reply_webhook.clone().or_else(|| channel.reply_webhook.clone());
+    let reply_url = b
+        .reply_webhook
+        .clone()
+        .or_else(|| channel.reply_webhook.clone());
     if let Some(url) = reply_url {
         let core = st.core.clone();
         let sid = session.id.clone();
@@ -1790,7 +2256,11 @@ pub async fn channel_inbound(
                     continue;
                 }
                 if evt.kind == "run.finished" || evt.kind == "run.error" {
-                    let _ = reqwest::Client::new().post(&url).json(&evt.payload).send().await;
+                    let _ = reqwest::Client::new()
+                        .post(&url)
+                        .json(&evt.payload)
+                        .send()
+                        .await;
                     break;
                 }
             }
@@ -1801,7 +2271,7 @@ pub async fn channel_inbound(
     let text = b.text.clone();
     let sid = session.id.clone();
     tokio::spawn(async move {
-        let r = core.chat(&sid, &text).await;
+        let r = core.chat_scoped(&sid, &text, scope).await;
         if switched {
             let _ = core.registry().set_active_group(&prev_group);
         }
@@ -1829,8 +2299,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/groups/:id/agents", get(group_agents))
         .route("/api/groups/:id/primary", post(set_group_primary))
         .route("/api/groups/:id/model", axum::routing::put(set_group_model))
-        .route("/api/groups/:id/capabilities", axum::routing::put(set_group_capabilities))
-        .route("/api/groups/:id/workspace", axum::routing::put(set_group_workspace))
+        .route(
+            "/api/groups/:id/capabilities",
+            axum::routing::put(set_group_capabilities),
+        )
+        .route(
+            "/api/groups/:id/workspace",
+            axum::routing::put(set_group_workspace),
+        )
         .route("/api/groups/:id/overview", get(group_overview))
         .route("/api/sessions/:id/events", get(session_events))
         .route("/api/agents/:id/optimize", post(optimize_agent))
@@ -1840,7 +2316,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/cron", get(list_cron).post(create_cron))
         .route("/api/cron/runs", get(list_cron_runs))
-        .route("/api/cron/:id", axum::routing::put(update_cron).delete(delete_cron))
+        .route(
+            "/api/cron/:id",
+            axum::routing::put(update_cron).delete(delete_cron),
+        )
         .route("/api/cron/:id/run", post(run_cron_now))
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/:id/approve", post(approve_request))
@@ -1878,12 +2357,21 @@ mod identity_gate_tests {
             token: None,
             config: Default::default(),
             group_gate: gate,
+            capability: "computer".into(),
+            memory_isolation: false,
             created_at: exm_core::types::now_iso(),
         }
     }
 
     fn ctx<'a>(text: &'a str, uid: &'a str, is_group: bool, mentioned: bool) -> InboundCtx<'a> {
-        InboundCtx { text, external_id: uid, display_name: uid, is_group, mentioned, chat_key: "test" }
+        InboundCtx {
+            text,
+            external_id: uid,
+            display_name: uid,
+            is_group,
+            mentioned,
+            chat_key: "test",
+        }
     }
 
     /// 群聊门控：默认开——未提及忽略、提及放行、私聊豁免
@@ -1962,7 +2450,12 @@ mod identity_gate_tests {
         let ch = chan(None);
         let code = core.issue_pairing_code("测试", None, 600).unwrap();
 
-        let ok = admit(&core, &ch, &ctx(&format!("/pair {}", code.code), "u7", false, false)).await;
+        let ok = admit(
+            &core,
+            &ch,
+            &ctx(&format!("/pair {}", code.code), "u7", false, false),
+        )
+        .await;
         match ok {
             GateDecision::Deny(msg) => assert!(msg.contains("绑定成功"), "{msg}"),
             _ => panic!("/pair 有效码应回复绑定成功"),
@@ -1970,9 +2463,16 @@ mod identity_gate_tests {
         assert!(core.identity_of("tg-main", "u7").is_some(), "兑换后应落库");
 
         // 已用：再次兑换拒绝
-        let reuse = admit(&core, &ch, &ctx(&format!("/pair {}", code.code), "u8", false, false)).await;
+        let reuse = admit(
+            &core,
+            &ch,
+            &ctx(&format!("/pair {}", code.code), "u8", false, false),
+        )
+        .await;
         match reuse {
-            GateDecision::Deny(msg) => assert!(msg.contains("无效") || msg.contains("已被使用"), "{msg}"),
+            GateDecision::Deny(msg) => {
+                assert!(msg.contains("无效") || msg.contains("已被使用"), "{msg}")
+            }
             _ => panic!("/pair 已用码应拒绝"),
         }
 
@@ -1997,9 +2497,19 @@ mod identity_gate_tests {
     #[tokio::test]
     async fn 配对码_平台限定() {
         let core = test_core();
-        let code = core.issue_pairing_code("仅 discord", Some("discord-main"), 600).unwrap();
-        let ch = Channel { id: "tg-main".into(), ..chan(None) };
-        let wrong = admit(&core, &ch, &ctx(&format!("/pair {}", code.code), "u5", false, false)).await;
+        let code = core
+            .issue_pairing_code("仅 discord", Some("discord-main"), 600)
+            .unwrap();
+        let ch = Channel {
+            id: "tg-main".into(),
+            ..chan(None)
+        };
+        let wrong = admit(
+            &core,
+            &ch,
+            &ctx(&format!("/pair {}", code.code), "u5", false, false),
+        )
+        .await;
         match wrong {
             GateDecision::Deny(msg) => assert!(msg.contains("discord-main"), "{msg}"),
             _ => panic!("平台不匹配应拒绝"),
@@ -2032,7 +2542,11 @@ mod inbound_media_tests {
 
         let saved = vec![
             ("image".into(), img.display().to_string(), "shot.png".into()),
-            ("file".into(), doc.display().to_string(), "report.txt".into()),
+            (
+                "file".into(),
+                doc.display().to_string(),
+                "report.txt".into(),
+            ),
         ];
         let note = stage_inbound_media(&core, "ses-inb", &saved);
         assert!(note.contains("图片附件 shot.png 已注入"), "{note}");
@@ -2050,7 +2564,10 @@ mod inbound_media_tests {
         let saved = vec![("image".into(), "/nonexistent/x.png".into(), "x.png".into())];
         let note = stage_inbound_media(&core, "ses-fail", &saved);
         assert!(note.contains("读取失败"), "{note}");
-        assert!(exm_core::image_stash::take("ses-fail").is_empty(), "失败不应产生暂存");
+        assert!(
+            exm_core::image_stash::take("ses-fail").is_empty(),
+            "失败不应产生暂存"
+        );
     }
 }
 
@@ -2068,29 +2585,41 @@ mod heartbeat_tests {
         cfg.automation.heartbeat_agent = heartbeat_agent.map(|s| s.to_string());
         let core = exm_core::Core::with_config(cfg).expect("创建 Core 失败");
         // 测试组（内置组定义受保护，不可增删）：主智能体 + 可派发的执行个体
-        core.registry().create_group(Some("t".into()), "心跳组", "").unwrap();
-        let mk = |name: &str, identifier: &str, tier: exm_core::types::Tier| exm_core::types::AgentDefinition {
-            name: name.into(),
-            identifier: identifier.into(),
-            domain: "测试".into(),
-            tier,
-            description: "测试个体".into(),
-            capabilities: vec![],
-            tools: vec![],
-            when_to_call: String::new(),
-            link: None,
-            dependencies: vec![],
-            composable_with: vec![],
-            input_schema: Default::default(),
-            output_schema: Default::default(),
-            prompt_file: String::new(),
-            model_hint: None,
+        core.registry()
+            .create_group(Some("t".into()), "心跳组", "")
+            .unwrap();
+        let mk = |name: &str, identifier: &str, tier: exm_core::types::Tier| {
+            exm_core::types::AgentDefinition {
+                name: name.into(),
+                identifier: identifier.into(),
+                domain: "测试".into(),
+                tier,
+                description: "测试个体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            }
         };
         core.registry()
-            .upsert_agent("t", mk("值守指挥", "duty-orch", exm_core::types::Tier::Orchestrator), None)
+            .upsert_agent(
+                "t",
+                mk("值守指挥", "duty-orch", exm_core::types::Tier::Orchestrator),
+                None,
+            )
             .unwrap();
         core.registry()
-            .upsert_agent("t", mk("值守执行", "duty-worker", exm_core::types::Tier::Unit), None)
+            .upsert_agent(
+                "t",
+                mk("值守执行", "duty-worker", exm_core::types::Tier::Unit),
+                None,
+            )
             .unwrap();
         core.registry().set_primary("t", "duty-orch").unwrap();
         core
@@ -2100,7 +2629,11 @@ mod heartbeat_tests {
     fn 心跳_未配置维持全局() {
         let core = core_with_agent(None);
         let job = build_heartbeat_job(&core, "k1");
-        assert_eq!(job.session_title.as_deref(), Some("心跳巡检"), "全局心跳会话名不变");
+        assert_eq!(
+            job.session_title.as_deref(),
+            Some("心跳巡检"),
+            "全局心跳会话名不变"
+        );
         assert!(job.group.is_none(), "未配置 = 激活组执行（group 缺省）");
     }
 
@@ -2108,7 +2641,11 @@ mod heartbeat_tests {
     fn 心跳_目标个体不存在维持全局() {
         let core = core_with_agent(Some("ghost-agent"));
         let job = build_heartbeat_job(&core, "k2");
-        assert_eq!(job.session_title.as_deref(), Some("心跳巡检"), "个体不存在回落全局");
+        assert_eq!(
+            job.session_title.as_deref(),
+            Some("心跳巡检"),
+            "个体不存在回落全局"
+        );
         assert!(job.group.is_none());
     }
 
@@ -2117,15 +2654,24 @@ mod heartbeat_tests {
         let core = core_with_agent(Some("duty-worker"));
         core.registry().set_active_group("t").unwrap();
         let job = build_heartbeat_job(&core, "k3");
-        assert_eq!(job.session_title.as_deref(), Some("心跳巡检-duty-worker"), "per-agent 心跳独立会话");
+        assert_eq!(
+            job.session_title.as_deref(),
+            Some("心跳巡检-duty-worker"),
+            "per-agent 心跳独立会话"
+        );
         assert_eq!(job.group.as_deref(), Some("t"), "以个体所属组为执行上下文");
 
         // 实际执行一轮（替身通道派发）：产出（会话摘要等）应落在该组的记忆体系
-        let run = tokio::runtime::Runtime::new().unwrap().block_on(core.run_cron_job(&job));
+        let run = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(core.run_cron_job(&job));
         assert_eq!(run.status, "done", "替身通道执行应完成：{}", run.summary);
         let stats = core.memory_stats().unwrap();
         let group_entries = stats["byGroup"]["t"].as_u64().unwrap_or(0);
-        assert!(group_entries >= 1, "心跳产出应写入目标组记忆（byGroup.t = {group_entries}）");
+        assert!(
+            group_entries >= 1,
+            "心跳产出应写入目标组记忆（byGroup.t = {group_entries}）"
+        );
         // 独立演进：per-agent 会话存在，全局心跳会话不被创建（两种模式互不污染）
         let titles: Vec<String> = core
             .list_sessions_in_group("t")
@@ -2133,8 +2679,14 @@ mod heartbeat_tests {
             .into_iter()
             .map(|s| s.title)
             .collect();
-        assert!(titles.iter().any(|t| t == "心跳巡检-duty-worker"), "per-agent 会话存在：{titles:?}");
-        assert!(!titles.iter().any(|t| t == "心跳巡检"), "全局心跳会话不应被 per-agent 心跳创建");
+        assert!(
+            titles.iter().any(|t| t == "心跳巡检-duty-worker"),
+            "per-agent 会话存在：{titles:?}"
+        );
+        assert!(
+            !titles.iter().any(|t| t == "心跳巡检"),
+            "全局心跳会话不应被 per-agent 心跳创建"
+        );
     }
 }
 
@@ -2177,7 +2729,11 @@ mod cron_notify_tests {
             last_run_at: None,
             last_status: None,
             last_run_minute: None,
-            notify_channels: if subscribed { vec!["ch-hook".into()] } else { vec![] },
+            notify_channels: if subscribed {
+                vec!["ch-hook".into()]
+            } else {
+                vec![]
+            },
             created_at: String::new(),
         }
     }
@@ -2207,7 +2763,9 @@ mod cron_notify_tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { let _ = axum::serve(listener, app).await; });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
         (format!("http://{addr}/hook"), rx)
     }
 
@@ -2243,5 +2801,88 @@ mod cron_notify_tests {
         notify_cron_result(&core, &job(true), &run()).await;
         let got = tokio::time::timeout(std::time::Duration::from_millis(400), rx.recv()).await;
         assert!(got.is_err(), "总开关关闭 = 全部不推");
+    }
+}
+
+#[cfg(test)]
+mod channel_boundary_tests {
+    use super::*;
+
+    fn core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-chan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        exm_core::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn ch(kind: &str, capability: &str, isolation: bool) -> Channel {
+        Channel {
+            id: format!("c-{kind}"),
+            kind: kind.into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: None,
+            capability: capability.into(),
+            memory_isolation: isolation,
+            created_at: String::new(),
+        }
+    }
+
+    /// 能力边界 + 记忆分区是通道的「安全合同」：所有平台共用 ChannelRun，
+    /// 在这里锁定一次语义，六个 IM 适配器与视频通道即全部继承。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 通道执行_能力与记忆隔离落到会话() {
+        let core = core();
+        let c = ch("webhook", "tools", true);
+        let (run, _rx) = ChannelRun::begin(&std::sync::Arc::new(core), &c, "chat-1")
+            .await
+            .expect("建立执行上下文");
+        assert_eq!(run.scope, exm_core::types::ToolScope::Tools);
+        let s = run
+            .core
+            .store
+            .get_session(&run.session_id)
+            .unwrap()
+            .unwrap();
+        let gid = run.core.active_group();
+        assert_eq!(
+            s.memory_partition.as_deref(),
+            Some(format!("{gid}::channel:c-webhook").as_str())
+        );
+    }
+
+    #[test]
+    fn 通道语义_旧配置回退与边界裁剪() {
+        // capability 未知值回退完整档：老通道不因字段拼写/裁剪而失效
+        assert_eq!(
+            ch("telegram", "full-access", false).tool_scope(),
+            exm_core::types::ToolScope::Computer
+        );
+        assert_eq!(
+            ch("telegram", "chat", false).tool_scope(),
+            exm_core::types::ToolScope::Chat
+        );
+        // 关闭隔离 = None（共享记忆）；开启 = 组内唯一分区键
+        assert_eq!(ch("telegram", "chat", false).memory_partition("g"), None);
+        assert_eq!(
+            ch("telegram", "chat", true).memory_partition("g"),
+            Some("g::channel:c-telegram".into())
+        );
+        // 共享档同组同键：不同通道在同组共用同一记忆命名空间
+        assert_eq!(
+            ch("telegram", "chat", true).memory_partition("g"),
+            ch("telegram", "chat", true).memory_partition("g")
+        );
+        assert_ne!(
+            ch("telegram", "chat", true).memory_partition("g"),
+            ch("telegram", "chat", true).memory_partition("h")
+        );
     }
 }

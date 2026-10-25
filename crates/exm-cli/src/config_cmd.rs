@@ -36,7 +36,7 @@ fn schema_fields() -> Vec<(String, String, String)> {
 }
 
 fn kind_of(key: &str) -> Option<(String, String)> {
-    schema_fields().into_iter().find(|(k, kind, _)| k == key).map(|(_, kind, label)| (kind, label))
+    schema_fields().into_iter().find(|(k, _kind, _)| k == key).map(|(_, kind, label)| (kind, label))
 }
 
 fn parse_bool(v: &str) -> anyhow::Result<bool> {

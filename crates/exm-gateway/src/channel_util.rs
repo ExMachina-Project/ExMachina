@@ -38,7 +38,12 @@ pub(crate) fn parse_command(text: &str) -> Option<BuiltinCmd> {
 }
 
 /// 尝试执行内置命令：命中返回回复文本（由调用方按平台发回），未命中返回 None 走正常消息流。
-pub(crate) async fn builtin_command(core: &Arc<Core>, ch: &Channel, chat_key: &str, text: &str) -> Option<String> {
+pub(crate) async fn builtin_command(
+    core: &Arc<Core>,
+    ch: &Channel,
+    chat_key: &str,
+    text: &str,
+) -> Option<String> {
     match parse_command(text) {
         Some(BuiltinCmd::New) => Some(cmd_new(core, ch, chat_key).await),
         Some(BuiltinCmd::Status) => Some(cmd_status(core, ch, chat_key)),
@@ -89,7 +94,9 @@ async fn cmd_new(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
     }
     match created {
         Ok(_) => match archived {
-            Some((_, old_title)) => format!("🆕 新会话已开启。\n旧会话已归档为「{old_title}」，历史仍可在控制台回看。"),
+            Some((_, old_title)) => {
+                format!("🆕 新会话已开启。\n旧会话已归档为「{old_title}」，历史仍可在控制台回看。")
+            }
             None => "🆕 新会话已开启。".to_string(),
         },
         Err(e) => {
@@ -108,7 +115,15 @@ fn cmd_status(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
     let conn = match status_of(&ch.id) {
         Some(s) => {
             let mark = if s.state == "ok" { "✅" } else { "❌" };
-            format!("{mark} {}（{}）", if s.state == "ok" { "已连接" } else { "异常" }, s.detail)
+            format!(
+                "{mark} {}（{}）",
+                if s.state == "ok" {
+                    "已连接"
+                } else {
+                    "异常"
+                },
+                s.detail
+            )
         }
         // webhook/qq/wechat 桥接类没有运行时，无状态上报属正常
         None => "⚪ 无长连接（桥接类通道属正常）".to_string(),
@@ -119,7 +134,11 @@ fn cmd_status(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
         .ok()
         .and_then(|list| list.into_iter().find(|s| s.title == title));
     let sess_line = match sess {
-        Some(s) => format!("· 会话：{}（状态 {}）", &s.id[..s.id.len().min(12)], s.status),
+        Some(s) => format!(
+            "· 会话：{}（状态 {}）",
+            &s.id[..s.id.len().min(12)],
+            s.status
+        ),
         None => "· 会话：尚未创建（发消息即建）".to_string(),
     };
     let wl = if ch.allowed_chats.is_empty() {
@@ -131,7 +150,10 @@ fn cmd_status(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
         "📡 通道状态\n· 通道：{}（{}{}）\n· 绑定组：{}\n· 连接：{}\n{}\n· 白名单：{}",
         ch.id,
         ch.kind,
-        ch.account.as_deref().map(|a| format!(" · {a}")).unwrap_or_default(),
+        ch.account
+            .as_deref()
+            .map(|a| format!(" · {a}"))
+            .unwrap_or_default(),
         gid,
         conn,
         sess_line,
@@ -145,7 +167,8 @@ fn cmd_status(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
 /// 正常流量下是几分钟的窗口，足够覆盖 Resume 重放（重放只发生在断线瞬间附近），
 /// 又不会无限吃内存。
 fn seen() -> &'static Mutex<HashMap<String, (HashSet<String>, VecDeque<String>)>> {
-    static SEEN: OnceLock<Mutex<HashMap<String, (HashSet<String>, VecDeque<String>)>>> = OnceLock::new();
+    static SEEN: OnceLock<Mutex<HashMap<String, (HashSet<String>, VecDeque<String>)>>> =
+        OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -223,7 +246,11 @@ pub(crate) fn classify_attachment(mimetype: &str) -> &'static str {
 /// discord（audio/* 附件）/ matrix（m.audio）都会出现，「下载成功 → core.transcribe
 /// → 失败静默降级」这段逻辑各写一遍必然漂移（有的平台会漏、报错口径会不一致）。
 /// 转写属尽力而为：失败不拦截消息，语音文件本体仍以附件注记进入会话，模型还能按路径自行处理。
-pub(crate) async fn voice_transcript_note(core: &exm_core::Core, bytes: Vec<u8>, name: &str) -> String {
+pub(crate) async fn voice_transcript_note(
+    core: &exm_core::Core,
+    bytes: Vec<u8>,
+    name: &str,
+) -> String {
     if bytes.is_empty() {
         return String::new();
     }
@@ -245,7 +272,11 @@ mod tests {
         assert_eq!(parse_command("  /new  "), Some(BuiltinCmd::New));
         assert_eq!(parse_command("/status"), Some(BuiltinCmd::Status));
         assert_eq!(parse_command("/status 后面跟话"), None, "带后缀不算命令");
-        assert_eq!(parse_command("/NEW"), None, "命令区分大小写（不误触普通聊天）");
+        assert_eq!(
+            parse_command("/NEW"),
+            None,
+            "命令区分大小写（不误触普通聊天）"
+        );
         assert_eq!(parse_command("你好 /new"), None, "混在句中不算命令");
         assert_eq!(parse_command("/stop"), None, "/stop 归 admit 管，这里不认");
         assert_eq!(parse_command(""), None);
@@ -253,16 +284,27 @@ mod tests {
 
     #[test]
     fn 媒体占位_类型计数与空清单() {
-        assert_eq!(media_placeholder(&[]), "", "无附件不给占位（调用方应直接丢弃）");
+        assert_eq!(
+            media_placeholder(&[]),
+            "",
+            "无附件不给占位（调用方应直接丢弃）"
+        );
         assert_eq!(
             media_placeholder(&["image"]),
             "（用户发来附件：图片 x1，附件细节见消息注入）"
         );
         let multi = media_placeholder(&["image", "image", "file"]);
-        assert!(multi.contains("图片 x2") && multi.contains("文件 x1"), "{multi}");
+        assert!(
+            multi.contains("图片 x2") && multi.contains("文件 x1"),
+            "{multi}"
+        );
         let voice = media_placeholder(&["voice"]);
         assert!(voice.contains("语音 x1"), "{voice}");
-        assert_eq!(media_placeholder(&["unknown"]), "", "未知类型不计入占位（避免误导模型）");
+        assert_eq!(
+            media_placeholder(&["unknown"]),
+            "",
+            "未知类型不计入占位（避免误导模型）"
+        );
     }
 
     #[test]
@@ -282,10 +324,18 @@ mod tests {
     fn 附件归类_音频归语音未知归文件() {
         assert_eq!(classify_attachment("image/png"), "image");
         assert_eq!(classify_attachment("image/jpeg"), "image");
-        assert_eq!(classify_attachment("audio/ogg"), "voice", "音频归 voice 以触发转写");
+        assert_eq!(
+            classify_attachment("audio/ogg"),
+            "voice",
+            "音频归 voice 以触发转写"
+        );
         assert_eq!(classify_attachment("audio/mpeg"), "voice");
         assert_eq!(classify_attachment("application/pdf"), "file");
-        assert_eq!(classify_attachment("video/mp4"), "file", "视频无消费方，保守归文件");
+        assert_eq!(
+            classify_attachment("video/mp4"),
+            "file",
+            "视频无消费方，保守归文件"
+        );
         assert_eq!(classify_attachment(""), "file", "缺 mimetype 不丢弃");
     }
 
@@ -313,6 +363,8 @@ mod tests {
             token: None,
             config: Default::default(),
             group_gate: None,
+            capability: "computer".into(),
+            memory_isolation: false,
             created_at: String::new(),
         }
     }
@@ -345,10 +397,20 @@ mod tests {
         let r2 = builtin_command(&core, &ch, "100", "/new").await.unwrap();
         assert!(r2.contains("归档"), "应提示归档去向：{r2}");
         let sessions = core.list_sessions_in_group(&gid).unwrap();
-        let canonical = sessions.iter().find(|s| s.title == title).expect("归档后规范标题应有新会话");
+        let canonical = sessions
+            .iter()
+            .find(|s| s.title == title)
+            .expect("归档后规范标题应有新会话");
         assert_ne!(canonical.id, first.id, "规范标题应顶上全新会话");
-        let archived = sessions.iter().find(|s| s.id == first.id).expect("旧会话不删只改名");
-        assert!(archived.title.starts_with(title) && archived.title.contains("归档"), "{}", archived.title);
+        let archived = sessions
+            .iter()
+            .find(|s| s.id == first.id)
+            .expect("旧会话不删只改名");
+        assert!(
+            archived.title.starts_with(title) && archived.title.contains("归档"),
+            "{}",
+            archived.title
+        );
     }
 
     /// /status：能报出通道与连接口径（无运行时上报 = 桥接类属正常）
@@ -380,6 +442,8 @@ mod tests {
             exm_core::Core::with_config(cfg).expect("创建 Core 失败")
         });
         let ch = test_channel();
-        assert!(builtin_command(&core, &ch, "1", "帮我查一下天气").await.is_none());
+        assert!(builtin_command(&core, &ch, "1", "帮我查一下天气")
+            .await
+            .is_none());
     }
 }

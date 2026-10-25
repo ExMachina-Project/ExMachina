@@ -12,8 +12,11 @@
   ],
   "tools": [
     "read",
+    "grep",
+    "glob",
     "filesystem",
-    "terminal"
+    "terminal",
+    "edit"
   ],
   "whenToCall": "Web 界面实现：组件结构、样式与响应式布局、浏览器兼容与可访问性核查。",
   "dependencies": [],

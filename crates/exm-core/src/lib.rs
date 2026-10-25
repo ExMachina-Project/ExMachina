@@ -118,6 +118,22 @@ impl Core {
 
     // ---------------- 记忆系统便捷方法（组感知，docs/09 §6） ----------------
 
+    /// 会话的记忆分区（外部通道「记忆隔离」）：None = 与同组共享。
+    pub fn memory_partition_for_session(&self, session_id: &str) -> Option<String> {
+        self.store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.memory_partition)
+    }
+
+    /// 会话的有效记忆命名空间：有分区用分区，否则用当前组。
+    /// 注意：这里返回的是**记忆维度**的组键，不改变 registry 的激活组。
+    pub fn memory_group_for_session(&self, session_id: &str) -> String {
+        self.memory_partition_for_session(session_id)
+            .unwrap_or_else(|| self.active_group())
+    }
+
     pub fn memory_recall(&self, query: &str, limit: Option<usize>) -> anyhow::Result<Vec<RecallHit>> {
         let cfg = self.config();
         let gid = self.registry.active_group();
@@ -586,6 +602,7 @@ impl Core {
             title: format!("{}（分支·至第 {upto_turn} 轮）", src.title),
             status: "active".into(),
             group_id: src.group_id.clone(), // 权限与组继承
+            memory_partition: src.memory_partition.clone(), // 记忆分区随会话继承
             rolling_summary: None,          // 摘要按副本历史重建
             summary_upto: None,
             parent_session: Some(src.id.clone()),
@@ -614,6 +631,17 @@ impl Core {
     }
 
     pub async fn chat(&self, session_id: &str, text: &str) -> anyhow::Result<()> {
+        // 默认能力边界：完整工具面 + Computer（WebUI / CLI / 定时任务的既有行为）
+        self.chat_scoped(session_id, text, crate::types::ToolScope::Computer).await
+    }
+
+    /// 带能力边界执行一轮：外部通道据此限制「只聊天 / 工具调用 / 电脑操控」。
+    pub async fn chat_scoped(
+        &self,
+        session_id: &str,
+        text: &str,
+        scope: crate::types::ToolScope,
+    ) -> anyhow::Result<()> {
         // 预算闸门：估算口径超限即拒绝新轮次（0 = 不限）
         let budget = self.config().max_session_tokens;
         if budget > 0 {
@@ -632,7 +660,10 @@ impl Core {
         let _guard = lock.lock().await;
         // 轮次生命周期：开始（登记取消令牌）→ 执行 → 结束（移除）
         crate::round_trace::begin(session_id);
-        let result = self.orchestrator().handle_user_message(session_id, text).await;
+        let result = self
+            .orchestrator()
+            .handle_user_message_scoped(session_id, text, scope)
+            .await;
         crate::round_trace::end(session_id);
         result
     }
@@ -758,6 +789,8 @@ impl Core {
             session_id: session_id.to_string(),
             plan: plan.clone(),
             reports: reports_shared.clone(),
+            // 恢复执行按完整能力档：工具面已持久化在计划/派发单里
+            scope: crate::types::ToolScope::Computer,
         };
         let exec = Arc::new(exec);
         let scheduler = Scheduler::new(self.config().max_concurrency);

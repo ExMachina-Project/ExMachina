@@ -241,8 +241,6 @@ pub async fn run_round(
                                 .unwrap_or_else(|| orch_id_fallback.clone());
                             if orch_streaming || thinking_streaming || !current_unit.is_empty() {
                                 println!();
-                                orch_streaming = false;
-                                thinking_streaming = false;
                                 current_unit.clear();
                             }
                             // 思维链摘要（原文是内部协议，不直出）

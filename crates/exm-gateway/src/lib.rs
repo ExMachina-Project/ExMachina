@@ -31,6 +31,7 @@ pub mod qqbot;
 pub mod slack;
 pub mod telegram;
 pub mod triggers;
+pub mod video;
 pub mod worker_hub;
 
 /// 提取器拒绝（请求体 / 查询串解析失败）统一成全站错误契约：400 + {"error": 可读中文}。
@@ -1411,6 +1412,10 @@ pub struct AgentUpdateBody {
     /// 默认模型（"档案ID" 或 "档案ID/模型名"；空串清除 = 跟随所属组/全局）
     #[serde(default)]
     pub model_hint: Option<String>,
+    /// 连结体代理绑定（智能连结网络）：Some(id) 绑定（校验存在）；None = 不动该字段；
+    /// 空串 = 解绑
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 impl AgentUpdateBody {
@@ -1422,6 +1427,11 @@ impl AgentUpdateBody {
             capabilities: self.capabilities,
             tools: self.tools,
             model_hint: self.model_hint,
+            // 语义映射：None（未传）= 不动；Some("")（空串）= 解绑；Some(id) = 绑定
+            link: self.link.map(|v| {
+                let t = v.trim();
+                if t.is_empty() { None } else { Some(t.to_string()) }
+            }),
         }
     }
 }
@@ -1547,6 +1557,16 @@ async fn update_agent(
     Path(identifier): Path<String>,
     Json(b): Json<AgentUpdateBody>,
 ) -> impl IntoResponse {
+    // 连结体代理绑定校验（gateway 持有 config：link_id 必须指向已存在的连结体）
+    if let Some(id) = b.link.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if !st.core.config().nexus.links.iter().any(|l| l.id == id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("连结体不存在: {id}（先在「智能连结」页添加）") })),
+            )
+                .into_response();
+        }
+    }
     match st.core.registry().update_agent(&identifier, &b.into_patch()) {
         Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
@@ -2356,6 +2376,7 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
     discord::spawn_supervisor(core.clone());
     slack::spawn_supervisor(core.clone());
     matrix::spawn_supervisor(core.clone());
+    video::spawn_supervisor(core.clone());
     // 事件触发器（7.1）：文件监听（配置启用时才启动）
     triggers::spawn_file_watcher(core.clone());
     // 分布式执行：工作者池注入（有工作者在线即自动路由远程，失败回落本地）
