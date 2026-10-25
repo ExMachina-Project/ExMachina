@@ -19,7 +19,7 @@ fn unique_dir(tag: &str) -> std::path::PathBuf {
 }
 
 async fn app_with(auth_key: &str) -> (axum::Router, std::path::PathBuf, String) {
-    let dir = unique_dir(auth_key.is_empty().then(|| "open").unwrap_or("keyed"));
+    let dir = unique_dir(if auth_key.is_empty() { "open" } else { "keyed" });
     let mut cfg = ExmConfig::load(&dir);
     cfg.use_mock = true;
     cfg.memory_enabled = false;
@@ -75,13 +75,13 @@ async fn post(router: &axum::Router, path: &str, key: Option<&str>, body: Value)
 #[tokio::test]
 async fn http挂载_未启用404_启用后调用成功且鉴权生效() {
     // 启用 + 无鉴权：协议全流程
-    let (mut router, dir, sid) = app_with("").await;
+    let (router, dir, sid) = app_with("").await;
     let (st, _) = post(&router, "/mcp", None, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
     assert_eq!(st, StatusCode::OK);
     // 会话亲和：有效会话执行 read
     std::fs::write(dir.join("n.txt"), "http mcp").unwrap();
     let (st, body) = post(
-        &mut router,
+        &router,
         "/mcp",
         None,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -93,7 +93,7 @@ async fn http挂载_未启用404_启用后调用成功且鉴权生效() {
     assert!(body["result"]["content"][0]["text"].as_str().unwrap().contains("http mcp"));
     // 无效会话拒绝（会话亲和）
     let (st, body) = post(
-        &mut router,
+        &router,
         "/mcp",
         None,
         json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",

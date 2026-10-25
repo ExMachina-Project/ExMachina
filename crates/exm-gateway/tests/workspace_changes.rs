@@ -96,7 +96,7 @@ fn test_core(dir: &std::path::Path) -> std::sync::Arc<exm_core::Core> {
     std::sync::Arc::new(exm_core::Core::create(dir).expect("创建 Core 失败"))
 }
 
-async fn save(dir: &std::path::Path, path: &str, content: &str, core: &std::sync::Arc<exm_core::Core>) -> axum::response::Response {
+async fn save(_dir: &std::path::Path, path: &str, content: &str, core: &std::sync::Arc<exm_core::Core>) -> axum::response::Response {
     let state = AppState { core: core.clone() };
     let body = serde_json::json!({ "path": path, "content": content });
     fs_save(State(state), Json(body)).await.into_response()
