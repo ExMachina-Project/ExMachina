@@ -601,7 +601,10 @@ unsafe impl Sync for WinJob {}
 #[cfg(target_os = "windows")]
 impl WinJob {
     /// 建作业 → 设限 → 把子进程收进去；任一步失败返回 None（调用方继续按无作业执行）
-    pub fn attach(
+    ///
+    /// # Safety
+    /// `process` 必须是存活的 Win32 进程句柄——本函数仅将其透传给 Win32 API，不解引用。
+    pub unsafe fn attach(
         process: *mut core::ffi::c_void,
         memory_mb: usize,
         max_processes: u32,
@@ -654,7 +657,8 @@ impl WinJob {
 
 #[cfg(not(target_os = "windows"))]
 impl WinJob {
-    pub fn attach(
+    /// 非 Windows 恒不可用（签名与 Windows 侧保持一致，见其 Safety 约定）
+    pub unsafe fn attach(
         _process: *mut core::ffi::c_void,
         _memory_mb: usize,
         _max_processes: u32,
@@ -694,7 +698,8 @@ fn attach_job(child: &tokio::process::Child, opts: &ShellOpts) -> Option<WinJob>
     if handle.is_null() {
         return None;
     }
-    WinJob::attach(handle, opts.memory_mb, opts.max_processes)
+    // SAFETY: handle 来自 child_raw_handle 的存活子进程，attach 内部仅透传给 Win32 API
+    unsafe { WinJob::attach(handle, opts.memory_mb, opts.max_processes) }
 }
 
 /// 作业对象是否可用（沙箱加固自检 / 测试用）：建一个空作业即关闭
@@ -715,9 +720,10 @@ pub fn windows_job_available() -> bool {
         };
         let handle = {
             use std::os::windows::io::AsRawHandle;
-            child.as_raw_handle() as *mut core::ffi::c_void
+            child.as_raw_handle()
         };
-        let ok = !handle.is_null() && WinJob::attach(handle, 256, 0).is_some();
+        // SAFETY: std::process::Child 存活期间的句柄，attach 内部仅透传给 Win32 API
+        let ok = !handle.is_null() && unsafe { WinJob::attach(handle, 256, 0) }.is_some();
         let _ = child.kill();
         let _ = child.wait();
         ok
@@ -1050,6 +1056,9 @@ pub struct ToolGateway {
     memory_md_path: Option<PathBuf>,
 }
 
+/// computer 输入动作：在既有会话上执行一次鼠标/键盘操作
+type InputAction = Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>;
+
 impl ToolGateway {
     pub fn new(
         workspace_root: impl AsRef<Path>,
@@ -1363,7 +1372,7 @@ impl ToolGateway {
         args: &serde_json::Value,
     ) -> ToolResult {
         let started = Instant::now();
-        let call_id = format!("t{}", crate::types::new_id()[..12].to_string());
+        let call_id = format!("t{}", &crate::types::new_id()[..12]);
         let _ = self.events.send(CoreEvent {
             kind: "tool.call".into(),
             session_id: session_id.to_string(),
@@ -1737,7 +1746,7 @@ impl ToolGateway {
         args: &serde_json::Value,
     ) -> ToolResult {
         let started = Instant::now();
-        let call_id = format!("t{}", crate::types::new_id()[..12].to_string());
+        let call_id = format!("t{}", &crate::types::new_id()[..12]);
         // 工具执行事件（call）：文件操作 / 终端命令 / 截屏对用户全程可见——编程软件式的过程透明
         self.emit_and_persist(CoreEvent {
             kind: "tool.call".into(),
@@ -1942,7 +1951,7 @@ impl ToolGateway {
         if std::fs::create_dir_all(&dir).is_err() {
             return result;
         }
-        let stamp = crate::types::now_iso().replace(':', "").replace('-', "");
+        let stamp = crate::types::now_iso().replace([':', '-'], "");
         let file = dir.join(format!("{stamp}-{name}.txt"));
         if std::fs::write(&file, &text).is_err() {
             return result;
@@ -2378,14 +2387,15 @@ impl ToolGateway {
             })
             .unwrap_or_default();
         for name in placeholder_names(&tool.target) {
-            if !vals.contains_key(&name) {
-                if required.iter().any(|r| r == &name) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = vals.entry(name) {
+                if required.iter().any(|r| r == slot.key()) {
                     return ToolResult::err(format!(
-                        "自定义工具 {} 缺少必填参数 {name}",
-                        tool.name
+                        "自定义工具 {} 缺少必填参数 {}",
+                        tool.name,
+                        slot.key()
                     ));
                 }
-                vals.insert(name, String::new());
+                slot.insert(String::new());
             }
         }
         if tool.kind_norm() == "shell" {
@@ -3282,7 +3292,7 @@ impl ToolGateway {
     /// 启动后台任务：输出累积到共享缓冲，任务终结记录退出码
     fn bg_start(&self, cmd: &str) -> ToolResult {
         const BG_OUTPUT_CAP: usize = 200_000;
-        let id = format!("bg-{}", crate::types::new_id()[..8].to_string());
+        let id = format!("bg-{}", &crate::types::new_id()[..8]);
         let buf = Arc::new(parking_lot::Mutex::new(String::new()));
         let state = Arc::new(parking_lot::Mutex::new(None::<i32>));
         let cwd = self.effective_root();
@@ -3453,10 +3463,7 @@ impl ToolGateway {
         // 截屏：只读，不审批
         if op == "screenshot" {
             let index = args.get("monitor").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let stamp = crate::types::now_iso()
-                .replace(':', "")
-                .replace('-', "")
-                .replace('.', "");
+            let stamp = crate::types::now_iso().replace([':', '-', '.'], "");
             let name = format!("computer-{stamp}");
             let dir = self.workspace_root.join(".exmachina").join("screenshots");
             let result = session.screenshot(index, self.computer_cfg.max_edge, &dir, &name);
@@ -3481,7 +3488,7 @@ impl ToolGateway {
         }
 
         // 输入类动作：统一审批闸门 + 节流
-        let (desc, action): (String, Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>) = match op {
+        let (desc, action): (String, InputAction) = match op {
             "move" => {
                 let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -4301,7 +4308,7 @@ mod memory_tool_tests {
         let shared = r.gw.store.create_session("共享会话", "t").unwrap();
         let iso = r.gw.store.create_session("隔离会话", "t").unwrap();
         r.gw.store
-            .set_session_memory_partition(&iso.id, Some("t::channel:iso".into()))
+            .set_session_memory_partition(&iso.id, Some("t::channel:iso"))
             .unwrap();
 
         let a =
@@ -4866,7 +4873,7 @@ mod memory_tool_tests {
     }
 
     #[test]
-    fn 读取_offset越界与maxChars上限() {
+    fn 读取_offset越界与max_chars上限() {
         let r = rig();
         let p = r.dir.join("sample.txt");
         std::fs::write(&p, "l1\nl2\nl3\n").unwrap();
@@ -4938,11 +4945,7 @@ mod timeout_output_tests {
     #[tokio::test]
     async fn 终端超时_正常完成不受影响() {
         let root = std::env::temp_dir();
-        let cmd = if cfg!(windows) {
-            "echo quick-ok"
-        } else {
-            "echo quick-ok"
-        };
+        let cmd = "echo quick-ok";
         let r = execute_shell_command_timed(&root, cmd, 15).await;
         assert!(r.ok, "快速命令应成功");
         assert!(r.output.contains("quick-ok"), "输出应完整: {}", r.output);
@@ -4956,7 +4959,8 @@ mod timeout_output_tests {
     async fn 终端失败_退出码与输出进入错误字段() {
         let root = std::env::temp_dir();
         let cmd = if cfg!(windows) {
-            "cmd /C \"echo out-tail & echo boom 1>&2 & exit /b 3\"".to_string()
+            // 执行器已按 cmd /C <命令> 拼装，这里再包一层 cmd /C "..." 会被内层当程序名
+            "echo out-tail & echo boom 1>&2 & exit /b 3".to_string()
         } else {
             "printf out-tail; echo boom >&2; exit 3".to_string()
         };
@@ -4979,7 +4983,8 @@ mod timeout_output_tests {
     async fn 终端输出_超长截断带标记() {
         let root = std::env::temp_dir();
         let cmd = if cfg!(windows) {
-            "cmd /C \"for /L %i in (1,1,1500) do @echo aaaaaaaaaaaaaaaaaaaa-%i\"".to_string()
+            // for /L 从 0 起到 1499：与 unix 分支对齐（断言头部含 -0、尾部 -1499 被截）
+            "for /L %i in (0,1,1499) do @echo aaaaaaaaaaaaaaaaaaaa-%i".to_string()
         } else {
             "i=0; while [ $i -lt 1500 ]; do echo aaaaaaaaaaaaaaaaaaaa-$i; i=$((i+1)); done"
                 .to_string()
@@ -5076,9 +5081,11 @@ mod terminal_gate_tests {
         let store = Arc::new(Store::open(dir.join("data")).unwrap());
         let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let mut sec = SecurityConfig::default();
-        sec.exec_approval = mode.into();
-        sec.approval_wait_secs = wait_secs;
+        let sec = SecurityConfig {
+            exec_approval: mode.into(),
+            approval_wait_secs: wait_secs,
+            ..Default::default()
+        };
         ToolGateway::new(&dir, store, registry, events, sec)
     }
 
@@ -5135,11 +5142,7 @@ mod terminal_gate_tests {
     #[tokio::test]
     async fn 审批路径_risky档_白名单内命令照常执行() {
         let gw = gw_with_approval("risky", 0);
-        let cmd = if cfg!(windows) {
-            "echo hello"
-        } else {
-            "echo hello"
-        };
+        let cmd = "echo hello";
         let r = gw
             .execute(
                 "a1",

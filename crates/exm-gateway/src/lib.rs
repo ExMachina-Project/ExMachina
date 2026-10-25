@@ -598,8 +598,13 @@ pub async fn fs_save(State(st): State<AppState>, Json(body): Json<Value>) -> imp
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "content 不能为空" }))).into_response();
     };
     let norm = path.replace('\\', "/").trim_matches('/').to_string();
+    let trimmed = path.trim();
+    // 带根无前缀的路径（/etc）在 Unix 是绝对路径，Windows 是盘符相对——is_absolute 抓不到后者，
+    // 统一按「以 / 或 \ 开头即拒绝」处理，不让保存 /etc/passwd 静默落进工作区
+    let rooted = trimmed.starts_with('/') || trimmed.starts_with('\\');
     let path_legal = !norm.is_empty()
-        && !std::path::Path::new(path.trim()).is_absolute() // 绝对路径直接拒绝（不改写为相对）
+        && !rooted
+        && !std::path::Path::new(trimmed).is_absolute() // 绝对路径直接拒绝（不改写为相对）
         && !norm.split('/').any(|seg| seg == "..");
     if !path_legal {
         return (
@@ -991,7 +996,7 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
                 .unwrap_or_else(|| current.security.exec_allowlist.clone()),
             // 掩码/缺省 = 沿用旧密钥；显式空串 = 清除（回到免鉴权）
             auth_key: match sec.auth_key.as_deref() {
-                Some(k) if k == "***已配置***" => current.security.auth_key.clone(),
+                Some("***已配置***") => current.security.auth_key.clone(),
                 Some(k) => k.trim().to_string(),
                 None => current.security.auth_key.clone(),
             },
@@ -1442,18 +1447,15 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
         let Some(gid) = b.group.clone() else {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": "模板创建必须指定目标组 group" }))).into_response();
         };
-        let meta = st.core.group_meta(&gid);
         let was_empty = st.core.registry().group_agent_count(&gid) == 0;
         let result = st
             .core
             .registry()
             .create_agent_from_template(&gid, tpl, &b.identifier, &b.name, &b.description)
-            .map(|saved| {
+            .inspect(|saved| {
                 if was_empty {
                     let _ = st.core.registry().set_primary(&gid, &saved.identifier);
                 }
-                let _ = meta;
-                saved
             });
         return match result {
             Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
@@ -1484,25 +1486,21 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
     // 目标组：显式指定时写入该组（首个个体自动成为该组主智能体），否则激活组
     let result = match &b.group {
         Some(gid) => {
-            let meta = st.core.group_meta(gid);
             let was_empty = st.core.registry().group_agent_count(gid) == 0;
             st.core
                 .registry()
                 .upsert_agent(gid, def, b.prompt.clone())
-                .map(|saved| {
+                .inspect(|saved| {
                     // 主智能体由系统指定：仅组的首个个体自动成为主智能体（tier 不再触发换主）
                     if was_empty {
                         let _ = st.core.registry().set_primary(gid, &saved.identifier);
                     }
-                    let _ = meta;
-                    saved
                 })
         }
-        None => st.core.upsert_agent(def, b.prompt).map(|saved| {
+        None => st.core.upsert_agent(def, b.prompt).inspect(|saved| {
             if st.core.registry().count() == 1 {
                 let _ = st.core.set_primary(&saved.identifier);
             }
-            saved
         }),
     };
     match result {

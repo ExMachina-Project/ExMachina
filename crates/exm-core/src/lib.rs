@@ -768,7 +768,7 @@ impl Core {
                     objective: n.objective.clone(),
                     acceptance: n.acceptance.clone(),
                     depends_on: n.depends_on.clone(),
-                    priority: n.priority.clone(),
+                    priority: n.priority,
                 })
                 .collect(),
             final_answer: None,
@@ -875,16 +875,16 @@ impl Core {
     // ---------------- 会话与编成便捷方法 ----------------
 
     pub fn list_sessions_in_group(&self, gid: &str) -> anyhow::Result<Vec<Session>> {
-        Ok(self.store.list_sessions_in_group(gid)?)
+        self.store.list_sessions_in_group(gid)
     }
 
     /// 当前交互范围（组或智能体）的会话列表
     pub fn list_sessions_in_scope(&self) -> anyhow::Result<Vec<Session>> {
-        Ok(self.store.list_sessions_in_group(&self.registry.active_scope())?)
+        self.store.list_sessions_in_group(&self.registry.active_scope())
     }
 
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
-        Ok(self.store.delete_session(id)?)
+        self.store.delete_session(id)
     }
 
     pub fn create_session(&self, title: &str) -> anyhow::Result<Session> {
@@ -988,11 +988,11 @@ impl Core {
     }
 
     pub fn approval_list(&self, status: Option<&str>, limit: usize) -> anyhow::Result<Vec<ApprovalRequest>> {
-        Ok(self.store.list_approvals(status, limit)?)
+        self.store.list_approvals(status, limit)
     }
 
     pub fn approval_get(&self, id: &str) -> anyhow::Result<Option<ApprovalRequest>> {
-        Ok(self.store.get_approval(id)?)
+        self.store.get_approval(id)
     }
 
     /// 审批决定：批准即由系统代执行并记录输出；拒绝即关闭审批单
@@ -1168,6 +1168,8 @@ impl Core {
     }
 }
 
+// 依赖装配函数：八个入参即 Orchestrator 的全部协作者，收拢成 struct 反而造一个只用一次的壳
+#[allow(clippy::too_many_arguments)]
 pub fn build_orchestrator(
     cfg: &ExmConfig,
     store: &Arc<Store>,

@@ -32,6 +32,9 @@ pub trait RemoteExecutor: Send + Sync {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
+// 线协议帧：Dispatch 携带完整 AgentDefinition 本就是语义所需（装盒不改变序列化格式，
+// 却让所有小帧付出间接寻址；帧量级低，按最大变体占内存可接受）
+#[allow(clippy::large_enum_variant)]
 pub enum WorkerFrame {
     Hello { id: String, agents: Vec<String> },
     Dispatch { did: String, def: AgentDefinition, order: DispatchOrder, #[serde(default)] attach_images: bool },

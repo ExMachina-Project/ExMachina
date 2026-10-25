@@ -5,6 +5,7 @@
 //!   - agents/*.json（成员定义，含主智能体）+ prompts/*.md（成员提示词）+ adaptations/（经验要点）
 //!   - 内置默认组 = groups/default（builtin=true，定义受保护）；主智能体与独立智能体持 SOUL，子个体无人格层
 //!   - 集群级共享：protocol/（协议）、skills/（技能）、default-soul.md（兜底人格）
+//!
 //! 切换组即热切换：指挥体的规划/派发/提示词/SOUL 全部落在激活组内。
 //! 分布式实现可替换本文件（接口一致）。
 
@@ -1481,7 +1482,6 @@ impl LocalRegistry {
         std::fs::read_to_string(self.dir.join("default-soul.md"))
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .map(String::from)
             .unwrap_or_else(|| Self::DEFAULT_PERSONA.to_string())
     }
 
