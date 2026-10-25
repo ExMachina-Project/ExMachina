@@ -1,5 +1,5 @@
 
-# ExMachina — A Collaborative Agent Cluster
+# ExMachina — Rationalist Agents
 
 > [!WARNING]
 > This project is in pre-alpha. Interfaces and data formats may break without notice. Do not use in production.
@@ -64,11 +64,13 @@ npm install && npm run build:webui
 cargo run -p exm-gateway --release        # http://127.0.0.1:4173
 ```
 
-## Why a Cluster, Not Another Assistant
+## One Agent, or a Team
 
-Single-agent assistants hit a clear ceiling: **one context, one chain of thought, one answer**. The larger the task, the more likely they lose constraints, lose evidence, and compromise with themselves mid-chain — you can't trace how the conclusion was reached, or intervene when it goes off track.
+EXMACHINA gives you two interaction targets, chosen by task weight — both share the same memory, model, and tool foundations.
 
-EXMACHINA takes a different path: turning "accomplish something complex" into an **auditable organizational behavior**.
+**A single agent** — direct conversation, direct work. No orchestration overhead: system prompt + history + tool loop, and the answer. The full tool surface (terminal / files / patch / browser / computer use / MCP), layered memory, multi-provider models, persona and experience optimization — one agent is enough for daily tasks.
+
+**An agent group** — for tasks too heavy for one. A single assistant's ceiling is clear: **one context, one chain of thought, one answer** — the larger the task, the more constraints and evidence get lost mid-chain, and you can't trace how a conclusion was reached or intervene when it goes off track. Group mode turns "accomplish something complex" into an **auditable organizational behavior**:
 
 - **Division of labor** — The orchestrator does one thing: lock boundaries, decompose tasks, dispatch, arbitrate, converge. 39 sub-agents each hold a domain (research, architecture, implementation, verification, decision-making, operations, security, documentation…), producing in parallel.
 - **Contract-driven** — Every sub-agent's output must pass SyncReport structural + business validation. Failures auto-rewrite (max 2 attempts), then escalate to the orchestrator.
@@ -77,7 +79,12 @@ EXMACHINA takes a different path: turning "accomplish something complex" into an
 
 ## Core Features
 
-**Cluster collaboration**
+**Single agent (direct service)**
+- Answers without orchestration: system prompt + history + tool loop; the built-in `default` agent works out of the box
+- Full tool surface with the same approval / audit gates as groups
+- Shares the layered memory and multi-provider model system; persona (SOUL) and experience optimization apply too
+
+**Agent group (cluster intelligence · core)**
 - Task decomposition into DAG, topological scheduling with concurrency pool, dynamic arbitration nodes
 - SyncReport contract enforcement with auto-rewrite; full event sourcing for replay
 - Agent groups with workspace isolation; primary agent can expand roster mid-task

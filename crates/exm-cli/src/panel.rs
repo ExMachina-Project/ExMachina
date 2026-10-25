@@ -199,7 +199,7 @@ impl Panel {
         println!(
             "  {}",
             dim(format!(
-                "群体协作智能体系统   v{VERSION}   ｜   /help 查看命令"
+                "理性至上主义的智能体   v{VERSION}   ｜   /help 查看命令"
             ))
         );
         println!();
