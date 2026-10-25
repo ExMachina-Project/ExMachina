@@ -4959,7 +4959,8 @@ mod timeout_output_tests {
     async fn 终端失败_退出码与输出进入错误字段() {
         let root = std::env::temp_dir();
         let cmd = if cfg!(windows) {
-            "cmd /C \"echo out-tail & echo boom 1>&2 & exit /b 3\"".to_string()
+            // 执行器已按 cmd /C <命令> 拼装，这里再包一层 cmd /C "..." 会被内层当程序名
+            "echo out-tail & echo boom 1>&2 & exit /b 3".to_string()
         } else {
             "printf out-tail; echo boom >&2; exit 3".to_string()
         };
@@ -4982,7 +4983,8 @@ mod timeout_output_tests {
     async fn 终端输出_超长截断带标记() {
         let root = std::env::temp_dir();
         let cmd = if cfg!(windows) {
-            "for /L %i in (1,1,1500) do @echo aaaaaaaaaaaaaaaaaaaa-%i".to_string()
+            // for /L 从 0 起到 1499：与 unix 分支对齐（断言头部含 -0、尾部 -1499 被截）
+            "for /L %i in (0,1,1499) do @echo aaaaaaaaaaaaaaaaaaaa-%i".to_string()
         } else {
             "i=0; while [ $i -lt 1500 ]; do echo aaaaaaaaaaaaaaaaaaaa-$i; i=$((i+1)); done"
                 .to_string()
