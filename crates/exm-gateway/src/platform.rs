@@ -708,7 +708,7 @@ async fn notify_cron_result(
         summary
     );
     for ch in load_channels(core) {
-        if !ch.enabled || !job.notify_channels.iter().any(|id| *id == ch.id) {
+        if !ch.enabled || !job.notify_channels.contains(&ch.id) {
             continue;
         }
         let ok = push_channel_text(&ch, &text).await;
@@ -1326,12 +1326,10 @@ pub(crate) async fn admit(
     }
 
     // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引
-    if identity_cfg.identity_required {
-        if core.identity_of(&ch.id, ctx.external_id).is_none() {
-            return GateDecision::Deny(
-                "【报告】未绑定身份：请在控制台「通道身份」页签发配对码，然后在此发送 /pair <配对码> 完成绑定。".into(),
-            );
-        }
+    if identity_cfg.identity_required && core.identity_of(&ch.id, ctx.external_id).is_none() {
+        return GateDecision::Deny(
+            "【报告】未绑定身份：请在控制台「通道身份」页签发配对码，然后在此发送 /pair <配对码> 完成绑定。".into(),
+        );
     }
 
     // ④ 用量治理：通道主体滑动窗口限流 + 周期请求数配额（仅外部入口；组内派发不经此处）
@@ -1880,8 +1878,7 @@ pub async fn create_channel(
     if platform == "telegram"
         && b.token
             .as_deref()
-            .map(|t| t.trim().is_empty())
-            .unwrap_or(true)
+            .is_none_or(|t| t.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1897,10 +1894,10 @@ pub async fn create_channel(
         .collect();
     // 新平台必填项：qqbot 需要 appId + appSecret；napcat 需要 WS 地址
     if platform == "qqbot"
-        && (config.get("appId").map_or(true, |v| v.trim().is_empty())
+        && (config.get("appId").is_none_or(|v| v.trim().is_empty())
             || config
                 .get("appSecret")
-                .map_or(true, |v| v.trim().is_empty()))
+                .is_none_or(|v| v.trim().is_empty()))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1908,7 +1905,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "napcat" && config.get("url").map_or(true, |v| v.trim().is_empty()) {
+    if platform == "napcat" && config.get("url").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "napcat 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" })),
@@ -1919,8 +1916,7 @@ pub async fn create_channel(
     if matches!(platform.as_str(), "discord" | "slack" | "matrix")
         && b.token
             .as_deref()
-            .map(|t| t.trim().is_empty())
-            .unwrap_or(true)
+            .is_none_or(|t| t.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1928,7 +1924,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "slack" && config.get("appToken").map_or(true, |v| v.trim().is_empty()) {
+    if platform == "slack" && config.get("appToken").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "slack 通道需要 config.appToken（Socket Mode 应用级令牌）" })),
@@ -1938,7 +1934,7 @@ pub async fn create_channel(
     if platform == "matrix"
         && config
             .get("homeserver")
-            .map_or(true, |v| v.trim().is_empty())
+            .is_none_or(|v| v.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1947,8 +1943,8 @@ pub async fn create_channel(
             .into_response();
     }
     if platform == "bilibili"
-        && (config.get("sessdata").map_or(true, |v| v.trim().is_empty())
-            || config.get("biliJct").map_or(true, |v| v.trim().is_empty()))
+        && (config.get("sessdata").is_none_or(|v| v.trim().is_empty())
+            || config.get("biliJct").is_none_or(|v| v.trim().is_empty()))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1956,7 +1952,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "youtube" && config.get("apiKey").map_or(true, |v| v.trim().is_empty()) {
+    if platform == "youtube" && config.get("apiKey").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "youtube 通道需要 config.apiKey（YouTube Data API v3）" })),

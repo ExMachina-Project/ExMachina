@@ -359,6 +359,8 @@ fn strip_cq(s: &str) -> String {
 }
 
 /// 一条用户消息：组绑定 → 会话复用 → 订阅回复 → 执行 → send_group_msg / send_private_msg
+#[allow(clippy::too_many_arguments)]
+// 平台适配器的消息上下文逐项透传
 async fn handle_message(
     core: &Arc<Core>,
     ch: &Channel,

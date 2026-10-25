@@ -16,7 +16,7 @@ pub fn run_skill_list(core: &Core) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    println!("{}", format!("技能包（全体组共用，共 {} 个）", skills.len()).bold().to_string());
+    println!("{}", format!("技能包（全体组共用，共 {} 个）", skills.len()).bold());
     for s in skills {
         let agents = if s.agents.is_empty() { "全体".to_string() } else { s.agents.join("、") };
         println!(
@@ -104,7 +104,7 @@ pub fn run_agent_adaptation(core: &Core, identifier: &str) -> anyhow::Result<()>
             }
             println!("{}", a.content);
             if !a.previous.is_empty() {
-                println!("  {} {}", dim("历史版本"), format!("{:?}", a.previous.iter().map(|v| v.revision).collect::<Vec<_>>()));
+                println!("  {} {:?}", dim("历史版本"), a.previous.iter().map(|v| v.revision).collect::<Vec<_>>());
             }
         }
         None => println!("{}", dim("该个体尚无经验要点；agent optimize <id> 可手动合成。")),
@@ -131,7 +131,7 @@ pub fn run_model_list(core: &Core) -> anyhow::Result<()> {
     let cfg = core.config();
     println!(
         "{}",
-        format!("模型档案（生效：{}）", cfg.active_profile.cyan()).bold().to_string()
+        format!("模型档案（生效：{}）", cfg.active_profile.cyan()).bold()
     );
     for p in &cfg.llm_profiles {
         let mark = if p.id == cfg.active_profile { "●".green().to_string() } else { " ".into() };
@@ -300,7 +300,7 @@ pub fn run_cron_list(core: &Core) -> anyhow::Result<()> {
         println!("{}", dim("（无定时任务；exm cron add <名称> --prompt <提示词> --cron \"分 时 日 月 周\" 创建；连续任务用 --kind queue --steps id1,id2）"));
         return Ok(());
     }
-    println!("{}", "定时任务（exm gateway 常驻时自动调度）".bold().to_string());
+    println!("{}", "定时任务（exm gateway 常驻时自动调度）".bold());
     for j in jobs {
         let state = if j.enabled { "启用".green().to_string() } else { "停用".dimmed().to_string() };
         // 任务三类型（v0.4.0）：cron 周期 / at 一次性 / queue 连续；缺省按 cron/at 推断

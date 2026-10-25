@@ -68,6 +68,39 @@ pub fn quota_key(subject: &str, period: &str, now_ms: u64) -> (String, u64) {
     (format!("quota:{subject}:{day}"), window_ms)
 }
 
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/api/limits/stats", get(stats))
+}
+
+// ---------------------------------------------------------------- 管理视图（4.4）
+
+use axum::{extract::State, response::{IntoResponse, Response}, routing::get, Json, Router};
+use serde_json::{Value, json};
+
+use crate::AppState;
+
+/// GET /api/limits/stats：限流计数快照 + 配置口径（管理可见性）
+pub async fn stats(State(st): State<AppState>) -> Response {
+    let limits = st.core.config().limits.clone();
+    let now = exm_core::types::now_ms();
+    let window_ms = limits.window_secs * 1000;
+    let counters: Vec<Value> = crate::limits::RateLimiter::snapshot(window_ms.max(1000), now)
+        .into_iter()
+        .map(|(k, c)| json!({ "key": k, "count": c }))
+        .collect();
+    Json(json!({
+        "enabled": limits.enabled,
+        "windowSecs": limits.window_secs,
+        "maxRequests": limits.max_requests,
+        "quotaPeriod": limits.quota_period,
+        "quotaTokens": limits.quota_tokens,
+        "quotaRequests": limits.quota_requests,
+        "counters": counters,
+    }))
+    .into_response()
+}
+
+
 #[cfg(test)]
 mod limits_tests {
     use super::*;
@@ -102,36 +135,4 @@ mod limits_tests {
         assert_eq!(w3, 7 * 86400 * 1000);
         assert!(k3.starts_with("quota:user:u1:"));
     }
-}
-
-// ---------------------------------------------------------------- 管理视图（4.4）
-
-use axum::{extract::State, response::{IntoResponse, Response}, routing::get, Json, Router};
-use serde_json::{Value, json};
-
-use crate::AppState;
-
-/// GET /api/limits/stats：限流计数快照 + 配置口径（管理可见性）
-pub async fn stats(State(st): State<AppState>) -> Response {
-    let limits = st.core.config().limits.clone();
-    let now = exm_core::types::now_ms();
-    let window_ms = limits.window_secs * 1000;
-    let counters: Vec<Value> = crate::limits::RateLimiter::snapshot(window_ms.max(1000), now)
-        .into_iter()
-        .map(|(k, c)| json!({ "key": k, "count": c }))
-        .collect();
-    Json(json!({
-        "enabled": limits.enabled,
-        "windowSecs": limits.window_secs,
-        "maxRequests": limits.max_requests,
-        "quotaPeriod": limits.quota_period,
-        "quotaTokens": limits.quota_tokens,
-        "quotaRequests": limits.quota_requests,
-        "counters": counters,
-    }))
-    .into_response()
-}
-
-pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/limits/stats", get(stats))
 }

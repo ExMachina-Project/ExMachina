@@ -335,7 +335,7 @@ impl BrowserSession {
         let dir = workspace_root.join(".exmachina").join("screenshots");
         std::fs::create_dir_all(&dir)?;
         let stem: String = if name.trim().is_empty() {
-            crate::types::now_iso().replace(':', "").replace('-', "")
+            crate::types::now_iso().replace([':', '-'], "")
         } else {
             name.trim().chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect()
         };

@@ -384,18 +384,12 @@ impl Default for FileWatchConfig {
 }
 
 /// 事件 webhook 源（通用事件入口；独立于通道 webhook）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EventWebhookConfig {
     pub enabled: bool,
     /// HMAC 签名密钥；空 = 未配置（入口关闭）
     pub secret: String,
-}
-
-impl Default for EventWebhookConfig {
-    fn default() -> Self {
-        EventWebhookConfig { enabled: false, secret: String::new() }
-    }
 }
 
 /// 触发器总段（事件驱动主动行为）
@@ -1563,7 +1557,7 @@ mod config_tests {
         std::fs::create_dir_all(dir.join(".exmachina")).unwrap();
         let cfg = ExmConfig::load(&dir);
         assert_eq!(cfg.config_version, CONFIG_VERSION);
-        assert_eq!(cfg.identity.group_gate_default, true, "新装门控应默认开");
+        assert!(cfg.identity.group_gate_default, "新装门控应默认开");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
         assert!(!cfg.identity.identity_required, "身份管控默认关（白名单即全权）");
         assert!(!cfg.triggers.file_watch.enabled, "文件监听默认关");
@@ -1593,7 +1587,7 @@ mod config_tests {
 
         let cfg = ExmConfig::load(&dir);
         assert_eq!(cfg.config_version, 2, "迁移后应为 v2");
-        assert_eq!(cfg.identity.group_gate_default, false, "升级迁移门控应置关");
+        assert!(!cfg.identity.group_gate_default, "升级迁移门控应置关");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
         assert_eq!(cfg.max_concurrency, 4, "历史字段保留");
         assert!(!cfg.triggers.file_watch.enabled);

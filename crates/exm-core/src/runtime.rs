@@ -11,6 +11,9 @@ use tokio::sync::mpsc::unbounded_channel;
 
 pub const SYNC_REWRITE_LIMIT: u32 = 2;
 
+/// 单个工具调用的回填材料：回填文本 + 截图回灌组（图注 + 图像 data URL 清单）
+pub type ToolFeedback = (String, Option<(String, Vec<String>)>);
+
 /// 工具结果 → 回填文本（【报告】成功 / 【警告】失败），语义与审计一致
 fn tool_feedback(name: &str, r: &crate::tools::ToolResult) -> String {
     if r.ok {
@@ -57,6 +60,8 @@ impl AgentRuntime {
     /// `trace` = 过程数据（工具记录 / 工具事件）归集键：派发运行指向子会话；
     /// 用量记账与停止判定仍按 `session_id`（保持主会话口径）。
     /// `attach_images` = 目标模型具备视觉能力：工具副产物截图以图像消息回灌（computer use 闭环）。
+    // 派发执行的完整上下文逐项透传，收拢参数会造一个只用一次的中间结构
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute<F>(
         &self,
         def: &AgentDefinition,
@@ -221,7 +226,7 @@ impl AgentRuntime {
                         messages.push(ChatMessage::user(feedback));
                         if attach_images {
                             if let Some((note, data_urls)) =
-                                self.image_note(&tool.key().to_string(), &result.images)
+                                self.image_note(tool.key(), &result.images)
                             {
                                 let mut um = ChatMessage::user(note);
                                 um.images = data_urls;
@@ -294,6 +299,8 @@ impl AgentRuntime {
     /// 无派发概念、无 SyncReport 契约——模型产出不含工具调用的文本即为终点。
     /// 供智能体模式使用;工具面 = 个体 allowlist + 可见自定义工具 + MCP。
     /// `trace` = 过程数据归集键（单聊与用量同键）。
+    // 会话执行的全部上下文逐项透传，收拢参数会造一个只用一次的中间结构
+    #[allow(clippy::too_many_arguments)]
     pub async fn chat_execute<F>(
         &self,
         def: &AgentDefinition,
@@ -403,7 +410,7 @@ impl AgentRuntime {
                         messages.push(ChatMessage::user(feedback));
                         if attach_images {
                             if let Some((note, data_urls)) =
-                                self.image_note(&tool.key().to_string(), &result.images)
+                                self.image_note(tool.key(), &result.images)
                             {
                                 let mut um = ChatMessage::user(note);
                                 um.images = data_urls;
@@ -430,7 +437,7 @@ impl AgentRuntime {
     }
 
     /// 同轮工具调用：只读工具并发（join_all），写工具与 MCP 按原顺序串行。
-    /// 返回与 `calls` 同序的（回填文本, 截图回灌材料）——保证与 tool_call_id 配对。
+    /// 返回与 `calls` 同序的 `ToolFeedback`——保证与 tool_call_id 配对。
     /// `trace` = 工具记录与工具事件的归集键（派发运行指向子会话）。
     async fn run_tool_calls(
         &self,
@@ -440,7 +447,7 @@ impl AgentRuntime {
         calls: &[ToolCall],
         attach_images: bool,
         scope: ToolScope,
-    ) -> Vec<(String, Option<(String, Vec<String>)>)> {
+    ) -> Vec<ToolFeedback> {
         // 仅聊天档：即使模型绕过 schema 硬造 tool call，也在执行层全部拒绝。
         if !scope.allows_tools() {
             return calls
@@ -456,7 +463,7 @@ impl AgentRuntime {
                 })
                 .collect();
         }
-        let mut out: Vec<Option<(String, Option<(String, Vec<String>)>)>> = vec![None; calls.len()];
+        let mut out: Vec<Option<ToolFeedback>> = vec![None; calls.len()];
         let mut readonly: Vec<usize> = Vec::new();
         let mut serial: Vec<usize> = Vec::new();
         for (i, c) in calls.iter().enumerate() {

@@ -304,7 +304,7 @@ impl Orchestrator {
         order: &DispatchOrder,
         session_id: &str,
         attach_images: bool,
-        mut on_delta: F,
+        on_delta: F,
     ) -> anyhow::Result<SyncReport>
     where
         F: FnMut(StreamDelta),
@@ -321,7 +321,7 @@ impl Orchestrator {
                 session_id,
                 attach_images,
                 ToolScope::Computer,
-                |d| on_delta(d),
+                on_delta,
             )
             .await
     }
@@ -585,26 +585,23 @@ impl Orchestrator {
         let user = format!(
             "已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。"
         );
-        let summary = match self.resolve_orch_model() {
-            (provider, model) => {
-                let req = ChatRequest::new(
-                    model,
-                    vec![ChatMessage::system(system), ChatMessage::user(user)],
-                );
-                provider
-                    .chat(req)
-                    .await
-                    .map(|r| r.content)
-                    .unwrap_or_else(|e| {
-                        eprintln!("[orchestrator] 会话压缩失败（沿用旧摘要）：{e}");
-                        if prev_summary.is_empty() {
-                            String::new()
-                        } else {
-                            prev_summary.clone()
-                        }
-                    })
-            }
-        };
+        let (provider, model) = self.resolve_orch_model();
+        let req = ChatRequest::new(
+            model,
+            vec![ChatMessage::system(system), ChatMessage::user(user)],
+        );
+        let summary = provider
+            .chat(req)
+            .await
+            .map(|r| r.content)
+            .unwrap_or_else(|e| {
+                eprintln!("[orchestrator] 会话压缩失败（沿用旧摘要）：{e}");
+                if prev_summary.is_empty() {
+                    String::new()
+                } else {
+                    prev_summary.clone()
+                }
+            });
         if !summary.trim().is_empty() {
             let _ = self.store.update_compaction(session_id, &summary, upto);
             (Some(summary), render_recent_hlp(&recent))

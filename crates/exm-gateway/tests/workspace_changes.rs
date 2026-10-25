@@ -29,7 +29,8 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 #[tokio::test]
 async fn 变更清单_git口径() {
     let dir = unique_dir("git");
-    git(&dir, &["init", "-q"]);
+    // 钉住分支名：本机 init.defaultBranch 各不相同（main/master 并存），断言必须确定
+    git(&dir, &["init", "-q", "-b", "master"]);
     std::fs::write(dir.join("a.txt"), "one\n").unwrap();
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-q", "-m", "init"]);
@@ -96,7 +97,7 @@ fn test_core(dir: &std::path::Path) -> std::sync::Arc<exm_core::Core> {
     std::sync::Arc::new(exm_core::Core::create(dir).expect("创建 Core 失败"))
 }
 
-async fn save(dir: &std::path::Path, path: &str, content: &str, core: &std::sync::Arc<exm_core::Core>) -> axum::response::Response {
+async fn save(_dir: &std::path::Path, path: &str, content: &str, core: &std::sync::Arc<exm_core::Core>) -> axum::response::Response {
     let state = AppState { core: core.clone() };
     let body = serde_json::json!({ "path": path, "content": content });
     fs_save(State(state), Json(body)).await.into_response()

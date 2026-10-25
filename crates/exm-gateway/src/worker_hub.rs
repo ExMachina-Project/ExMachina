@@ -190,7 +190,7 @@ impl RemoteExecutor for WorkerHub {
         out.send(Message::Text(frame)).map_err(|e| anyhow::anyhow!("工作者连接已断: {e}"))?;
 
         // 超时 = 派发约束；期间 token 泵即时回调（report 就绪前持续消费）
-        let timeout = std::time::Duration::from_millis(order.constraints.timeout_ms.max(5_000).into());
+        let timeout = std::time::Duration::from_millis(order.constraints.timeout_ms.max(5_000));
         let mut report_rx = std::pin::pin!(report_rx);
         let result = tokio::time::timeout(timeout, async {
             loop {

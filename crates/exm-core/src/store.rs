@@ -245,6 +245,8 @@ impl Store {
     }
 
     /// 带过程数据的消息落盘（思维链 + 工具轨迹 + 有序步骤；过程收起栏的数据来源）
+    // 过程数据的各轨字段逐项透传，与 fsdb/sqlite 两实现签名保持一致
+    #[allow(clippy::too_many_arguments)]
     pub fn add_message_full(
         &self,
         session_id: &str,

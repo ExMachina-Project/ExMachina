@@ -541,7 +541,7 @@ impl Panel {
             }
             "tasks" => match core.store.latest_graph(&state.session_id)? {
                 Some(g) => {
-                    println!("{}", format!("图 {}｜状态 {:?}", g.id, g.status).bold().to_string());
+                    println!("{}", format!("图 {}｜状态 {:?}", g.id, g.status).bold());
                     for n in &g.nodes {
                         println!("{}", crate::render::node_line(n));
                     }
@@ -1290,7 +1290,7 @@ fn print_agents(core: &Core, filter: Option<&str>) -> anyhow::Result<()> {
     for d in defs {
         if d.domain != last_domain {
             last_domain = d.domain.clone();
-            println!("\n{}", last_domain.bold().underline().to_string());
+            println!("\n{}", last_domain.bold().underline());
         }
         let tier = if matches!(d.tier, Tier::Orchestrator) {
             format!(" {} ", "指挥体".on_blue().white())
