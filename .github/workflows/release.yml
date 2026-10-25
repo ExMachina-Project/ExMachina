@@ -31,19 +31,17 @@ jobs:
           VER=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
           echo "tag=v$VER" >> "$GITHUB_OUTPUT"
           echo "▸ 版本 v$VER"
-      - name: 检查该版本是否已发布(自动追加后缀)
+      - name: 检查该版本是否已发布(已发布则整条流水线跳过)
         id: check
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
-          SUFFIX=0
-          FINAL="$TAG"
-          while git ls-remote --tags origin "refs/tags/$FINAL" | grep -q .; do
-            SUFFIX=$((SUFFIX + 1))
-            FINAL="$TAG.$SUFFIX"
-          done
-          echo "tag=$FINAL" >> "$GITHUB_OUTPUT"
-          echo "exists=$([ -z "$(git ls-remote --tags origin "refs/tags/$FINAL")" ] && echo no || echo yes)" >> "$GITHUB_OUTPUT"
-          echo "▸ 发版 tag: $FINAL"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "exists=yes" >> "$GITHUB_OUTPUT"
+            echo "▸ tag $TAG 已存在——版本号未 bump，跳过发版（合入不发版是合法操作）"
+          else
+            echo "exists=no" >> "$GITHUB_OUTPUT"
+            echo "▸ 发版 tag: $TAG"
+          fi
 
   # ── 服务端预编译包：exm-gateway / exm / exmachina + webui-dist + 文档 ──────────
   server:
