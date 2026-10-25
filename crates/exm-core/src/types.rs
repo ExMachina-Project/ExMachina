@@ -439,7 +439,6 @@ pub struct GroupCapabilities {
     pub embedding: Option<String>,
 }
 
-/// 智能体组元数据：组是隔离与切换的基本单位（docs/09）
 // ---------------------------------------------------------------- 编成模板
 
 /// 编成模板元数据(entities/templates/<kind>/<id>/template.json):用户与 agent 均可基于模板创建
@@ -453,6 +452,7 @@ pub struct TemplateInfo {
     pub kind: String,
 }
 
+/// 智能体组元数据：组是隔离与切换的基本单位（docs/09）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupMeta {
@@ -555,7 +555,7 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerTask {
     pub goal: String,
@@ -567,18 +567,6 @@ pub struct LedgerTask {
     pub forbidden: Vec<String>,
     #[serde(default)]
     pub priorities: Vec<String>,
-}
-
-impl Default for LedgerTask {
-    fn default() -> Self {
-        LedgerTask {
-            goal: String::new(),
-            acceptance: vec![],
-            constraints: vec![],
-            forbidden: vec![],
-            priorities: vec![],
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

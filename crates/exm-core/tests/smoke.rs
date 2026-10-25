@@ -1,6 +1,8 @@
 //! 冒烟测试
 //! 覆盖：编成数据契约装载 / DAG 调度并发 / 端到端一次完整任务 / 自由建组（Mock 通道）
 //! 编成（个体、链路）是数据：本文件不指向任何具体编制，只校验契约完整性。
+//! 串行锁（serial_guard）按设计跨 await 持有——锁住的是整段测试而非某一步。
+#![allow(clippy::await_holding_lock)]
 
 use exm_core::config::ExmConfig;
 use exm_core::memory::{MemoryDraft, MemoryKind};
@@ -140,7 +142,7 @@ fn 自由建组_自定义集群热切换() {
         .create_group(Some("smoke-style".into()), "风格实验组", "验证自由建组与热切换")
         .expect("建组失败");
     assert_eq!(g.id, "smoke-style");
-    assert_eq!(g.builtin, false);
+    assert!(!g.builtin);
 
     core.switch_group("smoke-style").expect("切组失败");
     assert!(core.agents().is_empty(), "新组初始应无个体");
@@ -1034,7 +1036,7 @@ async fn 记忆压缩_超限归档两模式() {
     cfg.memory_enabled = false; // 深层关：归档到工作区文件
     let core = Core::with_config(cfg.clone()).expect("创建 Core 失败");
 
-    let long_md: String = std::iter::repeat("记忆条目内容测试。").take(60).collect(); // ~480 字
+    let long_md = "记忆条目内容测试。".repeat(60); // ~480 字
     std::fs::write(&core.config().memory_md_path, &long_md).unwrap();
 
     let (before, after) = core.compact_memory_md().await.expect("压缩失败");
@@ -1054,7 +1056,7 @@ async fn 记忆压缩_超限归档两模式() {
     cfg2.memory_md_max_chars = 100;
     cfg2.memory_enabled = true;
     let core2 = Core::with_config(cfg2).expect("创建 Core 失败");
-    let long2: String = std::iter::repeat("深层归档验证。").take(60).collect();
+    let long2 = "深层归档验证。".repeat(60);
     std::fs::write(&core2.config().memory_md_path, &long2).unwrap();
     core2.compact_memory_md().await.expect("压缩失败");
     let hits = core2
@@ -1639,7 +1641,7 @@ async fn 沙箱_环境净化与联网闸门_浏览器() {
 }
 
 #[tokio::test]
-async fn 自定义工具_HTTP与命令模板() {
+async fn 自定义工具_http与命令模板() {
     let _serial = serial_guard();
     let mut cfg = test_config();
     let tmp = std::env::temp_dir().join(format!("exm-custom-{}", uuid::Uuid::new_v4()));

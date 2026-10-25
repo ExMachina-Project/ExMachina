@@ -296,13 +296,13 @@ impl SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare("SELECT * FROM sessions WHERE id=?1")?;
         let mut rows = st.query(rusqlite::params![id])?;
-        Ok(rows.next()?.map(|r| Self::row_session(&r)).transpose()?)
+        Ok(rows.next()?.map(Self::row_session).transpose()?)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 200")?;
-        let rows = st.query_map([], |r| Self::row_session(r))?;
+        let rows = st.query_map([], Self::row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -357,7 +357,7 @@ impl SqliteStore {
     fn get_session_conn(conn: &Connection, id: &str) -> anyhow::Result<Option<Session>> {
         let mut st = conn.prepare("SELECT * FROM sessions WHERE id=?1")?;
         let mut rows = st.query(rusqlite::params![id])?;
-        Ok(rows.next()?.map(|r| Self::row_session(&r)).transpose()?)
+        Ok(rows.next()?.map(Self::row_session).transpose()?)
     }
 
     pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
@@ -403,7 +403,7 @@ impl SqliteStore {
                 m.id,
                 session_id,
                 seq,
-                serde_json::to_value(&m.role).unwrap_or(serde_json::json!("user")).as_str().unwrap_or("user").to_string(),
+                serde_json::to_value(m.role).unwrap_or(serde_json::json!("user")).as_str().unwrap_or("user").to_string(),
                 m.agent_id,
                 serde_json::to_string(&m.statements)?,
                 m.created_at,
@@ -472,6 +472,8 @@ impl SqliteStore {
     }
 
     /// 带过程数据的消息落盘(思维链 + 工具轨迹 + 有序步骤)
+    // 与 fsdb 实现的 add_message_full 签名保持一致（各轨字段逐项透传）
+    #[allow(clippy::too_many_arguments)]
     pub fn add_message_full(
         &self,
         session_id: &str,
@@ -502,7 +504,7 @@ impl SqliteStore {
         let mut st = conn.prepare(
             "SELECT * FROM (SELECT * FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq DESC LIMIT ?2) ORDER BY seq ASC",
         )?;
-        let rows = st.query_map(rusqlite::params![session_id, lim], |r| Self::row_message(r))?;
+        let rows = st.query_map(rusqlite::params![session_id, lim], Self::row_message)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -523,7 +525,7 @@ impl SqliteStore {
         let mut st = conn.prepare(
             "SELECT * FROM messages WHERE session_id=?1 AND archived=1 ORDER BY seq ASC",
         )?;
-        let rows = st.query_map(rusqlite::params![session_id], |r| Self::row_message(r))?;
+        let rows = st.query_map(rusqlite::params![session_id], Self::row_message)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -548,7 +550,7 @@ impl SqliteStore {
                 "SELECT * FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq ASC",
             )?;
             let rows: Vec<ChatMessage> = st
-                .query_map(rusqlite::params![dst_session], |r| Self::row_message(r))?
+                .query_map(rusqlite::params![dst_session], Self::row_message)?
                 .filter_map(|r| r.ok())
                 .collect();
             rows
@@ -860,7 +862,7 @@ impl SqliteStore {
         let mut st = conn.prepare(
             "SELECT * FROM sessions WHERE group_id=?1 ORDER BY updated_at DESC LIMIT 200",
         )?;
-        let rows = st.query_map(rusqlite::params![group_id], |r| Self::row_session(r))?;
+        let rows = st.query_map(rusqlite::params![group_id], Self::row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -952,7 +954,7 @@ impl SqliteStore {
         let mut st = conn.prepare(
             "SELECT * FROM turn_snapshots WHERE session_id=?1 ORDER BY turn ASC, created_at ASC",
         )?;
-        let rows = st.query_map(rusqlite::params![session_id], |r| Self::row_snapshot(r))?;
+        let rows = st.query_map(rusqlite::params![session_id], Self::row_snapshot)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -1097,7 +1099,6 @@ impl SqliteStore {
 mod store_tests {
     use super::*;
     use crate::store::Store;
-    use crate::types::*;
 
     fn test_store() -> Store {
         let dir = std::env::temp_dir().join(format!("exm-store-{}", uuid::Uuid::new_v4()));

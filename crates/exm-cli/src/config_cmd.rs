@@ -49,7 +49,7 @@ fn parse_bool(v: &str) -> anyhow::Result<bool> {
 
 pub fn run_config_list(workspace_root: &Path) -> anyhow::Result<()> {
     let cfg = ExmConfig::load(workspace_root);
-    println!("{}", "当前配置".bold().to_string());
+    println!("{}", "当前配置".bold());
     println!("  {} {}", dim("配置文件"), cfg.config_path.display());
     println!("  {} {}", dim("结构版本"), cfg.config_version);
     println!("  {} {}", dim("LLM Base URL"), cfg.llm.base_url);
