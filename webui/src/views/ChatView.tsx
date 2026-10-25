@@ -1,9 +1,9 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SearchOutlined, SendOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
-import { api } from "../api";
+import { api, type LlmProfile } from "../api";
 import { agentIdEn } from "../models";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
@@ -133,10 +133,13 @@ export function ChatView(): React.ReactElement {
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
     refreshAgents,
+    loadGroups,
     sessionsLoaded,
   } = useExm();
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
-  const [singles, setSinglesList] = useState<{ identifier: string; name: string }[]>([]);
+  const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
+  const [profiles, setProfiles] = useState<LlmProfile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState("");
   // 确认弹窗走 useModal 演出器：静态 Modal.confirm 渲染在 React 树外、吃不到 ConfigProvider，
   // 暗色主题下会落回默认白底（与全局自绘样式打架）；演出器版本随主题/语言/令牌同步。
   const [modal, modalContextHolder] = Modal.useModal();
@@ -146,7 +149,7 @@ export function ChatView(): React.ReactElement {
       const t = await api.getTarget();
       setTargetInfo({ mode: t.mode, id: t.id, name: t.name });
       const s = await api.listSingles();
-      setSinglesList(s.singles.map((x) => ({ identifier: x.identifier, name: x.name })));
+      setSinglesList(s.singles.map((x) => ({ identifier: x.identifier, name: x.name, modelHint: x.modelHint })));
     } catch {
       // 目标接口不可用时退回组模式展示
     }
@@ -155,6 +158,12 @@ export function ChatView(): React.ReactElement {
   useEffect(() => {
     void loadTarget();
   }, [loadTarget, activeGroup]);
+  useEffect(() => {
+    api.llmProfiles().then((r) => {
+      setProfiles(r.profiles);
+      setActiveProfileId(r.active);
+    }).catch(() => undefined);
+  }, []);
 
   const changeTarget = async (value: string) => {
     const [mode, id] = value.startsWith("single:") ? (["single", value.slice(7)] as const) : (["group", value.slice(6)] as const);
@@ -261,6 +270,51 @@ export function ChatView(): React.ReactElement {
   const orchLabel = target.mode === "single"
     ? (singles.find((x) => x.identifier === target.id)?.name ?? target.id)
     : t("chat.orchGroup", { group: activeMeta?.name ?? target.id });
+  const targetValue = target.mode === "single" ? `single:${target.id}` : `group:${target.id}`;
+  const currentModel = target.mode === "single"
+    ? (singles.find((x) => x.identifier === target.id)?.modelHint ?? "")
+    : (groups.find((g) => g.id === target.id)?.model ?? "");
+  const activeProfile = profiles.find((p) => p.id === activeProfileId);
+  const modelOptions = [
+    {
+      value: "",
+      label: activeProfile?.model
+        ? `${t("models.followGlobalShort")} · ${activeProfile.model}`
+        : t("models.followGlobalShort"),
+    },
+    ...profiles.flatMap((p) => [
+      ...(p.model ? [{ value: p.id, label: `${p.model} · ${p.name}` }] : []),
+      ...p.models
+        .filter((m) => m.model !== p.model)
+        .map((m) => ({ value: `${p.id}/${m.model}`, label: `${m.model} · ${p.name}` })),
+    ]),
+  ];
+  const changeModel = async (value: string) => {
+    try {
+      if (target.mode === "single") {
+        await api.setAgentModel(target.id, value);
+      } else {
+        await api.setGroupModel(target.id, value);
+      }
+      await Promise.all([loadTarget(), loadGroups()]);
+      message.success(t("common.saved"));
+    } catch (e) {
+      message.error(t("common.saveFailed", { err: String(e).slice(0, 120) }));
+    }
+  };
+  const targetOptions = [
+    {
+      label: t("chat.groupLabel"),
+      options: groups.map((g) => ({
+        value: `group:${g.id}`,
+        label: `${g.name}（${g.id}${g.builtin ? ` · ${t("chat.builtin")}` : ""}）`,
+      })),
+    },
+    {
+      label: t("chat.singlesLabel"),
+      options: singles.map((s) => ({ value: `single:${s.identifier}`, label: s.name })),
+    },
+  ];
 
   /** 会话归属的组名（列表副标题） */
   const groupNameOf = useCallback(
@@ -443,23 +497,11 @@ export function ChatView(): React.ReactElement {
             <span className="rail-no">01</span> {t("chat.target")} [TARGET]
           </div>
           <Select
-            value={target.mode === "single" ? `single:${target.id}` : `group:${target.id}`}
+            value={targetValue}
             style={{ width: "100%" }}
             className="target-select"
             onChange={(v) => void changeTarget(v)}
-            options={[
-              {
-                label: t("chat.groupLabel"),
-                options: groups.map((g) => ({
-                  value: `group:${g.id}`,
-                  label: `${g.name}（${g.id}${g.builtin ? ` · ${t("chat.builtin")}` : ""}）`,
-                })),
-              },
-              {
-                label: t("chat.singlesLabel"),
-                options: singles.map((s) => ({ value: `single:${s.identifier}`, label: s.name })),
-              },
-            ]}
+            options={targetOptions}
           />
           {target.mode === "single" ? (
             <div className="rail-hint">{t("chat.soloMode")} · <span className="mono">{agentIdEn(target.id)}</span></div>
@@ -793,7 +835,7 @@ export function ChatView(): React.ReactElement {
           <div ref={bottomRef} />
         </div>
 
-        <div className="chat-input">
+        <div className="chat-composer">
           {images.length > 0 && (
             <div className="attach-row">
               {images.map((src, i) => (
@@ -811,13 +853,14 @@ export function ChatView(): React.ReactElement {
             </div>
           )}
           <Input.TextArea
+            className="composer-textarea"
             value={text}
             disabled={isSubSession}
             onChange={(e) => {
               setText(e.target.value);
               if (sessionId) useExm.getState().setDraft(sessionId, e.target.value);
             }}
-            placeholder={`> ${isSubSession ? t("chat.subSessionReadonly") : narrow ? t("chat.inputPlaceholderNarrow") : t("chat.inputPlaceholder")}`}
+            placeholder={isSubSession ? t("chat.subSessionReadonly") : narrow ? t("chat.inputPlaceholderNarrow") : t("chat.inputPlaceholder")}
             autoSize={{ minRows: 1, maxRows: 6 }}
             onPressEnter={(e) => {
               if (!e.shiftKey) {
@@ -851,85 +894,111 @@ export function ChatView(): React.ReactElement {
               setText(recalled);
             }}
           />
-          <label className="attach-btn" title={t("chat.attachTip")}>
-            <PaperClipOutlined />
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              style={{ display: "none" }}
-              onChange={(e) => {
-                Array.from(e.target.files ?? []).slice(0, 4).forEach(addImage);
-                e.target.value = "";
-              }}
-            />
-          </label>
-          <Button
-            type="primary"
-            icon={<SendOutlined />}
-            loading={running}
-            disabled={isSubSession}
-            onClick={doSend}
-          >
-            {t("chat.send")}
-          </Button>
-          {running && sessionId && (
-            <Popconfirm
-              title={t("chat.stopConfirm")}
-              onConfirm={() => {
-                if (!sessionId) return;
-                api.stopSession(sessionId)
-                  .then((r) => message.success(t("chat.stopDone", { n: String(r.toolsExecuted) })))
-                  .catch((e) => message.error(t("chat.stopFail", { err: String(e).slice(0, 120) })));
-              }}
-            >
-              <Button danger icon={<PauseCircleOutlined />}>{t("chat.stop")}</Button>
-            </Popconfirm>
-          )}
-          {renaming && (
-            <Modal
-              open
-              title={t("chat.renameTitle")}
-              onCancel={() => setRenaming(null)}
-              onOk={async () => {
-                if (!renaming.title.trim()) return;
-                await api.renameSession(renaming.id, renaming.title);
-                const store = useExm.getState();
-                useExm.setState({ sessions: store.sessions.map((s) => s.id === renaming.id ? { ...s, title: renaming.title } : s) });
-                setRenaming(null);
-              }}
-              okText={t("common.rename")}
-            >
-              <Input
-                value={renaming.title}
-                onChange={(e) => setRenaming({ ...renaming, title: e.target.value })}
-                placeholder={t("chat.newTitle")}
-              />
-            </Modal>
-          )}
-          {editing && (
-            <Modal
-              open
-              title={t("chat.turn.editTitle", { turn: String(editing.turn) })}
-              onCancel={() => setEditing(null)}
-              onOk={() => void doEdit()}
-              okText={t("chat.turn.resend")}
-              confirmLoading={historyBusy}
-            >
-              <Alert
-                type="warning"
-                showIcon
-                message={t("chat.turn.editWarn")}
-                className="edit-warn"
-              />
-              <Input.TextArea
-                value={editing.text}
-                onChange={(e) => setEditing({ ...editing, text: e.target.value })}
-                autoSize={{ minRows: 3, maxRows: 10 }}
-              />
-            </Modal>
-          )}
+          <div className="composer-bar">
+            <div className="composer-tools">
+              <label className="attach-btn composer-attach" title={t("chat.attachTip")}>
+                <PlusOutlined />
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    Array.from(e.target.files ?? []).slice(0, 4).forEach(addImage);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+              <span className="composer-model">
+                <RobotOutlined />
+                <Select
+                  value={currentModel}
+                  onChange={(v) => void changeModel(v)}
+                  options={modelOptions}
+                  variant="borderless"
+                  size="small"
+                  className="composer-model-select"
+                  popupMatchSelectWidth={false}
+                  disabled={isSubSession || profiles.length === 0}
+                />
+              </span>
+            </div>
+            <div className="composer-actions">
+              <span className="composer-hint">{t("chat.enterHint")}</span>
+              {running && sessionId ? (
+                <Popconfirm
+                  title={t("chat.stopConfirm")}
+                  onConfirm={() => {
+                    if (!sessionId) return;
+                    api.stopSession(sessionId)
+                      .then((r) => message.success(t("chat.stopDone", { n: String(r.toolsExecuted) })))
+                      .catch((e) => message.error(t("chat.stopFail", { err: String(e).slice(0, 120) })));
+                  }}
+                >
+                  <Button
+                    className="composer-send composer-stop"
+                    shape="circle"
+                    danger
+                    icon={<PauseCircleOutlined />}
+                    aria-label={t("chat.stop")}
+                  />
+                </Popconfirm>
+              ) : (
+                <Button
+                  className="composer-send"
+                  shape="circle"
+                  icon={<ArrowUpOutlined />}
+                  disabled={isSubSession || running || !text.trim()}
+                  onClick={doSend}
+                  aria-label={t("chat.send")}
+                />
+              )}
+            </div>
+          </div>
         </div>
+        {renaming && (
+          <Modal
+            open
+            title={t("chat.renameTitle")}
+            onCancel={() => setRenaming(null)}
+            onOk={async () => {
+              if (!renaming.title.trim()) return;
+              await api.renameSession(renaming.id, renaming.title);
+              const store = useExm.getState();
+              useExm.setState({ sessions: store.sessions.map((s) => s.id === renaming.id ? { ...s, title: renaming.title } : s) });
+              setRenaming(null);
+            }}
+            okText={t("common.rename")}
+          >
+            <Input
+              value={renaming.title}
+              onChange={(e) => setRenaming({ ...renaming, title: e.target.value })}
+              placeholder={t("chat.newTitle")}
+            />
+          </Modal>
+        )}
+        {editing && (
+          <Modal
+            open
+            title={t("chat.turn.editTitle", { turn: String(editing.turn) })}
+            onCancel={() => setEditing(null)}
+            onOk={() => void doEdit()}
+            okText={t("chat.turn.resend")}
+            confirmLoading={historyBusy}
+          >
+            <Alert
+              type="warning"
+              showIcon
+              message={t("chat.turn.editWarn")}
+              className="edit-warn"
+            />
+            <Input.TextArea
+              value={editing.text}
+              onChange={(e) => setEditing({ ...editing, text: e.target.value })}
+              autoSize={{ minRows: 3, maxRows: 10 }}
+            />
+          </Modal>
+        )}
       </div>
     </div>
   );

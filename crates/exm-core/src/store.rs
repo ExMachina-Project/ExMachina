@@ -30,7 +30,10 @@ const MAX_AUDIT_LINES: usize = 2000;
 
 impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        Ok(Store { db: FsDb::open(root)?, ledger_lock: std::sync::Mutex::new(()) })
+        Ok(Store {
+            db: FsDb::open(root)?,
+            ledger_lock: std::sync::Mutex::new(()),
+        })
     }
 
     pub fn root(&self) -> String {
@@ -45,13 +48,18 @@ impl Store {
             id: new_id(),
             title: title.to_string(),
             status: "active".into(),
-            group_id: if group_id.trim().is_empty() { "exmachina".into() } else { group_id.to_string() },
+            group_id: if group_id.trim().is_empty() {
+                "exmachina".into()
+            } else {
+                group_id.to_string()
+            },
+            memory_partition: None,
             rolling_summary: None,
             summary_upto: None,
             parent_session: None,
             parent_upto: None,
-                last_message_preview: None,
-                last_active_at: None,
+            last_message_preview: None,
+            last_active_at: None,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -73,6 +81,7 @@ impl Store {
             title: title.to_string(),
             status: "active".into(),
             group_id: parent.group_id.clone(),
+            memory_partition: parent.memory_partition.clone(),
             rolling_summary: None,
             summary_upto: None,
             parent_session: Some(parent.id.clone()),
@@ -100,7 +109,11 @@ impl Store {
 
     /// 会话最后一条消息的纯文本预览（末行 JSONL 直接取，避免整文件反序列化）
     pub fn last_message_preview(&self, session_id: &str, max_chars: usize) -> Option<String> {
-        let path = self.db.root().join("messages").join(format!("{session_id}.jsonl"));
+        let path = self
+            .db
+            .root()
+            .join("messages")
+            .join(format!("{session_id}.jsonl"));
         let content = std::fs::read_to_string(path).ok()?;
         let last_line = content.lines().rev().find(|l| !l.trim().is_empty())?;
         let v: serde_json::Value = serde_json::from_str(last_line).ok()?;
@@ -144,7 +157,34 @@ impl Store {
     }
 
     pub fn ledger_of(&self, session_id: &str) -> Result<SessionLedger> {
-        Ok(self.get_session(session_id)?.map(|s| s.ledger).unwrap_or_default())
+        Ok(self
+            .get_session(session_id)?
+            .map(|s| s.ledger)
+            .unwrap_or_default())
+    }
+
+    /// 设置会话的记忆分区（None = 与同组共享；Some = 平台独立记忆命名空间）。
+    /// 通道每次执行前按最新通道配置同步，启停隔离即时生效。
+    pub fn set_session_memory_partition(
+        &self,
+        session_id: &str,
+        partition: Option<&str>,
+    ) -> Result<()> {
+        let _guard = self.ledger_lock.lock().unwrap();
+        let mut session = match self.get_session(session_id)? {
+            Some(s) => s,
+            None => anyhow::bail!("会话不存在: {session_id}"),
+        };
+        let next = partition
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if session.memory_partition == next {
+            return Ok(());
+        }
+        session.memory_partition = next;
+        session.updated_at = now_iso();
+        self.db.put("sessions", session_id, &session)
     }
 
     /// 更新会话滚动摘要（上下文压缩，docs/架构与设计.md）
@@ -167,7 +207,11 @@ impl Store {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
         };
-        session.rolling_summary = if summary.trim().is_empty() { None } else { Some(summary.to_string()) };
+        session.rolling_summary = if summary.trim().is_empty() {
+            None
+        } else {
+            Some(summary.to_string())
+        };
         session.summary_upto = Some(upto);
         session.updated_at = now_iso();
         self.db.put("sessions", session_id, &session)
@@ -252,7 +296,12 @@ impl Store {
     }
 
     /// 复制会话历史前缀（fork 用）：把 src 的前 keep 条消息复制为 dst 的活跃历史
-    pub fn copy_messages_prefix(&self, src_session: &str, dst_session: &str, keep: usize) -> Result<usize> {
+    pub fn copy_messages_prefix(
+        &self,
+        src_session: &str,
+        dst_session: &str,
+        keep: usize,
+    ) -> Result<usize> {
         let all: Vec<ChatMessage> = self.db.read_lines("messages", src_session, 0)?;
         let prefix: Vec<ChatMessage> = all.into_iter().take(keep).collect();
         let n = prefix.len();
@@ -271,9 +320,11 @@ impl Store {
 
     /// 取走本轮检查点引用（读出即清空；轮次收束时并入快照）
     pub fn drain_checkpoint_refs(&self, session_id: &str) -> Result<Vec<String>> {
-        let items: Vec<serde_json::Value> = self.db.read_lines("turn_checkpoints", session_id, 0)?;
+        let items: Vec<serde_json::Value> =
+            self.db.read_lines("turn_checkpoints", session_id, 0)?;
         if !items.is_empty() {
-            self.db.rewrite_lines::<serde_json::Value>("turn_checkpoints", session_id, &[])?;
+            self.db
+                .rewrite_lines::<serde_json::Value>("turn_checkpoints", session_id, &[])?;
         }
         Ok(items
             .into_iter()
@@ -293,7 +344,8 @@ impl Store {
         // 历史留痕（幂等：以图 id 去重）
         let history: Vec<TaskGraph> = self.db.read_lines("graph_history", &graph.session_id, 0)?;
         if !history.iter().any(|g| g.id == graph.id) {
-            self.db.append_line("graph_history", &graph.session_id, graph)?;
+            self.db
+                .append_line("graph_history", &graph.session_id, graph)?;
         }
         Ok(())
     }
@@ -312,7 +364,11 @@ impl Store {
             obj.insert("createdAt".into(), serde_json::json!(now_iso()));
         }
         self.db.put("sync_reports", &id, &value)?;
-        self.db.put("sync_reports_by_node", &report.task_node_id, &serde_json::json!(id))?;
+        self.db.put(
+            "sync_reports_by_node",
+            &report.task_node_id,
+            &serde_json::json!(id),
+        )?;
         Ok(id)
     }
 
@@ -397,7 +453,13 @@ impl Store {
             all.retain(|v| v.get("agentId").and_then(|x| x.as_str()) == Some(a));
         }
         if let Some(t) = tool {
-            all.retain(|v| v.get("tool").and_then(|x| x.as_str()).map(|x| x.to_lowercase()).unwrap_or_default().contains(&t.to_lowercase()));
+            all.retain(|v| {
+                v.get("tool")
+                    .and_then(|x| x.as_str())
+                    .map(|x| x.to_lowercase())
+                    .unwrap_or_default()
+                    .contains(&t.to_lowercase())
+            });
         }
         all.sort_by(|a, b| {
             let ka = a.get("createdAt").and_then(|x| x.as_str()).unwrap_or("");
@@ -411,7 +473,13 @@ impl Store {
     // ---------------- 用量台账（真实 token，替代字符粗估） ----------------
 
     /// 记录一次 LLM 调用的真实用量（provider 返回的 usage；0/0 不记）
-    pub fn add_usage(&self, session_id: &str, prompt_tokens: u64, completion_tokens: u64, model: &str) -> Result<()> {
+    pub fn add_usage(
+        &self,
+        session_id: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        model: &str,
+    ) -> Result<()> {
         if prompt_tokens == 0 && completion_tokens == 0 {
             return Ok(());
         }
@@ -427,19 +495,27 @@ impl Store {
 
     /// 会话累计用量：(prompt, completion, 调用次数)
     pub fn usage_total(&self, session_id: &str) -> (u64, u64, usize) {
-        let lines: Vec<serde_json::Value> = self.db.read_lines("usage", session_id, 0).unwrap_or_default();
+        let lines: Vec<serde_json::Value> = self
+            .db
+            .read_lines("usage", session_id, 0)
+            .unwrap_or_default();
         let mut p = 0u64;
         let mut c = 0u64;
         for l in &lines {
             p += l.get("promptTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            c += l.get("completionTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            c += l
+                .get("completionTokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
         }
         (p, c, lines.len())
     }
 
     /// 最近 N 条用量明细（管理视图）
     pub fn usage_recent(&self, session_id: &str, limit: usize) -> Vec<serde_json::Value> {
-        self.db.read_lines("usage", session_id, limit).unwrap_or_default()
+        self.db
+            .read_lines("usage", session_id, limit)
+            .unwrap_or_default()
     }
 
     // ---------------- 事件溯源 ----------------
@@ -469,10 +545,7 @@ impl Store {
     /// 按组列出会话（组是交互对象：会话归属创建时的激活组）
     pub fn list_sessions_in_group(&self, group_id: &str) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
-        let mut list: Vec<Session> = all
-            .into_iter()
-            .filter(|s| s.group_id == group_id)
-            .collect();
+        let mut list: Vec<Session> = all.into_iter().filter(|s| s.group_id == group_id).collect();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list.truncate(200);
         Ok(list)
@@ -499,7 +572,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn list_approvals(&self, status: Option<&str>, limit: usize) -> Result<Vec<ApprovalRequest>> {
+    pub fn list_approvals(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ApprovalRequest>> {
         let mut list: Vec<ApprovalRequest> = self.db.list("approvals")?;
         if let Some(s) = status {
             list.retain(|r| r.status == s);
@@ -545,7 +622,8 @@ impl Store {
     }
 
     pub fn get_identity(&self, channel: &str, external_id: &str) -> Result<Option<UserIdentity>> {
-        self.db.get("identities", &format!("{channel}:{external_id}"))
+        self.db
+            .get("identities", &format!("{channel}:{external_id}"))
     }
 
     pub fn get_identity_by_id(&self, id: &str) -> Result<Option<UserIdentity>> {
@@ -565,7 +643,13 @@ impl Store {
     // ---------------------------------------------------------------- 会话产物 outbox（媒体投递）
 
     /// 登记本会话产生的媒体产物（截图自动登记；`.exmachina/outbox/` 写入登记）
-    pub fn outbox_push(&self, session_id: &str, kind: &str, path: &str, caption: &str) -> Result<()> {
+    pub fn outbox_push(
+        &self,
+        session_id: &str,
+        kind: &str,
+        path: &str,
+        caption: &str,
+    ) -> Result<()> {
         self.db.append_line(
             "session_outbox",
             session_id,
@@ -577,7 +661,8 @@ impl Store {
     pub fn outbox_drain(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
         let items: Vec<serde_json::Value> = self.db.read_lines("session_outbox", session_id, 0)?;
         if !items.is_empty() {
-            self.db.rewrite_lines::<serde_json::Value>("session_outbox", session_id, &[])?;
+            self.db
+                .rewrite_lines::<serde_json::Value>("session_outbox", session_id, &[])?;
         }
         Ok(items)
     }
@@ -585,7 +670,12 @@ impl Store {
     // ---------------------------------------------------------------- 会话来源（通道身份升级语义）
 
     /// 登记会话的外部来源（通道闸门放行时写入；审批单创建时读取打标）
-    pub fn put_session_origin(&self, session_id: &str, external_id: &str, role: &str) -> Result<()> {
+    pub fn put_session_origin(
+        &self,
+        session_id: &str,
+        external_id: &str,
+        role: &str,
+    ) -> Result<()> {
         self.db.put(
             "session_origins",
             session_id,
@@ -597,8 +687,14 @@ impl Store {
         let v: Option<serde_json::Value> = self.db.get("session_origins", session_id)?;
         Ok(v.map(|v| {
             (
-                v.get("externalId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                v.get("role").and_then(|x| x.as_str()).unwrap_or("member").to_string(),
+                v.get("externalId")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("role")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("member")
+                    .to_string(),
             )
         }))
     }
@@ -686,7 +782,10 @@ mod store_tests {
         assert_eq!(list[0].turn, 1, "按轮次升序");
         let latest = store.latest_turn_snapshot("s1").unwrap().unwrap();
         assert_eq!(latest.turn, 3);
-        assert!(store.latest_turn_snapshot("s2").unwrap().is_none(), "会话隔离");
+        assert!(
+            store.latest_turn_snapshot("s2").unwrap().is_none(),
+            "会话隔离"
+        );
 
         store.prune_turn_snapshots_after("s1", 2).unwrap();
         let list = store.list_turn_snapshots("s1").unwrap();
@@ -714,6 +813,27 @@ mod store_tests {
         assert_eq!(store.list_identities().unwrap().len(), 1);
         store.delete_identity("telegram:10086").unwrap();
         assert!(store.get_identity("telegram", "10086").unwrap().is_none());
+    }
+
+    #[test]
+    fn 会话记忆分区_设置清除与子会话继承() {
+        let store = test_store();
+        let s = store.create_session("平台会话", "g1").unwrap();
+        assert!(s.memory_partition.is_none(), "默认共享记忆");
+        store
+            .set_session_memory_partition(&s.id, Some("g1::channel:bili"))
+            .unwrap();
+        let got = store.get_session(&s.id).unwrap().unwrap();
+        assert_eq!(got.memory_partition.as_deref(), Some("g1::channel:bili"));
+        let child = store.create_child_session(&s.id, "派发子会话").unwrap();
+        assert_eq!(
+            child.memory_partition.as_deref(),
+            Some("g1::channel:bili"),
+            "子会话继承分区"
+        );
+        store.set_session_memory_partition(&s.id, None).unwrap();
+        let got = store.get_session(&s.id).unwrap().unwrap();
+        assert!(got.memory_partition.is_none(), "关闭隔离立即回到共享");
     }
 
     #[test]
