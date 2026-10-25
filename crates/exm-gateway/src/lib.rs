@@ -598,8 +598,13 @@ pub async fn fs_save(State(st): State<AppState>, Json(body): Json<Value>) -> imp
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "content 不能为空" }))).into_response();
     };
     let norm = path.replace('\\', "/").trim_matches('/').to_string();
+    let trimmed = path.trim();
+    // 带根无前缀的路径（/etc）在 Unix 是绝对路径，Windows 是盘符相对——is_absolute 抓不到后者，
+    // 统一按「以 / 或 \ 开头即拒绝」处理，不让保存 /etc/passwd 静默落进工作区
+    let rooted = trimmed.starts_with('/') || trimmed.starts_with('\\');
     let path_legal = !norm.is_empty()
-        && !std::path::Path::new(path.trim()).is_absolute() // 绝对路径直接拒绝（不改写为相对）
+        && !rooted
+        && !std::path::Path::new(trimmed).is_absolute() // 绝对路径直接拒绝（不改写为相对）
         && !norm.split('/').any(|seg| seg == "..");
     if !path_legal {
         return (
