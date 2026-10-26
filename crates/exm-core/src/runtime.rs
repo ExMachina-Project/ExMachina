@@ -26,6 +26,18 @@ fn tool_feedback(name: &str, r: &crate::tools::ToolResult) -> String {
     }
 }
 
+/// 单智能体循环步数上限解析（三级覆盖）：
+/// 个体 maxSteps > 作用域档位偏好（Chat 档取全局半数作对话轮保护）> 全局默认。
+/// 全局 0 值视为无效回落 24（与 ToolGateway::chat_max_steps 同口径）。
+pub fn resolve_max_steps(agent_override: Option<usize>, scope: ToolScope, global: usize) -> usize {
+    let global = if global == 0 { 24 } else { global };
+    let scope_pref = match scope {
+        ToolScope::Chat => (global / 2).max(1),
+        _ => global,
+    };
+    agent_override.filter(|v| *v > 0).unwrap_or(scope_pref).max(1)
+}
+
 /// 子个体执行器：持 Provider / 工具网关 / 注册表（注册表只读共享）
 pub struct AgentRuntime {
     registry: Arc<LocalRegistry>,
@@ -47,6 +59,11 @@ impl AgentRuntime {
             tools,
             model: model.into(),
         }
+    }
+
+    /// Provider 共享（spawn 执行器构造回退链用）
+    pub fn provider_clone(&self) -> Arc<dyn LlmProvider> {
+        self.provider.clone()
     }
 
     /// 默认执行目标（全局生效档案）：未解析出个体/组专属模型时回退用
@@ -301,8 +318,7 @@ impl AgentRuntime {
     /// `trace` = 过程数据归集键（单聊与用量同键）。
     // 会话执行的全部上下文逐项透传，收拢参数会造一个只用一次的中间结构
     #[allow(clippy::too_many_arguments)]
-    pub async fn chat_execute<F>(
-        &self,
+    pub async fn chat_execute<F>(        &self,
         def: &AgentDefinition,
         system_prompt: String,
         history: Vec<ChatMessage>,
@@ -326,7 +342,11 @@ impl AgentRuntime {
         let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(history);
 
-        let max_steps = 24usize;
+        // 步数上限三级覆盖：个体 maxSteps > 作用域档位偏好 > 全局 security.chatMaxSteps
+        // （Chat 档无工具循环，对话轮保护取半；Tools/Computer 档用全局默认）
+        let max_steps = resolve_max_steps(def.max_steps, scope, self.tools.chat_max_steps());
+        // 步数耗尽时回显已完成的工具调用清单（便于归因）
+        let mut done_tools: Vec<String> = Vec::new();
         let mut usage_prompt: u64 = 0;
         let mut usage_completion: u64 = 0;
         let mut last_model = String::new();
@@ -366,6 +386,9 @@ impl AgentRuntime {
                 let mut assistant = ChatMessage::assistant(text.clone());
                 assistant.tool_calls = calls.clone();
                 messages.push(assistant);
+                for c in &calls {
+                    done_tools.push(c.name.clone());
+                }
                 let feedbacks = self
                     .run_tool_calls(
                         &def.identifier,
@@ -397,6 +420,7 @@ impl AgentRuntime {
                             .tools
                             .execute(&def.identifier, trace, &scoped_allowlist, tool, &args)
                             .await;
+                        done_tools.push(tool.key().to_string());
                         messages.push(ChatMessage::assistant(text));
                         let feedback = if result.ok {
                             format!("【报告】工具 {} 执行结果：\n{}", tool.key(), result.output)
@@ -431,8 +455,13 @@ impl AgentRuntime {
         self.tools
             .record_usage(session_id, usage_prompt, usage_completion, &last_model);
         anyhow::bail!(
-            "个体 {} 超过最大步数 {max_steps} 仍未产出最终回复",
-            def.identifier
+            "个体 {} 已达最大工具步数 {max_steps} 仍未产出最终回复；已完成的工具调用：{}",
+            def.identifier,
+            if done_tools.is_empty() {
+                "（无）".to_string()
+            } else {
+                done_tools.join("、")
+            }
         )
     }
 
@@ -1104,5 +1133,36 @@ mod tool_loop_tests {
             .await
             .expect("白名单拒绝不应中断循环");
         assert_eq!(report.status, SyncStatus::Done);
+    }
+}
+
+#[cfg(test)]
+mod max_steps_tests {
+    use super::resolve_max_steps;
+    use crate::types::ToolScope;
+
+    #[test]
+    fn 步数覆盖优先级_个体最高() {
+        // 个体显式 48 覆盖一切
+        assert_eq!(resolve_max_steps(Some(48), ToolScope::Tools, 24), 48);
+        assert_eq!(resolve_max_steps(Some(48), ToolScope::Chat, 24), 48);
+    }
+
+    #[test]
+    fn 步数覆盖优先级_作用域档位次之() {
+        // 无个体覆盖：Chat 档取半，Tools/Computer 用全局
+        assert_eq!(resolve_max_steps(None, ToolScope::Chat, 24), 12);
+        assert_eq!(resolve_max_steps(None, ToolScope::Tools, 24), 24);
+        assert_eq!(resolve_max_steps(None, ToolScope::Computer, 24), 24);
+    }
+
+    #[test]
+    fn 步数无效值兜底() {
+        // 个体 0 / 全局 0 均视为未配置：回落默认
+        assert_eq!(resolve_max_steps(Some(0), ToolScope::Tools, 24), 24);
+        assert_eq!(resolve_max_steps(None, ToolScope::Tools, 0), 24);
+        assert_eq!(resolve_max_steps(None, ToolScope::Chat, 0), 12);
+        // Chat 档取半后至少 1
+        assert_eq!(resolve_max_steps(None, ToolScope::Chat, 1), 1);
     }
 }

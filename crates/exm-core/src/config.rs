@@ -25,6 +25,9 @@ pub struct ModelEntry {
     /// 支持音频（语音输入）
     #[serde(default)]
     pub audio: bool,
+    /// 上下文窗口（token 数；0/缺省 = 未知，预算软着陆跳过判定）
+    #[serde(default)]
+    pub context_window: u64,
 }
 
 /// 厂商模型档案：一条 OpenAI 兼容端点（OpenAI/DeepSeek/通义/Kimi/智谱/Ollama/vLLM …）。
@@ -87,10 +90,28 @@ pub struct SecurityConfig {
     /// 期间批准 → 执行结果直接回灌模型继续干活；超时 → 按「受阻回流」交还上层。0 = 不等待（旧行为）
     #[serde(default)]
     pub approval_wait_secs: u64,
+    /// 单智能体对话循环（chat_execute）默认最大工具步数；
+    /// 个体 maxSteps / 作用域档位可覆盖此默认
+    #[serde(default = "default_chat_max_steps")]
+    pub chat_max_steps: usize,
+    /// 上下文预算安全线：估算 token 超模型窗口该比例时触发多级裁剪
+    /// （0 = 用默认 0.8；合法范围 0.5~1.0，越界回落默认）
+    #[serde(default = "default_context_budget_ratio")]
+    pub context_budget_ratio: f64,
     /// 首启密钥设置引导：无密钥部署的首次启动会引导设置访问密钥；
     /// 选「不再提醒」后为 true（「下次再说」只记进程内，网关重启即恢复提醒）
     #[serde(default)]
     pub key_setup_dismissed: bool,
+}
+
+/// 单智能体循环默认步数上限（与既有硬编码 24 保持一致）
+fn default_chat_max_steps() -> usize {
+    24
+}
+
+/// 上下文预算安全线默认值
+fn default_context_budget_ratio() -> f64 {
+    0.8
 }
 
 impl Default for SecurityConfig {
@@ -102,6 +123,8 @@ impl Default for SecurityConfig {
             terminal_timeout_secs: 120,
             tool_output_spill_chars: 12000,
             approval_wait_secs: 120,
+            chat_max_steps: default_chat_max_steps(),
+            context_budget_ratio: default_context_budget_ratio(),
             key_setup_dismissed: false,
         }
     }
@@ -793,6 +816,10 @@ struct SecurityFile {
     #[serde(default)]
     approval_wait_secs: Option<u64>,
     #[serde(default)]
+    chat_max_steps: Option<usize>,
+    #[serde(default)]
+    context_budget_ratio: Option<f64>,
+    #[serde(default)]
     key_setup_dismissed: Option<bool>,
 }
 
@@ -942,6 +969,14 @@ impl ExmConfig {
             approval_wait_secs: file_sec
                 .approval_wait_secs
                 .unwrap_or_else(|| SecurityConfig::default().approval_wait_secs),
+            chat_max_steps: file_sec
+                .chat_max_steps
+                .filter(|v| *v > 0)
+                .unwrap_or_else(|| SecurityConfig::default().chat_max_steps),
+            context_budget_ratio: file_sec
+                .context_budget_ratio
+                .filter(|v| (0.5..=1.0).contains(v))
+                .unwrap_or_else(|| SecurityConfig::default().context_budget_ratio),
             key_setup_dismissed: file_sec.key_setup_dismissed.unwrap_or(false),
         };
         let automation = AutomationConfig {
@@ -1138,6 +1173,8 @@ impl ExmConfig {
                 terminal_timeout_secs: Some(self.security.terminal_timeout_secs),
                 tool_output_spill_chars: Some(self.security.tool_output_spill_chars),
                 approval_wait_secs: Some(self.security.approval_wait_secs),
+                chat_max_steps: Some(self.security.chat_max_steps),
+                context_budget_ratio: Some(self.security.context_budget_ratio),
                 key_setup_dismissed: Some(self.security.key_setup_dismissed),
             }),
             computer: Some(self.computer.clone()),

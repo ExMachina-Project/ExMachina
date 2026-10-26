@@ -7,6 +7,7 @@
 //! 单体实现先行，替换为分布式实现时上层业务零改动。
 
 pub mod bus;
+pub mod budget;
 pub mod compaction;
 pub mod config;
 pub mod cron;
@@ -20,6 +21,7 @@ pub mod memory;
 pub mod orchestrator;
 pub mod parse;
 pub mod patch;
+pub mod plan;
 pub mod provider;
 pub mod nexus;
 pub mod registry;
@@ -1005,6 +1007,33 @@ impl Core {
         if req.status != "pending" {
             anyhow::bail!("审批单已处理: {}", req.status);
         }
+        // 计划审批单（[plan] 前缀）：转发计划通道——批准 = 回放清单，拒绝 = 保留清单
+        if req.command.starts_with("[plan]") {
+            let sid = req.session_id.clone();
+            if approve {
+                let results = self.plan_approve(&sid).await;
+                req.status = match results {
+                    Ok(rs) if rs.iter().all(|(_, r)| r.ok) => "executed".into(),
+                    Ok(_) => "failed".into(),
+                    Err(e) => {
+                        req.status = "failed".into();
+                        req.result = Some(e.to_string());
+                        self.store.update_approval(&req)?;
+                        self.emit_approval_resolved(&req);
+                        return Ok(req);
+                    }
+                };
+                req.result = Some("计划已回放执行".into());
+            } else {
+                self.plan_reject(&sid);
+                req.status = "denied".into();
+                req.result = Some("计划被拒绝（清单保留可继续修改）".into());
+            }
+            req.decided_at = Some(now_iso());
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
+        }
         req.decided_at = Some(now_iso());
         if !approve {
             req.status = "denied".into();
@@ -1025,6 +1054,106 @@ impl Core {
     /// 登记会话的外部来源（闸门放行时由适配器调用；审批单创建时据此打升级标）
     pub fn stamp_session_origin(&self, session_id: &str, external_id: &str, role: &str) {
         let _ = self.store.put_session_origin(session_id, external_id, role);
+    }
+
+    // ---------------- 计划模式（spec: plan-mode） ----------------
+
+    /// 工作台文件树（spec: webui-code-workbench）：.gitignore 口径过滤 + 越权拒绝
+    pub fn workbench_tree(&self, rel: &str, depth: usize) -> anyhow::Result<serde_json::Value> {
+        self.orchestrator.read().tools.workbench_tree(rel, depth)
+    }
+
+    /// 工作台文件读取（read 工具同口径分页）
+    pub fn workbench_file(&self, path: &str, offset: u64, limit: u64) -> anyhow::Result<serde_json::Value> {
+        self.orchestrator.read().tools.workbench_file(path, offset, limit)
+    }
+
+    /// 设置/清除会话计划模式（true = 只读规划，写操作转计划条目）
+    pub fn set_plan_mode(&self, session_id: &str, plan: bool) {
+        crate::plan::set_plan_mode(session_id, plan);
+        self.orchestrator.read().emit(
+            session_id,
+            if plan { "plan.enabled" } else { "plan.disabled" },
+            serde_json::json!({}),
+        );
+    }
+
+    /// 会话计划清单快照
+    pub fn plan_list(&self, session_id: &str) -> Vec<crate::plan::PlanItem> {
+        crate::plan::list_items(session_id)
+    }
+
+    /// 拒绝计划：保留清单（可继续修改），不切模式，广播事件；
+    /// 若 approvals 通道有关联待审批单则一并了结
+    pub fn plan_reject(&self, session_id: &str) -> Vec<crate::plan::PlanItem> {
+        let items = crate::plan::reject(session_id);
+        if let Some(ap_id) = crate::plan::take_pending_approval(session_id) {
+            if let Ok(Some(mut ap)) = self.store.get_approval(&ap_id) {
+                if ap.status == "pending" {
+                    ap.status = "denied".into();
+                    ap.decided_at = Some(now_iso());
+                    ap.result = Some("计划被拒绝（清单保留可继续修改）".into());
+                    let _ = self.store.update_approval(&ap);
+                    self.emit_approval_resolved(&ap);
+                }
+            }
+        }
+        self.orchestrator.read().emit(
+            session_id,
+            "plan.rejected",
+            serde_json::json!({ "count": items.len() }),
+        );
+        items
+    }
+
+    /// 批准计划：切 execute 并逐条回放执行（terminal 走 shell 执行器，
+    /// 其余工具走网关 execute——此时已非 plan 模式，不再拦截），
+    /// 每条执行结果广播 plan.applied 事件
+    pub async fn plan_approve(&self, session_id: &str) -> anyhow::Result<Vec<(crate::plan::PlanItem, crate::tools::ToolResult)>> {
+        let items = crate::plan::approve(session_id);
+        if items.is_empty() {
+            anyhow::bail!("计划清单为空（无可批准条目）");
+        }
+        // approvals 通道关联单了结（executed）
+        if let Some(ap_id) = crate::plan::take_pending_approval(session_id) {
+            if let Ok(Some(mut ap)) = self.store.get_approval(&ap_id) {
+                if ap.status == "pending" {
+                    ap.status = "executed".into();
+                    ap.decided_at = Some(now_iso());
+                    ap.result = Some("计划已批准回放".into());
+                    let _ = self.store.update_approval(&ap);
+                    self.emit_approval_resolved(&ap);
+                }
+            }
+        }
+        self.orchestrator.read().emit(
+            session_id,
+            "plan.approved",
+            serde_json::json!({ "count": items.len() }),
+        );
+        let orch = self.orchestrator.read().clone();
+        let mut out = Vec::new();
+        for item in items {
+            let tool = crate::types::ToolName::parse(&item.tool);
+            let result = match tool {
+                Some(t) => {
+                    orch.tools
+                        .execute("plan-replay", session_id, &[t], t, &item.args)
+                        .await
+                }
+                None => crate::tools::ToolResult::err(format!("未知工具：{}", item.tool)),
+            };
+            self.orchestrator.read().emit(
+                session_id,
+                "plan.applied",
+                serde_json::json!({
+                    "itemId": item.id, "tool": item.tool, "target": item.target,
+                    "ok": result.ok,
+                }),
+            );
+            out.push((item, result));
+        }
+        Ok(out)
     }
 
     pub fn session_origin(&self, session_id: &str) -> Option<(String, String)> {
@@ -1259,10 +1388,70 @@ pub fn build_orchestrator(
         }
     }
     pool.set_active(cfg.active_profile.clone());
+    let pool = Arc::new(pool);
+    // 子智能体派生执行器（spawn 工具，spec: subagent-spawn）：
+    // 构造临时个体（自包含任务书为系统提示）+ 空历史跑 chat_execute。
+    // 独立上下文 = 不继承会话历史；子级工具白名单在网关层已剔除 spawn/agent_manage（单层限制）。
+    {
+        let runtime = unit_runtime.clone();
+        let default_model = cfg.llm.model.clone();
+        let spawn_exec: Arc<
+            dyn Fn(&str, &str, &str, Vec<crate::types::ToolName>)
+                -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+                + Send
+                + Sync,
+        > = Arc::new(move |agent_id: &str, session_id: &str, task: &str, tools: Vec<crate::types::ToolName>| {
+            let runtime = runtime.clone();
+            let default_model = default_model.clone();
+            let def = crate::types::AgentDefinition {
+                name: "派生子智能体".into(),
+                identifier: format!("spawn-of-{agent_id}"),
+                domain: "派生".into(),
+                tier: crate::types::Tier::Unit,
+                description: "封闭子任务执行（独立上下文）".into(),
+                capabilities: vec![],
+                tools,
+                when_to_call: String::new(),
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+                link: None,
+                max_steps: None,
+            };
+            let system = format!(
+                "# 派生子智能体\n\n你是被派生出来执行封闭子任务的智能体。看不到主会话历史，\
+                 以下任务书即全部背景；自主使用工具完成并输出结论摘要（含关键产出引用）。\n\n## 任务书\n{task}"
+            );
+            let chain = crate::provider::ModelChain {
+                candidates: vec![(String::new(), runtime.provider_clone(), default_model)],
+                failover: Arc::new(crate::provider::FailoverState::default()),
+            };
+            let session = session_id.to_string();
+            Box::pin(async move {
+                runtime
+                    .chat_execute(
+                        &def,
+                        system,
+                        vec![],
+                        &session,
+                        &format!("{session}:spawn"),
+                        chain,
+                        false,
+                        crate::types::ToolScope::Tools,
+                        |_| {},
+                    )
+                    .await
+            })
+        });
+        tools.set_spawn_executor(spawn_exec);
+    }
     Ok(Orchestrator {
         registry: registry.clone(),
         orch_provider: provider,
-        model_pool: Arc::new(pool),
+        model_pool: pool,
         failover: Arc::new(FailoverState::default()),
         remote_enabled: remote.is_some(),
         remote,
@@ -1311,6 +1500,7 @@ mod history_tests {
             tools: vec![],
             when_to_call: String::new(),
             link: None,
+            max_steps: None,
             dependencies: vec![],
             composable_with: vec![],
             input_schema: Default::default(),
@@ -1520,6 +1710,108 @@ mod history_tests {
         assert!(core.undo_session(&s.id, 5, false).await.is_err(), "无快照轮次拒绝");
         assert!(core.undo_session("no-such-session", 1, false).await.is_err(), "不存在会话拒绝");
         assert!(core.fork_session("no-such-session", 1).is_err());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+}
+
+// ---------------------------------------------------------------- 计划模式集成（组 4）
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn plan_core() -> Core {
+        let dir = std::env::temp_dir().join(format!("exm-plan-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    /// 计划模式全链路：开启 → 拦截写转条目 + 落审批单 → 批准（approvals 通道）→ 回放落地
+    #[tokio::test]
+    async fn 计划审批_批准经approvals通道回放落地() {
+        let core = plan_core();
+        let s = core.create_session("计划").unwrap();
+        core.set_plan_mode(&s.id, true);
+        assert!(crate::plan::is_plan_mode(&s.id));
+        // 拦截一次写（filesystem write）→ 1 条计划 + 关联审批单
+        let orch = core.orchestrator.read().clone();
+        let r = orch
+            .tools
+            .execute(
+                "a1",
+                &s.id,
+                &[crate::types::ToolName::Filesystem],
+                crate::types::ToolName::Filesystem,
+                &serde_json::json!({ "op": "write", "path": "p.txt", "content": "v" }),
+            )
+            .await;
+        assert!(r.ok && r.output.contains("计划模式"));
+        assert_eq!(core.plan_list(&s.id).len(), 1);
+        let pending = core.approval_list(Some("pending"), 10).unwrap();
+        assert_eq!(pending.len(), 1, "应落一张计划审批单");
+        assert!(pending[0].command.starts_with("[plan]"), "计划审批单带前缀标");
+        let ap_id = pending[0].id.clone();
+        // 批准（经 approvals 通道）→ 回放执行
+        let decided = core.approval_decide(&ap_id, true).await.unwrap();
+        assert_eq!(decided.status, "executed");
+        assert!(!crate::plan::is_plan_mode(&s.id), "批准后切 execute");
+        assert!(core.plan_list(&s.id).is_empty(), "清单已消费");
+        assert!(
+            core.config().workspace_root.join("p.txt").exists(),
+            "回放应真正写文件"
+        );
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    /// 拒绝（approvals 通道）：清单保留、模式不变、文件不落
+    #[tokio::test]
+    async fn 计划审批_拒绝保留清单() {
+        let core = plan_core();
+        let s = core.create_session("计划拒绝").unwrap();
+        core.set_plan_mode(&s.id, true);
+        let orch = core.orchestrator.read().clone();
+        let _ = orch
+            .tools
+            .execute(
+                "a1",
+                &s.id,
+                &[crate::types::ToolName::Filesystem],
+                crate::types::ToolName::Filesystem,
+                &serde_json::json!({ "op": "write", "path": "q.txt", "content": "v" }),
+            )
+            .await;
+        let ap_id = core.approval_list(Some("pending"), 10).unwrap()[0].id.clone();
+        core.approval_decide(&ap_id, false).await.unwrap();
+        assert!(crate::plan::is_plan_mode(&s.id), "拒绝后仍在 plan 模式");
+        assert_eq!(core.plan_list(&s.id).len(), 1, "清单保留");
+        assert!(!core.config().workspace_root.join("q.txt").exists());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    /// 空清单批准报错；模式位不影响读操作
+    #[tokio::test]
+    async fn 计划审批_空清单与读取放行() {
+        let core = plan_core();
+        let s = core.create_session("边界").unwrap();
+        core.set_plan_mode(&s.id, true);
+        assert!(core.plan_approve(&s.id).await.is_err(), "空清单应拒绝");
+        let orch = core.orchestrator.read().clone();
+        let r = orch
+            .tools
+            .execute(
+                "a1",
+                &s.id,
+                &[crate::types::ToolName::Grep],
+                crate::types::ToolName::Grep,
+                &serde_json::json!({ "pattern": "fn " }),
+            )
+            .await;
+        assert!(r.ok, "读操作放行：{:?}", r.error);
+        // 清理：关模式并丢弃清单
+        crate::plan::approve(&s.id);
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 }

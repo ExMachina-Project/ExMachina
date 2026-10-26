@@ -496,6 +496,7 @@ mod tests {
             output_schema: Default::default(),
             prompt_file: String::new(),
             model_hint: None,
+            max_steps: None,
         }
     }
 
