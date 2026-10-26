@@ -7,6 +7,7 @@
 //! 单体实现先行，替换为分布式实现时上层业务零改动。
 
 pub mod bus;
+pub mod compaction;
 pub mod config;
 pub mod cron;
 pub mod browser;
