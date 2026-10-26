@@ -46,6 +46,7 @@ const SinglesView = lazy(() => import("./views/SinglesView").then((m) => ({ defa
 const SkillsView = lazy(() => import("./views/SkillsView").then((m) => ({ default: m.SkillsView })));
 const AutomationsView = lazy(() => import("./views/AutomationsView").then((m) => ({ default: m.AutomationsView })));
 const ApprovalsView = lazy(() => import("./views/ApprovalsView").then((m) => ({ default: m.ApprovalsView })));
+const CodeWorkbenchView = lazy(() => import("./views/CodeWorkbenchView").then((m) => ({ default: m.CodeWorkbenchView })));
 const ChannelsView = lazy(() => import("./views/ChannelsView").then((m) => ({ default: m.ChannelsView })));
 const ActivityView = lazy(() => import("./views/ActivityView").then((m) => ({ default: m.ActivityView })));
 
@@ -67,6 +68,7 @@ function ViewSuspense({ children }: { children: React.ReactNode }): React.ReactE
 
 type ViewKey =
   | "chat"
+  | "workbench"
   | "graph"
   | "agent"
   | "groups"
@@ -83,7 +85,7 @@ type ViewKey =
 
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
-  "chat", "agent", "groups", "nexus", "graph", "automations",
+  "chat", "workbench", "agent", "groups", "nexus", "graph", "automations",
   "skills", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
 ];
 
@@ -107,6 +109,7 @@ export const NAV_ITEMS: {
   experimental?: boolean;
 }[] = [
   { key: "chat", en: "CHAT", labelKey: "nav.chat", icon: <MessageOutlined /> },
+  { key: "workbench", en: "CODE", labelKey: "nav.workbench", icon: <CodeOutlined /> },
   { key: "agent", en: "AGENTS", labelKey: "nav.agent", icon: <UserOutlined /> },
   { key: "groups", en: "GROUPS", labelKey: "nav.groups", icon: <TeamOutlined /> },
   { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined />, experimental: true },
@@ -380,6 +383,7 @@ export default function App(): React.ReactElement {
             {view === "models" && <ModelsView />}
             {view === "automations" && <AutomationsView />}
             {view === "approvals" && <ApprovalsView />}
+            {view === "workbench" && <CodeWorkbenchView />}
             {view === "channels" && <ChannelsView />}
             {view === "ledger" && <LedgerView />}
             {view === "memory" && <MemoryView />}

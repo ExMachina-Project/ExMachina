@@ -23,7 +23,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 面板强调色（对齐 WebUI 五套主题）
 #[derive(Clone, Copy, PartialEq)]
-enum Theme {
+pub(crate) enum Theme {
     Cyan,
     Green,
     Amber,
@@ -91,28 +91,30 @@ fn save_prefs(root: &Path, p: &PanelPrefs) {
 }
 
 /// 面板会话状态（当前会话 + 轮次计数）
-struct PanelState {
-    session_id: String,
-    session_title: String,
-    turns: usize,
+pub struct PanelState {
+    pub session_id: String,
+    pub session_title: String,
+    pub turns: usize,
 }
 
-enum Flow {
+/// 面板命令流转（TUI 与 readline 面板共享语义）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
     Continue,
     Exit,
 }
 
-struct Panel {
-    theme: Theme,
-    quiet: bool,
-    width: usize,
-    workspace: PathBuf,
+pub struct Panel {
+    pub(crate) theme: Theme,
+    pub(crate) quiet: bool,
+    pub(crate) width: usize,
+    pub(crate) workspace: PathBuf,
     /// 偏好落盘目录（`.exmachina`）
-    prefs_root: PathBuf,
+    pub(crate) prefs_root: PathBuf,
 }
 
 impl Panel {
-    fn new(workspace: PathBuf, prefs_root: PathBuf, quiet: bool) -> Self {
+    pub fn new(workspace: PathBuf, prefs_root: PathBuf, quiet: bool) -> Self {
         let width = term_width();
         let prefs = load_prefs(&prefs_root);
         let theme = Theme::parse(&prefs.theme).unwrap_or(Theme::Cyan);
@@ -410,7 +412,8 @@ impl Panel {
 
     // ---------------------------------------------------------------- 分发
 
-    async fn dispatch(&mut self, core: &Arc<Core>, state: &mut PanelState, line: &str) -> anyhow::Result<Flow> {
+    /// 斜杠命令分派（TUI 复用同一命令面；输出走 println，TUI 侧捕获后入消息流）
+    pub async fn dispatch(&mut self, core: &Arc<Core>, state: &mut PanelState, line: &str) -> anyhow::Result<Flow> {
         let body = line.trim().trim_start_matches('/');
         let tokens = tokenize(body);
         if tokens.is_empty() {
@@ -1142,7 +1145,7 @@ pub fn run_preview(core: &Arc<Core>, quiet: bool) -> anyhow::Result<()> {
 }
 
 /// 偏好落盘目录 = 配置文件所在目录（`.exmachina`）
-fn prefs_root(core: &Arc<Core>) -> PathBuf {
+pub fn prefs_root(core: &Arc<Core>) -> PathBuf {
     core.config()
         .config_path
         .parent()

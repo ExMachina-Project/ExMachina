@@ -24,7 +24,7 @@ fn profile_json(p: &LlmProfile) -> Value {
     let models: Vec<Value> = p
         .models
         .iter()
-        .map(|m| json!({ "model": m.model, "vision": m.vision, "audio": m.audio }))
+        .map(|m| json!({ "model": m.model, "vision": m.vision, "audio": m.audio, "contextWindow": m.context_window }))
         .collect();
     json!({
         "id": p.id, "name": p.name, "baseUrl": p.base_url,
@@ -79,6 +79,8 @@ pub struct ModelEntryBody {
     pub vision: bool,
     #[serde(default)]
     pub audio: bool,
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 /// Key 池条目：结构化提交让「沿用位」携带旧池引用（删行/插行后不串位），纯掩码字符串保持兼容
@@ -137,6 +139,7 @@ fn resolve_profile_input(
                 model: m.model.trim().to_string(),
                 vision: m.vision,
                 audio: m.audio,
+                context_window: m.context_window.unwrap_or(0),
             })
             .filter(|m| !m.model.is_empty())
             .collect(),
@@ -150,7 +153,15 @@ fn resolve_profile_input(
         .map(str::to_string)
         .unwrap_or_else(|| existing.map(|e| e.model.clone()).unwrap_or_default());
     if !model_name.is_empty() && !models.iter().any(|m| m.model == model_name) {
-        models.insert(0, ModelEntry { model: model_name.clone(), vision: false, audio: false });
+        models.insert(
+            0,
+            ModelEntry {
+                model: model_name.clone(),
+                vision: false,
+                audio: false,
+                context_window: 0,
+            },
+        );
     }
     LlmProfile {
         id: v.id

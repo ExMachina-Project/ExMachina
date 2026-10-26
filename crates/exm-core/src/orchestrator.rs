@@ -732,8 +732,88 @@ impl Orchestrator {
         system_prompt.push_str(&format!("\n\n## SOUL（人格）\n{soul}"));
 
         // 会话历史窗口:最近 40 条按角色映射(User→user, Orchestrator→assistant);
-        // 本轮输入已由 handle_user_message 落库,天然位于窗口末尾
+        // 本轮输入已由 handle_user_message 落库,天然位于窗口末尾。
+        // 窗口外更早历史接入共享滚动压缩(compaction.rs,与组调度同口径):
+        // 压缩摘要注入系统提示,窗口内保持原文
         let rows = self.store.list_messages(session_id, 40)?;
+        let compacted = crate::compaction::ensure_compacted(
+            &self.store,
+            &self.orch_provider,
+            &self.orch_model,
+            session_id,
+            crate::compaction::CompactParams {
+                trigger: 40,
+                keep: 20,
+            },
+        )
+        .await;
+
+        // ---- token 预算软着陆（budget.rs，D7）----
+        // 估算口径 ~4 字符/token；仅当生效模型的 contextWindow 已登记时判定。
+        // 超线时多级裁剪（滚动摘要收窄 → 旧消息截短），每次裁剪发 context.trim 事件留痕。
+        let budget_ratio = self.tools.context_budget_ratio();
+        let window_tokens = self
+            .unit_chain_for(&def)
+            .candidates
+            .first()
+            .and_then(|(pid, _, model)| self.model_pool.context_window(pid, model));
+        let mut summary_opt = compacted.summary.clone();
+        let mut rows = rows;
+        if let Some(window) = window_tokens {
+            let budget_chars =
+                (window as f64 * budget_ratio).floor() as usize * crate::budget::CHARS_PER_TOKEN;
+            let system_chars = system_prompt.chars().count();
+            let summary_chars = summary_opt.as_deref().map(|s| s.chars().count()).unwrap_or(0);
+            let history_chars: usize = rows
+                .iter()
+                .map(|m| m.statements.iter().map(|s| s.text.chars().count()).sum::<usize>())
+                .sum();
+            let total = system_chars + summary_chars + history_chars;
+            if total > budget_chars {
+                let over = total - budget_chars;
+                let outcome =
+                    crate::budget::trim_to_budget(over, None, None, summary_opt.as_deref());
+                summary_opt = outcome.summary;
+                // 消息截断落地：从最旧一侧逐条截短（保最新上下文完整性）
+                let shorten_msgs = outcome.truncated_msg_chars.unwrap_or(0);
+                if shorten_msgs > 0 {
+                    crate::budget::trim_oldest_messages(&mut rows, shorten_msgs);
+                }
+                self.emit(
+                    session_id,
+                    "context.trim",
+                    serde_json::json!({
+                        "estimatedChars": total,
+                        "budgetChars": budget_chars,
+                        "windowTokens": window,
+                        "ratio": budget_ratio,
+                        "trims": outcome
+                            .trims
+                            .iter()
+                            .map(|(k, from, to)| serde_json::json!({"block": k, "fromChars": from, "toChars": to}))
+                            .chain(std::iter::once(serde_json::json!({
+                                "block": "messages",
+                                "fromChars": history_chars,
+                                "toChars": rows.iter().map(|m| m.statements.iter().map(|s| s.text.chars().count()).sum::<usize>()).sum::<usize>(),
+                            })))
+                            .collect::<Vec<_>>(),
+                    }),
+                );
+            }
+        }
+
+        let system_prompt = if let Some(summary) = summary_opt.clone() {
+            if summary.trim().is_empty() {
+                system_prompt
+            } else {
+                system_prompt.push_str(&format!(
+                    "\n\n## 会话上下文（更早对话滚动摘要）\n{summary}\n"
+                ));
+                system_prompt
+            }
+        } else {
+            system_prompt
+        };
         let mut history: Vec<ChatMessage> = Vec::new();
         for m in rows {
             let content = m

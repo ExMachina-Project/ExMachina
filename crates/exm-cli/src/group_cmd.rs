@@ -144,6 +144,7 @@ pub fn run_agent_create(
         prompt_file: String::new(),
         model_hint: None,
         link: None,
+        max_steps: None,
     };
     let saved = core.registry().upsert_agent(&gid, def, prompt)?;
     if was_empty || tier == "orchestrator" {

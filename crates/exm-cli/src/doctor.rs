@@ -167,6 +167,17 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
     );
 
     d.soft(
+        "系统 git",
+        match std::process::Command::new("git").arg("--version").output() {
+            Ok(out) if out.status.success() => {
+                let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                Ok(format!("{v}（git 工具可用）"))
+            }
+            _ => Err("系统 git 不可用 —— git 工具将不可用（安装 git 后恢复）".into()),
+        },
+    );
+
+    d.soft(
         "WebUI 构建产物",
         if cfg.webui_dist.join("index.html").exists() {
             Ok(format!("{}", cfg.webui_dist.display()))

@@ -18,6 +18,8 @@ export interface ChatMessage {
   agentId?: string;
   statements: Statement[];
   createdAt: string;
+  /** 所属轮次（回滚按钮 undo 目标） */
+  turn?: number;
   /** 本轮收束时附带执行的工具轨迹（本地组装，刷新后由审计页回看） */
   toolCalls?: ToolCallItem[];
   /** 本轮思维链（本地组装：随收束留存，刷新后不在） */

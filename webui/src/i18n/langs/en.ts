@@ -4,6 +4,7 @@ import type { Dict } from "../core";
 export const en: Partial<Dict> = {
   // ── 导航与壳层 ──
   "nav.chat": "Chat",
+  "nav.workbench": "Code",
     "nav.agent": "Agents",
   "nav.groups": "Groups",
   "nav.units": "Units",
