@@ -230,6 +230,7 @@ export function ChannelsView(): React.ReactElement {
   const t = useT();
   const { groups } = useExm();
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [singles, setSingles] = useState<{ identifier: string; name: string }[]>([]);
   const [status, setStatus] = useState<Record<string, ChannelStatus>>({});
   const [testing, setTesting] = useState<string>("");
   const [testResult, setTestResult] = useState<Record<string, { ok: boolean; category?: string; identity?: string; message?: string; error?: string }>>({});
@@ -242,6 +243,8 @@ export function ChannelsView(): React.ReactElement {
     setLoading(true);
     try {
       setChannels(await api.listChannels());
+      // 绑定目标可选项：单智能体（默认形态，在前）+ 智能体组（次要）
+      api.listSingles().then((r) => setSingles(r.singles ?? [])).catch(() => {});
     } finally {
       setLoading(false);
     }
@@ -492,9 +495,20 @@ export function ChannelsView(): React.ReactElement {
               title: t("channels.colGroup"),
               render: (_, c) => {
                 const cap = c.capability ?? "computer";
+                const isSingle = c.group?.startsWith("single:");
                 return (
                   <Space direction="vertical" size={2}>
-                    {c.group ? <Tag color="purple">{c.group}</Tag> : <Tag>{t("channels.followCurrent")}</Tag>}
+                    {c.group ? (
+                      isSingle ? (
+                        <Tag color="cyan">
+                          {t("channels.f.singleTag")} · {singles.find((s) => s.identifier === c.group!.slice(7))?.name ?? c.group.slice(7)}
+                        </Tag>
+                      ) : (
+                        <Tag color="purple">{c.group}</Tag>
+                      )
+                    ) : (
+                      <Tag>{t("channels.followSingle")}</Tag>
+                    )}
                     <Space size={4} wrap>
                       <Tag color={cap === "chat" ? "default" : cap === "tools" ? "blue" : "volcano"}>
                         {t(`channels.cap.${cap}` as TKey)}
@@ -668,7 +682,19 @@ export function ChannelsView(): React.ReactElement {
                     <Select
                       allowClear
                       placeholder={t("channels.f.groupPh")}
-                      options={groups.map((g) => ({ value: g.id, label: `${g.name}（${g.id}）` }))}
+                      options={[
+                        {
+                          label: t("channels.f.singleGroup"),
+                          options: singles.map((s) => ({
+                            value: `single:${s.identifier}`,
+                            label: `${s.name}（${t("channels.f.singleTag")}）`,
+                          })),
+                        },
+                        {
+                          label: t("channels.f.groupTag"),
+                          options: groups.map((g) => ({ value: g.id, label: `${g.name}（${g.id}）` })),
+                        },
+                      ]}
                     />
                   </Form.Item>
                   <Form.Item

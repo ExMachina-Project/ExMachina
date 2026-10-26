@@ -996,6 +996,59 @@ impl Channel {
     }
 }
 
+// ---------------------------------------------------------------- 绑定目标（单智能体 / 组） ----
+
+/// 通道绑定目标的统一口径：`group` 字段既可存组 id（历史形态），也可存 `single:<智能体id>`。
+/// 单智能体是通道的一等目标（默认形态），组为次要形态。
+pub(crate) const SINGLE_PREFIX: &str = "single:";
+
+/// 解析绑定目标是否为单智能体；返回 (single:<id> 前缀剥出的 id, 组 id)
+pub(crate) fn parse_target(raw: &str) -> (Option<String>, Option<String>) {
+    let s = raw.trim();
+    if let Some(id) = s.strip_prefix(SINGLE_PREFIX) {
+        let id = id.trim();
+        if !id.is_empty() {
+            return (Some(id.to_string()), None);
+        }
+    }
+    if s.is_empty() {
+        (None, None)
+    } else {
+        (None, Some(s.to_string()))
+    }
+}
+
+/// 切换全局交互上下文到通道绑定目标（单智能体或组），返回是否发生了切换。
+/// 目标不存在/未配置时不动当前上下文（回落调用方各自的默认）。
+pub(crate) fn switch_context_to(core: &exm_core::Core, target: &str) -> bool {
+    let (single, group) = parse_target(target);
+    if let Some(id) = single {
+        if core.registry().active_single().as_deref() != Some(id.as_str()) {
+            return core.registry().set_active_single(Some(&id)).is_ok();
+        }
+        return false;
+    }
+    if let Some(g) = group {
+        // 进入组模式前清掉单智能体上下文（set_active_group 不清，会残留 single 模式）
+        if core.registry().single_mode() {
+            let _ = core.registry().set_active_single(None);
+        }
+        if g != core.active_group() && core.group_meta(&g).is_some() {
+            return core.registry().set_active_group(&g).is_ok();
+        }
+    }
+    false
+}
+
+/// 通道绑定目标是否存在（校验用）：单智能体查 singles 表，组查组表
+pub(crate) fn target_exists(core: &exm_core::Core, target: &str) -> bool {
+    let (single, group) = parse_target(target);
+    if let Some(id) = single {
+        return core.registry().single(&id).is_some();
+    }
+    group.as_deref().map(|g| core.group_meta(g).is_some()).unwrap_or(true)
+}
+
 // ---------------------------------------------------------------- 出站能力矩阵与回复整形（组 6）
 
 /// 平台出站能力矩阵（按 kind 静态声明）：媒体直发与 typing 支持
@@ -1401,6 +1454,7 @@ pub(crate) struct ChannelRun {
     core: std::sync::Arc<exm_core::Core>,
     pub session_id: String,
     prev_group: String,
+    prev_single: Option<String>,
     switched: bool,
     /// 平台 kind（能力矩阵判定用）
     pub kind: String,
@@ -1409,7 +1463,7 @@ pub(crate) struct ChannelRun {
 }
 
 impl ChannelRun {
-    /// 账号绑定组切换 + 会话键复用（`channel:<通道id>:<会话键>`）；
+    /// 账号绑定目标切换（单智能体或组）+ 会话键复用（`channel:<通道id>:<会话键>`）；
     /// 返回 (上下文, 运行事件订阅)
     pub(crate) async fn begin(
         core: &std::sync::Arc<exm_core::Core>,
@@ -1417,29 +1471,30 @@ impl ChannelRun {
         chat_key: &str,
     ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
         let prev_group = core.active_group();
-        let mut switched = false;
-        if let Some(g) = &ch.group {
-            if *g != prev_group && core.group_meta(g).is_some() {
-                switched = core.registry().set_active_group(g).is_ok();
-            }
-        }
-        let gid = core.active_group();
+        let prev_single = core.registry().active_single();
+        // 绑定目标缺省回落单智能体默认体（machina），未配置单智能体时维持当前上下文
+        let target = ch
+            .group
+            .clone()
+            .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(core)));
+        let switched = switch_context_to(core, &target);
+        let scope = core.registry().active_scope();
         let title = format!("channel:{}:{chat_key}", ch.id);
         let session = core
-            .list_sessions_in_group(&gid)
+            .list_sessions_in_group(&scope)
             .ok()
             .and_then(|list| list.into_iter().find(|s| s.title == title))
             .or_else(|| core.create_session(&title).ok());
         let Some(session) = session else {
-            // 会话建立失败也别把组上下文留在别人身上
+            // 会话建立失败也别把交互上下文留在别人身上
             if switched {
-                let _ = core.registry().set_active_group(&prev_group);
+                restore_context(core, &prev_group, &prev_single);
             }
             return None;
         };
         // 记忆隔离即时生效：通道每次执行前把分区键同步到会话；
         // 关闭隔离时清空分区，立即回到同组共享记忆。
-        let partition = ch.memory_partition(&gid);
+        let partition = ch.memory_partition(&scope);
         let _ = core
             .store
             .set_session_memory_partition(&session.id, partition.as_deref());
@@ -1449,6 +1504,7 @@ impl ChannelRun {
                 core: core.clone(),
                 session_id: session.id,
                 prev_group,
+                prev_single,
                 switched,
                 kind: ch.kind.clone(),
                 scope: ch.tool_scope(),
@@ -1473,11 +1529,12 @@ impl ChannelRun {
         }
     }
 
-    /// 执行本轮；返回后组上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
+    /// 执行本轮；返回后交互上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
     pub(crate) async fn run(self, text: &str) {
         let _restore = GroupRestore {
             core: self.core.clone(),
-            prev: self.prev_group.clone(),
+            prev_group: self.prev_group.clone(),
+            prev_single: self.prev_single.clone(),
             switched: self.switched,
         };
         // 周期 token 配额（外部来源会话）：耗尽即拒绝新轮次并经 run.error 回帖提示；
@@ -1509,20 +1566,45 @@ impl ChannelRun {
     }
 }
 
-/// 组上下文兜底还原：任务正常结束、提前返回、甚至被 abort 时都执行 Drop，
-/// 避免视频轮询等后台任务超时中止后把全局激活组留在通道绑定组上。
+/// 交互上下文兜底还原：任务正常结束、提前返回、甚至被 abort 时都执行 Drop，
+/// 避免视频轮询等后台任务超时中止后把全局激活组/单智能体留在通道绑定目标上。
 struct GroupRestore {
     core: std::sync::Arc<exm_core::Core>,
-    prev: String,
+    prev_group: String,
+    prev_single: Option<String>,
     switched: bool,
 }
 
 impl Drop for GroupRestore {
     fn drop(&mut self) {
         if self.switched {
-            let _ = self.core.registry().set_active_group(&self.prev);
+            restore_context(&self.core, &self.prev_group, &self.prev_single);
         }
     }
+}
+
+/// 还原到之前的交互上下文（组 + 单智能体快照）
+pub(crate) fn restore_context(core: &exm_core::Core, prev_group: &str, prev_single: &Option<String>) {
+    if let Some(id) = prev_single {
+        let _ = core.registry().set_active_single(Some(id));
+    } else {
+        if core.registry().single_mode() {
+            let _ = core.registry().set_active_single(None);
+        }
+        let _ = core.registry().set_active_group(prev_group);
+    }
+}
+
+/// 通道缺省绑定目标：默认单智能体 machina；不存在时取任意首个单智能体；都无则回落组模式
+pub(crate) fn default_single_id(core: &exm_core::Core) -> String {
+    if core.registry().single("machina").is_some() {
+        return "machina".into();
+    }
+    core.registry()
+        .list_singles()
+        .first()
+        .map(|d| d.identifier.clone())
+        .unwrap_or_default()
 }
 
 /// 挂本轮回帖任务：订阅运行事件，收束即用 `send` 把文本发回原会话（发完或流断即退出）。
@@ -1972,6 +2054,16 @@ pub async fn create_channel(
         )
             .into_response();
     }
+    // 绑定目标校验：组 id 或 single:<智能体id>（单智能体为默认形态）
+    if let Some(g) = b.group.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !target_exists(&st.core, g) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "绑定的智能体或组不存在（智能体写 single:<id>，组写组 id）" })),
+            )
+                .into_response();
+        }
+    }
     let mut channels = load_channels(&st.core);
     if channels.iter().any(|c| c.id == id) {
         return (StatusCode::CONFLICT, Json(json!({ "error": "通道已存在" }))).into_response();
@@ -2193,25 +2285,25 @@ pub async fn channel_inbound(
         )
             .into_response();
     }
-    // 账号绑定组：入站消息在绑定的组上下文执行（会话也归属该组）
+    // 账号绑定目标（单智能体或组）：入站消息在绑定的上下文执行（会话也归属该 scope）
     let prev_group = st.core.active_group();
-    let mut switched = false;
-    if let Some(g) = &channel.group {
-        if *g != prev_group && st.core.group_meta(g).is_some() {
-            switched = st.core.registry().set_active_group(g).is_ok();
-        }
-    }
-    // 会话复用（组内）：channel:{id}:{sessionKey|senderId|default}
+    let prev_single = st.core.registry().active_single();
+    let target = channel
+        .group
+        .clone()
+        .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(&st.core)));
+    let switched = switch_context_to(&st.core, &target);
+    // 会话复用（scope 内）：channel:{id}:{sessionKey|senderId|default}
     let key = b
         .session_key
         .clone()
         .or_else(|| b.sender_id.clone())
         .unwrap_or_else(|| "default".into());
     let title = format!("channel:{}:{}", channel.id, key);
-    let gid = st.core.active_group();
+    let scope_id = st.core.registry().active_scope();
     let session = match st
         .core
-        .list_sessions_in_group(&gid)
+        .list_sessions_in_group(&scope_id)
         .ok()
         .and_then(|list| list.into_iter().find(|s| s.title == title))
     {
@@ -2220,7 +2312,7 @@ pub async fn channel_inbound(
             Ok(s) => s,
             Err(e) => {
                 if switched {
-                    let _ = st.core.registry().set_active_group(&prev_group);
+                    restore_context(&st.core, &prev_group, &prev_single);
                 }
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2231,8 +2323,8 @@ pub async fn channel_inbound(
         },
     };
     // 能力边界 + 记忆隔离：webhook 与内置适配器走同一套通道配置语义
-    let scope = channel.tool_scope();
-    let partition = channel.memory_partition(&gid);
+    let tool_scope = channel.tool_scope();
+    let partition = channel.memory_partition(&scope_id);
     let _ = st
         .core
         .store
@@ -2262,14 +2354,14 @@ pub async fn channel_inbound(
             }
         });
     }
-    // 202 受理，运行过程经 WS 推流；运行结束后恢复激活组
+    // 202 受理，运行过程经 WS 推流；运行结束后恢复交互上下文
     let core = st.core.clone();
     let text = b.text.clone();
     let sid = session.id.clone();
     tokio::spawn(async move {
-        let r = core.chat_scoped(&sid, &text, scope).await;
+        let r = core.chat_scoped(&sid, &text, tool_scope).await;
         if switched {
-            let _ = core.registry().set_active_group(&prev_group);
+            restore_context(&core, &prev_group, &prev_single);
         }
         if let Err(e) = r {
             let _ = core.events.send(CoreEvent {
