@@ -2596,3 +2596,24 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 @media (max-width: 860px) {
   .memory-card .ant-table { min-width: 100%; }
 }
+
+/* ============ 通道身份面板（折叠态） ============
+ * 收起时只剩签发工具条 + 展开按钮一行，把纵向空间还给通道主表。 */
+.identity-collapsed { display: flex; align-items: center; gap: 8px; }
+.identity-collapsed .ant-space-compact { flex: 1 1 auto; min-width: 0; }
+.identity-issued { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+/* 空态瘦身：身份面板的两个内嵌小表用轻量空态，不再撑出大插画 */
+.identity-panel .ant-table-placeholder .ant-empty { margin: 8px 0; }
+.identity-panel .ant-table-placeholder { padding: 8px 0; }
+/* tab 内联形态：身份面板在「身份与配对」tab 下的平铺容器 */
+.identity-inline { display: block; }
+.identity-inline .ant-table-wrapper + .ant-table-wrapper { margin-top: 12px; }
+
+/* ============ B 站扫码登录弹窗 ============ */
+.biliqr-body { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px 0 4px; }
+.biliqr-img { position: relative; line-height: 0; padding: 8px; border-radius: 8px; background: #fff; }
+.biliqr-img img { display: block; }
+.biliqr-img.scanned img { filter: blur(3px) opacity(0.35); }
+.biliqr-veil { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.biliqr-hint { text-align: center; font-size: 12px; }
+.biliqr-loading { padding: 48px 0; }

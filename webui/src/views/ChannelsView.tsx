@@ -1,13 +1,14 @@
 /** 通道网关：多平台多账号接入（QQ 官方机器人 / NapCat / Telegram / Discord / Slack / Matrix / webhook 桥接），每个账号可绑定不同智能体组 */
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  Button, Collapse, Form, Input, Modal, Popconfirm, Select, Space, Spin, Switch, Table, Tag, Tooltip, message,
+  Button, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch, Table, Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { PlusOutlined, QrcodeOutlined, ReloadOutlined } from "@ant-design/icons";
 import { api, type Channel, type ChannelStatus } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { IdentityPanel } from "../components/IdentityPanel";
+import { BiliQrLoginModal } from "../components/BiliQrLoginModal";
 import { useExm } from "../store";
 import { useT, type TKey } from "../i18n/core";
 
@@ -29,6 +30,8 @@ interface ChanField {
   options?: { value: string; labelKey: TKey }[];
   /** 多行文本 */
   multiline?: boolean;
+  /** B 站扫码登录挂点：该字段渲染前插「扫码登录」按钮（回填本平台 Cookie 字段） */
+  qrLogin?: boolean;
 }
 interface ChanPlat {
   key: string;
@@ -123,7 +126,7 @@ const PLATFORMS: ChanPlat[] = [
     helpKey: "channels.platHelp.bilibili",
     proactive: true,
     fields: [
-      { key: "sessdata", labelKey: "channels.f.biliSessdata", secret: true, required: true, helpKey: "channels.f.biliSessdataHelp" },
+      { key: "sessdata", labelKey: "channels.f.biliSessdata", secret: true, required: true, helpKey: "channels.f.biliSessdataHelp", qrLogin: true },
       { key: "biliJct", labelKey: "channels.f.biliJct", secret: true, required: true, helpKey: "channels.f.biliJctHelp" },
       { key: "uid", labelKey: "channels.f.biliUid", helpKey: "channels.f.biliUidHelp" },
       { key: "watch", labelKey: "channels.f.watch", toggle: true, default: true, helpKey: "channels.f.watchHelp" },
@@ -230,12 +233,14 @@ export function ChannelsView(): React.ReactElement {
   const t = useT();
   const { groups } = useExm();
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [tab, setTab] = useState("accounts");
   const [singles, setSingles] = useState<{ identifier: string; name: string }[]>([]);
   const [status, setStatus] = useState<Record<string, ChannelStatus>>({});
   const [testing, setTesting] = useState<string>("");
   const [testResult, setTestResult] = useState<Record<string, { ok: boolean; category?: string; identity?: string; message?: string; error?: string }>>({});
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
+  const [qrOpen, setQrOpen] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [form] = Form.useForm();
 
@@ -458,11 +463,22 @@ export function ChannelsView(): React.ReactElement {
       <PageHeader
         en="CHANNELS"
         title={t("nav.channels")}
-        desc={t("channels.desc")}        actions={
+        desc={t("channels.desc")}
+        actions={
           <>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              {t("channels.add")}
-            </Button>
+            <Segmented
+              value={tab}
+              onChange={(v) => setTab(v as string)}
+              options={[
+                { value: "accounts", label: t("channels.tabAccounts") },
+                { value: "identity", label: t("channels.tabIdentity") },
+              ]}
+            />
+            {tab === "accounts" ? (
+              <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+                {t("channels.add")}
+              </Button>
+            ) : null}
             <Button icon={<ReloadOutlined />} onClick={() => void load()}>
               {t("common.refresh")}
             </Button>
@@ -471,8 +487,10 @@ export function ChannelsView(): React.ReactElement {
       />
 
       <Spin spinning={loading}>
-        <IdentityPanel />
-        <Table<Channel>
+        {tab === "identity" ? (
+          <IdentityPanel expanded />
+        ) : (
+          <Table<Channel>
           size="small"
           rowKey="id"
           pagination={false}
@@ -591,6 +609,7 @@ export function ChannelsView(): React.ReactElement {
             },
           ]}
         />
+        )}
       </Spin>
 
       {channels.some((c) => BRIDGE_TYPES.includes(c.type)) && (
@@ -655,27 +674,35 @@ export function ChannelsView(): React.ReactElement {
                         <Switch size="small" />
                       </Form.Item>
                     ) : (
-                      <Form.Item
-                        key={f.key}
-                        name={f.top ? f.key : ["config", f.key]}
-                        label={t(f.labelKey)}
-                        rules={
-                          f.required && !editing
-                            ? [{ required: true, message: t("channels.f.required") }]
-                            : undefined
-                        }
-                        extra={f.helpKey ? t(f.helpKey) : undefined}
-                      >
-                        {f.options ? (
-                          <Select options={f.options.map((o) => ({ value: o.value, label: t(o.labelKey) }))} />
-                        ) : f.multiline ? (
-                          <Input.TextArea rows={2} placeholder={f.ph} />
-                        ) : f.secret ? (
-                          <Input.Password autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
-                        ) : (
-                          <Input placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
+                      <React.Fragment key={f.key}>
+                        {f.qrLogin && (
+                          <Form.Item label={t("channels.biliqr.btn")} extra={t("channels.biliqr.btnHelp")}>
+                            <Button block icon={<QrcodeOutlined />} onClick={() => setQrOpen(true)}>
+                              {t("channels.biliqr.btn")}
+                            </Button>
+                          </Form.Item>
                         )}
-                      </Form.Item>
+                        <Form.Item
+                          name={f.top ? f.key : ["config", f.key]}
+                          label={t(f.labelKey)}
+                          rules={
+                            f.required && !editing
+                              ? [{ required: true, message: t("channels.f.required") }]
+                              : undefined
+                          }
+                          extra={f.helpKey ? t(f.helpKey) : undefined}
+                        >
+                          {f.options ? (
+                            <Select options={f.options.map((o) => ({ value: o.value, label: t(o.labelKey) }))} />
+                          ) : f.multiline ? (
+                            <Input.TextArea rows={2} placeholder={f.ph} />
+                          ) : f.secret ? (
+                            <Input.Password autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
+                          ) : (
+                            <Input placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
+                          )}
+                        </Form.Item>
+                      </React.Fragment>
                     ),
                   )}
                   <Form.Item name="group" label={t("channels.f.group")}>
@@ -776,6 +803,14 @@ export function ChannelsView(): React.ReactElement {
           </Form.Item>
         </Form>
       </Modal>
+      <BiliQrLoginModal
+        open={qrOpen}
+        onClose={() => setQrOpen(false)}
+        onConfirmed={({ sessdata, biliJct, uid }) => {
+          // 回填 Cookie 字段：uid 非空才写（老账号可能不下发）
+          form.setFieldsValue({ config: { ...form.getFieldValue("config"), sessdata, biliJct, ...(uid ? { uid } : {}) } });
+        }}
+      />
     </div>
   );
 }
