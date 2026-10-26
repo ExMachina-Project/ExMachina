@@ -197,10 +197,10 @@ impl LocalRegistry {
                 singles.insert(def.identifier.clone(), def);
             }
         }
-        // 显示名迁移：内置默认智能体显示名统一为 default（历史安装落盘为 Machina）
+        // 显示名迁移：内置默认智能体显示名统一为 Machina（历史落盘曾为 default）
         if let Some(def) = singles.get_mut("machina") {
-            if def.name == "Machina" {
-                def.name = "default".into();
+            if def.name == "default" {
+                def.name = "Machina".into();
                 let p = self.dir.join("agents").join("machina").join("agent.json");
                 if p.is_file() {
                     let _ = std::fs::write(&p, serde_json::to_string_pretty(def)?);
