@@ -645,6 +645,13 @@ export const api = {
 
   listChannels: () => req<Channel[]>("/channels"),
   channelStatus: () => req<Record<string, ChannelStatus>>("/channels/status"),
+  /** B 站扫码登录：出码（返回二维码内容 URL）→ 前端渲染二维码 → 轮询到 confirmed 拿登录 Cookie */
+  biliQrStart: () => req<{ qrcodeKey: string; url: string }>("/channels/bili-qr", { method: "POST" }),
+  biliQrPoll: (key: string) =>
+    req<
+      | { state: "waiting"; code: number }
+      | { state: "confirmed"; sessdata: string; biliJct: string; uid: string; uname: string }
+    >(`/channels/bili-qr/${encodeURIComponent(key)}`),
   createChannel: (body: {
     id: string;
     platform?: string;

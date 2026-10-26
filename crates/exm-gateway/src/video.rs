@@ -486,7 +486,7 @@ fn build_prompt(
     }
     let comment_rule = if s.comment {
         format!(
-            "写一条自然、具体、像真人观众的中文评论，不超过 {} 字；不要复读标题、不要空泛夸赞、不要营销腔，不要提自己是 AI。",
+            "写一条具体、有信息量的中文评论，不超过 {} 字；不复读标题、不空泛夸赞、不营销腔，不提自己是 AI。语气保持你自身的说话风格——观众感来自内容具体，不靠刻意模仿人类口吻。",
             s.max_comment_chars
         )
     } else {
@@ -503,7 +503,7 @@ fn build_prompt(
     let style = if s.comment_style.is_empty() {
         String::new()
     } else {
-        format!("【风格要求】{}\n", s.comment_style)
+        format!("【风格要求】{}（与本账号人设冲突时，以人设为准）\n", s.comment_style)
     };
     let published = if item.published_at > 0 {
         chrono::DateTime::from_timestamp(item.published_at, 0)
@@ -517,11 +517,12 @@ fn build_prompt(
 【视频资料】\n平台：{}\n标题：{}\n作者：{}\n链接：{}\n播放量：{}\n发布时间：{}\n\n{}\n\n\
 【评论区摘录（按热度）】\n{}\n\
 【任务】\n\
-1. 以真实观众视角概括视频内容、亮点或问题（summary，80 字以内）。\n\
+1. 以观众视角概括视频内容、亮点或问题（summary，80 字以内）。summary 用你自己的语言，保持你一贯的说话方式。\n\
 2. {} \n\
 3. {} \n\
 {}\
 【硬性要求】\n\
+- 你的人格、语气、口头禅全部沿用你自身的设定（SOUL/人设）；本任务不要求你扮演别人，只用你自己的方式谈论视频内容。\n\
 - 只输出一个 JSON 对象，不要 Markdown 代码块、不要解释、不要使用任何工具。\n\
 - 格式：{{\"summary\":\"...\",\"comment\":\"...\",\"reply\":{{\"to\":\"评论id\",\"text\":\"...\"}}}}；不回复时 reply 为 null。\n\
 - 不要捏造视频里没有的事实；看不懂或材料不足时在 summary 说明，评论/回复宁可留空。\n",
@@ -1097,6 +1098,122 @@ pub(crate) enum ProbeError {
     Missing(String),
     Auth(String),
     Network(String),
+}
+
+// ---------------------------------------------------------------- B 站扫码登录
+// passport 开放接口：generate 出码 → 客户端扫 → poll 轮询；确认后 Set-Cookie 下发登录态。
+
+pub(crate) struct BiliQrStart {
+    pub qrcode_key: String,
+    pub url: String,
+}
+
+pub(crate) struct BiliQrLogin {
+    pub sessdata: String,
+    pub bili_jct: String,
+    pub dede_user_id: String,
+    pub uname: String,
+}
+
+/// 生成扫码登录二维码（B 站 passport web 协议）
+pub(crate) async fn bili_qr_generate() -> anyhow::Result<BiliQrStart> {
+    let resp = http_client()
+        .get("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
+        .header(reqwest::header::USER_AGENT, UA)
+        .header(reqwest::header::REFERER, BILI_REFERER)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("B 站请求失败：{e}"))?;
+    let status = resp.status();
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("B 站响应不是 JSON（HTTP {status}）：{e}"))?;
+    if body.get("code").and_then(|c| c.as_i64()) != Some(0) {
+        anyhow::bail!("出码失败：{}", api_message(&body));
+    }
+    let qrcode_key = body
+        .pointer("/data/qrcode_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("响应缺 qrcode_key"))?
+        .to_string();
+    let url = body
+        .pointer("/data/url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("响应缺 url"))?
+        .to_string();
+    Ok(BiliQrStart { qrcode_key, url })
+}
+
+/// 轮询扫码状态：code 0 = 已确认（Set-Cookie 带登录态）；86101 未扫；86090 已扫待确认；86083 过期
+pub(crate) async fn bili_qr_poll(qrcode_key: &str) -> anyhow::Result<Result<BiliQrLogin, i64>> {
+    let resp = http_client()
+        .get("https://passport.bilibili.com/x/passport-login/web/qrcode/poll")
+        .query(&[("qrcode_key", qrcode_key)])
+        .header(reqwest::header::USER_AGENT, UA)
+        .header(reqwest::header::REFERER, BILI_REFERER)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("B 站请求失败：{e}"))?;
+    let status = resp.status();
+    // 先取 Set-Cookie 再消费 body
+    let cookies: Vec<String> = resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+        .collect();
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("B 站响应不是 JSON（HTTP {status}）：{e}"))?;
+    // 外层 code 是 HTTP 层结果；扫码状态在 data.code：0 已确认 / 86101 未扫 / 86090 待确认 / 86083 过期
+    let code = body
+        .pointer("/data/code")
+        .and_then(|c| c.as_i64())
+        .unwrap_or(-1);
+    if code != 0 {
+        // 未扫/待确认/过期：把业务码交调用方决定轮询节奏
+        return Ok(Err(code));
+    }
+    let pick = |name: &str| -> Option<String> {
+        cookies.iter().find_map(|c| {
+            let c = c.trim();
+            let kv = c.split(';').next()?.trim();
+            let (k, v) = kv.split_once('=')?;
+            (k.trim() == name && !v.is_empty()).then(|| v.to_string())
+        })
+    };
+    let sessdata = pick("SESSDATA").ok_or_else(|| anyhow::anyhow!("登录成功但响应缺 SESSDATA Cookie"))?;
+    let bili_jct = pick("bili_jct").ok_or_else(|| anyhow::anyhow!("登录成功但响应缺 bili_jct Cookie"))?;
+    let dede_user_id = pick("DedeUserID").unwrap_or_default();
+    // 用新 Cookie 查一次 nav 拿用户名，顺带校验登录态真的可用
+    let mut cookie_parts = vec![format!("SESSDATA={sessdata}"), format!("bili_jct={bili_jct}")];
+    if !dede_user_id.is_empty() {
+        cookie_parts.push(format!("DedeUserID={dede_user_id}"));
+    }
+    let nav: Value = http_client()
+        .get("https://api.bilibili.com/x/web-interface/nav")
+        .header(reqwest::header::USER_AGENT, UA)
+        .header(reqwest::header::REFERER, BILI_REFERER)
+        .header(reqwest::header::COOKIE, cookie_parts.join("; "))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("校验登录态失败：{e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("nav 响应不是 JSON：{e}"))?;
+    if nav.get("code").and_then(|c| c.as_i64()) != Some(0)
+        || !nav.pointer("/data/isLogin").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
+        anyhow::bail!("扫码成功但登录态校验未通过：{}", api_message(&nav));
+    }
+    let uname = nav
+        .pointer("/data/uname")
+        .and_then(|v| v.as_str())
+        .unwrap_or("bilibili")
+        .to_string();
+    Ok(Ok(BiliQrLogin { sessdata, bili_jct, dede_user_id, uname }))
 }
 
 pub(crate) async fn probe_bilibili(ch: &Channel) -> Result<String, ProbeError> {

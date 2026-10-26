@@ -1839,6 +1839,49 @@ pub async fn channel_status() -> impl IntoResponse {
     Json(serde_json::to_value(snapshot).unwrap_or(Value::Null)).into_response()
 }
 
+// ---------------------------------------------------------------- B 站扫码登录
+// 出码与轮询都是无副作用的 passport 只读接口；登录态 Cookie 只在 poll 确认瞬间产生，
+// 直接回给前端填表单，不落盘（保存通道时才随 config 入库并掩码）。
+
+pub async fn bili_qr_start() -> impl IntoResponse {
+    match crate::video::bili_qr_generate().await {
+        Ok(s) => Json(json!({ "qrcodeKey": s.qrcode_key, "url": s.url })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("B 站出码失败：{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
+    if qrcode_key.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺少 qrcode_key" })),
+        )
+            .into_response();
+    }
+    match crate::video::bili_qr_poll(qrcode_key.trim()).await {
+        // Ok(登录态) → 成功；Err(业务码) → 86101 未扫 / 86090 待确认 / 86083 过期
+        Ok(Ok(login)) => Json(json!({
+            "state": "confirmed",
+            "sessdata": login.sessdata,
+            "biliJct": login.bili_jct,
+            "uid": login.dede_user_id,
+            "uname": login.uname,
+        }))
+        .into_response(),
+        Ok(Err(code)) => Json(json!({ "state": "waiting", "code": code })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("B 站轮询失败：{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+
 // ---------------------------------------------------------------- 通道 CRUD（脱敏回显）
 
 /// 平台 config 中的敏感键（掩码回显；更新时掩码值 = 沿用旧值）
@@ -2413,6 +2456,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/approvals/:id/approve", post(approve_request))
         .route("/api/approvals/:id/deny", post(deny_request))
         .route("/api/channels/status", get(channel_status))
+        .route("/api/channels/bili-qr", post(bili_qr_start))
+        .route("/api/channels/bili-qr/:key", get(bili_qr_poll))
         .route("/api/channels", get(list_channels).post(create_channel))
         .route(
             "/api/channels/:id",
