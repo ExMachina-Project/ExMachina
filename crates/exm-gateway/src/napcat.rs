@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 struct Conn {
     handle: JoinHandle<()>,
@@ -82,36 +83,44 @@ async fn connect_loop(core: Arc<Core>, ch: Channel) {
     // NapCat 停机维护时不该每 5 秒重试一次敲日志。
     let mut fail_streak: u32 = 0;
     loop {
-        // 带鉴权头的握手请求（token 为空则不带）
-        let request = tokio_tungstenite::tungstenite::http::Request::builder()
-            .uri(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("X-Client-Role", "ExMachina-Gateway")
-            .body(());
-        let ws = match request {
-            Ok(req) => match connect_async(req).await {
-                Ok((ws, _)) => {
-                    println!("[napcat:{}] 已连结 {url}", ch.id);
-                    report_status(&ch.id, "ok", format!("已连结 {url}"));
-                    // 复位退避：连上即视为恢复（连上后立刻断开属对端不稳，5s 基线重试可接受）
-                    fail_streak = 0;
-                    ws
+        // 握手请求：由 String 的 IntoRequest 生成规范 WS 头（tungstenite 0.21+ 不再自动补
+        // Sec-WebSocket-Key 等 5 头，手动 Request::builder 缺头即握手失败），再叠加鉴权头。
+        // token 为空则不带 Authorization。
+        let request = match url.clone().into_client_request() {
+            Ok(mut req) => {
+                if !token.is_empty() {
+                    req.headers_mut().insert(
+                        "Authorization",
+                        format!("Bearer {token}").parse().unwrap(),
+                    );
                 }
-                Err(e) => {
-                    let msg = format!("连接失败：{e}");
-                    eprintln!("[napcat:{}] {msg}", ch.id);
-                    report_status(&ch.id, "error", msg);
-                    let wait = std::time::Duration::from_secs((5u64 << fail_streak.min(7)).min(300));
-                    fail_streak = fail_streak.saturating_add(1);
-                    tokio::time::sleep(wait).await;
-                    continue;
-                }
-            },
+                req.headers_mut()
+                    .insert("X-Client-Role", "ExMachina-Gateway".parse().unwrap());
+                req
+            }
             Err(e) => {
                 let msg = format!("地址非法（{url}）：{e}");
                 eprintln!("[napcat:{}] {msg}", ch.id);
                 report_status(&ch.id, "error", msg);
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+        let ws = match connect_async(request).await {
+            Ok((ws, _)) => {
+                println!("[napcat:{}] 已连结 {url}", ch.id);
+                report_status(&ch.id, "ok", format!("已连结 {url}"));
+                // 复位退避：连上即视为恢复（连上后立刻断开属对端不稳，5s 基线重试可接受）
+                fail_streak = 0;
+                ws
+            }
+            Err(e) => {
+                let msg = format!("连接失败：{e}");
+                eprintln!("[napcat:{}] {msg}", ch.id);
+                report_status(&ch.id, "error", msg);
+                let wait = std::time::Duration::from_secs((5u64 << fail_streak.min(7)).min(300));
+                fail_streak = fail_streak.saturating_add(1);
+                tokio::time::sleep(wait).await;
                 continue;
             }
         };
