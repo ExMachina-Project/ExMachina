@@ -341,6 +341,14 @@ impl ModelPool {
         list.iter().find(|m| m.model == model).map(|m| if vision { m.vision } else { m.audio })
     }
 
+    /// 模型上下文窗口（token 数）；档案/模型未登记或登记 0 = 未知 None
+    pub fn context_window(&self, pid: &str, model: &str) -> Option<u64> {
+        let list = self.models.get(pid)?;
+        list.iter()
+            .find(|m| m.model == model)
+            .and_then(|m| (m.context_window > 0).then_some(m.context_window))
+    }
+
     /// 全局生效档案 id（build_orchestrator 注入）
     pub fn set_active(&mut self, id: impl Into<String>) {
         self.active_id = id.into();

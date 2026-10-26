@@ -137,6 +137,12 @@ pub enum ToolName {
     /// 记忆关联与主题列示：建立条目关联 / 列示主题下条目及关联链
     #[serde(rename = "memory_link")]
     MemoryLink,
+    /// Git 版本控制：多合一动作面（只读 status/diff/log/branch/show/stash-list；
+    /// 写 add/commit/restore/stash-push/stash-pop/checkout-b 过审批闸门；push 不在动作面）
+    Git,
+    /// 子智能体派生：主智能体把封闭子任务交给独立上下文的子智能体执行（单层限制，
+    /// 子级无 spawn/agent_manage），返回结论摘要。并发与超时受控（spec: subagent-spawn）
+    Spawn,
 }
 
 impl ToolName {
@@ -158,6 +164,8 @@ impl ToolName {
             ToolName::MemoryRead => "memory_read",
             ToolName::MemoryWrite => "memory_write",
             ToolName::MemoryLink => "memory_link",
+            ToolName::Git => "git",
+            ToolName::Spawn => "spawn",
         }
     }
 
@@ -192,6 +200,8 @@ impl ToolName {
             "memory_read" => Some(ToolName::MemoryRead),
             "memory_write" => Some(ToolName::MemoryWrite),
             "memory_link" => Some(ToolName::MemoryLink),
+            "git" => Some(ToolName::Git),
+            "spawn" => Some(ToolName::Spawn),
             _ => None,
         }
     }
@@ -526,6 +536,10 @@ pub struct AgentDefinition {
     /// 值 = nexus.links 中的连结体 id。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// 单智能体对话循环工具步数上限覆盖（None = 用全局默认 security.chatMaxSteps；
+    /// 组派发路径不受此项影响，仍取派发约束 unitMaxSteps）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<usize>,
 }
 
 // ---------------------------------------------------------------- 消息与三账
@@ -654,6 +668,9 @@ pub struct ChatMessage {
     pub agent_id: Option<String>,
     pub statements: Vec<Statement>,
     pub created_at: String,
+    /// 所属轮次（写库时标注；工具卡回滚按钮的 undo 目标）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<TokenUsage>,
     /// 本轮思维链（收束时由服务端留存，过程收起栏数据源）

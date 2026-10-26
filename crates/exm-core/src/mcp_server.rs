@@ -256,6 +256,7 @@ mod tests {
             tools: vec![],
             when_to_call: String::new(),
             link: None,
+            max_steps: None,
             dependencies: vec![],
             composable_with: vec![],
             input_schema: Default::default(),

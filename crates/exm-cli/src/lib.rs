@@ -9,6 +9,7 @@ pub mod group_cmd;
 pub mod install;
 pub mod memory_cmd;
 pub mod panel;
+pub mod tui;
 pub mod persona_cmd;
 pub mod platform_cmd;
 pub mod render;
@@ -39,6 +40,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 全屏 TUI 终端工作台（裸 `exm` 默认形态）：消息流/输入/状态栏 + 审批页
+    Tui,
     /// 首启安装向导：环境检查 → 模型接入 → 落盘 → 自检
     Install {
         /// 快速模式：仅确认关键项（模型接入仍会询问）
@@ -466,14 +469,20 @@ pub fn run() -> anyhow::Result<()> {
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace.clone();
-    // 裸命令 `exm` / `exmachina` 等价于 `exm chat`（无参数）：直接进终端交互面板
-    let command = cli.command.unwrap_or(Commands::Chat {
-        text: None,
-        session: None,
-        quiet: false,
-        preview: false,
-    });
+    // 裸命令 `exm` / `exmachina`：进全屏 TUI（消息流/输入/状态栏三段版式）。
+    // `exm chat` 保留 readline 面板（ BREAKING：裸命令旧版进 readline 面板）
+    let command = cli.command.unwrap_or(Commands::Tui);
     match command {
+        Commands::Tui => {
+            let core = build_core(&workspace)?;
+            // TTY 校验：非终端（管道/重定向）退回行交互，避免控制序列污染
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                tui::run_tui(core, false).await
+            } else {
+                chat::run_interactive(core, false).await
+            }
+        }
         Commands::Install { quick } => {
             let root = normalize_root(&workspace);
             install::run_install(&root, quick)

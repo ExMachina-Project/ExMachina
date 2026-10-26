@@ -30,11 +30,13 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
   const hasTools = Boolean(m.toolCalls && m.toolCalls.length > 0);
   const steps = m.steps ?? [];
   const hasProcess = hasThinking || hasTools || steps.length > 0;
+  const time = relativeTime(m.createdAt);
   return (
     <Card size="small" className={`msg-bubble ${isUser ? "msg-user" : "msg-agent"}`}>
       <div className="msg-head">
         {isUser ? <UserOutlined /> : <RobotOutlined />} <b>{title}</b>
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
+        {time && <span className="msg-time mono">{time}</span>}
         {!isUser && (
           <button
             className="msg-copy"
@@ -59,6 +61,8 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
             toolCalls={m.toolCalls ?? []}
             labelThinking={(n) => tUsage(tb, n)}
             labelTools={(n) => tb("chat.usedTools", { n: String(n) })}
+            sessionId={m.sessionId}
+            turn={m.turn ?? turn}
           />
         ) : (
           <div className="msg-process">
@@ -69,7 +73,7 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
             )}
             {hasTools && (
               <UsageBar label={tb("chat.usedTools", { n: m.toolCalls!.length })}>
-                <ToolCallList calls={m.toolCalls!} />
+                <ToolCallList calls={m.toolCalls!} sessionId={m.sessionId} turn={m.turn ?? turn} />
               </UsageBar>
             )}
           </div>
@@ -512,7 +516,7 @@ export function ChatView(): React.ReactElement {
           )}
         </div>
         <div className="rail-section grow">
-          {/* 工具条：搜索 + 类型过滤（桌面端沿用原竖排，见样式表） */}
+          {/* 工具条：搜索 + 类型过滤（同行紧凑排布，见样式表） */}
           <div className="rail-toolbar">
             <Input
               size="small"
@@ -523,8 +527,9 @@ export function ChatView(): React.ReactElement {
               value={sessionFilter}
               onChange={(e) => setSessionFilter(e.target.value)}
             />
-            {/* 会话类型过滤（2.2）：全部 / 普通 / 通道 */}
+            {/* 会话类型过滤（2.2）：全部 / 普通 / 通道（segment 紧凑形态，宽度自适应） */}
             <Select
+              size="small"
               value={sessionKind}
               onChange={setSessionKind}
               className="session-kind"

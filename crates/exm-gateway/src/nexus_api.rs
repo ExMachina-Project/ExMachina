@@ -235,6 +235,7 @@ mod tests {
                 input_schema: Default::default(), output_schema: Default::default(),
                 prompt_file: String::new(), model_hint: None,
                 link: Some("lnk1".into()),
+                max_steps: None,
             },
             None,
         )

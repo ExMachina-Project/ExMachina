@@ -171,33 +171,156 @@ pub async fn ensure_compacted(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{MessageRole, SpeechTag, Statement};
 
-    #[test]
-    fn render_recent_roles() {
-        let mk = |role: MessageRole, text: &str| ChatMessage {
+    fn mk_msg(role: MessageRole, text: &str) -> ChatMessage {
+        ChatMessage {
             id: String::new(),
             session_id: String::new(),
             role,
             agent_id: Some("a1".into()),
-            statements: vec![crate::types::Statement::new(
-                crate::types::SpeechTag::报告,
-                text,
-            )],
+            statements: vec![Statement::new(SpeechTag::报告, text)],
             created_at: String::new(),
+            turn: None,
             token_usage: None,
             thinking: None,
             last_message_preview: None,
             last_active_at: None,
             tool_calls: Vec::new(),
             steps: Vec::new(),
-        };
+        }
+    }
+
+    /// 压缩替身：固定返回摘要文本
+    struct OkCompacter;
+    #[async_trait::async_trait]
+    impl LlmProvider for OkCompacter {
+        fn name(&self) -> &'static str {
+            "ok-compacter"
+        }
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<crate::provider::ChatResponse> {
+            Ok(crate::provider::ChatResponse {
+                content: "合并摘要：目标与结论".into(),
+                reasoning: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: Vec::new(),
+            })
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamDelta>,
+        ) -> anyhow::Result<crate::provider::ChatResponse> {
+            anyhow::bail!("测试替身不支持流式")
+        }
+    }
+
+    /// 压缩替身：必然失败（模拟模型超时/异常）
+    struct FailCompacter;
+    #[async_trait::async_trait]
+    impl LlmProvider for FailCompacter {
+        fn name(&self) -> &'static str {
+            "fail-compacter"
+        }
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<crate::provider::ChatResponse> {
+            anyhow::bail!("模拟压缩失败")
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamDelta>,
+        ) -> anyhow::Result<crate::provider::ChatResponse> {
+            anyhow::bail!("测试替身不支持流式")
+        }
+    }
+
+    fn test_store_with(n_msgs: usize) -> (Arc<Store>, String) {
+        let dir = std::env::temp_dir().join(format!("exm-compact-{}", uuid::Uuid::new_v4()));
+        let store = Store::open(&dir).expect("打开测试存储失败");
+        let s = store.create_session("压缩测试", "g1").unwrap();
+        let sid = s.id;
+        for i in 0..n_msgs {
+            let role = if i % 2 == 0 {
+                MessageRole::User
+            } else {
+                MessageRole::Orchestrator
+            };
+            store
+                .add_message(
+                    &sid,
+                    role,
+                    None,
+                    vec![Statement::new(SpeechTag::报告, format!("消息{i}"))],
+                )
+                .unwrap();
+        }
+        (Arc::new(store), sid)
+    }
+
+    #[test]
+    fn render_recent_roles() {
         let msgs = vec![
-            mk(MessageRole::User, "你好"),
-            mk(MessageRole::Orchestrator, "收到"),
+            mk_msg(MessageRole::User, "你好"),
+            mk_msg(MessageRole::Orchestrator, "收到"),
         ];
         let out = render_recent(&msgs);
         assert!(out.contains("[用户] 你好"));
         assert!(out.contains("[a1] 收到"));
+    }
+
+    #[tokio::test]
+    async fn 未超阈值_不压缩_返回全量原文() {
+        let (store, sid) = test_store_with(5);
+        let provider: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
+        let c = ensure_compacted(&store, &provider, "m", &sid, CompactParams { trigger: 10, keep: 5 })
+            .await;
+        assert!(c.summary.is_none());
+        assert!(c.recent.contains("消息0"));
+        assert!(c.recent.contains("消息4"));
+    }
+
+    #[tokio::test]
+    async fn 超阈值_触发压缩_摘要持久化() {
+        let (store, sid) = test_store_with(30);
+        let provider: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
+        let c = ensure_compacted(&store, &provider, "m", &sid, CompactParams { trigger: 10, keep: 5 })
+            .await;
+        // 摘要来自替身固定返回
+        assert_eq!(c.summary.as_deref(), Some("合并摘要：目标与结论"));
+        // 最近窗口保留原文（尾部 5 条），窗口外消息不出现
+        assert!(c.recent.contains("消息29"));
+        assert!(!c.recent.contains("消息0"));
+        // 摘要已持久化到会话
+        let s = store.get_session(&sid).unwrap().unwrap();
+        assert_eq!(
+            s.rolling_summary.as_deref(),
+            Some("合并摘要：目标与结论")
+        );
+        assert_eq!(s.summary_upto, Some(25));
+    }
+
+    #[tokio::test]
+    async fn 压缩失败_沿用旧摘要_不阻断() {
+        let (store, sid) = test_store_with(30);
+        // 先用成功替身建立旧摘要
+        let ok: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
+        ensure_compacted(&store, &ok, "m", &sid, CompactParams { trigger: 10, keep: 5 }).await;
+        // 再追加消息后用失败替身压缩：应沿用旧摘要
+        store
+            .add_message(
+                &sid,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::报告, "追加消息")],
+            )
+            .unwrap();
+        let fail: Arc<dyn LlmProvider> = Arc::new(FailCompacter);
+        let c = ensure_compacted(&store, &fail, "m", &sid, CompactParams { trigger: 10, keep: 5 })
+            .await;
+        assert_eq!(c.summary.as_deref(), Some("合并摘要：目标与结论"));
+        // 最近窗口仍包含最新消息原文
+        assert!(c.recent.contains("追加消息"));
     }
 
     #[test]

@@ -733,6 +733,43 @@ export function fsList(path: string): Promise<{ path: string; entries: FsEntry[]
   return req(`/fs/list?path=${encodeURIComponent(path)}`);
 }
 
+// ---------------- 代码工作台（spec: webui-code-workbench） ----------------
+
+export interface WorkbenchNode {
+  path: string;
+  name: string;
+  type: "dir" | "file";
+  size?: number;
+}
+
+export interface WorkbenchTree {
+  root: string;
+  count: number;
+  nodes: WorkbenchNode[];
+}
+
+/** 工作台文件树（.gitignore 口径过滤；工作区边界校验在服务端） */
+export function workbenchTree(path?: string, depth?: number): Promise<WorkbenchTree> {
+  const qs = new URLSearchParams();
+  if (path) qs.set("path", path);
+  if (depth) qs.set("depth", String(depth));
+  const q = qs.toString();
+  return req(`/workbench/tree${q ? `?${q}` : ""}`);
+}
+
+export interface WorkbenchFile {
+  path: string;
+  offset: number;
+  limit: number;
+  totalLines: number;
+  content: string;
+}
+
+/** 工作台文件分页读取（read 工具同口径） */
+export function workbenchFile(path: string, offset = 1, limit = 400): Promise<WorkbenchFile> {
+  return req(`/workbench/file?path=${encodeURIComponent(path)}&offset=${offset}&limit=${limit}`);
+}
+
 /** 工作区文本文件预览（编码页代码查看） */
 export function fsFile(path: string): Promise<{ path: string; size: number; truncated: boolean; content: string }> {
   return req(`/fs/file?path=${encodeURIComponent(path)}`);

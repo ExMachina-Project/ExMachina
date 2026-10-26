@@ -825,6 +825,8 @@ struct PartialSecurity {
     tool_output_spill_chars: Option<usize>,
     #[serde(default)]
     approval_wait_secs: Option<u64>,
+    chat_max_steps: Option<usize>,
+    context_budget_ratio: Option<f64>,
 }
 
 /// Computer Use（设置页）：部分更新语义——缺省字段沿用旧值
@@ -911,6 +913,8 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
         terminal_timeout_secs: None,
         tool_output_spill_chars: None,
         approval_wait_secs: None,
+        chat_max_steps: None,
+        context_budget_ratio: None,
     });
     let computer = body.computer.clone().unwrap_or(PartialComputer {
         enabled: None,
@@ -1009,6 +1013,14 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
             approval_wait_secs: sec
                 .approval_wait_secs
                 .unwrap_or(current.security.approval_wait_secs),
+            chat_max_steps: sec
+                .chat_max_steps
+                .filter(|v| *v > 0)
+                .unwrap_or(current.security.chat_max_steps),
+            context_budget_ratio: sec
+                .context_budget_ratio
+                .filter(|v| (0.5..=1.0).contains(v))
+                .unwrap_or(current.security.context_budget_ratio),
             // 首启引导提醒：不由设置页改写（专属端点 auth/dismiss 控制）
             key_setup_dismissed: current.security.key_setup_dismissed,
         },
@@ -1482,6 +1494,7 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
         prompt_file: String::new(),
         model_hint: b.model.filter(|s| !s.trim().is_empty()),
         link: None,
+        max_steps: None,
     };
     // 目标组：显式指定时写入该组（首个个体自动成为该组主智能体），否则激活组
     let result = match &b.group {

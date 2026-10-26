@@ -2617,3 +2617,71 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .biliqr-veil { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
 .biliqr-hint { text-align: center; font-size: 12px; }
 .biliqr-loading { padding: 48px 0; }
+
+/* ============ 对话体验优化（chat-render / rail-compact） ============
+ * 目标：会话栏省纵向空间、长代码不吞屏、消息头信息更完整。 */
+
+/* —— 会话栏紧凑化：目标区与列表区共用更紧的节奏 —— */
+.chat-rail { padding: 12px; }
+.chat-rail .rail-section { margin-bottom: 10px; }
+.chat-rail .rail-label { margin-bottom: 6px; }
+.chat-rail .rail-hint { margin-top: 5px; font-size: 12px; }
+.rail-toolbar { gap: 6px; }
+/* 类型过滤自适应宽度（原固定 106px 在小屏挤占搜索框） */
+.rail-toolbar .session-kind { width: auto; min-width: 72px; flex: none; }
+.rail-toolbar .session-kind .ant-select-content { font-size: 12px; }
+
+/* —— 代码块 meta 栏：语言标签 + 行数 + 折叠开关（替代裸复制钮） —— */
+.code-block-wrap { position: relative; }
+.code-block-meta {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  background: var(--bg-raise);
+  font-size: 11px;
+}
+.code-block-wrap .code-block-meta + pre {
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  margin-top: 0;
+}
+.code-lang { color: var(--accent); font-weight: 600; }
+.code-lines { color: var(--muted-dim); }
+.code-fold-btn {
+  margin-left: auto; padding: 0; border: none; background: none;
+  color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.code-fold-btn:hover { color: var(--accent); }
+/* 折叠态：只露前 14 行 + 省略号，尾部提示可展开 */
+pre.code-folded { position: relative; margin: 0; max-height: calc(14 * 1.6em + 24px); overflow: hidden; }
+.code-fold-ellipsis {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: block; text-align: center;
+  padding: 18px 0 6px;
+  background: linear-gradient(transparent, var(--bg-sunken) 55%);
+  color: var(--muted); font-size: 11px; font-family: var(--mono);
+}
+
+/* —— 消息头：时间戳跟随轮次号（左区），复制/操作仍归右端 —— */
+.msg-head .msg-time { color: var(--muted-dim); font-size: 10.5px; }
+.msg-head .msg-copy { margin-left: 0; }
+.msg-head .msg-ops { margin-left: 4px; }
+
+/* —— 用户消息：视觉与助手区分（左缘强调条 + 轻底色），不再全宽平铺 —— */
+.msg-bubble.msg-user, .ant-card.msg-bubble.msg-user { border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent) !important; }
+.msg-bubble { transition: border-color var(--dur-fast) var(--ease-out); }
+.msg-bubble:hover { border-color: var(--line-strong); }
+
+/* —— 长任务 prompt（用户消息内超大段文本）：行高与字距微调，扫读更省力 —— */
+.md { line-height: 1.72; }
+.md p + p { margin-top: 0.55em; }
+/* JSON 代码块：长字符串值自动换行（中文无空格，pre 默认不换会拉出横向滚动） */
+.md pre code.json, .md pre .language-json { white-space: pre-wrap; word-break: break-all; }
+
+/* —— 终端产出面板（工具卡展开区）：命令/输出/退出码分区 —— */
+.tool-terminal { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.tool-terminal .term-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tool-terminal .term-label { font-size: 11px; color: var(--ant-color-text-tertiary, #999); flex: none; }
+.tool-terminal .term-cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--ant-color-fill-quaternary, #f5f5f5); padding: 1px 6px; border-radius: 4px; word-break: break-all; }
+.tool-terminal .term-out { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--ant-color-bg-layout, #fafafa); border-radius: 6px; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
