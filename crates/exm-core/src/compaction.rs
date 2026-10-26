@@ -186,6 +186,10 @@ mod tests {
             created_at: String::new(),
             token_usage: None,
             thinking: None,
+            last_message_preview: None,
+            last_active_at: None,
+            tool_calls: Vec::new(),
+            steps: Vec::new(),
         };
         let msgs = vec![
             mk(MessageRole::User, "你好"),
