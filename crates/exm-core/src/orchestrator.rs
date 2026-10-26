@@ -535,79 +535,18 @@ impl Orchestrator {
     }
 
     /// 上下文压缩（docs/架构与设计.md）：历史超过阈值时，旧消息压成滚动摘要，保留最近窗口原文
-    /// 返回 (滚动摘要, 最近窗口消息原文文本)
+    /// 返回 (滚动摘要, 最近窗口消息原文文本)——共享实现见 compaction.rs（单智能体循环同口径复用）
     async fn ensure_compacted(&self, session_id: &str) -> (Option<String>, String) {
-        type StoredMessage = crate::types::ChatMessage;
-        const TRIGGER: usize = 20; // 超过才压缩
-        const KEEP: usize = 12; // 保留最近 N 条原文
-        let msgs: Vec<StoredMessage> = self
-            .store
-            .list_messages(session_id, 500)
-            .unwrap_or_default();
-        if msgs.len() <= TRIGGER {
-            return (None, render_recent(&msgs));
-        }
-        // list_messages 为时间正序：older = 前段（压入摘要）；recent = 尾部 KEEP 条原文窗口
-        let split = msgs.len().saturating_sub(KEEP);
-        let older: Vec<&StoredMessage> = msgs.iter().take(split).collect();
-        let recent: Vec<&StoredMessage> = msgs.iter().skip(split).collect();
-        let session = self.store.get_session(session_id).ok().flatten();
-        let upto = older.len();
-        let prev_upto = session.as_ref().and_then(|s| s.summary_upto).unwrap_or(0);
-        let prev_summary = session
-            .as_ref()
-            .and_then(|s| s.rolling_summary.clone())
-            .unwrap_or_default();
-        if prev_upto == upto {
-            return (Some(prev_summary), render_recent_hlp(&recent));
-        }
-        // 增量压缩：已有摘要 + 新纳入的旧消息 → 新摘要（LLM 非流式，指挥体模型）
-        let transcript: String = older
-            .iter()
-            .map(|m| {
-                let who = match m.role {
-                    MessageRole::User => "用户",
-                    MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体"),
-                    MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
-                    MessageRole::System => "系统",
-                };
-                let body = m
-                    .statements
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("；");
-                format!("[{who}] {}", body.chars().take(400).collect::<String>())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let system = "你是会话压缩器【会话压缩】。把历史对话压成不超过 400 字的连续上下文摘要：保留目标、关键结论、证据与未决事项；只输出摘要正文，不要任何前后缀。";
-        let user = format!(
-            "已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。"
-        );
         let (provider, model) = self.resolve_orch_model();
-        let req = ChatRequest::new(
-            model,
-            vec![ChatMessage::system(system), ChatMessage::user(user)],
-        );
-        let summary = provider
-            .chat(req)
-            .await
-            .map(|r| r.content)
-            .unwrap_or_else(|e| {
-                eprintln!("[orchestrator] 会话压缩失败（沿用旧摘要）：{e}");
-                if prev_summary.is_empty() {
-                    String::new()
-                } else {
-                    prev_summary.clone()
-                }
-            });
-        if !summary.trim().is_empty() {
-            let _ = self.store.update_compaction(session_id, &summary, upto);
-            (Some(summary), render_recent_hlp(&recent))
-        } else {
-            (None, render_recent_hlp(&recent))
-        }
+        let c = crate::compaction::ensure_compacted(
+            &self.store,
+            &provider,
+            &model,
+            session_id,
+            crate::compaction::CompactParams::default(),
+        )
+        .await;
+        (c.summary, c.recent)
     }
 
     pub async fn handle_user_message(
@@ -2715,32 +2654,6 @@ fn fallback_converge_text(
         graph.list().len()
     ));
     lines.join("\n")
-}
-
-/// 最近窗口消息渲染为文本（新→旧输入，按时间正序输出）
-fn render_recent(msgs: &[crate::types::ChatMessage]) -> String {
-    render_recent_hlp(&msgs.iter().collect::<Vec<_>>())
-}
-
-fn render_recent_hlp(msgs: &[&crate::types::ChatMessage]) -> String {
-    msgs.iter()
-        .map(|m| {
-            let who = match m.role {
-                MessageRole::User => "用户",
-                MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体"),
-                MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
-                MessageRole::System => "系统",
-            };
-            let body = m
-                .statements
-                .iter()
-                .map(|s| s.text.as_str())
-                .collect::<Vec<_>>()
-                .join("；");
-            format!("[{who}] {}", body.chars().take(300).collect::<String>())
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 pub fn text_to_statements(text: &str) -> Vec<Statement> {
