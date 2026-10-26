@@ -494,14 +494,16 @@ async fn single_agent_target_switch_and_l0_direct() {
     assert!(core.registry().remove_single("lone-writer").unwrap());
     assert!(core.registry().single("lone-writer").is_none());
 
-    // 默认智能体（生成器预置）：存在、显示名为 default、提示词含「本机」自称
+    // 默认智能体（生成器预置）：存在、显示名 Machina；角色设定在 SOUL、行为协议在 PROMPT
     let machina = core.registry().single("machina").expect("默认智能体应预置");
-    assert_eq!(machina.name, "default");
+    assert_eq!(machina.name, "Machina");
     let prompt = core.registry().load_single_prompt(&machina.prompt_file).unwrap();
-    assert!(prompt.contains("本机"), "默认智能体提示词应含「本机」自称");
-    // 指挥体不叫 default（组指挥体 ≠ 默认智能体）
+    assert!(!prompt.contains("你是"), "PROMPT 不定义角色设定（归 SOUL）");
+    let soul = core.registry().single_persona("machina").unwrap();
+    assert!(soul.contains("理性"), "SOUL 应含性格准则（默认与用户定制均满足）");
+    // 指挥体不叫 Machina（组指挥体 ≠ 默认智能体）
     let orch = core.agent("orchestrator").expect("指挥体应存在");
-    assert_ne!(orch.name, "default");
+    assert_ne!(orch.name, "Machina");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
