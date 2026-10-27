@@ -325,6 +325,29 @@ pub fn build_router(core: Arc<Core>) -> Router {
         router = router.fallback_service(
             tower_http::services::ServeDir::new(dist).not_found_service(index),
         );
+        // 静态资源缓存语义（SW 换版可靠性）：
+        // - sw.js / index.html：no-cache（每次回源验证）——sw.js 被浏览器/旧 SW 缓存会阻塞新版接管，
+        //   v1 cache-first 时代的 SW 尤其顽固；index.html 引用 hash 资产，同样必须每次回源
+        // - /assets/：immutable 长缓存（内容 hash 文件名，内容变则名变）
+        router = router.layer(axum::middleware::from_fn(|req: axum::extract::Request, next: axum::middleware::Next| async move {
+            let is_static = !req.uri().path().starts_with("/api") && !req.uri().path().starts_with("/ws");
+            let path = req.uri().path().to_string();
+            let mut resp = next.run(req).await;
+            if !is_static {
+                return resp;
+            }
+            let cc = if path.starts_with("/assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                // sw.js / index.html / 文档 / 其余：每次回源验证
+                "no-cache"
+            };
+            resp.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static(cc),
+            );
+            resp
+        }));
     }
     router
 }
