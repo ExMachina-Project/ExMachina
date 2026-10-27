@@ -203,3 +203,25 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           generate_release_notes: true
           files: release/*
+
+  # ── 发版后补步：把 main 的 squash 发版提交 merge 回 dev，补回发版线祖先 ────────
+  # 背景：main 为线性历史（squash 落地），PR 的原始提交永远不在 main 祖先里。
+  # 不补血缘的话，下次 dev→main PR 会 diverged 无法比对——历史上这一步靠人肉
+  # 「merge main 合入 dev」，v0.5.2 时漏做直接炸出 307 条提交的 PR。此 job 使其不可能被遗忘。
+  post-release:
+    needs: [version, publish]
+    # 只在真正发过版时跑；workflow_dispatch 手动跑且 tag 已存在时也允许补（补救漏掉的场次）
+    if: always() && needs.version.result == 'success' && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: merge main 回 dev（只改图不改内容——squash 内容本就是 dev 树的时点快照）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge origin/main --no-ff -m "merge main 合入 dev——补回 ${{ needs.version.outputs.tag }} squash 发版祖先（发版流水线自动补步）"
+      - name: 推送 dev
+        run: git push origin dev
