@@ -125,6 +125,8 @@ struct Settings {
     max_comment_chars: usize,
     source: String,
     keywords: Vec<String>,
+    /// 内容倾向：自由文本提示词，整段注入观看提示作口味参考；分词仅用于候选软排序
+    interests: String,
     reply_keywords: Vec<String>,
     comment_style: String,
     region: String,
@@ -146,6 +148,7 @@ impl Settings {
             max_comment_chars: cfg_u64(ch, "maxCommentChars", 120).clamp(20, 800) as usize,
             source: ch.cfg("source").unwrap_or_else(|| "popular".into()),
             keywords: split_list(ch.cfg("keywords").as_deref()),
+            interests: ch.cfg("interests").unwrap_or_default(),
             reply_keywords: split_list(ch.cfg("replyKeywords").as_deref()),
             comment_style: ch.cfg("commentStyle").unwrap_or_default(),
             region: ch.cfg("region").unwrap_or_else(|| "US".into()),
@@ -276,6 +279,11 @@ async fn tick(core: &Arc<Core>, ch: &Channel, s: &Settings) -> anyhow::Result<St
 
     let mut items = fetch_candidates(ch, s).await?;
     items.retain(|v| !state.seen(&video_key(v)));
+    // 内容倾向（软偏好）：命中的视频排到队首优先观看，未命中的保留在后（不硬过滤）
+    let interest_terms = split_list(Some(s.interests.as_str()));
+    if !interest_terms.is_empty() {
+        items.sort_by_key(|v| !matches_keywords(v, &interest_terms));
+    }
     if !s.keywords.is_empty() {
         let filtered: Vec<VideoItem> = items
             .iter()
@@ -505,6 +513,12 @@ fn build_prompt(
     } else {
         format!("【风格要求】{}（与本账号人设冲突时，以人设为准）\n", s.comment_style)
     };
+    // 内容倾向：观看与互动的口味参考（软偏好，不排斥其他内容）
+    let taste = if s.interests.trim().is_empty() {
+        String::new()
+    } else {
+        format!("【内容倾向】{}\n这是账号主理人给的内容口味提示——命中倾向的视频可以多聊、多深挖，未命中的正常观看即可，不必硬凑，也不要在评论里复述这段要求。\n", s.interests.trim())
+    };
     let published = if item.published_at > 0 {
         chrono::DateTime::from_timestamp(item.published_at, 0)
             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
@@ -520,7 +534,7 @@ fn build_prompt(
 1. 以观众视角概括视频内容、亮点或问题（summary，80 字以内）。summary 用你自己的语言，保持你一贯的说话方式。\n\
 2. {} \n\
 3. {} \n\
-{}\
+{}{}\
 【硬性要求】\n\
 - 你的人格、语气、口头禅全部沿用你自身的设定（SOUL/人设）；本任务不要求你扮演别人，只用你自己的方式谈论视频内容。\n\
 - 只输出一个 JSON 对象，不要 Markdown 代码块、不要解释、不要使用任何工具。\n\
@@ -536,7 +550,8 @@ fn build_prompt(
         c,
         comment_rule,
         reply_rule,
-        style
+        style,
+        taste
     )
 }
 
