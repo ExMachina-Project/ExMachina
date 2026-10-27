@@ -55,3 +55,22 @@ jobs:
       # 未收录的 key 会静默返回原文（界面直接显示 approvals.xxx）。此处兜底拦截。
       - name: i18n keys
         run: npm run check:i18n
+
+  # Windows 编译门禁：release 流水线全平台出包，但本 CI 只有 ubuntu——
+  # Windows 专属编译错误（Unix API 误用等）曾带病潜伏两个版本，发版时才在 release 里爆红。
+  # 只跑 check（不跑 clippy/test）：目标是在 PR 阶段机械拦住「Windows 编不过」，不是全量质量门。
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Check
+        run: cargo check --workspace --locked
