@@ -449,15 +449,15 @@ export function ChannelsView(): React.ReactElement {
     const st = status[c.id];
     if (!st) return <Tag>{t("channels.stWait")}</Tag>;
     return (
-      <Space direction="vertical" size={0}>
+      <Space direction="vertical" size={0} style={{ display: "flex" }}>
         <Tooltip title={`${st.detail} · ${st.at}`}>
-          <Tag color={st.state === "ok" ? "success" : "error"} style={{ cursor: "default" }}>
+          <Tag color={st.state === "ok" ? "success" : "error"} style={{ cursor: "default", marginRight: 0, alignSelf: "flex-start" }}>
             {st.state === "ok" ? t("channels.stOk") : t("channels.stErr")}
           </Tag>
         </Tooltip>
         <span
           className="mono dim"
-          style={{ maxWidth: 210, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          style={{ display: "block", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         >
           {st.detail}
         </span>
@@ -549,7 +549,7 @@ export function ChannelsView(): React.ReactElement {
               },
             },
             { title: t("channels.colSecret"), render: (_, c) => credTag(c) },
-            { title: t("channels.colStatus"), render: (_, c) => statusCell(c) },
+            { title: t("channels.colStatus"), width: 280, render: (_, c) => statusCell(c) },
             {
               title: t("channels.colTest"),
               width: 110,

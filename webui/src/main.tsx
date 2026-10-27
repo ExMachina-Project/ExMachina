@@ -90,12 +90,12 @@ function Root(): React.ReactElement {
           colorInfo: color,
           colorLink: color,
           ...tokens,
-          // 圆角纪律：全局统一 8px，小件 6px，浮层 12px
-          borderRadius: 8,
-          borderRadiusLG: 12,
-          borderRadiusSM: 6,
-          borderRadiusXS: 4,
-          borderRadiusOuter: 10,
+          // 圆角纪律：智械直角风——结构圆角全部归零（LED/头像等圆形走组件内定制）
+          borderRadius: 0,
+          borderRadiusLG: 0,
+          borderRadiusSM: 0,
+          borderRadiusXS: 0,
+          borderRadiusOuter: 0,
           // 动效令牌：快进慢出，全局统一节奏
           motionDurationFast: "0.12s",
           motionDurationMid: "0.2s",
