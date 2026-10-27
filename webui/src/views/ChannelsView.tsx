@@ -242,6 +242,7 @@ export function ChannelsView(): React.ReactElement {
   const [testResult, setTestResult] = useState<Record<string, { ok: boolean; category?: string; identity?: string; message?: string; error?: string }>>({});
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [form] = Form.useForm();
@@ -348,11 +349,13 @@ export function ChannelsView(): React.ReactElement {
 
   const submit = async () => {
     const v = await form.validateFields();
+    setSaving(true);
     const plat = PLATFORMS.find((p) => p.key === v.platform) ?? PLATFORMS[0];
     // config 扩展 JSON：面板未展开时字段未注册，从 form store 直读并手动校验（合法才允许保存）
     const parsedJson = parseConfigJson(form.getFieldValue("configJson"));
     if (parsedJson.error) {
       message.error(parsedJson.error);
+      setSaving(false);
       return;
     }
     // 目录字段优先：剔除扩展 JSON 里的同名键，避免「清空目录字段却被扩展 JSON 复活」
@@ -394,6 +397,8 @@ export function ChannelsView(): React.ReactElement {
       await load();
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -627,10 +632,13 @@ export function ChannelsView(): React.ReactElement {
         title={editing ? t("channels.editTitle", { id: editing.id }) : t("channels.add")}
         onCancel={() => setModal(false)}
         onOk={() => void submit()}
+        confirmLoading={saving}
         okText={t("common.save")}
         cancelText={t("common.cancel")}
+        destroyOnHidden
+        width={640}
       >
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" onFinish={() => void submit()}>
           <Form.Item noStyle shouldUpdate={(a, b) => a.platform !== b.platform}>
             {({ getFieldValue }) => {
               const plat = PLATFORMS.find((p) => p.key === getFieldValue("platform")) ?? PLATFORMS[0];
@@ -697,7 +705,7 @@ export function ChannelsView(): React.ReactElement {
                           {f.options ? (
                             <Select options={f.options.map((o) => ({ value: o.value, label: t(o.labelKey) }))} />
                           ) : f.multiline ? (
-                            <Input.TextArea rows={2} placeholder={f.ph} />
+                            <Input.TextArea rows={3} placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           ) : f.secret ? (
                             <Input.Password autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           ) : (

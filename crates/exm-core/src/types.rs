@@ -143,6 +143,10 @@ pub enum ToolName {
     /// 子智能体派生：主智能体把封闭子任务交给独立上下文的子智能体执行（单层限制，
     /// 子级无 spawn/agent_manage），返回结论摘要。并发与超时受控（spec: subagent-spawn）
     Spawn,
+    /// 动态上下文压缩（实验性，experiments.dynamicCompaction 开启才下发）：
+    /// 模型自行判断时机，把窗口外旧历史主动压成滚动摘要
+    #[serde(rename = "context_compact")]
+    ContextCompact,
 }
 
 impl ToolName {
@@ -166,6 +170,7 @@ impl ToolName {
             ToolName::MemoryLink => "memory_link",
             ToolName::Git => "git",
             ToolName::Spawn => "spawn",
+            ToolName::ContextCompact => "context_compact",
         }
     }
 
@@ -202,6 +207,7 @@ impl ToolName {
             "memory_link" => Some(ToolName::MemoryLink),
             "git" => Some(ToolName::Git),
             "spawn" => Some(ToolName::Spawn),
+            "context_compact" => Some(ToolName::ContextCompact),
             _ => None,
         }
     }

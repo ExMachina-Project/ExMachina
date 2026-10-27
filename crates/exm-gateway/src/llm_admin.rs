@@ -59,6 +59,10 @@ pub struct LlmProfileBody {
     /// 多 Key 池：明文 = 新键；掩码哨兵 = 兼容旧客户端按序数沿用；{"keep": i} = 沿用旧池第 i 把键
     #[serde(default)]
     pub api_keys: Option<Vec<ApiKeyEntry>>,
+    /// 显式清空全部密钥（主 Key + Key 池）：true 时 api_key/api_keys 的沿用语义失效。
+    /// 此前空字符串被当「沿用旧值」，删掉密钥行保存后密钥永远清不掉——删除必须是显式意图。
+    #[serde(default)]
+    pub clear_keys: bool,
     #[serde(default)]
     pub api_format: Option<String>,
     #[serde(default)]
@@ -97,38 +101,46 @@ fn resolve_profile_input(
     existing: Option<&LlmProfile>,
     v: &LlmProfileBody,
 ) -> LlmProfile {
-    let key = match v.api_key.as_deref() {
-        Some(KEY_MASK) | None => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
-        Some(k) if k.trim().is_empty() => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
-        Some(k) => k.to_string(),
+    // 显式清空优先：clearKeys=true 时主 Key 与 Key 池一律置空（删除密钥的保存语义）
+    let key = if v.clear_keys {
+        String::new()
+    } else {
+        match v.api_key.as_deref() {
+            Some(KEY_MASK) | None => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
+            Some(k) if k.trim().is_empty() => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
+            Some(k) => k.to_string(),
+        }
     };
     // Key 池：明文 = 新键；{"keep": i} = 沿用旧池第 i 把键（结构化，删行/插行后不串位）；
-    // 掩码哨兵 = 兼容旧客户端，按「第 n 个掩码沿用旧池第 n 把有效键」序数对位
+    // 掩码哨兵 = 兼容旧客户端，按「第 n 个掩码沿用旧池第 n 把有效键」序数对位。
+    // clearKeys 时整池跳过（清空优先于一切沿用引用）
     let mut api_keys: Vec<String> = Vec::new();
     if let Some(list) = &v.api_keys {
-        let old_pool: Vec<&String> = existing
-            .map(|e| e.api_keys.iter().filter(|k| !k.trim().is_empty()).collect())
-            .unwrap_or_default();
-        let mut text_mask_seq = 0usize;
-        for k in list {
-            match k {
-                ApiKeyEntry::Keep { keep } => {
-                    if let Some(old_k) = old_pool.get(*keep) {
-                        api_keys.push((*old_k).clone());
+        if !v.clear_keys {
+            let old_pool: Vec<&String> = existing
+                .map(|e| e.api_keys.iter().filter(|k| !k.trim().is_empty()).collect())
+                .unwrap_or_default();
+            let mut text_mask_seq = 0usize;
+            for k in list {
+                match k {
+                    ApiKeyEntry::Keep { keep } => {
+                        if let Some(old_k) = old_pool.get(*keep) {
+                            api_keys.push((*old_k).clone());
+                        }
                     }
-                }
-                ApiKeyEntry::Text(s) if s == KEY_MASK => {
-                    if let Some(old_k) = old_pool.get(text_mask_seq) {
-                        api_keys.push((*old_k).clone());
+                    ApiKeyEntry::Text(s) if s == KEY_MASK => {
+                        if let Some(old_k) = old_pool.get(text_mask_seq) {
+                            api_keys.push((*old_k).clone());
+                        }
+                        text_mask_seq += 1;
                     }
-                    text_mask_seq += 1;
+                    ApiKeyEntry::Text(s) if !s.trim().is_empty() => api_keys.push(s.clone()),
+                    ApiKeyEntry::Text(_) => {}
                 }
-                ApiKeyEntry::Text(s) if !s.trim().is_empty() => api_keys.push(s.clone()),
-                ApiKeyEntry::Text(_) => {}
             }
         }
     }
-    if api_keys.is_empty() {
+    if api_keys.is_empty() && !v.clear_keys {
         api_keys = existing.map(|e| e.api_keys.clone()).unwrap_or_default();
     }
     // 模型清单：缺省沿用旧清单；提交时空值模型名剔除。默认模型若不在清单中自动补入（能力未标记）。
@@ -547,5 +559,78 @@ pub async fn list_provider_models(
             Json(json!({ "ok": true, "models": models })).into_response()
         }
         Err(e) => Json(json!({ "ok": false, "models": [], "error": e.to_string() })).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn existing() -> LlmProfile {
+        LlmProfile {
+            id: "p1".into(),
+            name: "测试档案".into(),
+            base_url: "https://api.test.com/v1".into(),
+            api_key: "sk-main".into(),
+            api_keys: vec!["sk-pool-1".into(), "sk-pool-2".into()],
+            models: vec![],
+            api_format: "openai".into(),
+            model: "m1".into(),
+            fallback: None,
+        }
+    }
+
+    fn body(json: serde_json::Value) -> LlmProfileBody {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// 删除密钥保存无效的回归：clearKeys=true 时主 Key 与 Key 池全部清空
+    #[test]
+    fn 密钥解析_显式清空标志清掉全部密钥() {
+        let old = existing();
+        // 模拟前端删空所有密钥行的提交
+        let b = body(json!({ "id": "p1", "apiKey": "", "apiKeys": [], "clearKeys": true }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "", "主 Key 应被清空");
+        assert!(p.api_keys.is_empty(), "Key 池应被清空");
+    }
+
+    /// 不带 clearKeys 的空提交沿用旧密钥（既有「不丢已配密钥」语义保持）
+    #[test]
+    fn 密钥解析_空提交不带清空标志沿用旧值() {
+        let old = existing();
+        let b = body(json!({ "id": "p1", "apiKey": "", "apiKeys": [] }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert_eq!(p.api_keys.len(), 2);
+    }
+
+    /// 掩码 = 沿用主 Key；{keep: i} = 按索引沿用池内键（删行/插行不串位）
+    #[test]
+    fn 密钥解析_掩码与keep索引对位沿用() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ { "keep": 1 }, "sk-new" ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert_eq!(p.api_keys, vec!["sk-pool-2".to_string(), "sk-new".to_string()]);
+    }
+
+    /// clearKeys 与掩码并存时清空优先（删除是显式意图，优先级最高）
+    #[test]
+    fn 密钥解析_清空标志优先于掩码() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ { "keep": 0 } ],
+            "clearKeys": true
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "");
+        assert!(p.api_keys.is_empty());
     }
 }

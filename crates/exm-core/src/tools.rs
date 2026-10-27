@@ -5,6 +5,7 @@
 //! 未配置即不下发）/ web_fetch / agent_manage（组内编成）/ schedule（自主排程）。
 
 use crate::config::{SandboxConfig, SearchConfig, SecurityConfig};
+use crate::provider::LlmProvider;
 use crate::registry::LocalRegistry;
 use crate::store::Store;
 use crate::types::{normalize_domain, AgentDefinition, ApprovalRequest, CoreEvent, Tier, ToolName};
@@ -1037,6 +1038,9 @@ pub struct ToolGateway {
     /// RwLock 槽：Core 装配后回接（tools 已 Arc 共享给 runtime，无法再拿可变引用）
     spawn_executor:
         parking_lot::RwLock<Option<Arc<dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>>>,
+    /// 上下文压缩执行器（context_compact 工具，实验性；未注入 = 工具返回未装配说明）。
+    /// 槽位语义同 spawn_executor：Core 装配后回接 (provider, model)。
+    compactor: parking_lot::RwLock<Option<(Arc<dyn LlmProvider>, String)>>,
     /// spawn 并发闸（实例级信号量；ToolGateway 装配时按上限创建）
     spawn_semaphore: Arc<tokio::sync::Semaphore>,
     /// spawn 子任务超时（秒；默认 300）
@@ -1086,6 +1090,7 @@ impl ToolGateway {
             hooks: crate::config::HooksConfig::default(),
             cron: None,
             spawn_executor: parking_lot::RwLock::new(None),
+            compactor: parking_lot::RwLock::new(None),
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
             background: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
@@ -1116,6 +1121,11 @@ impl ToolGateway {
         exec: Arc<dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>,
     ) {
         *self.spawn_executor.write() = Some(exec);
+    }
+
+    /// 注入上下文压缩执行器（context_compact 工具，实验性开关开启时由 Core 装配后回接）
+    pub fn set_compactor(&self, provider: Arc<dyn LlmProvider>, model: String) {
+        *self.compactor.write() = Some((provider, model));
     }
 
     /// 注入记忆模式（config.memory.enabled + memory_md_path）。
@@ -1748,12 +1758,21 @@ impl ToolGateway {
             },
             "required": ["task"]
         }));
+        push(ToolName::ContextCompact, "主动压缩会话上下文：把最近窗口之外的更早历史压成滚动摘要（原文保留在会话记录中，仅上下文视图替换）。何时调用由你判断：上下文已冗长、早期细节不再关键、即将进入需要大量新鲜上下文的长任务阶段。压缩是增量的，可多次调用", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "keepRecent": { "type": "integer", "description": "保留最近 N 条原文不压缩（默认 12，范围 2-100）" },
+                "note": { "type": "string", "description": "本次压缩时机判断的简要说明（为什么现在压、想保住什么）" }
+            },
+            "required": []
+        }));
         specs
     }
 
     /// 同 [`Self::tool_specs`]，额外按记忆模式收敛 schema：文件记忆模式下
     /// memory_write / memory_link 必然失败，不下发（与 web_search/browser 的
     /// 「后端未就绪不承诺」同一口径）；memory_read 保留——读 memory.md 仍有意义。
+    /// 记忆模式门控下发：memory_deep=false（文件记忆模式）时记忆写类工具不下发
     pub fn tool_specs_gated(
         allowlist: &[ToolName],
         search_ready: bool,
@@ -1770,6 +1789,22 @@ impl ToolGateway {
             specs.retain(|s| !drop.contains(&s.name.as_str()));
         }
         specs
+    }
+
+    /// 实验性开关门控：dynamic_compaction=false 时 context_compact 不下发
+    /// （不开实验开关就不给模型这个能力面，避免误用未稳定行为）
+    pub fn tool_specs_experiments(
+        specs: Vec<crate::provider::ToolSpec>,
+        dynamic_compaction: bool,
+    ) -> Vec<crate::provider::ToolSpec> {
+        if dynamic_compaction {
+            specs
+        } else {
+            specs
+                .into_iter()
+                .filter(|s| s.name != ToolName::ContextCompact.key())
+                .collect()
+        }
     }
 
     /// 工具层事件发双层：实时广播（WS 推流）+ 事件库落盘（历史可回放）。
@@ -1914,7 +1949,7 @@ impl ToolGateway {
 
         let result = match ToolName::parse(name) {
             Some(tool) => {
-                if !allowlist.contains(&tool) {
+                if !allowlist.contains(&tool) && tool != ToolName::ContextCompact {
                     ToolResult::err(format!("工具 {} 不在本节点放行白名单内", tool.key()))
                 } else if tool == ToolName::AgentManage
                     && self
@@ -1928,6 +1963,11 @@ impl ToolGateway {
                     ToolResult::err("agent_manage 仅限激活组主智能体使用")
                 } else if tool == ToolName::Computer {
                     self.tool_computer(agent_id, session_id, args).await
+                } else if tool == ToolName::ContextCompact {
+                    // 实验性动态压缩：豁免 allowlist（能力面由 schema 下发门控控制——
+                    // 未开实验开关时模型根本看不到该工具 schema，不会有调用进来）
+                    self.tool_context_compact(agent_id, session_id, args)
+                        .await
                 } else {
                     self.dispatch(agent_id, session_id, tool, args).await
                 }
@@ -2118,6 +2158,7 @@ impl ToolGateway {
             ToolName::MemoryLink => self.tool_memory_link(agent_id, session_id, args),
             ToolName::Git => self.tool_git(agent_id, session_id, args).await,
             ToolName::Spawn => self.tool_spawn(agent_id, session_id, args).await,
+            ToolName::ContextCompact => unreachable!("context_compact 在 execute_named 预分发"),
         }
     }
 
@@ -3678,7 +3719,59 @@ impl ToolGateway {
         result
     }
 
-    /// 工作台文件树（WebUI CodeWorkbenchView 用，spec: webui-code-workbench）：
+    /// 动态上下文压缩（实验性，experiments.dynamicCompaction）：模型主动触发。
+    /// 压缩执行体在 compaction.rs（compact_now），网关只做装配判定与结果转述。
+    async fn tool_context_compact(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
+        let Some((provider, model)) = self.compactor.read().clone() else {
+            return ToolResult::err("压缩器未装配（运行时未就绪）");
+        };
+        let keep = args
+            .get("keepRecent")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(crate::compaction::COMPACT_KEEP as u64)
+            .clamp(2, 100) as usize;
+        let note = args
+            .get("note")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        match crate::compaction::compact_now(
+            &self.store,
+            &provider,
+            &model,
+            session_id,
+            keep,
+            &note,
+        )
+        .await
+        {
+            Some((summary, n)) => {
+                self.emit_and_persist(CoreEvent {
+                    kind: "context.compacted".into(),
+                    session_id: session_id.to_string(),
+                    payload: serde_json::json!({
+                        "agentId": agent_id, "messagesCompacted": n,
+                        "keepRecent": keep, "summaryChars": summary.chars().count(),
+                    }),
+                });
+                ToolResult::ok(format!(
+                    "已压缩 {n} 条更早历史为滚动摘要（保留最近 {keep} 条原文）。摘要要点：{}",
+                    summary.chars().take(300).collect::<String>()
+                ))
+            }
+            None => ToolResult::ok(
+                "窗口外没有待压缩的历史（已全部压过或条数不足）——无需压缩。".to_string(),
+            ),
+        }
+    }
+
+    /// 工作台文件树（对话内 @ 文件提及与 e2e 用，spec: webui-code-workbench → chat-as-coding）：
     /// 相对工作区根的目录列表（.gitignore 过滤 + 深度/数量限制）。
     /// 与工具同一工作区边界（resolve_safe），越权路径拒绝。
     pub fn workbench_tree(&self, rel: &str, depth_limit: usize) -> anyhow::Result<serde_json::Value> {
@@ -6097,5 +6190,113 @@ mod terminal_gate_tests {
             r.error.unwrap_or_default().contains("审批"),
             "白名单内高危命令应走审批闸门"
         );
+    }
+
+    // ---------------- 实验性开关（experiments） ----------------
+
+    /// 动态压缩门控：开关关闭时 context_compact 不在 schema 面
+    #[test]
+    fn 实验开关_动态压缩关闭时schema剔除context_compact() {
+        let allow = [ToolName::Terminal, ToolName::ContextCompact];
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_experiments(specs, false);
+        assert!(
+            specs.iter().all(|s| s.name != "context_compact"),
+            "开关关闭时 context_compact 不应下发"
+        );
+        // 开启时保留
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_experiments(specs, true);
+        assert!(specs.iter().any(|s| s.name == "context_compact"));
+    }
+
+    /// 动态压缩执行：装配压缩器后调用成功落库摘要；未装配时明确报错
+    #[tokio::test]
+    async fn 动态压缩_装配后执行并落库() {
+        use crate::provider::{ChatRequest, LlmProvider};
+        struct OkCompacter;
+        #[async_trait::async_trait]
+        impl LlmProvider for OkCompacter {
+            fn name(&self) -> &'static str {
+                "test-compacter"
+            }
+            async fn chat(&self, _req: ChatRequest) -> anyhow::Result<crate::provider::ChatResponse> {
+                Ok(crate::provider::ChatResponse {
+                    content: "目标 X 已完成；结论 Y；未决 Z".into(),
+                    reasoning: String::new(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    tool_calls: Vec::new(),
+                })
+            }
+            async fn stream(
+                &self,
+                _req: ChatRequest,
+                _tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamDelta>,
+            ) -> anyhow::Result<crate::provider::ChatResponse> {
+                anyhow::bail!("测试替身不支持流式")
+            }
+        }
+
+        let gw = gw_with_approval("off", 0);
+        // 造 6 条历史，keep=2 → 压 4 条
+        let sid = gw
+            .store
+            .create_session("压缩测试", "g1")
+            .unwrap()
+            .id;
+        for i in 0..6 {
+            gw.store
+                .add_message(
+                    &sid,
+                    crate::types::MessageRole::User,
+                    None,
+                    vec![crate::types::Statement::new(
+                        crate::types::SpeechTag::要求,
+                        format!("第 {i} 条"),
+                    )],
+                )
+                .unwrap();
+        }
+        // 未装配：明确报错（不是静默失败）
+        let r = gw
+            .execute(
+                "a1",
+                &sid,
+                &[],
+                ToolName::ContextCompact,
+                &serde_json::json!({ "keepRecent": 2 }),
+            )
+            .await;
+        assert!(!r.ok);
+
+        // 装配后：压缩成功 + 会话滚动摘要落库
+        gw.set_compactor(Arc::new(OkCompacter), "test-model".into());
+        let r = gw
+            .execute(
+                "a1",
+                &sid,
+                &[],
+                ToolName::ContextCompact,
+                &serde_json::json!({ "keepRecent": 2, "note": "进入长任务阶段" }),
+            )
+            .await;
+        assert!(r.ok, "压缩应成功: {:?}", r.error);
+        let s = gw.store.get_session(&sid).unwrap().unwrap();
+        assert_eq!(s.summary_upto, Some(4), "摘要应覆盖前 4 条");
+        assert!(s.rolling_summary.is_some());
+
+        // 幂等：窗口外已全部压过 → 无可压缩说明
+        let r2 = gw
+            .execute(
+                "a1",
+                &sid,
+                &[],
+                ToolName::ContextCompact,
+                &serde_json::json!({ "keepRecent": 2 }),
+            )
+            .await;
+        assert!(r2.ok);
+        assert!(r2.output.contains("无需压缩"), "二次压缩应报无可压缩");
     }
 }

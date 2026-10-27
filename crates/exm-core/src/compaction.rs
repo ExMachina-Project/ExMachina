@@ -168,6 +168,64 @@ pub async fn ensure_compacted(
     }
 }
 
+/// 模型主动压缩（实验性，experiments.dynamicCompaction）：context_compact 工具的执行体。
+///
+/// 与 `ensure_compacted` 的差异：不看条数阈值，只要窗口外还有未压缩历史就压。
+/// `keep` 是保留原文的最近窗口；返回 (新摘要, 本次数纳入压缩的消息条数)。
+/// 无可压缩内容 / 压缩失败时返回 None（调用方转成工具层说明，不阻断会话）。
+pub async fn compact_now(
+    store: &Arc<Store>,
+    provider: &Arc<dyn LlmProvider>,
+    model: &str,
+    session_id: &str,
+    keep: usize,
+    note: &str,
+) -> Option<(String, usize)> {
+    let msgs: Vec<ChatMessage> = store
+        .list_messages(session_id, 500)
+        .unwrap_or_default();
+    // keep 至少 2 条：正在进行的轮次（用户输入 + 尚未落地的回复）不能被压走
+    let keep = keep.max(2);
+    if msgs.len() <= keep {
+        return None;
+    }
+    let split = msgs.len() - keep;
+    let older: Vec<&ChatMessage> = msgs.iter().take(split).collect();
+    let upto = older.len();
+    let session = store.get_session(session_id).ok().flatten();
+    let prev_upto = session.as_ref().and_then(|s| s.summary_upto).unwrap_or(0);
+    if prev_upto >= upto {
+        return None; // 窗口外已全部压过：无新内容
+    }
+    let prev_summary = session
+        .as_ref()
+        .and_then(|s| s.rolling_summary.clone())
+        .unwrap_or_default();
+    let transcript = older
+        .iter()
+        .map(|m| transcript_line(m))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let user = if note.trim().is_empty() {
+        format!("已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。")
+    } else {
+        format!(
+            "已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n模型压缩说明：{note}\n输出合并后的新摘要。"
+        )
+    };
+    let req = ChatRequest::new(
+        model.to_string(),
+        vec![Wire::system(COMPACTER_SYSTEM), Wire::user(user)],
+    );
+    let content = provider.chat(req).await.ok()?.content;
+    let summary = content.trim().to_string();
+    if summary.is_empty() {
+        return None;
+    }
+    store.update_compaction(session_id, &summary, upto).ok()?;
+    Some((summary, upto - prev_upto))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

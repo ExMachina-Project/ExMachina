@@ -28,6 +28,7 @@ const SECTIONS: Record<string, { icon: React.ReactNode; titleKey: TKey; descKey:
   triggers: { icon: <RadarChartOutlined />, titleKey: "sec.triggers", descKey: "sec.triggers.desc" },
   mcpServe: { icon: <CloudServerOutlined />, titleKey: "sec.mcpServe", descKey: "sec.mcpServe.desc" },
   notify: { icon: <NotificationOutlined />, titleKey: "sec.notify", descKey: "sec.notify.desc" },
+  experiments: { icon: <ThunderboltOutlined />, titleKey: "sec.experiments", descKey: "sec.experiments.desc" },
   tools: { icon: <ToolOutlined />, titleKey: "sec.tools", descKey: "sec.tools.desc" },
   ui: { icon: <BgColorsOutlined />, titleKey: "sec.ui", descKey: "sec.ui.desc" },
   version: { icon: <CloudDownloadOutlined />, titleKey: "sec.version", descKey: "sec.version.desc" },
@@ -268,7 +269,7 @@ export function SettingsView(): React.ReactElement {
     setSaving(true);
     try {
       const body: Record<string, unknown> = {};
-      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools"];
+      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "experiments"];
       for (const [k, v] of Object.entries(values)) {
         if (v === undefined) continue;
         const dot = k.indexOf(".");
