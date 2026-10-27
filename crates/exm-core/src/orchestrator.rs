@@ -2287,6 +2287,16 @@ impl ExecCtx {
                         });
                     }
                 }
+                // 组共享上下文（实验性，experiments.groupSharedContext）：
+                // 携带组主会话的滚动摘要 + 最近对话窗口——子个体不再只有 objective 孤岛视角。
+                // 摘要与窗口同源规划路径（ensure_compacted），口径一致。
+                if o.config_snapshot.read().experiments.group_shared_context {
+                    let (summary, recent) =
+                        o.ensure_compacted(&self.session_id).await;
+                    if let Some(ctx) = shared_context_input(summary, recent) {
+                        inputs.push(ctx);
+                    }
+                }
                 inputs
             },
             // 主智能体权限注入：组主智能体获得组内个体管理工具（自定义组）与记忆三工具（默认授权）；
@@ -2843,9 +2853,54 @@ fn protocol_unit_inputs<'a>(
         .collect()
 }
 
+/// 组共享上下文的注入体（实验性，experiments.groupSharedContext）：
+/// 滚动摘要 + 最近窗口 → 一条 DispatchInput；两者皆空时返回 None（不注入空块）。
+fn shared_context_input(summary: Option<String>, recent: String) -> Option<DispatchInput> {
+    let mut ctx = String::new();
+    if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
+        ctx.push_str(&format!("### 会话滚动摘要（更早对话）\n{s}\n\n"));
+    }
+    if !recent.trim().is_empty() {
+        ctx.push_str(&format!("### 最近对话窗口\n{recent}"));
+    }
+    if ctx.trim().is_empty() {
+        return None;
+    }
+    Some(DispatchInput {
+        ref_id: "sharedContext".into(),
+        kind: "context".into(),
+        summary: ctx.trim().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod protocol_inject_tests {
     use super::*;
+
+    /// 组共享上下文注入体：摘要与窗口的组合（实验性开关的数据面）
+    #[test]
+    fn 共享上下文_摘要与窗口拼接() {
+        // 两者皆有：两段都注入
+        let input = shared_context_input(
+            Some("目标：重构压缩模块".into()),
+            "[用户] 继续\n[指挥体] 已完成一半".into(),
+        )
+        .unwrap();
+        assert_eq!(input.ref_id, "sharedContext");
+        assert_eq!(input.kind, "context");
+        assert!(input.summary.contains("会话滚动摘要"));
+        assert!(input.summary.contains("目标：重构压缩模块"));
+        assert!(input.summary.contains("最近对话窗口"));
+
+        // 只有窗口：只带窗口段
+        let input = shared_context_input(None, "[用户] hi".into()).unwrap();
+        assert!(input.summary.contains("最近对话窗口"));
+        assert!(!input.summary.contains("会话滚动摘要"));
+
+        // 两者皆空（含空白摘要）：不注入
+        assert!(shared_context_input(Some("   ".into()), String::new()).is_none());
+        assert!(shared_context_input(None, String::new()).is_none());
+    }
 
     fn proto(id: &str, scope: &str, triggers: &[&str], body: &str) -> ProtocolDef {
         ProtocolDef {

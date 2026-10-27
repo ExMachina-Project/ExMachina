@@ -44,6 +44,8 @@ pub struct AgentRuntime {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<ToolGateway>,
     model: String,
+    /// 实验性开关快照（装配时写入；context_compact 下发门控用）
+    experiments: crate::config::ExperimentsConfig,
 }
 
 impl AgentRuntime {
@@ -58,7 +60,14 @@ impl AgentRuntime {
             provider,
             tools,
             model: model.into(),
+            experiments: crate::config::ExperimentsConfig::default(),
         }
+    }
+
+    /// 注入实验性开关（Core 装配后回接）
+    pub fn with_experiments(mut self, experiments: crate::config::ExperimentsConfig) -> Self {
+        self.experiments = experiments;
+        self
     }
 
     /// Provider 共享（spawn 执行器构造回退链用）
@@ -133,6 +142,10 @@ impl AgentRuntime {
             self.tools.browser_ready(),
             self.tools.computer_ready(),
             self.tools.memory_deep(),
+        );
+        specs = crate::tools::ToolGateway::tool_specs_experiments(
+            specs,
+            self.experiments.dynamic_compaction,
         );
         // 声明式自定义工具（按 agents 可见性）与 MCP 第三方工具一并下发；
         // 仅聊天档连 schema 都不下发——不承诺、不执行任何工具。
@@ -360,6 +373,10 @@ impl AgentRuntime {
             self.tools.browser_ready(),
             self.tools.computer_ready(),
             self.tools.memory_deep(),
+        );
+        specs = crate::tools::ToolGateway::tool_specs_experiments(
+            specs,
+            self.experiments.dynamic_compaction,
         );
         // 仅聊天档连自定义 / MCP schema 都不下发
         if scope.allows_tools() {

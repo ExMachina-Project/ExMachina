@@ -474,6 +474,30 @@ impl Default for LimitsConfig {
     }
 }
 
+/// 实验性功能开关（未稳定的行为面；默认全关，开启即自担体验波动）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentsConfig {
+    /// 动态上下文压缩：模型获得 context_compact 工具，自行判断压缩时机
+    /// （判断依据：上下文变得冗长 / 早期细节已不再关键 / 即将进入长任务阶段），
+    /// 主动把指定范围历史压成滚动摘要。关闭时仍用条数阈值的自动压缩。
+    #[serde(default)]
+    pub dynamic_compaction: bool,
+    /// 智能体组共享上下文：派发子个体时携带组主会话的滚动摘要与最近对话窗口，
+    /// 子个体不再只有 objective 孤岛视角。会放大每轮派发的 token 开销。
+    #[serde(default)]
+    pub group_shared_context: bool,
+}
+
+impl Default for ExperimentsConfig {
+    fn default() -> Self {
+        ExperimentsConfig {
+            dynamic_compaction: false,
+            group_shared_context: false,
+        }
+    }
+}
+
 /// MCP 服务端（把内置工具面按 ACL 暴露给外部客户端；与客户端接入段 mcpServers 解耦）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -628,6 +652,8 @@ pub struct ExmConfig {
     pub notify: NotifyConfig,
     /// 智能连结网络（实验性）
     pub nexus: NexusConfig,
+    /// 实验性功能开关（动态压缩 / 组共享上下文等；默认全关）
+    pub experiments: ExperimentsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -681,6 +707,8 @@ struct ConfigFile {
     notify: Option<NotifyConfig>,
     #[serde(default)]
     nexus: Option<NexusConfig>,
+    #[serde(default)]
+    experiments: Option<ExperimentsConfig>,
 }
 
 /// 能力模型槽位（模型设置页配置）：语音合成 / 语音识别 / 视觉转述。
@@ -1118,6 +1146,7 @@ impl ExmConfig {
             mcp_serve: file.mcp_serve.clone().unwrap_or_default(),
             notify: file.notify.clone().unwrap_or_default(),
             nexus: file.nexus.clone().unwrap_or_default(),
+            experiments: file.experiments.clone().unwrap_or_default(),
         }
     }
 
@@ -1197,6 +1226,7 @@ impl ExmConfig {
             mcp_serve: Some(self.mcp_serve.clone()),
             notify: Some(self.notify.clone()),
             nexus: Some(self.nexus.clone()),
+            experiments: Some(self.experiments.clone()),
         };
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1565,6 +1595,18 @@ pub fn config_schema() -> serde_json::Value {
                     { "key": "mcpServe.allowedTools", "label": "允许的工具", "kind": "string",
                       "default": "", "required": false,
                       "help": "逗号分隔的工具名；空 = 全部启用工具" }
+                ]
+            },
+            {
+                "key": "experiments",
+                "label": "实验性功能",
+                "fields": [
+                    { "key": "experiments.dynamicCompaction", "label": "动态上下文压缩", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）模型获得 context_compact 工具，自行判断压缩时机：上下文冗长、早期细节不再关键时主动把旧历史压成滚动摘要。关闭时按条数阈值自动压缩" },
+                    { "key": "experiments.groupSharedContext", "label": "智能体组共享上下文", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）派发子个体时自动携带组主会话的滚动摘要与最近对话窗口，子个体不再只有 objective 孤岛视角；会放大派发 token 开销" }
                 ]
             },
             {
