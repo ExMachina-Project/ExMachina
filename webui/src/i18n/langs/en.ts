@@ -260,7 +260,7 @@ export const en: Partial<Dict> = {
   "models.removeKey": "Remove this key",
   "models.addKey": "Add key",
   "models.keysExtra": "Multiple keys allowed: an agent sticks to one and only rotates on quota-type failures.",
-  "models.keysExtraEdit": "Leave blank or keep masks to reuse configured keys.",
+  "models.keysExtraEdit": "Keep masks to reuse configured keys; clear a row to delete that key.",
   "models.keysExtraNew": "Leave blank to create the profile first, fill in later.",
   "models.defaultModel": "Default model",
   "models.defaultModelExtra": "Model used by default on this endpoint; units and groups can override on their own pages",

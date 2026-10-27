@@ -16,7 +16,7 @@ import {
   ApiOutlined, CheckCircleOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
-import { api, KEY_MASK, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../api";
+import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../api";
 import { buildCapabilityOptions } from "../models";
 import { PageHeader } from "../components/PageHeader";
 import { useT, type TKey } from "../i18n/core";
@@ -246,34 +246,60 @@ export function ModelsView(): React.ReactElement {
     try {
       const all = form.getFieldsValue(true) as KeyForm & Record<string, unknown>;
       const existing = editing;
-      // 行序即语义：首行 = 主 Key 位（掩码 = 沿用旧值，明文 = 设置/替换主 Key），
-      // 其余行按原序进 Key 池；掩码行以结构化 { keep: 旧池索引 } 提交，删行/插行后不串位。
-      const rows = liveRows(all.keys);
-      const fresh = rows.filter((r) => r.value !== KEY_MASK).map((r) => r.value);
-      const poolEntries: (string | { keep: number })[] = rows
-        .slice(1)
-        .map((r) => (r.value === KEY_MASK ? { keep: r.keep ?? 0 } : r.value));
+      // 行级意图三态：掩码 = 沿用旧值；明文 = 设置/替换；掩码行被清空 = 显式删除（KEY_CLEAR 哨兵）。
+      // 空串在后端是「沿用旧值」——删除必须用哨兵表达，否则「清空输入框保存」永远删不掉密钥。
+      // 首行 = 主 Key 位（keep: -1 = 主沿用），其余行按原序进 Key 池（keep = 旧池索引）。
+      const rawRows = (all.keys ?? []).map((r) => ({
+        value: (r?.value ?? "").trim(),
+        keep: r?.keep,
+      }));
+      // 行是否携带沿用标记（编辑时由 openEdit 注入；-1 = 主 Key 位，>=0 = 旧池索引）
+      const hasKeep = (r: { keep?: number }) => r.keep !== undefined;
+      const firstRaw = rawRows[0];
       let apiKey: string;
       let apiKeys: (string | { keep: number })[];
       let clearKeys = false;
       if (existing) {
-        const first = rows[0];
-        if (first?.value === KEY_MASK) {
-          // 首行掩码：主 Key 沿用旧值（服务端无主 Key 时保持空），其余行全部进池
+        const first = firstRaw;
+        if (first && first.value === KEY_MASK) {
+          // 首行掩码保留：主 Key 沿用旧值（服务端无主 Key 时保持空），其余行进池
           apiKey = existing.apiKey ? KEY_MASK : "";
-          apiKeys = poolEntries;
-        } else if (first) {
+          apiKeys = rawRows.slice(1).map((r) =>
+            hasKeep(r) && r.value === KEY_MASK
+              ? { keep: r.keep ?? 0 }
+              : hasKeep(r) && r.value === ""
+                ? KEY_CLEAR // 掩码行被清空 = 删除该池键
+                : r.value,
+          );
+        } else if (first && first.value !== "") {
           // 首行明文：设置/替换主 Key，其余行进池
           apiKey = first.value;
-          apiKeys = poolEntries;
+          apiKeys = rawRows.slice(1).map((r) =>
+            hasKeep(r) && r.value === KEY_MASK
+              ? { keep: r.keep ?? 0 }
+              : hasKeep(r) && r.value === ""
+                ? KEY_CLEAR
+                : r.value,
+          );
+        } else if (first && first.value === "" && hasKeep(first)) {
+          // 首行是掩码位但被用户清空 = 显式删除主 Key（KEY_CLEAR），其余行进池
+          apiKey = KEY_CLEAR;
+          apiKeys = rawRows.slice(1).map((r) =>
+            hasKeep(r) && r.value === KEY_MASK
+              ? { keep: r.keep ?? 0 }
+              : hasKeep(r) && r.value === ""
+                ? KEY_CLEAR
+                : r.value,
+          );
         } else {
-          // 行已删空：显式清空全部密钥（clearKeys）——空串在后端是「沿用旧值」，
-          // 不带标志位保存后密钥依然存在（删除密钥保存无效的根因）
+          // 行已删空（或首行是新的空行）：显式清空全部密钥（clearKeys）——
+          // 空串在后端是「沿用旧值」，不带标志位保存后密钥依然存在
           apiKey = "";
           apiKeys = [];
           clearKeys = (existing.apiKey ?? "") !== "" || (existing.apiKeys ?? []).length > 0;
         }
       } else {
+        const fresh = rawRows.filter((r) => r.value !== "" && r.value !== KEY_MASK).map((r) => r.value);
         [apiKey = "", ...apiKeys] = fresh;
       }
       await api.saveLlmProfile({

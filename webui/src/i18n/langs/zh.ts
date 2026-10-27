@@ -259,7 +259,7 @@ export const zh = {
   "models.removeKey": "移除这把密钥",
   "models.addKey": "添加密钥",
   "models.keysExtra": "可填多把：同一智能体粘性使用其中一把，仅在限额类失败时切换。",
-  "models.keysExtraEdit": "留空或保持掩码 = 沿用已配置的密钥。",
+  "models.keysExtraEdit": "保持掩码 = 沿用已配置的密钥；清空某行 = 删除该密钥。",
   "models.keysExtraNew": "留空可先建档案，之后再补填。",
   "models.defaultModel": "默认模型",
   "models.defaultModelExtra": "连接该端点后默认使用的模型名；个体与组可在各自页面单独指定",
