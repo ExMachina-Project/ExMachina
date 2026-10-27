@@ -98,6 +98,7 @@ export const zh = {
   // ── 对话页 ──
   "session.new": "新会话",
   "chat.role.user": "用户",
+  "chat.role.auto": "自动任务",
   "chat.role.orchestrator": "指挥体",
   "chat.role.system": "系统",
   "chat.switchedSingle": "已切换到智能体：{id}",

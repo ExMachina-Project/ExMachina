@@ -100,6 +100,7 @@ export const en: Partial<Dict> = {
   // ── 对话页 ──
   "session.new": "New Session",
   "chat.role.user": "User",
+  "chat.role.auto": "Auto Task",
   "chat.role.orchestrator": "Orchestrator",
   "chat.role.system": "System",
   "chat.switchedSingle": "Switched to agent: {id}",

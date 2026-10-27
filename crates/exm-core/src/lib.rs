@@ -645,6 +645,18 @@ impl Core {
         text: &str,
         scope: crate::types::ToolScope,
     ) -> anyhow::Result<()> {
+        self.chat_scoped_origin(session_id, text, scope, None).await
+    }
+
+    /// 带来源标记的一轮执行：自动任务（视频观看/定时/webhook）传 origin（如 "auto:video"），
+    /// 消息落库 agent_id 携带该标记，展示层据此把系统自动内容与真人消息区分开。
+    pub async fn chat_scoped_origin(
+        &self,
+        session_id: &str,
+        text: &str,
+        scope: crate::types::ToolScope,
+        origin: Option<&str>,
+    ) -> anyhow::Result<()> {
         // 预算闸门：估算口径超限即拒绝新轮次（0 = 不限）
         let budget = self.config().max_session_tokens;
         if budget > 0 {
@@ -665,7 +677,7 @@ impl Core {
         crate::round_trace::begin(session_id);
         let result = self
             .orchestrator()
-            .handle_user_message_scoped(session_id, text, scope)
+            .handle_user_message_scoped(session_id, text, scope, origin)
             .await;
         crate::round_trace::end(session_id);
         result

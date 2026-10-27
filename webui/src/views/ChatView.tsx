@@ -27,7 +27,15 @@ import type { ChatMessage } from "../types";
 function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
   const tb = useT();
   const isUser = m.role === "user";
-  const title = isUser ? tb("chat.role.user") : m.role === "orchestrator" ? (orchLabel ?? tb("chat.role.orchestrator")) : (m.agentId ?? tb("chat.role.system"));
+  // 自动任务标记：agentId 带 auto: 前缀的 user 消息是系统自动内容（视频观看等），非真人输入
+  const autoOrigin = isUser && m.agentId?.startsWith("auto:") ? m.agentId.slice(5) : null;
+  const title = isUser
+    ? autoOrigin
+      ? tb("chat.role.auto")
+      : tb("chat.role.user")
+    : m.role === "orchestrator"
+      ? (orchLabel ?? tb("chat.role.orchestrator"))
+      : (m.agentId ?? tb("chat.role.system"));
   const hasThinking = Boolean(m.thinking && m.thinking.trim());
   const hasTools = Boolean(m.toolCalls && m.toolCalls.length > 0);
   const steps = m.steps ?? [];
@@ -37,6 +45,7 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
     <Card size="small" className={`msg-bubble ${isUser ? "msg-user" : "msg-agent"}`}>
       <div className="msg-head">
         {isUser ? <UserOutlined /> : <RobotOutlined />} <b>{title}</b>
+        {autoOrigin && <span className="auto-tag">{autoOrigin}</span>}
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
         {time && <span className="msg-time mono">{time}</span>}
         {!isUser && (
@@ -482,7 +491,7 @@ export function ChatView(): React.ReactElement {
       const msgs = await api.messages(id);
       const lines: string[] = [`# ${title}`, "", `> 导出时间：${new Date().toLocaleString()}`, ""];
       for (const m of msgs) {
-        const role = m.role === "user" ? "👤 用户" : m.role === "orchestrator" ? (m.agentId ? `🤖 ${m.agentId}` : "🤖 指挥体") : "⚙️ 系统";
+        const role = m.role === "user" ? (m.agentId?.startsWith("auto:") ? "⚙️ 自动任务" : "👤 用户") : m.role === "orchestrator" ? (m.agentId ? `🤖 ${m.agentId}` : "🤖 指挥体") : "⚙️ 系统";
         lines.push(`## ${role} · ${m.createdAt}`, "");
         if (m.thinking) {
           lines.push("<details><summary>思维过程</summary>", "", "```", m.thinking, "```", "", "</details>", "");

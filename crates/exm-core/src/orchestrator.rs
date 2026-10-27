@@ -554,16 +554,19 @@ impl Orchestrator {
         session_id: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        self.handle_user_message_scoped(session_id, text, ToolScope::Computer)
+        self.handle_user_message_scoped(session_id, text, ToolScope::Computer, None)
             .await
     }
 
     /// 带能力边界处理一轮（外部通道入口）：scope 贯穿规划/派发/单聊执行。
+    /// `origin`：自动任务的来源标记（如 "auto:video"），落入消息 agent_id；
+    /// None = 真人输入。展示层据此区分「用户消息」与「系统自动内容」。
     pub async fn handle_user_message_scoped(
         self: &Arc<Self>,
         session_id: &str,
         text: &str,
         scope: ToolScope,
+        origin: Option<&str>,
     ) -> anyhow::Result<()> {
         let session = self.store.get_session(session_id)?;
         if session.is_none() {
@@ -573,7 +576,7 @@ impl Orchestrator {
         self.store.add_message(
             session_id,
             MessageRole::User,
-            None,
+            origin,
             vec![Statement::new(SpeechTag::要求, text)],
         )?;
 
@@ -936,6 +939,18 @@ impl Orchestrator {
         agent_identifier: &str,
         text: &str,
     ) -> anyhow::Result<()> {
+        self.unit_direct_round_origin(session_id, agent_identifier, text, None)
+            .await
+    }
+
+    /// 带来源标记的单体直连轮次（origin 语义同 handle_user_message_scoped）
+    pub async fn unit_direct_round_origin(
+        self: &Arc<Self>,
+        session_id: &str,
+        agent_identifier: &str,
+        text: &str,
+        origin: Option<&str>,
+    ) -> anyhow::Result<()> {
         // 解析个体：组内子个体优先，其次独立智能体
         let def = self
             .registry
@@ -993,11 +1008,11 @@ impl Orchestrator {
             }
         }
 
-        // 本轮输入落库（与 handle_user_message 同口径，要求标签）
+        // 本轮输入落库（与 handle_user_message 同口径，要求标签；agent_id 兼作自动来源标记）
         self.store.add_message(
             session_id,
             MessageRole::User,
-            None,
+            origin,
             vec![Statement::new(SpeechTag::要求, text)],
         )?;
 

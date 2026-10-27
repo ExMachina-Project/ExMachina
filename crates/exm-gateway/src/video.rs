@@ -142,7 +142,7 @@ impl Settings {
             comment,
             reply,
             dry_run: cfg_bool(ch, "dryRun", true),
-            interval_minutes: cfg_u64(ch, "intervalMinutes", 60).clamp(5, 24 * 60),
+            interval_minutes: cfg_u64(ch, "intervalMinutes", 10).clamp(5, 24 * 60),
             max_actions: cfg_u64(ch, "maxActionsPerRun", 1).clamp(1, 5) as usize,
             daily_limit: cfg_u64(ch, "dailyLimit", 6).clamp(1, 60) as u32,
             max_comment_chars: cfg_u64(ch, "maxCommentChars", 120).clamp(20, 800) as usize,
@@ -271,6 +271,10 @@ async fn tick(core: &Arc<Core>, ch: &Channel, s: &Settings) -> anyhow::Result<St
     if !s.watch && !s.comment && !s.reply {
         return Ok("主动观看与互动均已关闭".into());
     }
+    // B 站互动前先养设备指纹（buvid3/4），缺指纹发评论易被静默风控
+    if ch.kind == "bilibili" && (s.comment || s.reply) {
+        bili_prime_buvid(ch).await;
+    }
     let mut state = VideoState::load(core, &ch.id);
     state.reset_day();
     if (s.comment || s.reply) && state.actions_today >= s.daily_limit {
@@ -393,7 +397,7 @@ async fn process_video(
     }
 
     if s.comment {
-        let text = clean_text(&action.comment, s.max_comment_chars);
+        let text = clean_comment(&action.comment, s.max_comment_chars);
         if !text.is_empty() {
             post_comment(ch, &item, &text, None).await?;
             count += 1;
@@ -405,7 +409,7 @@ async fn process_video(
     if s.reply {
         if let Some(reply) = action.reply.as_ref() {
             let to = reply_id(&reply.to);
-            let text = clean_text(&reply.text, s.max_comment_chars);
+            let text = clean_comment(&reply.text, s.max_comment_chars);
             let target = comments.iter().find(|c| c.id == to);
             if let Some(target) = target {
                 if !text.is_empty()
@@ -436,6 +440,8 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
     let (run, mut rx) = ChannelRun::begin(core, ch, "video")
         .await
         .ok_or_else(|| anyhow::anyhow!("视频通道会话建立失败"))?;
+    // 系统自动任务标记：落库消息带 auto:video 来源，展示层与真人消息区分
+    let run = run.with_origin("auto:video");
     let sid = run.session_id.clone();
     let reply_run = run.clone();
     let prompt = prompt.to_string();
@@ -622,6 +628,41 @@ fn clean_text(raw: &str, max: usize) -> String {
     }
 }
 
+/// 评论清洗：在 clean_text 基础上剥离 Markdown/装饰符号。
+/// B 站评论不支持 Markdown，`**`、`#`、`>` 等会原样上屏且是审核拦截的高发因素；
+/// 智能体产出常带人设口癖装饰（▸、⚠ 等），同样易触发风控，一并去除。
+fn clean_comment(raw: &str, max: usize) -> String {
+    let s = clean_text(raw, max * 2);
+    let mut out = String::new();
+    for ch in s.chars() {
+        match ch {
+            '*' | '#' | '`' | '>' | '[' | ']' | '~' | '_' | '|' | '▸' | '◀' | '▶' | '«' | '»'
+            | '⚠' => {} // 剥离 Markdown 与人设装饰符号（【】为中文常用标点，保留）
+            _ => out.push(ch),
+        }
+    }
+    // 折叠剥离后产生的连续空格
+    let mut collapsed = String::new();
+    let mut last_space = false;
+    for ch in out.trim().chars() {
+        if ch == ' ' {
+            if !last_space {
+                collapsed.push(' ');
+            }
+            last_space = true;
+        } else {
+            collapsed.push(ch);
+            last_space = false;
+        }
+    }
+    let collapsed = collapsed.trim().to_string();
+    if collapsed.chars().count() > max {
+        collapsed.chars().take(max).collect()
+    } else {
+        collapsed
+    }
+}
+
 // ---------------------------------------------------------------- 平台动作分发
 
 #[derive(Clone, Debug)]
@@ -667,6 +708,8 @@ fn matches_keywords(v: &VideoItem, keywords: &[String]) -> bool {
 async fn fetch_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<VideoItem>> {
     match ch.kind.as_str() {
         "bilibili" => {
+            // 内容倾向先行：popular 模式且配置了倾向时，用倾向词主动搜索（权重高于热门榜单），
+            // 命中倾向的搜索结果排前、热门流补位——而不是只对 20 条热门做事后排序
             if s.source == "search" && !s.keywords.is_empty() {
                 if let Ok(list) = search_candidates(ch, s).await {
                     if !list.is_empty() {
@@ -674,7 +717,22 @@ async fn fetch_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<Vide
                     }
                 }
             }
-            bili_popular(ch, 20).await
+            let mut items = bili_popular(ch, 20).await?;
+            // 倾向「选择」候选：从自由文本倾向提取核心搜索词，主动搜索替代热门流——
+            // 让倾向在选视频之前起效，而不是对热门榜做事后排序
+            let interest_terms = split_list(Some(s.interests.as_str()));
+            let search_terms = interest_search_terms(&s.interests);
+            if !search_terms.is_empty() {
+                // 游标轮换：每轮用不同的倾向词搜索，避免反复搜同一个词刷到同一批
+                let term = search_terms[interest_cursor(ch, &search_terms)].clone();
+                if let Ok(mut hits) = bili_search(ch, &term, s).await {
+                    hits.retain(|v| matches_keywords(v, &interest_terms) || matches_keywords(v, &search_terms));
+                    if !hits.is_empty() {
+                        items = hits; // 倾向搜索命中优先，热门流丢弃（本轮不混排，倾向即选择）
+                    }
+                }
+            }
+            Ok(items)
         }
         "youtube" => {
             if s.source == "search" && !s.keywords.is_empty() {
@@ -688,6 +746,75 @@ async fn fetch_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<Vide
         }
         other => anyhow::bail!("不支持的视频平台：{other}"),
     }
+}
+
+/// 倾向词轮换游标：按通道记忆轮次取模，跨轮次推进避免反复搜同一个词
+fn interest_cursor(ch: &Channel, terms: &[String]) -> usize {
+    static CURSORS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+        OnceLock::new();
+    let map = CURSORS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock().expect("interest cursor lock");
+    let n = guard.entry(ch.id.clone()).or_insert(0);
+    let cur = *n;
+    *n = n.wrapping_add(1);
+    cur % terms.len().max(1)
+}
+
+/// 从自由文本倾向里提取可用的搜索词：倾向是「只查看AI相关内容，优先二创其次是技术类。」
+/// 这类长句，整句直接搜索噪音大，匹配也难命中。按引导虚词二次切分，取剩下的核心词。
+/// 例：「优先二创其次是技术类」→ ["二创", "技术类"]；「只查看AI相关内容」→ ["AI"]。
+fn interest_search_terms(interests: &str) -> Vec<String> {
+    const PREFIX_FILLERS: &[&str] = &[
+        "只查看", "只看", "优先看", "优先", "偏向", "偏爱", "喜欢看", "喜欢", "偏好", "多看",
+        "少看", "不要看", "不看", "避免看", "避免", "查看",
+    ];
+    const JOINERS: &[&str] = &[
+        "相关", "其次是", "其次", "类型", "类的", "类", "为主", "以及", "还有", "都行", "的",
+    ];
+    let mut out = Vec::new();
+    for seg in split_list(Some(interests)) {
+        // 剥离句首引导虚词，得到核心片段
+        let mut cur = seg.as_str();
+        loop {
+            let mut changed = false;
+            for f in PREFIX_FILLERS {
+                if let Some(rest) = cur.strip_prefix(f) {
+                    cur = rest;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let cur = cur.trim_matches(['。', '！', '？', '，', '；', ' ']);
+        if cur.is_empty() {
+            continue;
+        }
+        // 句中连接虚词切分：核心词在连接词之前（「AI相关」→ AI；「二创其次技术类」→ 二创、技术类）
+        let mut parts = vec![cur.to_string()];
+        for j in JOINERS {
+            let mut next = Vec::new();
+            for p in parts {
+                for seg in p.split(j) {
+                    next.push(seg.to_string());
+                }
+            }
+            parts = next;
+        }
+        for part in parts {
+            let core = part.trim();
+            // 泛词过滤：「内容」「视频」这类词做搜索词噪音太大
+            const GENERIC: &[&str] = &["内容", "视频", "东西", "玩意"];
+            if core.chars().count() > 1
+                && !GENERIC.contains(&core)
+                && !out.iter().any(|o: &String| o.contains(core) || core.contains(o.as_str()))
+            {
+                out.push(core.to_string());
+            }
+        }
+    }
+    out
 }
 
 async fn search_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<VideoItem>> {
@@ -789,13 +916,78 @@ fn bili_cookie(ch: &Channel) -> String {
     if let Some(v) = ch.cfg("uid") {
         parts.push(format!("DedeUserID={v}"));
     }
+    // 设备指纹：缺 buvid3 时发评论常被静默风控（code=0 但评论进自查不上屏）。
+    // 优先用匿名访问 B 站时服务端种下的 buvid3/buvid4（内存缓存跨请求复用）。
+    if let Some(b) = buvid_cached(ch) {
+        parts.push(format!("buvid3={}", b.0));
+        if let Some(b4) = b.1 {
+            parts.push(format!("buvid4={b4}"));
+        }
+    }
     parts.join("; ")
 }
 
+/// 通道级 buvid 缓存（共享单例）：(buvid3, Option<buvid4>)
+fn buvid_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 读取缓存的 buvid（无则 None——发评论前应先 bili_prime_buvid）
+fn buvid_cached(ch: &Channel) -> Option<(String, Option<String>)> {
+    buvid_cache().lock().expect("buvid cache lock").get(&ch.id).cloned()
+}
+
+/// 异步获取并缓存 buvid（观看轮次开始时调用一次；匿名访问首页即下发）
+async fn bili_prime_buvid(ch: &Channel) {
+    let need = !buvid_cache().lock().expect("buvid cache lock").contains_key(&ch.id);
+    if !need {
+        return;
+    }
+    let resp = match http_client()
+        .get("https://www.bilibili.com/")
+        .header(reqwest::header::USER_AGENT, UA)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let mut buvid3 = None;
+    let mut buvid4 = None;
+    for cv in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+        if let Ok(s) = cv.to_str() {
+            for pair in s.split(';') {
+                let pair = pair.trim();
+                if let Some(v) = pair.strip_prefix("buvid3=") {
+                    buvid3 = Some(v.to_string());
+                } else if let Some(v) = pair.strip_prefix("buvid4=") {
+                    buvid4 = Some(v.to_string());
+                }
+            }
+        }
+    }
+    if let Some(b3) = buvid3 {
+        buvid_cache()
+            .lock()
+            .expect("buvid cache lock")
+            .insert(ch.id.clone(), (b3, buvid4));
+    }
+}
+
 fn bili_request(ch: &Channel, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    bili_request_with_referer(ch, BILI_REFERER, rb)
+}
+
+fn bili_request_with_referer(
+    ch: &Channel,
+    referer: &str,
+    rb: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
     let rb = rb
         .header(reqwest::header::USER_AGENT, UA)
-        .header(reqwest::header::REFERER, BILI_REFERER);
+        .header(reqwest::header::REFERER, referer);
     let cookie = bili_cookie(ch);
     if cookie.is_empty() {
         rb
@@ -874,8 +1066,11 @@ async fn bili_popular(ch: &Channel, limit: usize) -> anyhow::Result<Vec<VideoIte
 }
 
 async fn bili_search(ch: &Channel, keyword: &str, _s: &Settings) -> anyhow::Result<Vec<VideoItem>> {
-    let resp = bili_request(
+    // 搜索接口风控比普通接口严：无 buvid 指纹或 Referer 不符会返回 HTML 拦截页（实测）。
+    // Referer 用搜索页；buvid 由 tick 开头的 bili_prime_buvid 预热进 cookie。
+    let resp = bili_request_with_referer(
         ch,
+        "https://search.bilibili.com/",
         http_client()
             .get("https://api.bilibili.com/x/web-interface/search/type")
             .query(&[
@@ -887,10 +1082,17 @@ async fn bili_search(ch: &Channel, keyword: &str, _s: &Settings) -> anyhow::Resu
     .send()
     .await
     .map_err(|e| anyhow::anyhow!("B 站搜索失败：{e}"))?;
-    let body: Value = resp
-        .json()
+    let status = resp.status();
+    let text = resp
+        .text()
         .await
-        .map_err(|e| anyhow::anyhow!("B 站搜索响应不是 JSON：{e}"))?;
+        .map_err(|e| anyhow::anyhow!("B 站搜索响应读取失败：{e}"))?;
+    // 风控拦截页返回 HTML 而非 JSON：按搜索失败处理（调用方回退热门流），不当硬错误
+    if !text.trim_start().starts_with('{') {
+        anyhow::bail!("B 站搜索被风控拦截（返回非 JSON）");
+    }
+    let body: Value = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("B 站搜索响应解析失败（HTTP {status}）：{e}"))?;
     api_ok(&body)?;
     let list = body
         .pointer("/data/result")
@@ -1106,7 +1308,63 @@ async fn bili_post_comment(
         anyhow::bail!("B 站评论 HTTP {status}：{}", api_message(&body));
     }
     api_ok(&body)?;
+    // 发后验证：B 站可能 code=0 但评论进自查/风控不上屏（静默拦截）。
+    // 用「按时间倒序」接口验证——自己的新评论必然在第一页前排（热度排序会漏）。
+    // 双次确认（4s + 6s）：容忍审核短暂延迟；未上屏才如实报错，
+    // 避免 actions_today 虚增、状态条谎报「已评论」。
+    let uid = ch.cfg("uid").unwrap_or_default();
+    if !uid.is_empty() {
+        let mut visible = false;
+        for wait in [4u64, 6] {
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            match bili_comment_visible(ch, aid, &uid).await {
+                Ok(true) => {
+                    visible = true;
+                    break;
+                }
+                Ok(false) => continue,
+                Err(e) => {
+                    // 验证本身失败不判定发布结果（评论可能仍在审核中），只记日志
+                    eprintln!("[video:bilibili] 评论上屏验证失败（不判定发布结果）：{e}");
+                    visible = true;
+                    break;
+                }
+            }
+        }
+        if !visible {
+            anyhow::bail!(
+                "评论提交返回成功但未在评论区上屏——疑似被 B 站审核/风控拦截（建议降低频次或检查账号状态）"
+            );
+        }
+    }
     Ok(())
+}
+
+/// 检查指定 uid 的评论是否出现在该视频评论区（按时间倒序第一页，新评论必在前排）
+async fn bili_comment_visible(ch: &Channel, aid: u64, uid: &str) -> anyhow::Result<bool> {
+    let body = bili_get(
+        ch,
+        &format!(
+            "https://api.bilibili.com/x/v2/reply?pn=1&ps=20&oid={aid}&type=1&sort=2"
+        ),
+    )
+    .await?;
+    let replies = body
+        .pointer("/data/replies")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for r in replies {
+        let mid = r
+            .pointer("/member/mid")
+            .and_then(as_u64)
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        if mid == uid {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) enum ProbeError {
@@ -1637,5 +1895,18 @@ mod tests {
         };
         assert!(matches_keywords(&v, &["rust".into()]));
         assert!(!matches_keywords(&v, &["python".into()]));
+    }
+}
+
+#[cfg(test)]
+mod interest_tests {
+    use super::*;
+
+    #[test]
+    fn test_interest_search_terms() {
+        let terms = interest_search_terms("只查看AI相关内容，优先二创其次是技术类。");
+        println!("提取结果: {terms:?}");
+        assert!(!terms.is_empty());
+        assert!(terms.iter().any(|t| t.contains("AI")));
     }
 }
