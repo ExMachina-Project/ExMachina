@@ -29,4 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 ratatui = "0.29"
 crossterm = "0.28"
+
+# libc 仅 Unix fd 操作（pipe/dup/dup2）使用；Windows 走 CRT（extern 声明，无 crate）
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
