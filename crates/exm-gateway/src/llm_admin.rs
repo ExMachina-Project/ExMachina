@@ -15,6 +15,11 @@ use serde_json::{json, Value};
 /// 密钥掩码哨兵（前后端契约：更新时收到此值 = 沿用服务端旧值，不得当明文入库）
 pub(crate) const KEY_MASK: &str = "***已配置***";
 
+/// 密钥清除哨兵（前后端契约：更新时收到此值 = 显式删除该密钥。
+/// 空串历史语义是「沿用旧值」（不丢已配密钥），无法表达删除意图——
+/// 删除用此哨兵，部分删除（保留其余密钥）的场景只能靠它表达）
+pub(crate) const KEY_CLEAR: &str = "__CLEAR__";
+
 fn mask_key(k: &str) -> String {
     if k.trim().is_empty() { String::new() } else { KEY_MASK.to_string() }
 }
@@ -107,6 +112,7 @@ fn resolve_profile_input(
     } else {
         match v.api_key.as_deref() {
             Some(KEY_MASK) | None => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
+            Some(KEY_CLEAR) => String::new(), // 显式清除主 Key（保留池）
             Some(k) if k.trim().is_empty() => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
             Some(k) => k.to_string(),
         }
@@ -134,13 +140,20 @@ fn resolve_profile_input(
                         }
                         text_mask_seq += 1;
                     }
+                    ApiKeyEntry::Text(s) if s == KEY_CLEAR => {
+                        // 显式删除该池位：跳过（不沿用旧键、不入新键、不占掩码序数）
+                    }
                     ApiKeyEntry::Text(s) if !s.trim().is_empty() => api_keys.push(s.clone()),
                     ApiKeyEntry::Text(_) => {}
                 }
             }
         }
     }
-    if api_keys.is_empty() && !v.clear_keys {
+    // 兜底沿用：仅当「前端没有提供任何行级意图」时才沿用旧池——
+    // apiKeys 缺省（None）或空列表 = 旧客户端/未提供，保持不丢密钥；
+    // apiKeys 非空但解析为空（全是 CLEAR 删除哨兵）= 用户删光了池行，显式意图，如实清空。
+    let pool_intent_given = v.api_keys.as_ref().is_some_and(|l| !l.is_empty());
+    if api_keys.is_empty() && !v.clear_keys && !pool_intent_given {
         api_keys = existing.map(|e| e.api_keys.clone()).unwrap_or_default();
     }
     // 模型清单：缺省沿用旧清单；提交时空值模型名剔除。默认模型若不在清单中自动补入（能力未标记）。
@@ -603,6 +616,34 @@ mod key_tests {
         let p = resolve_profile_input(Some(&old), &b);
         assert_eq!(p.api_key, "sk-main");
         assert_eq!(p.api_keys.len(), 2);
+    }
+
+    /// apiKey=__CLEAR__ 哨兵：只清主 Key，池保留（部分删除场景）
+    #[test]
+    fn 密钥解析_清除哨兵只删主键保留池() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_CLEAR,
+            "apiKeys": [ { "keep": 0 } ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "", "主 Key 应被清除哨兵置空");
+        assert_eq!(p.api_keys, vec!["sk-pool-1".to_string()], "池按 keep 精确替换");
+    }
+
+    /// 池行全部为 CLEAR 哨兵：显式清池（不再兜底沿用），主 Key 不受影响
+    #[test]
+    fn 密钥解析_池全删除哨兵清空池保留主键() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ KEY_CLEAR, KEY_CLEAR ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main", "主 Key 掩码沿用不受池删除影响");
+        assert!(p.api_keys.is_empty(), "池行全为 CLEAR = 显式清池");
     }
 
     /// 掩码 = 沿用主 Key；{keep: i} = 按索引沿用池内键（删行/插行不串位）
