@@ -227,6 +227,49 @@ async fn probe_matrix(client: reqwest::Client, homeserver: &str, token: &str) ->
     }
 }
 
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/api/channels/:id/test", axum::routing::post(test_channel))
+}
+
+// ---------------------------------------------------------------- HTTP 端点
+
+use crate::AppState;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::{Json, Router};
+use serde_json::json;
+
+/// 通道连通测试（POST /api/channels/:id/test）
+pub async fn test_channel(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let Some(ch) = platform::load_channels(&st.core)
+        .into_iter()
+        .find(|c| c.id == id)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "通道不存在" })),
+        )
+            .into_response();
+    };
+    if !ch.enabled {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "category": "missing", "message": "通道已停用，请先启用" })),
+        )
+            .into_response();
+    }
+    let r = probe(&st.core, &ch).await;
+    Json(json!({
+        "ok": r.ok,
+        "category": r.category,
+        "identity": r.identity,
+        "message": r.message,
+    }))
+    .into_response()
+}
+
+
 // ---------------------------------------------------------------- 测试
 
 #[cfg(test)]
@@ -335,46 +378,4 @@ mod tests {
             message: String::new(),
         }
     }
-}
-
-// ---------------------------------------------------------------- HTTP 端点
-
-use crate::AppState;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::{Json, Router};
-use serde_json::json;
-
-/// 通道连通测试（POST /api/channels/:id/test）
-pub async fn test_channel(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    let Some(ch) = platform::load_channels(&st.core)
-        .into_iter()
-        .find(|c| c.id == id)
-    else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "通道不存在" })),
-        )
-            .into_response();
-    };
-    if !ch.enabled {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "category": "missing", "message": "通道已停用，请先启用" })),
-        )
-            .into_response();
-    }
-    let r = probe(&st.core, &ch).await;
-    Json(json!({
-        "ok": r.ok,
-        "category": r.category,
-        "identity": r.identity,
-        "message": r.message,
-    }))
-    .into_response()
-}
-
-pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/channels/:id/test", axum::routing::post(test_channel))
 }

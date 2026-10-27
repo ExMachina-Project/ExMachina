@@ -4,6 +4,9 @@ import { tr } from "./i18n/core";
 
 /** 密钥掩码哨兵（与后端 llm_admin::KEY_MASK / 通道脱敏同一契约）：提交时收到此值 = 沿用服务端旧值 */
 export const KEY_MASK = "***已配置***";
+/** 密钥清除哨兵（与后端 llm_admin::KEY_CLEAR 同一契约）：提交时收到此值 = 显式删除该密钥。
+ *  空串的历史语义是「沿用旧值」，删除意图只能用此哨兵表达。 */
+export const KEY_CLEAR = "__CLEAR__";
 
 /** 远程服务器基址（桌面/移动客户端连接任意网关；空 = 同源）。
  *  同一份 WebUI 既能被本机网关托管（桌面/浏览器），也能作为客户端连远程网关（手机 PWA）。 */
@@ -645,6 +648,13 @@ export const api = {
 
   listChannels: () => req<Channel[]>("/channels"),
   channelStatus: () => req<Record<string, ChannelStatus>>("/channels/status"),
+  /** B 站扫码登录：出码（返回二维码内容 URL）→ 前端渲染二维码 → 轮询到 confirmed 拿登录 Cookie */
+  biliQrStart: () => req<{ qrcodeKey: string; url: string }>("/channels/bili-qr", { method: "POST" }),
+  biliQrPoll: (key: string) =>
+    req<
+      | { state: "waiting"; code: number }
+      | { state: "confirmed"; sessdata: string; biliJct: string; uid: string; uname: string }
+    >(`/channels/bili-qr/${encodeURIComponent(key)}`),
   createChannel: (body: {
     id: string;
     platform?: string;
@@ -665,7 +675,7 @@ export const api = {
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
 
   llmProfiles: () => req<LlmProfilesInfo>("/llm/profiles"),
-  saveLlmProfile: (body: { id?: string; name?: string; baseUrl?: string; apiFormat?: string; apiKey?: string; apiKeys?: (string | { keep: number })[]; model?: string; models?: ProfileModel[]; fallback?: string }) =>
+  saveLlmProfile: (body: { id?: string; name?: string; baseUrl?: string; apiFormat?: string; apiKey?: string; apiKeys?: (string | { keep: number })[]; clearKeys?: boolean; model?: string; models?: ProfileModel[]; fallback?: string }) =>
     req<{ ok: boolean; id: string; mock?: boolean }>("/llm/profiles", { method: "POST", body: JSON.stringify(body) }),
   deleteLlmProfile: (id: string) => req<{ ok: boolean }>(`/llm/profiles/${id}`, { method: "DELETE" }),
   activateLlmProfile: (id: string) =>
@@ -714,74 +724,28 @@ export async function probeServer(base: string): Promise<{ ok: boolean; error?: 
   }
 }
 
-export interface FsEntry {
+// ---------------- 文件提及（对话即编码：chat 内 @ 引用） ----------------
+
+export interface WorkbenchNode {
+  path: string;
   name: string;
-  dir: boolean;
-  size: number;
-  path: string;
+  type: "dir" | "file";
+  size?: number;
 }
 
-/** 工作区目录清单（编码页文件树） */
-export function fsList(path: string): Promise<{ path: string; entries: FsEntry[] }> {
-  return req(`/fs/list?path=${encodeURIComponent(path)}`);
+export interface WorkbenchTree {
+  root: string;
+  count: number;
+  nodes: WorkbenchNode[];
 }
 
-/** 工作区文本文件预览（编码页代码查看） */
-export function fsFile(path: string): Promise<{ path: string; size: number; truncated: boolean; content: string }> {
-  return req(`/fs/file?path=${encodeURIComponent(path)}`);
-}
-
-export interface WorkspaceChangeFile {
-  path: string;
-  /** M=修改 A=新增 D=删除 */
-  status: string;
-  staged: boolean;
-  /** 未跟踪文件无 diff（内容走 fsFile 预览） */
-  diff: { text: string; truncated: boolean } | null;
-}
-
-export interface WorkspaceChanges {
-  /** git = HEAD 对比口径；checkpoint = 检查点口径（非 git 仓库回退） */
-  source: "git" | "checkpoint";
-  branch: string | null;
-  files: WorkspaceChangeFile[];
-}
-
-/** 工作区变更清单（编码页变更视图） */
-export function workspaceChanges(): Promise<WorkspaceChanges> {
-  return req(`/workspace/changes`);
-}
-
-/** 工作区文件保存（编码页编辑器）：服务端走检查点 + 审计同口径 */
-export function fsSave(path: string, content: string): Promise<{ ok: boolean; message: string }> {
-  return req(`/fs/file`, { method: "PUT", body: JSON.stringify({ path, content }) });
-}
-
-export interface GitOverview {
-  repo: boolean;
-  branch?: string;
-  log?: string[];
-  branches?: string[];
-}
-
-export interface GitOpResult {
-  ok: boolean;
-  output?: string;
-  /** 破坏性操作：true = 已生成审批单（批准后执行） */
-  pending?: boolean;
-  approvalId?: string;
-  command?: string;
-  error?: string;
-}
-
-/** Git 面板概览（分支 / 最近提交） */
-export function gitOverview(): Promise<GitOverview> {
-  return req(`/git/overview`);
-}
-
-/** Git 操作：常规操作直发；push/reset/discard 走审批单 */
-export function gitOp(op: string, extra?: { path?: string; message?: string; branch?: string }): Promise<GitOpResult> {
-  return req(`/git/op`, { method: "POST", body: JSON.stringify({ op, ...extra }) });
+/** 工作台文件树（.gitignore 口径过滤；工作区边界校验在服务端）：对话内 @ 文件提及的数据源 */
+export function workbenchTree(path?: string, depth?: number): Promise<WorkbenchTree> {
+  const qs = new URLSearchParams();
+  if (path) qs.set("path", path);
+  if (depth) qs.set("depth", String(depth));
+  const q = qs.toString();
+  return req(`/workbench/tree${q ? `?${q}` : ""}`);
 }
 
 export interface IdentityItem {

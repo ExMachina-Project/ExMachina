@@ -6,7 +6,6 @@ import {
   BellOutlined,
   ClusterOutlined,
   CloseOutlined,
-  CodeOutlined,
   DatabaseOutlined,
   FileTextOutlined,
   MenuOutlined,

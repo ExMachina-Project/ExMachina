@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let entities = root.join("entities");
     // 先快照、后动手：验收期间会经 REST 写配置与激活组指针，跑完必须原样还回工作机/工作树
     // （config.json / active_group / 出厂人格）。快照必须早于任何清理写入，否则会被当成原状。
-    let _guards = vec![
+    let _guards = [
         FileGuard::watch(root.join(".exmachina").join("config.json")),
         FileGuard::watch(entities.join("active_group")),
         // 出厂人格随项目内容交付：验收可临时改写，但跑完必须原样还回（否则工作树被改脏）
@@ -1429,11 +1429,11 @@ let mut cfg = ExmConfig::load(&root);
                     drop(seen);
                     // 确定性：每把 Key 的第一次请求返回 429（模拟限额），之后恢复——迫使发起方轮换
                     if first_time {
-                        return (
+                        (
                             axum::http::StatusCode::TOO_MANY_REQUESTS,
                             Json(json!({ "error": { "message": "rate limit exceeded" } })),
                         )
-                            .into_response();
+                            .into_response()
                     } else {
                         let plan = json!({
                             "routeLevel": "L0", "goal": "e2e-pool",

@@ -9,7 +9,7 @@
  *   - /assets/ 下带 hash 的不可变产物 → cache-first（命中即回，省流量）
  *   - sw.js 自身 → 不走缓存（否则 SW 永远无法升级）
  */
-const CACHE = "exm-shell-v2";
+const CACHE = "exm-shell-v3";
 const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg"];
 
 /** 带内容 hash 的构建产物：内容变则文件名变，可长期缓存 */

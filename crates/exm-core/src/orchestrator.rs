@@ -304,7 +304,7 @@ impl Orchestrator {
         order: &DispatchOrder,
         session_id: &str,
         attach_images: bool,
-        mut on_delta: F,
+        on_delta: F,
     ) -> anyhow::Result<SyncReport>
     where
         F: FnMut(StreamDelta),
@@ -321,7 +321,7 @@ impl Orchestrator {
                 session_id,
                 attach_images,
                 ToolScope::Computer,
-                |d| on_delta(d),
+                on_delta,
             )
             .await
     }
@@ -535,82 +535,18 @@ impl Orchestrator {
     }
 
     /// 上下文压缩（docs/架构与设计.md）：历史超过阈值时，旧消息压成滚动摘要，保留最近窗口原文
-    /// 返回 (滚动摘要, 最近窗口消息原文文本)
+    /// 返回 (滚动摘要, 最近窗口消息原文文本)——共享实现见 compaction.rs（单智能体循环同口径复用）
     async fn ensure_compacted(&self, session_id: &str) -> (Option<String>, String) {
-        type StoredMessage = crate::types::ChatMessage;
-        const TRIGGER: usize = 20; // 超过才压缩
-        const KEEP: usize = 12; // 保留最近 N 条原文
-        let msgs: Vec<StoredMessage> = self
-            .store
-            .list_messages(session_id, 500)
-            .unwrap_or_default();
-        if msgs.len() <= TRIGGER {
-            return (None, render_recent(&msgs));
-        }
-        // list_messages 为时间正序：older = 前段（压入摘要）；recent = 尾部 KEEP 条原文窗口
-        let split = msgs.len().saturating_sub(KEEP);
-        let older: Vec<&StoredMessage> = msgs.iter().take(split).collect();
-        let recent: Vec<&StoredMessage> = msgs.iter().skip(split).collect();
-        let session = self.store.get_session(session_id).ok().flatten();
-        let upto = older.len();
-        let prev_upto = session.as_ref().and_then(|s| s.summary_upto).unwrap_or(0);
-        let prev_summary = session
-            .as_ref()
-            .and_then(|s| s.rolling_summary.clone())
-            .unwrap_or_default();
-        if prev_upto == upto {
-            return (Some(prev_summary), render_recent_hlp(&recent));
-        }
-        // 增量压缩：已有摘要 + 新纳入的旧消息 → 新摘要（LLM 非流式，指挥体模型）
-        let transcript: String = older
-            .iter()
-            .map(|m| {
-                let who = match m.role {
-                    MessageRole::User => "用户",
-                    MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体"),
-                    MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
-                    MessageRole::System => "系统",
-                };
-                let body = m
-                    .statements
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("；");
-                format!("[{who}] {}", body.chars().take(400).collect::<String>())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let system = "你是会话压缩器【会话压缩】。把历史对话压成不超过 400 字的连续上下文摘要：保留目标、关键结论、证据与未决事项；只输出摘要正文，不要任何前后缀。";
-        let user = format!(
-            "已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。"
-        );
-        let summary = match self.resolve_orch_model() {
-            (provider, model) => {
-                let req = ChatRequest::new(
-                    model,
-                    vec![ChatMessage::system(system), ChatMessage::user(user)],
-                );
-                provider
-                    .chat(req)
-                    .await
-                    .map(|r| r.content)
-                    .unwrap_or_else(|e| {
-                        eprintln!("[orchestrator] 会话压缩失败（沿用旧摘要）：{e}");
-                        if prev_summary.is_empty() {
-                            String::new()
-                        } else {
-                            prev_summary.clone()
-                        }
-                    })
-            }
-        };
-        if !summary.trim().is_empty() {
-            let _ = self.store.update_compaction(session_id, &summary, upto);
-            (Some(summary), render_recent_hlp(&recent))
-        } else {
-            (None, render_recent_hlp(&recent))
-        }
+        let (provider, model) = self.resolve_orch_model();
+        let c = crate::compaction::ensure_compacted(
+            &self.store,
+            &provider,
+            &model,
+            session_id,
+            crate::compaction::CompactParams::default(),
+        )
+        .await;
+        (c.summary, c.recent)
     }
 
     pub async fn handle_user_message(
@@ -618,16 +554,19 @@ impl Orchestrator {
         session_id: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        self.handle_user_message_scoped(session_id, text, ToolScope::Computer)
+        self.handle_user_message_scoped(session_id, text, ToolScope::Computer, None)
             .await
     }
 
     /// 带能力边界处理一轮（外部通道入口）：scope 贯穿规划/派发/单聊执行。
+    /// `origin`：自动任务的来源标记（如 "auto:video"），落入消息 agent_id；
+    /// None = 真人输入。展示层据此区分「用户消息」与「系统自动内容」。
     pub async fn handle_user_message_scoped(
         self: &Arc<Self>,
         session_id: &str,
         text: &str,
         scope: ToolScope,
+        origin: Option<&str>,
     ) -> anyhow::Result<()> {
         let session = self.store.get_session(session_id)?;
         if session.is_none() {
@@ -637,7 +576,7 @@ impl Orchestrator {
         self.store.add_message(
             session_id,
             MessageRole::User,
-            None,
+            origin,
             vec![Statement::new(SpeechTag::要求, text)],
         )?;
 
@@ -796,8 +735,88 @@ impl Orchestrator {
         system_prompt.push_str(&format!("\n\n## SOUL（人格）\n{soul}"));
 
         // 会话历史窗口:最近 40 条按角色映射(User→user, Orchestrator→assistant);
-        // 本轮输入已由 handle_user_message 落库,天然位于窗口末尾
+        // 本轮输入已由 handle_user_message 落库,天然位于窗口末尾。
+        // 窗口外更早历史接入共享滚动压缩(compaction.rs,与组调度同口径):
+        // 压缩摘要注入系统提示,窗口内保持原文
         let rows = self.store.list_messages(session_id, 40)?;
+        let compacted = crate::compaction::ensure_compacted(
+            &self.store,
+            &self.orch_provider,
+            &self.orch_model,
+            session_id,
+            crate::compaction::CompactParams {
+                trigger: 40,
+                keep: 20,
+            },
+        )
+        .await;
+
+        // ---- token 预算软着陆（budget.rs，D7）----
+        // 估算口径 ~4 字符/token；仅当生效模型的 contextWindow 已登记时判定。
+        // 超线时多级裁剪（滚动摘要收窄 → 旧消息截短），每次裁剪发 context.trim 事件留痕。
+        let budget_ratio = self.tools.context_budget_ratio();
+        let window_tokens = self
+            .unit_chain_for(&def)
+            .candidates
+            .first()
+            .and_then(|(pid, _, model)| self.model_pool.context_window(pid, model));
+        let mut summary_opt = compacted.summary.clone();
+        let mut rows = rows;
+        if let Some(window) = window_tokens {
+            let budget_chars =
+                (window as f64 * budget_ratio).floor() as usize * crate::budget::CHARS_PER_TOKEN;
+            let system_chars = system_prompt.chars().count();
+            let summary_chars = summary_opt.as_deref().map(|s| s.chars().count()).unwrap_or(0);
+            let history_chars: usize = rows
+                .iter()
+                .map(|m| m.statements.iter().map(|s| s.text.chars().count()).sum::<usize>())
+                .sum();
+            let total = system_chars + summary_chars + history_chars;
+            if total > budget_chars {
+                let over = total - budget_chars;
+                let outcome =
+                    crate::budget::trim_to_budget(over, None, None, summary_opt.as_deref());
+                summary_opt = outcome.summary;
+                // 消息截断落地：从最旧一侧逐条截短（保最新上下文完整性）
+                let shorten_msgs = outcome.truncated_msg_chars.unwrap_or(0);
+                if shorten_msgs > 0 {
+                    crate::budget::trim_oldest_messages(&mut rows, shorten_msgs);
+                }
+                self.emit(
+                    session_id,
+                    "context.trim",
+                    serde_json::json!({
+                        "estimatedChars": total,
+                        "budgetChars": budget_chars,
+                        "windowTokens": window,
+                        "ratio": budget_ratio,
+                        "trims": outcome
+                            .trims
+                            .iter()
+                            .map(|(k, from, to)| serde_json::json!({"block": k, "fromChars": from, "toChars": to}))
+                            .chain(std::iter::once(serde_json::json!({
+                                "block": "messages",
+                                "fromChars": history_chars,
+                                "toChars": rows.iter().map(|m| m.statements.iter().map(|s| s.text.chars().count()).sum::<usize>()).sum::<usize>(),
+                            })))
+                            .collect::<Vec<_>>(),
+                    }),
+                );
+            }
+        }
+
+        let system_prompt = if let Some(summary) = summary_opt.clone() {
+            if summary.trim().is_empty() {
+                system_prompt
+            } else {
+                system_prompt.push_str(&format!(
+                    "\n\n## 会话上下文（更早对话滚动摘要）\n{summary}\n"
+                ));
+                system_prompt
+            }
+        } else {
+            system_prompt
+        };
         let mut history: Vec<ChatMessage> = Vec::new();
         for m in rows {
             let content = m
@@ -920,6 +939,18 @@ impl Orchestrator {
         agent_identifier: &str,
         text: &str,
     ) -> anyhow::Result<()> {
+        self.unit_direct_round_origin(session_id, agent_identifier, text, None)
+            .await
+    }
+
+    /// 带来源标记的单体直连轮次（origin 语义同 handle_user_message_scoped）
+    pub async fn unit_direct_round_origin(
+        self: &Arc<Self>,
+        session_id: &str,
+        agent_identifier: &str,
+        text: &str,
+        origin: Option<&str>,
+    ) -> anyhow::Result<()> {
         // 解析个体：组内子个体优先，其次独立智能体
         let def = self
             .registry
@@ -977,11 +1008,11 @@ impl Orchestrator {
             }
         }
 
-        // 本轮输入落库（与 handle_user_message 同口径，要求标签）
+        // 本轮输入落库（与 handle_user_message 同口径，要求标签；agent_id 兼作自动来源标记）
         self.store.add_message(
             session_id,
             MessageRole::User,
-            None,
+            origin,
             vec![Statement::new(SpeechTag::要求, text)],
         )?;
 
@@ -2271,6 +2302,16 @@ impl ExecCtx {
                         });
                     }
                 }
+                // 组共享上下文（实验性，experiments.groupSharedContext）：
+                // 携带组主会话的滚动摘要 + 最近对话窗口——子个体不再只有 objective 孤岛视角。
+                // 摘要与窗口同源规划路径（ensure_compacted），口径一致。
+                if o.config_snapshot.read().experiments.group_shared_context {
+                    let (summary, recent) =
+                        o.ensure_compacted(&self.session_id).await;
+                    if let Some(ctx) = shared_context_input(summary, recent) {
+                        inputs.push(ctx);
+                    }
+                }
                 inputs
             },
             // 主智能体权限注入：组主智能体获得组内个体管理工具（自定义组）与记忆三工具（默认授权）；
@@ -2720,32 +2761,6 @@ fn fallback_converge_text(
     lines.join("\n")
 }
 
-/// 最近窗口消息渲染为文本（新→旧输入，按时间正序输出）
-fn render_recent(msgs: &[crate::types::ChatMessage]) -> String {
-    render_recent_hlp(&msgs.iter().collect::<Vec<_>>())
-}
-
-fn render_recent_hlp(msgs: &[&crate::types::ChatMessage]) -> String {
-    msgs.iter()
-        .map(|m| {
-            let who = match m.role {
-                MessageRole::User => "用户",
-                MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体"),
-                MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
-                MessageRole::System => "系统",
-            };
-            let body = m
-                .statements
-                .iter()
-                .map(|s| s.text.as_str())
-                .collect::<Vec<_>>()
-                .join("；");
-            format!("[{who}] {}", body.chars().take(300).collect::<String>())
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 pub fn text_to_statements(text: &str) -> Vec<Statement> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -2853,9 +2868,54 @@ fn protocol_unit_inputs<'a>(
         .collect()
 }
 
+/// 组共享上下文的注入体（实验性，experiments.groupSharedContext）：
+/// 滚动摘要 + 最近窗口 → 一条 DispatchInput；两者皆空时返回 None（不注入空块）。
+fn shared_context_input(summary: Option<String>, recent: String) -> Option<DispatchInput> {
+    let mut ctx = String::new();
+    if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
+        ctx.push_str(&format!("### 会话滚动摘要（更早对话）\n{s}\n\n"));
+    }
+    if !recent.trim().is_empty() {
+        ctx.push_str(&format!("### 最近对话窗口\n{recent}"));
+    }
+    if ctx.trim().is_empty() {
+        return None;
+    }
+    Some(DispatchInput {
+        ref_id: "sharedContext".into(),
+        kind: "context".into(),
+        summary: ctx.trim().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod protocol_inject_tests {
     use super::*;
+
+    /// 组共享上下文注入体：摘要与窗口的组合（实验性开关的数据面）
+    #[test]
+    fn 共享上下文_摘要与窗口拼接() {
+        // 两者皆有：两段都注入
+        let input = shared_context_input(
+            Some("目标：重构压缩模块".into()),
+            "[用户] 继续\n[指挥体] 已完成一半".into(),
+        )
+        .unwrap();
+        assert_eq!(input.ref_id, "sharedContext");
+        assert_eq!(input.kind, "context");
+        assert!(input.summary.contains("会话滚动摘要"));
+        assert!(input.summary.contains("目标：重构压缩模块"));
+        assert!(input.summary.contains("最近对话窗口"));
+
+        // 只有窗口：只带窗口段
+        let input = shared_context_input(None, "[用户] hi".into()).unwrap();
+        assert!(input.summary.contains("最近对话窗口"));
+        assert!(!input.summary.contains("会话滚动摘要"));
+
+        // 两者皆空（含空白摘要）：不注入
+        assert!(shared_context_input(Some("   ".into()), String::new()).is_none());
+        assert!(shared_context_input(None, String::new()).is_none());
+    }
 
     fn proto(id: &str, scope: &str, triggers: &[&str], body: &str) -> ProtocolDef {
         ProtocolDef {

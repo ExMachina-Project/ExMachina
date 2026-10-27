@@ -28,6 +28,7 @@ export function GroupsView(): React.ReactElement {
   const [modelDraft, setModelDraft] = useState<string>("");
   const [groupModal, setGroupModal] = useState(false);
   const [agentModal, setAgentModal] = useState(false);
+  const [saving, setSaving] = useState<"" | "group" | "agent" | "edit">("");
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [wsDraft, setWsDraft] = useState("");
   const [descDraft, setDescDraft] = useState("");
@@ -98,6 +99,7 @@ export function GroupsView(): React.ReactElement {
 
   const submitGroup = async () => {
     const v = await groupForm.validateFields();
+    setSaving("group");
     try {
       const created = await api.createGroup({
         name: v.name,
@@ -114,12 +116,15 @@ export function GroupsView(): React.ReactElement {
       setEntered(created.id);
     } catch (e) {
       message.error(t("groups.createFailed", { err: String(e) }));
+    } finally {
+      setSaving("");
     }
   };
 
   const submitAgent = async () => {
     if (!meta) return;
     const v = await agentForm.validateFields();
+    setSaving("agent");
     try {
       await api.createAgent({
         name: v.name || "",
@@ -136,6 +141,8 @@ export function GroupsView(): React.ReactElement {
       await refreshAgents();
     } catch (e) {
       message.error(t("groups.createFailed", { err: String(e) }));
+    } finally {
+      setSaving("");
     }
   };
 
@@ -266,6 +273,7 @@ export function GroupsView(): React.ReactElement {
   const submitEdit = async () => {
     if (!editing || !meta) return;
     const v = await editForm.validateFields();
+    setSaving("edit");
     try {
       await api.updateAgent(editing.identifier, {
         name: v.name,
@@ -282,6 +290,8 @@ export function GroupsView(): React.ReactElement {
       await refreshAgents();
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e) }));
+    } finally {
+      setSaving("");
     }
   };
 
@@ -425,8 +435,16 @@ export function GroupsView(): React.ReactElement {
           </Card>
         </div>
 
-        <Modal open={groupModal} title={t("groups.modalNew")} onCancel={() => setGroupModal(false)} onOk={() => void submitGroup()} okText={t("groups.create")}>
-          <Form form={groupForm} layout="vertical">
+        <Modal
+          open={groupModal}
+          title={t("groups.modalNew")}
+          onCancel={() => setGroupModal(false)}
+          onOk={() => void submitGroup()}
+          confirmLoading={saving === "group"}
+          okText={t("groups.create")}
+          destroyOnHidden
+        >
+          <Form form={groupForm} layout="vertical" onFinish={() => void submitGroup()}>
             <Form.Item name="template" label={t("groups.f.template")} initialValue="">
               <Select
                 allowClear
@@ -449,8 +467,16 @@ export function GroupsView(): React.ReactElement {
           </Form>
         </Modal>
 
-        <Modal open={agentModal} title={t("groups.modalNewAgent", { name: meta.name })} onCancel={() => setAgentModal(false)} onOk={() => void submitAgent()} okText={t("groups.create")}>
-          <Form form={agentForm} layout="vertical">
+        <Modal
+          open={agentModal}
+          title={t("groups.modalNewAgent", { name: meta.name })}
+          onCancel={() => setAgentModal(false)}
+          onOk={() => void submitAgent()}
+          confirmLoading={saving === "agent"}
+          okText={t("groups.create")}
+          destroyOnHidden
+        >
+          <Form form={agentForm} layout="vertical" onFinish={() => void submitAgent()}>
             <Form.Item name="template" label={t("groups.f.template")} initialValue="">
               <Select
                 allowClear
@@ -481,9 +507,12 @@ export function GroupsView(): React.ReactElement {
           title={editing ? t("agents.editTitle", { name: editing.name }) : ""}
           onCancel={() => setEditing(null)}
           onOk={() => void submitEdit()}
+          confirmLoading={saving === "edit"}
           okText={t("common.save")}
+          destroyOnHidden
+          width={620}
         >
-          <Form form={editForm} layout="vertical">
+          <Form form={editForm} layout="vertical" onFinish={() => void submitEdit()}>
             <Form.Item name="name" label={t("agents.f.name")} rules={[{ required: true }]}>
               <Input />
             </Form.Item>
@@ -630,8 +659,16 @@ export function GroupsView(): React.ReactElement {
         {groups.length === 0 && <BrandEmpty description={t("groups.none")} className="pane-empty" />}
       </div>
 
-      <Modal open={groupModal} title={t("groups.modalNew")} onCancel={() => setGroupModal(false)} onOk={() => void submitGroup()} okText={t("groups.create")}>
-        <Form form={groupForm} layout="vertical">
+      <Modal
+        open={groupModal}
+        title={t("groups.modalNew")}
+        onCancel={() => setGroupModal(false)}
+        onOk={() => void submitGroup()}
+        confirmLoading={saving === "group"}
+        okText={t("groups.create")}
+        destroyOnHidden
+      >
+        <Form form={groupForm} layout="vertical" onFinish={() => void submitGroup()}>
           <Form.Item name="name" label={t("groups.f.name")} rules={[{ required: true }]}>
             <Input placeholder={t("groups.f.namePh")} />
           </Form.Item>

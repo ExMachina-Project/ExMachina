@@ -226,6 +226,18 @@ impl Store {
         agent_id: Option<&str>,
         statements: Vec<Statement>,
     ) -> Result<ChatMessage> {
+        self.add_message_with_turn(session_id, role, agent_id, statements, None)
+    }
+
+    /// 带轮次号的消息落盘（工具卡回滚按钮的 undo 目标；轮次收束前用户/系统消息也可标注）
+    pub fn add_message_with_turn(
+        &self,
+        session_id: &str,
+        role: MessageRole,
+        agent_id: Option<&str>,
+        statements: Vec<Statement>,
+        turn: Option<usize>,
+    ) -> Result<ChatMessage> {
         let msg = ChatMessage {
             id: new_id(),
             session_id: session_id.to_string(),
@@ -233,6 +245,7 @@ impl Store {
             agent_id: agent_id.map(|s| s.to_string()),
             statements,
             created_at: now_iso(),
+            turn,
             token_usage: None,
             thinking: None,
             tool_calls: Vec::new(),
@@ -245,6 +258,8 @@ impl Store {
     }
 
     /// 带过程数据的消息落盘（思维链 + 工具轨迹 + 有序步骤；过程收起栏的数据来源）
+    // 过程数据的各轨字段逐项透传，与 fsdb/sqlite 两实现签名保持一致
+    #[allow(clippy::too_many_arguments)]
     pub fn add_message_full(
         &self,
         session_id: &str,
@@ -255,7 +270,14 @@ impl Store {
         tool_calls: Vec<crate::round_trace::ToolCallRecord>,
         steps: Vec<crate::round_trace::TraceStep>,
     ) -> Result<ChatMessage> {
-        let mut msg = self.add_message(session_id, role, agent_id, statements)?;
+        // 轮次标注：收束消息落库时快照尚未记录，本轮号 = 最新快照 + 1（与 record_turn_snapshot 同口径）
+        let turn = self
+            .latest_turn_snapshot(session_id)
+            .ok()
+            .flatten()
+            .map(|s| s.turn + 1)
+            .or(Some(1));
+        let mut msg = self.add_message_with_turn(session_id, role, agent_id, statements, turn)?;
         msg.thinking = thinking.filter(|s| !s.trim().is_empty());
         msg.tool_calls = tool_calls;
         msg.steps = steps;

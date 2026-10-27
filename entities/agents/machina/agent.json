@@ -1,9 +1,9 @@
 {
-  "name": "default",
+  "name": "Machina",
   "identifier": "machina",
   "domain": "默认",
   "tier": "orchestrator",
-  "description": "默认智能体，以「本机」自称。",
+  "description": "默认智能体。",
   "capabilities": [
     "通用任务",
     "独立执行",

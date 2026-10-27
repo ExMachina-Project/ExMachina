@@ -37,3 +37,6 @@ desktop/src-tauri/gen/
 # 部署密钥（不入库）
 .env
 desktop/target
+
+# OpenSpec 规划工件（本地规划过程，不入库；specs/ 主规格仍入库）
+openspec/changes/

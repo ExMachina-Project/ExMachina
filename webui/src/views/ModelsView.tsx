@@ -8,7 +8,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AutoComplete, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Spin, Switch,
+  Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Spin, Switch,
   Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
@@ -16,7 +16,7 @@ import {
   ApiOutlined, CheckCircleOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
-import { api, KEY_MASK, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../api";
+import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../api";
 import { buildCapabilityOptions } from "../models";
 import { PageHeader } from "../components/PageHeader";
 import { useT, type TKey } from "../i18n/core";
@@ -91,14 +91,18 @@ export function ModelsView(): React.ReactElement {
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState<LlmProfile | null>(null);
-  const [testing, setTesting] = useState("");
+  const [testing, setTesting] = useState<string>("");
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [saving, setSaving] = useState(false);
+  /** 模型选择弹窗：远端清单拉取后先展示，勾选后才进表单（避免全量塞入） */
+  const [picker, setPicker] = useState<{ open: boolean; models: string[]; selected: string[] } | null>(null);
+  const [pickerSaving, setPickerSaving] = useState(false);
   const [form] = Form.useForm();
   /** 模型清单行（Form.useWatch 实时跟随表单）：默认模型与「获取清单」按钮的数据源 */
   const modelWatch: ProfileModel[] = Form.useWatch("models", form) ?? [];
 
   /** 拉取端点可用模型：编辑态按档案 id（沿用已存密钥）；新建态用表单当前端点 + 首行明文密钥。
-   *  返回清单与既有行合并（保留已勾选的视觉/语音能力，仅补充缺失的模型名）。 */
+   *  拉取成功后弹选择窗，勾选的模型才合入表单清单（保留既有行的能力标记，仅补缺）。 */
   const fetchModels = async () => {
     setFetchingModels(true);
     try {
@@ -128,22 +132,45 @@ export function ModelsView(): React.ReactElement {
         message.warning(r.message ?? t("models.testNoKey"));
         return;
       }
-      const current: ProfileModel[] = (form.getFieldValue("models") ?? []).filter((m: ProfileModel) => m?.model?.trim());
-      const known = new Set(current.map((m) => m.model));
-      const merged: ProfileModel[] = [
-        ...current,
-        ...r.models.filter((m) => !known.has(m)).map((m) => ({ model: m, vision: false, audio: false })),
-      ];
-      form.setFieldsValue({ models: merged });
       if (r.models.length === 0) {
         message.warning(r.message ?? t("models.fetchEmpty"));
-      } else {
-        message.success(t("models.fetchOk", { n: r.models.length, add: merged.length - current.length }));
+        return;
       }
+      // 已在表单里的模型不出现在选择窗（弹窗只承担「补充哪些」的选择）
+      const current: ProfileModel[] = (form.getFieldValue("models") ?? []).filter((m: ProfileModel) => m?.model?.trim());
+      const known = new Set(current.map((m) => m.model));
+      const fresh = r.models.filter((m) => !known.has(m));
+      if (fresh.length === 0) {
+        message.info(t("models.fetchAllKnown"));
+        return;
+      }
+      setPicker({ open: true, models: fresh, selected: [] });
     } catch (e) {
       message.error(t("models.fetchFailed", { err: String(e).slice(0, 140) }));
     } finally {
       setFetchingModels(false);
+    }
+  };
+
+  /** 选择窗确认：勾选的模型合入表单清单（既有行不动，仅追加勾选项） */
+  const applyPickedModels = async () => {
+    if (!picker) return;
+    const picked = picker.selected;
+    setPickerSaving(true);
+    try {
+      if (picked.length > 0) {
+        const current: ProfileModel[] = (form.getFieldValue("models") ?? []).filter((m: ProfileModel) => m?.model?.trim());
+        const known = new Set(current.map((m) => m.model));
+        const merged: ProfileModel[] = [
+          ...current,
+          ...picked.filter((m) => !known.has(m)).map((m) => ({ model: m, vision: false, audio: false })),
+        ];
+        form.setFieldsValue({ models: merged });
+        message.success(t("models.fetchOk", { n: picker.models.length, add: merged.length - current.length }));
+      }
+      setPicker(null);
+    } finally {
+      setPickerSaving(false);
     }
   };
 
@@ -215,36 +242,64 @@ export function ModelsView(): React.ReactElement {
     // 校验规则用 validateFields；取值用 getFieldsValue(true)——
     // 掩码行的 keep 无控件绑定，validateFields 只返回已注册字段会把它丢掉
     const v = await form.validateFields();
-    const all = form.getFieldsValue(true) as KeyForm & Record<string, unknown>;
-    const existing = editing;
-    // 行序即语义：首行 = 主 Key 位（掩码 = 沿用旧值，明文 = 设置/替换主 Key），
-    // 其余行按原序进 Key 池；掩码行以结构化 { keep: 旧池索引 } 提交，删行/插行后不串位。
-    const rows = liveRows(all.keys);
-    const fresh = rows.filter((r) => r.value !== KEY_MASK).map((r) => r.value);
-    const poolEntries: (string | { keep: number })[] = rows
-      .slice(1)
-      .map((r) => (r.value === KEY_MASK ? { keep: r.keep ?? 0 } : r.value));
-    let apiKey: string;
-    let apiKeys: (string | { keep: number })[];
-    if (existing) {
-      const first = rows[0];
-      if (first?.value === KEY_MASK) {
-        // 首行掩码：主 Key 沿用旧值（服务端无主 Key 时保持空），其余行全部进池
-        apiKey = existing.apiKey ? KEY_MASK : "";
-        apiKeys = poolEntries;
-      } else if (first) {
-        // 首行明文：设置/替换主 Key，其余行进池
-        apiKey = first.value;
-        apiKeys = poolEntries;
-      } else {
-        // 行已删空：交由服务端沿用旧值（不丢失已配置密钥）
-        apiKey = "";
-        apiKeys = [];
-      }
-    } else {
-      [apiKey = "", ...apiKeys] = fresh;
-    }
+    setSaving(true);
     try {
+      const all = form.getFieldsValue(true) as KeyForm & Record<string, unknown>;
+      const existing = editing;
+      // 行级意图三态：掩码 = 沿用旧值；明文 = 设置/替换；掩码行被清空/删除 = 显式删除（KEY_CLEAR 哨兵）。
+      // 空串在后端是「沿用旧值」——删除必须用哨兵表达，否则「清空输入框保存」永远删不掉密钥。
+      // 首行 = 主 Key 位（keep: -1 = 主沿用），其余行按原序进 Key 池（keep = 旧池索引）。
+      // 关键：Form.List 删行是物理移除，被删行不会出现在 all.keys 里——
+      // 后端会把「apiKeys 缺省/空列表」当旧客户端沿用旧池，删行保存就白删了。
+      // 所以池提交序列必须与「初始池掩码行」等长对齐：初始池第 j 把若不在当前行里，补 KEY_CLEAR 占位。
+      const rawRows = (all.keys ?? []).map((r) => ({
+        value: (r?.value ?? "").trim(),
+        keep: r?.keep,
+      }));
+      // 行是否携带沿用标记（编辑时由 openEdit 注入；-1 = 主 Key 位，>=0 = 旧池索引）
+      const hasKeep = (r: { keep?: number }) => r.keep !== undefined;
+      // 当前各行表达的旧池意图：keep=j 的掩码行 = 沿用第 j 把；keep=j 的空行 = 删除第 j 把
+      const oldPoolSize = existing ? (existing.apiKeys ?? []).filter((k) => k && k.trim()).length : 0;
+      const poolIntent = new Map<number, string>(); // j -> KEY_MASK(沿用) | KEY_CLEAR(删除)
+      for (const r of rawRows) {
+        if (hasKeep(r) && (r.keep ?? -1) >= 0) {
+          poolIntent.set(r.keep ?? 0, r.value === KEY_MASK ? KEY_MASK : r.value === "" ? KEY_CLEAR : r.value);
+        }
+      }
+      // 新增明文行（无 keep 标记且非空、非掩码）按序追加在池序列之后
+      const freshPool = rawRows.filter((r) => !hasKeep(r) && r.value !== "" && r.value !== KEY_MASK).map((r) => r.value);
+      const firstRaw = rawRows[0];
+      let apiKey: string;
+      let apiKeys: (string | { keep: number })[];
+      let clearKeys = false;
+      if (existing) {
+        const first = firstRaw;
+        // 池提交序列：按初始池索引 0..oldPoolSize-1 对齐（缺位 = 该行被删除 = KEY_CLEAR），再接新增明文
+        apiKeys = Array.from({ length: oldPoolSize }, (_, j) => poolIntent.get(j) ?? KEY_CLEAR).concat(freshPool);
+        // 主 Key 行（keep=-1）已被物理删除 → 删除主 Key 意图（剩余行的池意图已在 poolIntent 里对齐）
+        const mainRowGone = hasKeep(first) && (first.keep ?? -1) >= 0;
+        if (mainRowGone && (existing.apiKey ?? "") !== "") {
+          apiKey = KEY_CLEAR;
+        } else if (first && first.value === KEY_MASK) {
+          // 首行掩码保留：主 Key 沿用旧值（服务端无主 Key 时保持空）
+          apiKey = existing.apiKey ? KEY_MASK : "";
+        } else if (first && first.value !== "") {
+          // 首行明文：设置/替换主 Key
+          apiKey = first.value;
+        } else if (first && first.value === "" && hasKeep(first)) {
+          // 首行是掩码位但被用户清空 = 显式删除主 Key（KEY_CLEAR）
+          apiKey = KEY_CLEAR;
+        } else {
+          // 行已删空（或首行是新的空行）：显式清空全部密钥（clearKeys）——
+          // 空串在后端是「沿用旧值」，不带标志位保存后密钥依然存在
+          apiKey = "";
+          apiKeys = [];
+          clearKeys = (existing.apiKey ?? "") !== "" || (existing.apiKeys ?? []).length > 0;
+        }
+      } else {
+        const fresh = rawRows.filter((r) => r.value !== "" && r.value !== KEY_MASK).map((r) => r.value);
+        [apiKey = "", ...apiKeys] = fresh;
+      }
       await api.saveLlmProfile({
         id: existing?.id ?? ((v.id ?? "").trim() || undefined),
         name: (v.name ?? "").trim() || t("models.unnamed"),
@@ -252,6 +307,7 @@ export function ModelsView(): React.ReactElement {
         apiFormat: v.apiFormat ?? "openai",
         apiKey,
         apiKeys,
+        clearKeys,
         model: (v.model ?? "").trim(),
         models: ((v.models ?? []) as ProfileModel[])
           .filter((m) => m.model && m.model.trim())
@@ -263,6 +319,8 @@ export function ModelsView(): React.ReactElement {
       await load();
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -491,10 +549,12 @@ export function ModelsView(): React.ReactElement {
         title={editing ? t("models.editTitle", { name: editing.name }) : t("models.add")}
         onCancel={() => setModal(false)}
         onOk={() => void submit()}
+        confirmLoading={saving}
         okText={t("common.save")}
-        width={560}
+        destroyOnHidden
+        width={620}
       >
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" onFinish={() => void submit()}>
           <Form.Item name="preset" label={t("models.presetLabel")} rules={[{ required: true }]}>
             <Select options={presetOptions} onChange={(k) => applyPreset(k)} />
           </Form.Item>
@@ -541,13 +601,15 @@ export function ModelsView(): React.ReactElement {
             name="model"
             label={t("models.defaultModel")}
             extra={t("models.defaultModelExtra")}
+            tooltip={modelWatch.length === 0 ? t("models.defaultModelEmptyTip") : undefined}
           >
-            <AutoComplete
+            <Select
               allowClear
               showSearch
               options={modelWatch.map((m) => ({ value: m.model, label: m.model }))}
               filterOption={(input, opt) => String(opt?.value ?? "").toLowerCase().includes(input.toLowerCase())}
-              placeholder={t("models.defaultModelPh")}
+              placeholder={modelWatch.length === 0 ? t("models.defaultModelEmptyPh") : t("models.defaultModelPh")}
+              notFoundContent={t("models.defaultModelEmptyPh")}
             />
           </Form.Item>
 
@@ -640,6 +702,71 @@ export function ModelsView(): React.ReactElement {
           </Form.Item>
         </Form>
       </Modal>
+
+      {/* 远端模型选择窗：拉取后先勾选再入表单（不全量塞入） */}
+      <Modal
+        open={Boolean(picker?.open)}
+        title={t("models.pickerTitle")}
+        onCancel={() => setPicker(null)}
+        onOk={() => void applyPickedModels()}
+        okText={t("models.pickerAdd", { n: picker?.selected.length ?? 0 })}
+        okButtonProps={{ disabled: (picker?.selected.length ?? 0) === 0, loading: pickerSaving }}        cancelText={t("common.cancel")}
+        width={520}
+      >
+        {picker && (
+          <ModelPicker
+            models={picker.models}
+            selected={picker.selected}
+            onChange={(selected) => setPicker((p) => (p ? { ...p, selected } : p))}
+          />
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+/** 远端模型勾选列表：搜索过滤 + 全选/全不选；已在表单中的模型标记「已有」不可勾 */
+function ModelPicker({ models, selected, onChange }: {
+  models: string[];
+  selected: string[];
+  onChange: (selected: string[]) => void;
+}): React.ReactElement {
+  const t = useT();
+  const [q, setQ] = useState("");
+  const lowered = q.trim().toLowerCase();
+  const shown = lowered ? models.filter((m) => m.toLowerCase().includes(lowered)) : models;
+  const allChecked = shown.length > 0 && shown.every((m) => selected.includes(m));
+  const toggle = (m: string) =>
+    onChange(selected.includes(m) ? selected.filter((x) => x !== m) : [...selected, m]);
+  return (
+    <div className="model-picker">
+      <Space style={{ width: "100%", marginBottom: 8 }} direction="vertical" size={6}>
+        <Input.Search
+          placeholder={t("models.pickerSearch")}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          allowClear
+          size="small"
+        />
+        <Space size={8}>
+          <Button size="small" type="link" onClick={() => onChange(allChecked ? selected.filter((m) => !shown.includes(m)) : Array.from(new Set([...selected, ...shown])))}>
+            {allChecked ? t("models.pickerUnselectAll") : t("models.pickerSelectAll")}
+          </Button>
+          <span className="dim">{t("models.pickerCount", { sel: selected.length, total: models.length })}</span>
+        </Space>
+      </Space>
+      <div className="model-picker-list">
+        {shown.map((m) => {
+          const on = selected.includes(m);
+          return (
+            <label key={m} className={`model-picker-item ${on ? "on" : ""}`}>
+              <input type="checkbox" checked={on} onChange={() => toggle(m)} />
+              <span className="mono">{m}</span>
+            </label>
+          );
+        })}
+        {shown.length === 0 && <div className="dim" style={{ padding: 12 }}>{t("models.pickerEmpty")}</div>}
+      </div>
     </div>
   );
 }

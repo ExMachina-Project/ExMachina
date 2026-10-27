@@ -137,6 +137,16 @@ pub enum ToolName {
     /// 记忆关联与主题列示：建立条目关联 / 列示主题下条目及关联链
     #[serde(rename = "memory_link")]
     MemoryLink,
+    /// Git 版本控制：多合一动作面（只读 status/diff/log/branch/show/stash-list；
+    /// 写 add/commit/restore/stash-push/stash-pop/checkout-b 过审批闸门；push 不在动作面）
+    Git,
+    /// 子智能体派生：主智能体把封闭子任务交给独立上下文的子智能体执行（单层限制，
+    /// 子级无 spawn/agent_manage），返回结论摘要。并发与超时受控（spec: subagent-spawn）
+    Spawn,
+    /// 动态上下文压缩（实验性，experiments.dynamicCompaction 开启才下发）：
+    /// 模型自行判断时机，把窗口外旧历史主动压成滚动摘要
+    #[serde(rename = "context_compact")]
+    ContextCompact,
 }
 
 impl ToolName {
@@ -158,6 +168,9 @@ impl ToolName {
             ToolName::MemoryRead => "memory_read",
             ToolName::MemoryWrite => "memory_write",
             ToolName::MemoryLink => "memory_link",
+            ToolName::Git => "git",
+            ToolName::Spawn => "spawn",
+            ToolName::ContextCompact => "context_compact",
         }
     }
 
@@ -192,6 +205,9 @@ impl ToolName {
             "memory_read" => Some(ToolName::MemoryRead),
             "memory_write" => Some(ToolName::MemoryWrite),
             "memory_link" => Some(ToolName::MemoryLink),
+            "git" => Some(ToolName::Git),
+            "spawn" => Some(ToolName::Spawn),
+            "context_compact" => Some(ToolName::ContextCompact),
             _ => None,
         }
     }
@@ -439,7 +455,6 @@ pub struct GroupCapabilities {
     pub embedding: Option<String>,
 }
 
-/// 智能体组元数据：组是隔离与切换的基本单位（docs/09）
 // ---------------------------------------------------------------- 编成模板
 
 /// 编成模板元数据(entities/templates/<kind>/<id>/template.json):用户与 agent 均可基于模板创建
@@ -453,6 +468,7 @@ pub struct TemplateInfo {
     pub kind: String,
 }
 
+/// 智能体组元数据：组是隔离与切换的基本单位（docs/09）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupMeta {
@@ -526,6 +542,10 @@ pub struct AgentDefinition {
     /// 值 = nexus.links 中的连结体 id。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// 单智能体对话循环工具步数上限覆盖（None = 用全局默认 security.chatMaxSteps；
+    /// 组派发路径不受此项影响，仍取派发约束 unitMaxSteps）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<usize>,
 }
 
 // ---------------------------------------------------------------- 消息与三账
@@ -555,7 +575,7 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerTask {
     pub goal: String,
@@ -567,18 +587,6 @@ pub struct LedgerTask {
     pub forbidden: Vec<String>,
     #[serde(default)]
     pub priorities: Vec<String>,
-}
-
-impl Default for LedgerTask {
-    fn default() -> Self {
-        LedgerTask {
-            goal: String::new(),
-            acceptance: vec![],
-            constraints: vec![],
-            forbidden: vec![],
-            priorities: vec![],
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,6 +674,9 @@ pub struct ChatMessage {
     pub agent_id: Option<String>,
     pub statements: Vec<Statement>,
     pub created_at: String,
+    /// 所属轮次（写库时标注；工具卡回滚按钮的 undo 目标）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<TokenUsage>,
     /// 本轮思维链（收束时由服务端留存，过程收起栏数据源）

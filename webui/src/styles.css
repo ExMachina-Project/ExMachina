@@ -11,15 +11,16 @@
    2) 强调色（--accent）只用于交互与状态点缀，绝不大面积铺色。
    3) 语义色（--green/--amber/--red/--blue）仅表状态，不参与装饰。
    4) 正文用无衬线；等宽（--mono）只留给代码、数字读数与技术标识。
-   面板语汇：面板 = 圆角卡片（radius + 1px 描边 + 柔和阴影），层次由阴影与底色差表达。
+   面板语汇：面板 = 直角卡片（0 radius + 1px 描边 + 柔和阴影），层次由阴影与底色差表达。智械硬朗风。
    ============================================================ */
 :root {
   /* ── 几何 ── */
-  --r-xs: 4px;
-  --r-sm: 6px;
-  --r-md: 8px;
-  --r-lg: 12px;
-  --r-xl: 16px;
+  /* 智械直角风：结构圆角全部归零（LED/进度环等功能性圆形走 --r-full） */
+  --r-xs: 0px;
+  --r-sm: 0px;
+  --r-md: 0px;
+  --r-lg: 0px;
+  --r-xl: 0px;
   --r-full: 999px;
 
   /* ── 动效令牌（快进慢出，统一节奏） ── */
@@ -206,7 +207,7 @@ input, textarea { caret-color: var(--accent); }
 .brand-tag {
   margin-left: auto;
   font-size: 11px;
-  border-radius: var(--r-full) !important;
+  border-radius: 0 !important;
 }
 
 .new-session-btn {
@@ -338,7 +339,7 @@ input, textarea { caret-color: var(--accent); }
 }
 .ant-table-tbody > tr > td { border-bottom: 1px solid var(--line); }
 .ant-tag {
-  border-radius: var(--r-full);
+  border-radius: 0;
   font-size: 11.5px;
   border-color: var(--line-strong);
 }
@@ -426,9 +427,22 @@ textarea.ant-input:focus,
 .ant-drawer-header { border-bottom: 1px solid var(--line); }
 .ant-empty-description { color: var(--muted); font-size: 12.5px; }
 
+/* 长页滚动时页头保持可达：标题与操作钮吸顶（背景模糊避免与内容叠字） */
+.page-head {
+  position: sticky;
+  /* 负 top：让盒背景盖住滚动容器顶部的 padding 空隙（12px），内容用 padding 补回原位 */
+  top: -12px;
+  margin-top: 0;
+  padding-top: 24px;
+  z-index: 20;
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
+  box-shadow: 0 6px 14px -10px color-mix(in srgb, var(--bg-sunken) 80%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
 /* ============ 统一页头 ============ */
 .page-head {
-  position: relative;
   padding: 2px 0 14px;
   margin-bottom: 18px;
   border-bottom: 1px solid var(--line);
@@ -668,6 +682,46 @@ textarea.ant-input:focus,
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 .chat-composer .attach-row { padding: 10px 12px 0; }
+
+/* `@` 文件提及弹层（对话即编码）：浮在输入框上方 */
+.chat-composer { position: relative; }
+.mention-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 12px;
+  right: 12px;
+  max-width: 560px;
+  margin: 0 auto;
+  background: var(--panel, #1e1f24);
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  z-index: 30;
+  overflow: hidden;
+}
+.mention-pop-head, .mention-pop-foot {
+  padding: 6px 12px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+.mention-pop-head { border-bottom: 1px solid var(--line, rgba(127,127,127,.2)); }
+.mention-pop-foot { border-top: 1px solid var(--line, rgba(127,127,127,.2)); }
+.mention-pop-list { max-height: 264px; overflow-y: auto; padding: 4px; }
+.mention-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.mention-pop-item.on { background: rgba(64, 128, 255, 0.14); }
+.mention-pop-item .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .chat-composer .composer-textarea.ant-input {
   min-height: 42px;
   padding: 11px 14px 2px !important;
@@ -746,7 +800,7 @@ textarea.ant-input:focus,
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--r-full);
+  border-radius: 0;
   background: var(--text-hi) !important;
   color: var(--bg) !important;
   box-shadow: none;
@@ -785,6 +839,12 @@ textarea.ant-input:focus,
 .graph-empty { margin-top: 120px; }
 
 /* ============ 个体 / 三账 / 设置 ============ */
+/* 三账：三卡等高 + 任务账长文滚动约束（超长 prompt 会把卡片撑到数屏高） */
+.ledger-wrap { padding: 8px; }
+.ledger-wrap .ant-card { height: 100%; display: flex; flex-direction: column; }
+.ledger-wrap .ant-card .ant-card-body { flex: 1; min-height: 0; overflow-y: auto; max-height: calc(100vh - 260px); }
+.ledger-wrap p { margin: 6px 0; line-height: 1.7; }
+.ledger-wrap .ant-list { margin: 4px 0 10px; }
 .agents-group { margin-bottom: 16px; }
 .agents-toolbar { margin-bottom: 12px; }
 .ledger-wrap { padding: 8px; }
@@ -797,6 +857,7 @@ textarea.ant-input:focus,
 }
 .ledger-evidence-row .ant-tag { margin-inline-end: 0; flex: none; }
 .ledger-evidence { flex: 1 1 150px; margin: 0; min-width: 0; line-height: 1.6; }
+/* 旧 .ledger-wrap 内边距规则由「个体 / 三账 / 设置」段新规则取代（等高 + 滚动约束） */
 .settings-card { max-width: 720px; margin: 0 auto; }
 .settings-group { margin-bottom: 12px; }
 .settings-key { color: var(--accent); font-size: 12.5px; font-family: var(--mono); }
@@ -804,6 +865,22 @@ textarea.ant-input:focus,
 .settings-note { color: var(--muted); font-size: 12.5px; line-height: 1.7; }
 
 /* ============ 记忆 ============ */
+/* 统计读数：数字走 mono 读数语言（与控制台 TELEMETRY/TOKENS 一致），标题小号大写 */
+.ant-statistic { width: 100%; }
+.ant-statistic .ant-statistic-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.ant-statistic .ant-statistic-content {
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--text-hi);
+  line-height: 1.2;
+}
 .memory-wrap { width: 100%; min-width: 0; }
 .memory-card { margin-top: 16px; }
 .memory-stat { height: 100%; }
@@ -937,7 +1014,7 @@ textarea.ant-input:focus,
   background: transparent;
   position: relative;
 }
-.view-stage { width: 100%; }
+.view-stage { width: 100%; max-width: 1480px; margin: 0 auto; }
 
 .agents-group .ant-card-head-title {
   font-weight: 600;
@@ -1012,6 +1089,32 @@ textarea.ant-input:focus,
 .model-caps .anticon { font-size: 11px; opacity: 0.85; }
 .model-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .model-row > .ant-form-item { flex: 1; min-width: 0; margin: 0; }
+
+/* 远端模型选择窗（获取可用模型 → 勾选后入表单） */
+.model-picker-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.25));
+  border-radius: 8px;
+  padding: 4px;
+}
+.model-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.model-picker-item:hover { background: rgba(127, 127, 127, 0.1); }
+.model-picker-item.on { background: rgba(64, 128, 255, 0.12); }
+.model-picker-item input[type="checkbox"] { accent-color: #4080ff; cursor: pointer; }
+.model-picker-item .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cap-switch {
   display: inline-flex;
   align-items: center;
@@ -1199,8 +1302,10 @@ textarea.ant-input:focus,
 .plain-table tbody tr { transition: background var(--dur-fast) var(--ease-out); }
 .plain-table tbody tr:hover { background: var(--hover); }
 
-/* ============ 设置页 v3 ============ */
+/* 设置页 v3：面板区独立滚动，左侧分区导航常驻（长表单滚动时导航不跟着滚走） */
 .settings2 { display: flex; gap: 22px; align-items: flex-start; }
+/* sticky top 对齐吸顶页头下缘（页头约 87px），避免导航首项被页头盖住 */
+.settings2 .cfg-nav { position: sticky; top: 96px; max-height: calc(100vh - 216px); overflow-y: auto; padding-bottom: 8px; }
 .cfg-nav {
   flex: none;
   width: 200px;
@@ -1385,7 +1490,7 @@ textarea.ant-input:focus,
   position: absolute;
   top: 2px;
   right: 2px;
-  border-radius: var(--r-full) !important;
+  border-radius: 0 !important;
 }
 .attach-btn {
   display: flex;
@@ -1768,6 +1873,8 @@ textarea.ant-input:focus,
   }
   .app-sider.open { transform: translateX(0); }
   .app-content { padding: 52px 10px 14px 10px !important; }
+  /* 窄屏取消页头吸顶：触屏空间宝贵，吸顶头占位且与移动端顶栏重叠 */
+  .page-head { position: static; margin-top: 0; padding-top: 0; background: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
   /* 对话竖屏改由「左栏抽屉」方案接管（见上方 media 块）：
    * 此处不再对 .chat-shell/.chat-rail 做纵向堆叠与 max-height 截断——
    * 两者叠加会把抽屉压到 38vh，会话列表只剩 20px 高并把行截断。 */
@@ -1865,7 +1972,7 @@ textarea.ant-input:focus,
 .change-row.active { background: var(--accent-soft); }
 .change-op {
   font-family: var(--mono); font-size: 10px; padding: 1px 6px;
-  border-radius: var(--r-full); text-transform: uppercase; flex-shrink: 0;
+  border-radius: 0; text-transform: uppercase; flex-shrink: 0;
 }
 .change-edit { color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent); }
 .change-write { color: var(--green); border: 1px solid color-mix(in srgb, var(--green) 45%, transparent); }
@@ -1927,14 +2034,23 @@ textarea.ant-input:focus,
 .turn-op { padding: 0 5px; font-size: 12px; color: var(--muted); border-radius: var(--r-xs); }
 .turn-op:hover { color: var(--accent); background: var(--hover); }
 .msg-turn { margin-left: 6px; font-size: 10px; opacity: 0.55; }
+/* 自动任务徽标：系统自动内容（视频观看等）与真人消息的区分标记 */
+.auto-tag {
+  margin-left: 6px; padding: 0 5px; font-size: 10px; line-height: 16px;
+  color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  opacity: 0.85; font-family: var(--mono);
+}
 .code-msg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .code-msg .turn-op { padding: 0 4px; }
 .edit-warn { margin-bottom: 12px; }
 
 /* ============ 紧凑化 ============ */
 .app-content { padding: 12px 16px 18px; }
-.page-head { padding: 0 0 10px; margin-bottom: 10px; }
+.page-head { padding: 0 0 10px; margin-bottom: 8px; padding-top: 24px; }
 .page-head-row { gap: 16px; }
+/* 吸顶盒底部阴影与分隔线已构成视觉分隔，页头与内容的间距收紧 */
+.page-head + .ant-spin-nested-loading,
+.page-head + * { margin-top: 0; }
 .page-desc { line-height: 1.55; margin: 4px 0 0; }
 .pane-toolbar { margin-bottom: 10px; }
 .pane-empty { margin: 16px 0; }
@@ -2005,7 +2121,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   font-weight: 500;
   padding: 3px 10px;
   border: 1px solid var(--line-strong);
-  border-radius: var(--r-full);
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -2433,7 +2549,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   bottom: 12px; right: 14px;
   z-index: 6;
   width: 34px; height: 34px;
-  border-radius: var(--r-full);
+  border-radius: 0;
   border: 1px solid var(--line-strong);
   background: var(--bg-panel);
   color: var(--muted);
@@ -2448,6 +2564,19 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .plain-table { table-layout: fixed; width: 100%; }
 .plain-table th, .plain-table td { padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
 .plain-table .member-cell .member-id { display: block; margin-top: 1px; }
+
+/* 表格内空态（审批/通道等页面）：占位收敛，不再与整页空态同高 */
+.ant-table .brand-empty { padding: 26px 0; gap: 8px; }
+.ant-table .brand-empty-figure { width: 68px; height: 68px; }
+.ant-table .brand-empty-emblem { opacity: 0.4; }
+.ant-table .brand-empty-desc { font-size: 12px; }
+
+/* —— 表格：行悬停已有；补表头吸顶（长表滚动时列名常驻）与行过渡 —— */
+.ant-table-tbody > tr > td { transition: background var(--dur-fast) var(--ease-out); }
+.ant-table-thead > tr > th { position: sticky; top: 0; z-index: 5; }
+
+/* —— 卡片悬停浮起：可点击卡片才有，全局卡片只做描边加深 —— */
+.ant-card:hover { border-color: var(--line-strong); }
 
 /* ============ 微交互补全 ============ */
 .ant-btn { transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform 0.1s var(--ease-out); }
@@ -2596,3 +2725,92 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 @media (max-width: 860px) {
   .memory-card .ant-table { min-width: 100%; }
 }
+
+/* ============ 通道身份面板（折叠态） ============
+ * 收起时只剩签发工具条 + 展开按钮一行，把纵向空间还给通道主表。 */
+.identity-collapsed { display: flex; align-items: center; gap: 8px; }
+.identity-collapsed .ant-space-compact { flex: 1 1 auto; min-width: 0; }
+.identity-issued { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+/* 空态瘦身：身份面板的两个内嵌小表用轻量空态，不再撑出大插画 */
+.identity-panel .ant-table-placeholder .ant-empty { margin: 8px 0; }
+.identity-panel .ant-table-placeholder { padding: 8px 0; }
+/* tab 内联形态：身份面板在「身份与配对」tab 下的平铺容器 */
+.identity-inline { display: block; }
+.identity-inline .ant-table-wrapper + .ant-table-wrapper { margin-top: 12px; }
+
+/* ============ B 站扫码登录弹窗 ============ */
+.biliqr-body { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px 0 4px; }
+.biliqr-img { position: relative; line-height: 0; padding: 8px; border-radius: 8px; background: #fff; }
+.biliqr-img img { display: block; }
+.biliqr-img.scanned img { filter: blur(3px) opacity(0.35); }
+.biliqr-veil { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.biliqr-hint { text-align: center; font-size: 12px; }
+.biliqr-loading { padding: 48px 0; }
+
+/* ============ 对话体验优化（chat-render / rail-compact） ============
+ * 目标：会话栏省纵向空间、长代码不吞屏、消息头信息更完整。 */
+
+/* —— 会话栏紧凑化：目标区与列表区共用更紧的节奏 —— */
+.chat-rail { padding: 12px; }
+.chat-rail .rail-section { margin-bottom: 10px; }
+.chat-rail .rail-label { margin-bottom: 6px; }
+.chat-rail .rail-hint { margin-top: 5px; font-size: 12px; }
+.rail-toolbar { gap: 6px; }
+/* 类型过滤自适应宽度（原固定 106px 在小屏挤占搜索框） */
+.rail-toolbar .session-kind { width: auto; min-width: 72px; flex: none; }
+.rail-toolbar .session-kind .ant-select-content { font-size: 12px; }
+
+/* —— 代码块 meta 栏：语言标签 + 行数 + 折叠开关（替代裸复制钮） —— */
+.code-block-wrap { position: relative; }
+.code-block-meta {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  background: var(--bg-raise);
+  font-size: 11px;
+}
+.code-block-wrap .code-block-meta + pre {
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  margin-top: 0;
+}
+.code-lang { color: var(--accent); font-weight: 600; }
+.code-lines { color: var(--muted-dim); }
+.code-fold-btn {
+  margin-left: auto; padding: 0; border: none; background: none;
+  color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.code-fold-btn:hover { color: var(--accent); }
+/* 折叠态：只露前 14 行 + 省略号，尾部提示可展开 */
+pre.code-folded { position: relative; margin: 0; max-height: calc(14 * 1.6em + 24px); overflow: hidden; }
+.code-fold-ellipsis {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: block; text-align: center;
+  padding: 18px 0 6px;
+  background: linear-gradient(transparent, var(--bg-sunken) 55%);
+  color: var(--muted); font-size: 11px; font-family: var(--mono);
+}
+
+/* —— 消息头：时间戳跟随轮次号（左区），复制/操作仍归右端 —— */
+.msg-head .msg-time { color: var(--muted-dim); font-size: 10.5px; }
+.msg-head .msg-copy { margin-left: 0; }
+.msg-head .msg-ops { margin-left: 4px; }
+
+/* —— 用户消息：视觉与助手区分（左缘强调条 + 轻底色），不再全宽平铺 —— */
+.msg-bubble.msg-user, .ant-card.msg-bubble.msg-user { border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent) !important; }
+.msg-bubble { transition: border-color var(--dur-fast) var(--ease-out); }
+.msg-bubble:hover { border-color: var(--line-strong); }
+
+/* —— 长任务 prompt（用户消息内超大段文本）：行高与字距微调，扫读更省力 —— */
+.md { line-height: 1.72; }
+.md p + p { margin-top: 0.55em; }
+/* JSON 代码块：长字符串值自动换行（中文无空格，pre 默认不换会拉出横向滚动） */
+.md pre code.json, .md pre .language-json { white-space: pre-wrap; word-break: break-all; }
+
+/* —— 终端产出面板（工具卡展开区）：命令/输出/退出码分区 —— */
+.tool-terminal { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.tool-terminal .term-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tool-terminal .term-label { font-size: 11px; color: var(--ant-color-text-tertiary, #999); flex: none; }
+.tool-terminal .term-cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--ant-color-fill-quaternary, #f5f5f5); padding: 1px 6px; border-radius: 4px; word-break: break-all; }
+.tool-terminal .term-out { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--ant-color-bg-layout, #fafafa); border-radius: 6px; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
