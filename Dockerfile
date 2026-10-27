@@ -15,10 +15,17 @@ RUN npm run build
 # ---------- 2) Rust 核心 ----------
 FROM rust:1.92-bookworm AS rust-builder
 WORKDIR /build
+# 国内网络环境：rustup/cargo 走 rsproxy 镜像（static.rust-lang.org 在部分路由器 DNS 下超时）
+ENV RUSTUP_DIST_SERVER=https://rsproxy.cn
+ENV RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+# apt 源同样换国内（deb.debian.org 为 Fastly CDN，该网络下不可达）
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources
 # libxdo-dev：enigo 键鼠控制链接 libxdo（dbus 已 vendored，无需系统包）
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libxdo-dev && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+# cargo 源也切到 rsproxy（crates.io 代理）
+RUN mkdir -p /usr/local/cargo/ && printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n' > /usr/local/cargo/config.toml
 # 依赖缓存层（无 lockfile 变更时命中）
 RUN cargo build --release -p exm-cli -p exm-gateway
 
@@ -27,7 +34,9 @@ FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 # 运行时动态库：enigo/xcap 的 X11 栈（libxdo / X11 / xkbcommon；容器内无显示面，Computer Use 默认关闭，
 # 但二进制加载即需这些 .so）+ CA 证书与 curl（健康检查）
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt 源换国内（deb.debian.org 为 Fastly CDN，该网络下不可达）
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git libxdo3 libx11-6 libxcb1 libxext6 libxinerama1 libxtst6 libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
 # 一键更新工具链:docker cli + compose 插件由 compose 从宿主机只读挂载(零构建期下载,版本与宿主引擎一致)

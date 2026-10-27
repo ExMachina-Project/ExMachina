@@ -12,6 +12,7 @@ export function SkillsView(): React.ReactElement {
   const [skills, setSkills] = useState<SkillDef[]>([]);
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
   const load = useCallback(async () => {
@@ -29,6 +30,7 @@ export function SkillsView(): React.ReactElement {
 
   const submit = async () => {
     const v = await form.validateFields();
+    setSaving(true);
     try {
       await api.createSkill({
         id: v.id,
@@ -44,6 +46,8 @@ export function SkillsView(): React.ReactElement {
       await load();
     } catch (e) {
       message.error(t("skills.createFailed", { err: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -120,8 +124,16 @@ export function SkillsView(): React.ReactElement {
         )}
       </Spin>
 
-      <Modal open={modal} title={t("skills.new")} onCancel={() => setModal(false)} onOk={() => void submit()} okText={t("skills.create")}>
-        <Form form={form} layout="vertical">
+      <Modal
+        open={modal}
+        title={t("skills.new")}
+        onCancel={() => setModal(false)}
+        onOk={() => void submit()}
+        confirmLoading={saving}
+        okText={t("skills.create")}
+        destroyOnHidden
+      >
+        <Form form={form} layout="vertical" onFinish={() => void submit()}>
           <Form.Item name="id" label="ID" rules={[{ required: true }, { pattern: /^[A-Za-z0-9_-]{1,48}$/, message: t("skills.idPattern") }]}>
             <Input placeholder={t("skills.f.idPh")} />
           </Form.Item>

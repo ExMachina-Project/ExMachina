@@ -213,7 +213,7 @@ impl ComputerSession {
         let mut held: Vec<enigo::Key> = Vec::new();
         for m in &modifiers {
             let k = key_of(m)?;
-            enigo.key(k.clone(), Direction::Press)?;
+            enigo.key(k, Direction::Press)?;
             held.push(k);
         }
         let last_key = key_of(&last)?;

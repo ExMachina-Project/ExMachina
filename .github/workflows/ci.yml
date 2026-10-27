@@ -24,7 +24,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Check
-        run: cargo check --workspace
+        # --locked：Cargo.lock 与 Cargo.toml 漂移（改了依赖忘提交锁文件）在此机械拦截
+        run: cargo check --workspace --locked
+      # Lint 门禁：警告清零是基线纪律（一笔 56 条警告的欠账曾无人拦），新警告进 PR 即红
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace
       # 端到端验收（README 的验证入口）：REST 全端点 + 事件流 + 任务图 + 证据/三账/记忆/档案。

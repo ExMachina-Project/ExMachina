@@ -31,7 +31,7 @@ fn ask_yes(prompt: &str, default_yes: bool) -> bool {
 }
 
 pub fn run_install(workspace_root: &std::path::Path, quick: bool) -> anyhow::Result<()> {
-    println!("{}", "EXMACHINA 安装向导".on_blue().white().to_string());
+    println!("{}", "EXMACHINA 安装向导".on_blue().white());
     println!("{}", dim("本向导将完成：环境检查 → 模型接入 → 运行时参数 → 落盘与自检"));
     println!();
 
@@ -98,7 +98,7 @@ pub fn run_install(workspace_root: &std::path::Path, quick: bool) -> anyhow::Res
     }
 
     println!();
-    println!("{}", "安装完成".green().bold().to_string());
+    println!("{}", "安装完成".green().bold());
     println!("  {} {}", dim("运行配置"), cfg.config_path.display());
     println!("  {} {}", dim("安装清单"), cfg.install_manifest_path().display());
     println!("  {} {}", dim("数据目录"), cfg.data_dir.display());
@@ -112,7 +112,7 @@ pub fn run_install(workspace_root: &std::path::Path, quick: bool) -> anyhow::Res
         println!("  {}  {}", dim("·"), "exm gateway  # 打开「提供商」页图形化配置".cyan());
     }
     println!();
-    println!("{}", "下一步".bold().to_string());
+    println!("{}", "下一步".bold());
     println!("  {}  {}{}", dim("1."), "exm chat \"分析当前项目的架构风险\"".cyan(), dim("   # 终端直接对话"));
     println!("  {}  {}{}", dim("2."), "exm gateway".cyan(), dim("                       # 起网关（WebUI/第三方渠道接入）"));
     println!("  {}  {}{}", dim("3."), "exm doctor".cyan(), dim("                       # 体检：配置/编成/记忆/端口"));

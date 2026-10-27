@@ -9,6 +9,7 @@ pub mod group_cmd;
 pub mod install;
 pub mod memory_cmd;
 pub mod panel;
+pub mod tui;
 pub mod persona_cmd;
 pub mod platform_cmd;
 pub mod render;
@@ -16,7 +17,7 @@ pub mod render;
 use clap::{Parser, Subcommand};
 use exm_core::Core;
 use owo_colors::OwoColorize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -39,6 +40,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 全屏 TUI 终端工作台（裸 `exm` 默认形态）：消息流/输入/状态栏 + 审批页
+    Tui,
     /// 首启安装向导：环境检查 → 模型接入 → 落盘 → 自检
     Install {
         /// 快速模式：仅确认关键项（模型接入仍会询问）
@@ -442,8 +445,8 @@ enum MemoryAction {
 /// Windows 上 `canonicalize` 会返回 `\\?\D:\...`（UNC 则为 `\\?\UNC\srv\share`），
 /// 这个前缀一旦进了 config.json 或 `doctor` / 面板的输出，跨端（桌面端、WebUI）比对
 /// 就会处处对不上，可读性也差。故在 CLI 入口统一剥掉。
-fn normalize_root(ws: &PathBuf) -> PathBuf {
-    let root = ws.canonicalize().unwrap_or_else(|_| ws.clone());
+fn normalize_root(ws: &Path) -> PathBuf {
+    let root = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
     let s = root.to_string_lossy().to_string();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
@@ -454,8 +457,8 @@ fn normalize_root(ws: &PathBuf) -> PathBuf {
     }
 }
 
-fn build_core(workspace: &PathBuf) -> anyhow::Result<Arc<Core>> {
-    Ok(Arc::new(Core::create(&normalize_root(workspace))?))
+fn build_core(workspace: &Path) -> anyhow::Result<Arc<Core>> {
+    Ok(Arc::new(Core::create(normalize_root(workspace))?))
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -466,14 +469,20 @@ pub fn run() -> anyhow::Result<()> {
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace.clone();
-    // 裸命令 `exm` / `exmachina` 等价于 `exm chat`（无参数）：直接进终端交互面板
-    let command = cli.command.unwrap_or(Commands::Chat {
-        text: None,
-        session: None,
-        quiet: false,
-        preview: false,
-    });
+    // 裸命令 `exm` / `exmachina`：进全屏 TUI（消息流/输入/状态栏三段版式）。
+    // `exm chat` 保留 readline 面板（ BREAKING：裸命令旧版进 readline 面板）
+    let command = cli.command.unwrap_or(Commands::Tui);
     match command {
+        Commands::Tui => {
+            let core = build_core(&workspace)?;
+            // TTY 校验：非终端（管道/重定向）退回行交互，避免控制序列污染
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                tui::run_tui(core, false).await
+            } else {
+                chat::run_interactive(core, false).await
+            }
+        }
         Commands::Install { quick } => {
             let root = normalize_root(&workspace);
             install::run_install(&root, quick)
@@ -514,7 +523,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 let label = d.domain.clone();
                 if label != last_domain {
                     last_domain = label.clone();
-                    println!("\n{}", label.bold().underline().to_string());
+                    println!("\n{}", label.bold().underline());
                 }
                 let tier = if matches!(d.tier, exm_core::types::Tier::Orchestrator) {
                     format!(" {} ", "指挥体".on_blue().white())
@@ -539,7 +548,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let core = build_core(&workspace)?;
             match core.store.latest_graph(&session_id)? {
                 Some(g) => {
-                    println!("{}", format!("图 {}｜状态 {:?}", g.id, g.status).bold().to_string());
+                    println!("{}", format!("图 {}｜状态 {:?}", g.id, g.status).bold());
                     for n in &g.nodes {
                         println!("{}", render::node_line(n));
                     }

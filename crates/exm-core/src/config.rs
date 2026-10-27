@@ -25,6 +25,9 @@ pub struct ModelEntry {
     /// 支持音频（语音输入）
     #[serde(default)]
     pub audio: bool,
+    /// 上下文窗口（token 数；0/缺省 = 未知，预算软着陆跳过判定）
+    #[serde(default)]
+    pub context_window: u64,
 }
 
 /// 厂商模型档案：一条 OpenAI 兼容端点（OpenAI/DeepSeek/通义/Kimi/智谱/Ollama/vLLM …）。
@@ -87,10 +90,28 @@ pub struct SecurityConfig {
     /// 期间批准 → 执行结果直接回灌模型继续干活；超时 → 按「受阻回流」交还上层。0 = 不等待（旧行为）
     #[serde(default)]
     pub approval_wait_secs: u64,
+    /// 单智能体对话循环（chat_execute）默认最大工具步数；
+    /// 个体 maxSteps / 作用域档位可覆盖此默认
+    #[serde(default = "default_chat_max_steps")]
+    pub chat_max_steps: usize,
+    /// 上下文预算安全线：估算 token 超模型窗口该比例时触发多级裁剪
+    /// （0 = 用默认 0.8；合法范围 0.5~1.0，越界回落默认）
+    #[serde(default = "default_context_budget_ratio")]
+    pub context_budget_ratio: f64,
     /// 首启密钥设置引导：无密钥部署的首次启动会引导设置访问密钥；
     /// 选「不再提醒」后为 true（「下次再说」只记进程内，网关重启即恢复提醒）
     #[serde(default)]
     pub key_setup_dismissed: bool,
+}
+
+/// 单智能体循环默认步数上限（与既有硬编码 24 保持一致）
+fn default_chat_max_steps() -> usize {
+    24
+}
+
+/// 上下文预算安全线默认值
+fn default_context_budget_ratio() -> f64 {
+    0.8
 }
 
 impl Default for SecurityConfig {
@@ -102,6 +123,8 @@ impl Default for SecurityConfig {
             terminal_timeout_secs: 120,
             tool_output_spill_chars: 12000,
             approval_wait_secs: 120,
+            chat_max_steps: default_chat_max_steps(),
+            context_budget_ratio: default_context_budget_ratio(),
             key_setup_dismissed: false,
         }
     }
@@ -384,18 +407,12 @@ impl Default for FileWatchConfig {
 }
 
 /// 事件 webhook 源（通用事件入口；独立于通道 webhook）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EventWebhookConfig {
     pub enabled: bool,
     /// HMAC 签名密钥；空 = 未配置（入口关闭）
     pub secret: String,
-}
-
-impl Default for EventWebhookConfig {
-    fn default() -> Self {
-        EventWebhookConfig { enabled: false, secret: String::new() }
-    }
 }
 
 /// 触发器总段（事件驱动主动行为）
@@ -453,6 +470,30 @@ impl Default for LimitsConfig {
             quota_tokens: 0,
             quota_requests: 0,
             quota_running_policy: "finish".into(),
+        }
+    }
+}
+
+/// 实验性功能开关（未稳定的行为面；默认全关，开启即自担体验波动）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentsConfig {
+    /// 动态上下文压缩：模型获得 context_compact 工具，自行判断压缩时机
+    /// （判断依据：上下文变得冗长 / 早期细节已不再关键 / 即将进入长任务阶段），
+    /// 主动把指定范围历史压成滚动摘要。关闭时仍用条数阈值的自动压缩。
+    #[serde(default)]
+    pub dynamic_compaction: bool,
+    /// 智能体组共享上下文：派发子个体时携带组主会话的滚动摘要与最近对话窗口，
+    /// 子个体不再只有 objective 孤岛视角。会放大每轮派发的 token 开销。
+    #[serde(default)]
+    pub group_shared_context: bool,
+}
+
+impl Default for ExperimentsConfig {
+    fn default() -> Self {
+        ExperimentsConfig {
+            dynamic_compaction: false,
+            group_shared_context: false,
         }
     }
 }
@@ -611,6 +652,8 @@ pub struct ExmConfig {
     pub notify: NotifyConfig,
     /// 智能连结网络（实验性）
     pub nexus: NexusConfig,
+    /// 实验性功能开关（动态压缩 / 组共享上下文等；默认全关）
+    pub experiments: ExperimentsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -664,6 +707,8 @@ struct ConfigFile {
     notify: Option<NotifyConfig>,
     #[serde(default)]
     nexus: Option<NexusConfig>,
+    #[serde(default)]
+    experiments: Option<ExperimentsConfig>,
 }
 
 /// 能力模型槽位（模型设置页配置）：语音合成 / 语音识别 / 视觉转述。
@@ -798,6 +843,10 @@ struct SecurityFile {
     tool_output_spill_chars: Option<usize>,
     #[serde(default)]
     approval_wait_secs: Option<u64>,
+    #[serde(default)]
+    chat_max_steps: Option<usize>,
+    #[serde(default)]
+    context_budget_ratio: Option<f64>,
     #[serde(default)]
     key_setup_dismissed: Option<bool>,
 }
@@ -948,6 +997,14 @@ impl ExmConfig {
             approval_wait_secs: file_sec
                 .approval_wait_secs
                 .unwrap_or_else(|| SecurityConfig::default().approval_wait_secs),
+            chat_max_steps: file_sec
+                .chat_max_steps
+                .filter(|v| *v > 0)
+                .unwrap_or_else(|| SecurityConfig::default().chat_max_steps),
+            context_budget_ratio: file_sec
+                .context_budget_ratio
+                .filter(|v| (0.5..=1.0).contains(v))
+                .unwrap_or_else(|| SecurityConfig::default().context_budget_ratio),
             key_setup_dismissed: file_sec.key_setup_dismissed.unwrap_or(false),
         };
         let automation = AutomationConfig {
@@ -1089,6 +1146,7 @@ impl ExmConfig {
             mcp_serve: file.mcp_serve.clone().unwrap_or_default(),
             notify: file.notify.clone().unwrap_or_default(),
             nexus: file.nexus.clone().unwrap_or_default(),
+            experiments: file.experiments.clone().unwrap_or_default(),
         }
     }
 
@@ -1144,6 +1202,8 @@ impl ExmConfig {
                 terminal_timeout_secs: Some(self.security.terminal_timeout_secs),
                 tool_output_spill_chars: Some(self.security.tool_output_spill_chars),
                 approval_wait_secs: Some(self.security.approval_wait_secs),
+                chat_max_steps: Some(self.security.chat_max_steps),
+                context_budget_ratio: Some(self.security.context_budget_ratio),
                 key_setup_dismissed: Some(self.security.key_setup_dismissed),
             }),
             computer: Some(self.computer.clone()),
@@ -1166,6 +1226,7 @@ impl ExmConfig {
             mcp_serve: Some(self.mcp_serve.clone()),
             notify: Some(self.notify.clone()),
             nexus: Some(self.nexus.clone()),
+            experiments: Some(self.experiments.clone()),
         };
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1537,6 +1598,18 @@ pub fn config_schema() -> serde_json::Value {
                 ]
             },
             {
+                "key": "experiments",
+                "label": "实验性功能",
+                "fields": [
+                    { "key": "experiments.dynamicCompaction", "label": "动态上下文压缩", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）模型获得 context_compact 工具，自行判断压缩时机：上下文冗长、早期细节不再关键时主动把旧历史压成滚动摘要。关闭时按条数阈值自动压缩" },
+                    { "key": "experiments.groupSharedContext", "label": "智能体组共享上下文", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）派发子个体时自动携带组主会话的滚动摘要与最近对话窗口，子个体不再只有 objective 孤岛视角；会放大派发 token 开销" }
+                ]
+            },
+            {
                 "key": "notify",
                 "label": "结果推送",
                 "fields": [
@@ -1563,7 +1636,7 @@ mod config_tests {
         std::fs::create_dir_all(dir.join(".exmachina")).unwrap();
         let cfg = ExmConfig::load(&dir);
         assert_eq!(cfg.config_version, CONFIG_VERSION);
-        assert_eq!(cfg.identity.group_gate_default, true, "新装门控应默认开");
+        assert!(cfg.identity.group_gate_default, "新装门控应默认开");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
         assert!(!cfg.identity.identity_required, "身份管控默认关（白名单即全权）");
         assert!(!cfg.triggers.file_watch.enabled, "文件监听默认关");
@@ -1593,7 +1666,7 @@ mod config_tests {
 
         let cfg = ExmConfig::load(&dir);
         assert_eq!(cfg.config_version, 2, "迁移后应为 v2");
-        assert_eq!(cfg.identity.group_gate_default, false, "升级迁移门控应置关");
+        assert!(!cfg.identity.group_gate_default, "升级迁移门控应置关");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
         assert_eq!(cfg.max_concurrency, 4, "历史字段保留");
         assert!(!cfg.triggers.file_watch.enabled);
