@@ -24,6 +24,7 @@ export function AutomationsView(): React.ReactElement {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [runsFor, setRunsFor] = useState<CronJob | null>(null);
   const [runs, setRuns] = useState<CronRun[]>([]);
   const [form] = Form.useForm();
@@ -45,10 +46,11 @@ export function AutomationsView(): React.ReactElement {
 
   const submit = async () => {
     const v = await form.validateFields();
-    const mode = (v.mode ?? "cron") as string;
-    const oneOff = mode === "at";
-    const queue = mode === "queue";
+    setSaving(true);
     try {
+      const mode = (v.mode ?? "cron") as string;
+      const oneOff = mode === "at";
+      const queue = mode === "queue";
       await api.createCron({
         name: v.name,
         prompt: v.prompt,
@@ -71,6 +73,8 @@ export function AutomationsView(): React.ReactElement {
       await load();
     } catch (e) {
       message.error(t("cron.createFailed", { err: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -221,8 +225,16 @@ export function AutomationsView(): React.ReactElement {
         ))}
       </Drawer>
 
-      <Modal open={modal} title={t("cron.modalNew")} onCancel={() => setModal(false)} onOk={() => void submit()} okText={t("cron.create")}>
-        <Form form={form} layout="vertical" initialValues={{ mode: "cron" }}>
+      <Modal
+        open={modal}
+        title={t("cron.modalNew")}
+        onCancel={() => setModal(false)}
+        onOk={() => void submit()}
+        confirmLoading={saving}
+        okText={t("cron.create")}
+        destroyOnHidden
+      >
+        <Form form={form} layout="vertical" onFinish={() => void submit()} initialValues={{ mode: "cron" }}>
           <Form.Item name="name" label={t("cron.f.name")} rules={[{ required: true }]}>
             <Input placeholder={t("cron.f.namePh")} />
           </Form.Item>

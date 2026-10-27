@@ -13,6 +13,8 @@ import { StatementList } from "../components/Statements";
 import { Markdown } from "../components/Markdown";
 import { AsciiMeter } from "../components/Ascii";
 import { ToolCallList } from "../components/ToolCall";
+import { FileMentionPopup, mentionCandidates, type MentionState } from "../components/FileMention";
+import { workbenchTree, type WorkbenchNode } from "../api";
 import { copyText } from "../components/Markdown";
 import { UsageBar } from "../components/UsageBar";
 import { ProcessSteps } from "../components/ProcessSteps";
@@ -25,16 +27,27 @@ import type { ChatMessage } from "../types";
 function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
   const tb = useT();
   const isUser = m.role === "user";
-  const title = isUser ? tb("chat.role.user") : m.role === "orchestrator" ? (orchLabel ?? tb("chat.role.orchestrator")) : (m.agentId ?? tb("chat.role.system"));
+  // 自动任务标记：agentId 带 auto: 前缀的 user 消息是系统自动内容（视频观看等），非真人输入
+  const autoOrigin = isUser && m.agentId?.startsWith("auto:") ? m.agentId.slice(5) : null;
+  const title = isUser
+    ? autoOrigin
+      ? tb("chat.role.auto")
+      : tb("chat.role.user")
+    : m.role === "orchestrator"
+      ? (orchLabel ?? tb("chat.role.orchestrator"))
+      : (m.agentId ?? tb("chat.role.system"));
   const hasThinking = Boolean(m.thinking && m.thinking.trim());
   const hasTools = Boolean(m.toolCalls && m.toolCalls.length > 0);
   const steps = m.steps ?? [];
   const hasProcess = hasThinking || hasTools || steps.length > 0;
+  const time = relativeTime(m.createdAt);
   return (
     <Card size="small" className={`msg-bubble ${isUser ? "msg-user" : "msg-agent"}`}>
       <div className="msg-head">
         {isUser ? <UserOutlined /> : <RobotOutlined />} <b>{title}</b>
+        {autoOrigin && <span className="auto-tag">{autoOrigin}</span>}
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
+        {time && <span className="msg-time mono">{time}</span>}
         {!isUser && (
           <button
             className="msg-copy"
@@ -59,6 +72,8 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
             toolCalls={m.toolCalls ?? []}
             labelThinking={(n) => tUsage(tb, n)}
             labelTools={(n) => tb("chat.usedTools", { n: String(n) })}
+            sessionId={m.sessionId}
+            turn={m.turn ?? turn}
           />
         ) : (
           <div className="msg-process">
@@ -69,7 +84,7 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
             )}
             {hasTools && (
               <UsageBar label={tb("chat.usedTools", { n: m.toolCalls!.length })}>
-                <ToolCallList calls={m.toolCalls!} />
+                <ToolCallList calls={m.toolCalls!} sessionId={m.sessionId} turn={m.turn ?? turn} />
               </UsageBar>
             )}
           </div>
@@ -173,6 +188,12 @@ export function ChatView(): React.ReactElement {
   };
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
+  /** `@` 文件提及（对话即编码）：输入 @ 触发候选弹层，选中插入路径 */
+  const [mention, setMention] = useState<MentionState>({ open: false, query: "", start: 0 });
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const [mentionNodes, setMentionNodes] = useState<WorkbenchNode[]>([]);
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const mentionSeqRef = useRef(0);
   const [sessionFilter, setSessionFilter] = useState("");
   /** 竖屏导航 = 列表页 / 会话页 两个独立页面（对标主流移动端）：
    *  进入应用先落在会话列表，点某条会话才进入该会话页，会话页有返回按钮回到列表。
@@ -241,6 +262,91 @@ export function ChatView(): React.ReactElement {
 
   // 是否已滚离底部（chat-ergonomics：显示「回到底部」按钮）
   const [showBottomBtn, setShowBottomBtn] = useState(false);
+
+  /** 检测输入末尾的 `@提及` 片段：光标前最近一个未被空格隔断的 @ 起段即触发 */
+  const detectMention = useCallback((value: string, caret: number) => {
+    const before = value.slice(0, caret);
+    const at = before.lastIndexOf("@");
+    if (at < 0) {
+      setMention((m) => ({ ...m, open: false }));
+      return;
+    }
+    const seg = before.slice(at + 1);
+    // 触发词不含空白与第二个 @；超长视为普通文本（误触保护）
+    if (seg.length > 48 || /[\s@]/.test(seg)) {
+      setMention((m) => ({ ...m, open: false }));
+      return;
+    }
+    setMention({ open: true, query: seg, start: at });
+  }, []);
+
+  /** 文件树懒加载：首次触发 @ 时拉取一次（会话期内缓存；深层目录由模型 read 工具承担） */
+  useEffect(() => {
+    if (!mention.open || mentionNodes.length > 0 || mentionLoading) return;
+    const seq = ++mentionSeqRef.current;
+    setMentionLoading(true);
+    void workbenchTree("", 6)
+      .then((r) => {
+        if (seq !== mentionSeqRef.current) return;
+        setMentionNodes(r.nodes);
+      })
+      .catch(() => {
+        if (seq === mentionSeqRef.current) setMention((m) => ({ ...m, open: false }));
+      })
+      .finally(() => {
+        if (seq === mentionSeqRef.current) setMentionLoading(false);
+      });
+  }, [mention.open, mentionNodes.length, mentionLoading]);
+
+  /** 选中候选：把 @片段 替换为 `路径 `（占位插入，路径中的 @/空格风险由过滤端点保证不存在） */
+  const applyMention = useCallback((path: string) => {
+    setText((prev) => {
+      const after = prev.slice(mention.start).replace(/@[^\s@]*/, "");
+      return prev.slice(0, mention.start) + path + after + " ";
+    });
+    setMention({ open: false, query: "", start: 0 });
+    setMentionIdx(0);
+    // 焦点回输入框（弹层点击会抢焦点）
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLTextAreaElement>(".composer-textarea textarea");
+      el?.focus();
+      const pos = mention.start + path.length + 1;
+      el?.setSelectionRange(pos, pos);
+    });
+  }, [mention]);
+
+  /** 提及弹层键盘导航（textarea onKeyDown 转发）：↑↓ 移动、Enter/Tab 选中、Esc 关闭。
+   *  返回 true = 已接管该键，宿主不得再触发发送。 */
+  const onMentionKey = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+      if (!mention.open) return false;
+      const cands = mentionCandidates(mentionNodes, mention.query);
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionIdx((i) => Math.min(i + 1, cands.length - 1));
+        return true;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionIdx((i) => Math.max(i - 1, 0));
+        return true;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const c = cands[mentionIdx];
+        if (c) applyMention(c.path);
+        return true;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMention((m) => ({ ...m, open: false }));
+        return true;
+      }
+      return false;
+    },
+    [mention, mentionNodes, mentionIdx, applyMention],
+  );
+
   useEffect(() => {
     const el = document.querySelector(".chat-scroll");
     if (!el) return;
@@ -385,7 +491,7 @@ export function ChatView(): React.ReactElement {
       const msgs = await api.messages(id);
       const lines: string[] = [`# ${title}`, "", `> 导出时间：${new Date().toLocaleString()}`, ""];
       for (const m of msgs) {
-        const role = m.role === "user" ? "👤 用户" : m.role === "orchestrator" ? (m.agentId ? `🤖 ${m.agentId}` : "🤖 指挥体") : "⚙️ 系统";
+        const role = m.role === "user" ? (m.agentId?.startsWith("auto:") ? "⚙️ 自动任务" : "👤 用户") : m.role === "orchestrator" ? (m.agentId ? `🤖 ${m.agentId}` : "🤖 指挥体") : "⚙️ 系统";
         lines.push(`## ${role} · ${m.createdAt}`, "");
         if (m.thinking) {
           lines.push("<details><summary>思维过程</summary>", "", "```", m.thinking, "```", "", "</details>", "");
@@ -512,7 +618,7 @@ export function ChatView(): React.ReactElement {
           )}
         </div>
         <div className="rail-section grow">
-          {/* 工具条：搜索 + 类型过滤（桌面端沿用原竖排，见样式表） */}
+          {/* 工具条：搜索 + 类型过滤（同行紧凑排布，见样式表） */}
           <div className="rail-toolbar">
             <Input
               size="small"
@@ -523,8 +629,9 @@ export function ChatView(): React.ReactElement {
               value={sessionFilter}
               onChange={(e) => setSessionFilter(e.target.value)}
             />
-            {/* 会话类型过滤（2.2）：全部 / 普通 / 通道 */}
+            {/* 会话类型过滤（2.2）：全部 / 普通 / 通道（segment 紧凑形态，宽度自适应） */}
             <Select
+              size="small"
               value={sessionKind}
               onChange={setSessionKind}
               className="session-kind"
@@ -836,6 +943,14 @@ export function ChatView(): React.ReactElement {
         </div>
 
         <div className="chat-composer">
+          <FileMentionPopup
+            nodes={mentionNodes}
+            loading={mentionLoading}
+            state={mention}
+            idx={mentionIdx}
+            onIdxChange={setMentionIdx}
+            onPick={applyMention}
+          />
           {images.length > 0 && (
             <div className="attach-row">
               {images.map((src, i) => (
@@ -858,11 +973,16 @@ export function ChatView(): React.ReactElement {
             disabled={isSubSession}
             onChange={(e) => {
               setText(e.target.value);
+              detectMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
               if (sessionId) useExm.getState().setDraft(sessionId, e.target.value);
             }}
-            placeholder={isSubSession ? t("chat.subSessionReadonly") : narrow ? t("chat.inputPlaceholderNarrow") : t("chat.inputPlaceholder")}
+            onBlur={() => {
+              // 延迟关闭：给 onMouseDown 选中留出事件窗口
+              setTimeout(() => setMention((m) => ({ ...m, open: false })), 150);
+            }}
             autoSize={{ minRows: 1, maxRows: 6 }}
             onPressEnter={(e) => {
+              if (mention.open) return; // 提及弹层接管 Enter
               if (!e.shiftKey) {
                 e.preventDefault();
                 if (text.trim() && !running && !isSubSession) {
@@ -871,6 +991,7 @@ export function ChatView(): React.ReactElement {
               }
             }}
             onKeyDown={(e) => {
+              if (onMentionKey(e)) return; // 提及弹层优先接管方向键/确认/关闭
               // 上/下箭头召回历史用户消息（chat-ergonomics）：仅在空输入时接管
               if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
               if (text.trim()) return;

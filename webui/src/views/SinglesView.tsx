@@ -25,6 +25,7 @@ export function SinglesView(): React.ReactElement {
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [modelTarget, setModelTarget] = useState<SingleInfo | null>(null);
   const [modelDraft, setModelDraft] = useState<string>("");
   const [descTarget, setDescTarget] = useState<SingleInfo | null>(null);
@@ -62,6 +63,7 @@ export function SinglesView(): React.ReactElement {
 
   const submit = async () => {
     const v = await form.validateFields();
+    setSaving(true);
     try {
       await api.createSingle({
         name: v.name,
@@ -76,6 +78,8 @@ export function SinglesView(): React.ReactElement {
       await load();
     } catch (e) {
       message.error(t("singles.createFailed", { err: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -404,9 +408,11 @@ export function SinglesView(): React.ReactElement {
         title={t("singles.new")}
         onCancel={() => setModal(false)}
         onOk={() => void submit()}
+        confirmLoading={saving}
         okText={t("singles.create")}
+        destroyOnHidden
       >
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" onFinish={() => void submit()}>
           <Form.Item name="name" label={t("singles.f.name")} rules={[{ required: true }]}>
             <Input placeholder={t("singles.f.namePh")} />
           </Form.Item>

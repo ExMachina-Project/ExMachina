@@ -27,6 +27,7 @@ export function NexusView(): React.ReactElement {
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState<{ link: NexusLink | null } | null>(null);
   const [probing, setProbing] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
   const load = useCallback(async () => {
@@ -44,6 +45,7 @@ export function NexusView(): React.ReactElement {
 
   const submit = async () => {
     const v = await form.validateFields();
+    setSaving(true);
     try {
       const r = await api.saveNexusLink({
         id: v.id.trim(),
@@ -60,6 +62,8 @@ export function NexusView(): React.ReactElement {
       await load();
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -158,9 +162,11 @@ export function NexusView(): React.ReactElement {
         title={modal?.link ? t("nexus.editTitle", { name: modal.link.name }) : t("nexus.add")}
         onCancel={() => setModal(null)}
         onOk={() => void submit()}
+        confirmLoading={saving}
         okText={t("common.save")}
+        destroyOnHidden
       >
-        <Form form={form} layout="vertical" initialValues={{ kind: "exmachina" }}>
+        <Form form={form} layout="vertical" initialValues={{ kind: "exmachina" }} onFinish={() => void submit()}>
           <Form.Item name="id" label={t("nexus.f.id")} rules={[{ required: true }, { pattern: /^[A-Za-z0-9_-]{1,48}$/, message: t("groups.idPattern") }]}>
             <Input placeholder={t("nexus.f.idPh")} disabled={modal?.link != null} />
           </Form.Item>

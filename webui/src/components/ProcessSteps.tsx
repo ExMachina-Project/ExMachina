@@ -21,9 +21,12 @@ export interface ProcessStepsProps {
   live?: boolean;
   labelThinking: (chars: number) => string;
   labelTools: (n: number) => string;
+  /** 传递给工具卡的回滚目标（会话/轮次） */
+  sessionId?: string;
+  turn?: number;
 }
 
-export function ProcessSteps({ parts, toolCalls, live, labelThinking, labelTools }: ProcessStepsProps): React.ReactElement | null {
+export function ProcessSteps({ parts, toolCalls, live, labelThinking, labelTools, sessionId, turn }: ProcessStepsProps): React.ReactElement | null {
   const byId = new Map(toolCalls.map((c) => [c.callId, c]));
   const rows: React.ReactNode[] = [];
   let i = 0;
@@ -41,7 +44,7 @@ export function ProcessSteps({ parts, toolCalls, live, labelThinking, labelTools
         const running = group.some((c) => c.status === "running");
         rows.push(
           <UsageBar key={`tools-${i}`} label={labelTools(group.length)} live={Boolean(live && running)}>
-            <ToolCallList calls={group} />
+            <ToolCallList calls={group} sessionId={sessionId} turn={turn} />
           </UsageBar>,
         );
       }

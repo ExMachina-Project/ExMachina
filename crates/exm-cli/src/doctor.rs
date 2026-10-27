@@ -48,7 +48,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
-    println!("{}", "EXMACHINA 体检".on_blue().white().to_string());
+    println!("{}", "EXMACHINA 体检".on_blue().white());
     let mut d = Doctor::new();
     let cfg = ExmConfig::load(workspace_root);
 
@@ -163,6 +163,17 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
                 Ok(msg) => Ok(msg),
                 Err(e) => Err(format!("端点不可达：{e}")),
             }
+        },
+    );
+
+    d.soft(
+        "系统 git",
+        match std::process::Command::new("git").arg("--version").output() {
+            Ok(out) if out.status.success() => {
+                let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                Ok(format!("{v}（git 工具可用）"))
+            }
+            _ => Err("系统 git 不可用 —— git 工具将不可用（安装 git 后恢复）".into()),
         },
     );
 

@@ -15,6 +15,11 @@ use serde_json::{json, Value};
 /// 密钥掩码哨兵（前后端契约：更新时收到此值 = 沿用服务端旧值，不得当明文入库）
 pub(crate) const KEY_MASK: &str = "***已配置***";
 
+/// 密钥清除哨兵（前后端契约：更新时收到此值 = 显式删除该密钥。
+/// 空串历史语义是「沿用旧值」（不丢已配密钥），无法表达删除意图——
+/// 删除用此哨兵，部分删除（保留其余密钥）的场景只能靠它表达）
+pub(crate) const KEY_CLEAR: &str = "__CLEAR__";
+
 fn mask_key(k: &str) -> String {
     if k.trim().is_empty() { String::new() } else { KEY_MASK.to_string() }
 }
@@ -24,7 +29,7 @@ fn profile_json(p: &LlmProfile) -> Value {
     let models: Vec<Value> = p
         .models
         .iter()
-        .map(|m| json!({ "model": m.model, "vision": m.vision, "audio": m.audio }))
+        .map(|m| json!({ "model": m.model, "vision": m.vision, "audio": m.audio, "contextWindow": m.context_window }))
         .collect();
     json!({
         "id": p.id, "name": p.name, "baseUrl": p.base_url,
@@ -59,6 +64,10 @@ pub struct LlmProfileBody {
     /// 多 Key 池：明文 = 新键；掩码哨兵 = 兼容旧客户端按序数沿用；{"keep": i} = 沿用旧池第 i 把键
     #[serde(default)]
     pub api_keys: Option<Vec<ApiKeyEntry>>,
+    /// 显式清空全部密钥（主 Key + Key 池）：true 时 api_key/api_keys 的沿用语义失效。
+    /// 此前空字符串被当「沿用旧值」，删掉密钥行保存后密钥永远清不掉——删除必须是显式意图。
+    #[serde(default)]
+    pub clear_keys: bool,
     #[serde(default)]
     pub api_format: Option<String>,
     #[serde(default)]
@@ -79,6 +88,8 @@ pub struct ModelEntryBody {
     pub vision: bool,
     #[serde(default)]
     pub audio: bool,
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 /// Key 池条目：结构化提交让「沿用位」携带旧池引用（删行/插行后不串位），纯掩码字符串保持兼容
@@ -95,38 +106,54 @@ fn resolve_profile_input(
     existing: Option<&LlmProfile>,
     v: &LlmProfileBody,
 ) -> LlmProfile {
-    let key = match v.api_key.as_deref() {
-        Some(KEY_MASK) | None => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
-        Some(k) if k.trim().is_empty() => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
-        Some(k) => k.to_string(),
+    // 显式清空优先：clearKeys=true 时主 Key 与 Key 池一律置空（删除密钥的保存语义）
+    let key = if v.clear_keys {
+        String::new()
+    } else {
+        match v.api_key.as_deref() {
+            Some(KEY_MASK) | None => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
+            Some(KEY_CLEAR) => String::new(), // 显式清除主 Key（保留池）
+            Some(k) if k.trim().is_empty() => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
+            Some(k) => k.to_string(),
+        }
     };
     // Key 池：明文 = 新键；{"keep": i} = 沿用旧池第 i 把键（结构化，删行/插行后不串位）；
-    // 掩码哨兵 = 兼容旧客户端，按「第 n 个掩码沿用旧池第 n 把有效键」序数对位
+    // 掩码哨兵 = 兼容旧客户端，按「第 n 个掩码沿用旧池第 n 把有效键」序数对位。
+    // clearKeys 时整池跳过（清空优先于一切沿用引用）
     let mut api_keys: Vec<String> = Vec::new();
     if let Some(list) = &v.api_keys {
-        let old_pool: Vec<&String> = existing
-            .map(|e| e.api_keys.iter().filter(|k| !k.trim().is_empty()).collect())
-            .unwrap_or_default();
-        let mut text_mask_seq = 0usize;
-        for k in list {
-            match k {
-                ApiKeyEntry::Keep { keep } => {
-                    if let Some(old_k) = old_pool.get(*keep) {
-                        api_keys.push((*old_k).clone());
+        if !v.clear_keys {
+            let old_pool: Vec<&String> = existing
+                .map(|e| e.api_keys.iter().filter(|k| !k.trim().is_empty()).collect())
+                .unwrap_or_default();
+            let mut text_mask_seq = 0usize;
+            for k in list {
+                match k {
+                    ApiKeyEntry::Keep { keep } => {
+                        if let Some(old_k) = old_pool.get(*keep) {
+                            api_keys.push((*old_k).clone());
+                        }
                     }
-                }
-                ApiKeyEntry::Text(s) if s == KEY_MASK => {
-                    if let Some(old_k) = old_pool.get(text_mask_seq) {
-                        api_keys.push((*old_k).clone());
+                    ApiKeyEntry::Text(s) if s == KEY_MASK => {
+                        if let Some(old_k) = old_pool.get(text_mask_seq) {
+                            api_keys.push((*old_k).clone());
+                        }
+                        text_mask_seq += 1;
                     }
-                    text_mask_seq += 1;
+                    ApiKeyEntry::Text(s) if s == KEY_CLEAR => {
+                        // 显式删除该池位：跳过（不沿用旧键、不入新键、不占掩码序数）
+                    }
+                    ApiKeyEntry::Text(s) if !s.trim().is_empty() => api_keys.push(s.clone()),
+                    ApiKeyEntry::Text(_) => {}
                 }
-                ApiKeyEntry::Text(s) if !s.trim().is_empty() => api_keys.push(s.clone()),
-                ApiKeyEntry::Text(_) => {}
             }
         }
     }
-    if api_keys.is_empty() {
+    // 兜底沿用：仅当「前端没有提供任何行级意图」时才沿用旧池——
+    // apiKeys 缺省（None）或空列表 = 旧客户端/未提供，保持不丢密钥；
+    // apiKeys 非空但解析为空（全是 CLEAR 删除哨兵）= 用户删光了池行，显式意图，如实清空。
+    let pool_intent_given = v.api_keys.as_ref().is_some_and(|l| !l.is_empty());
+    if api_keys.is_empty() && !v.clear_keys && !pool_intent_given {
         api_keys = existing.map(|e| e.api_keys.clone()).unwrap_or_default();
     }
     // 模型清单：缺省沿用旧清单；提交时空值模型名剔除。默认模型若不在清单中自动补入（能力未标记）。
@@ -137,6 +164,7 @@ fn resolve_profile_input(
                 model: m.model.trim().to_string(),
                 vision: m.vision,
                 audio: m.audio,
+                context_window: m.context_window.unwrap_or(0),
             })
             .filter(|m| !m.model.is_empty())
             .collect(),
@@ -150,7 +178,15 @@ fn resolve_profile_input(
         .map(str::to_string)
         .unwrap_or_else(|| existing.map(|e| e.model.clone()).unwrap_or_default());
     if !model_name.is_empty() && !models.iter().any(|m| m.model == model_name) {
-        models.insert(0, ModelEntry { model: model_name.clone(), vision: false, audio: false });
+        models.insert(
+            0,
+            ModelEntry {
+                model: model_name.clone(),
+                vision: false,
+                audio: false,
+                context_window: 0,
+            },
+        );
     }
     LlmProfile {
         id: v.id
@@ -536,5 +572,106 @@ pub async fn list_provider_models(
             Json(json!({ "ok": true, "models": models })).into_response()
         }
         Err(e) => Json(json!({ "ok": false, "models": [], "error": e.to_string() })).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn existing() -> LlmProfile {
+        LlmProfile {
+            id: "p1".into(),
+            name: "测试档案".into(),
+            base_url: "https://api.test.com/v1".into(),
+            api_key: "sk-main".into(),
+            api_keys: vec!["sk-pool-1".into(), "sk-pool-2".into()],
+            models: vec![],
+            api_format: "openai".into(),
+            model: "m1".into(),
+            fallback: None,
+        }
+    }
+
+    fn body(json: serde_json::Value) -> LlmProfileBody {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// 删除密钥保存无效的回归：clearKeys=true 时主 Key 与 Key 池全部清空
+    #[test]
+    fn 密钥解析_显式清空标志清掉全部密钥() {
+        let old = existing();
+        // 模拟前端删空所有密钥行的提交
+        let b = body(json!({ "id": "p1", "apiKey": "", "apiKeys": [], "clearKeys": true }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "", "主 Key 应被清空");
+        assert!(p.api_keys.is_empty(), "Key 池应被清空");
+    }
+
+    /// 不带 clearKeys 的空提交沿用旧密钥（既有「不丢已配密钥」语义保持）
+    #[test]
+    fn 密钥解析_空提交不带清空标志沿用旧值() {
+        let old = existing();
+        let b = body(json!({ "id": "p1", "apiKey": "", "apiKeys": [] }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert_eq!(p.api_keys.len(), 2);
+    }
+
+    /// apiKey=__CLEAR__ 哨兵：只清主 Key，池保留（部分删除场景）
+    #[test]
+    fn 密钥解析_清除哨兵只删主键保留池() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_CLEAR,
+            "apiKeys": [ { "keep": 0 } ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "", "主 Key 应被清除哨兵置空");
+        assert_eq!(p.api_keys, vec!["sk-pool-1".to_string()], "池按 keep 精确替换");
+    }
+
+    /// 池行全部为 CLEAR 哨兵：显式清池（不再兜底沿用），主 Key 不受影响
+    #[test]
+    fn 密钥解析_池全删除哨兵清空池保留主键() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ KEY_CLEAR, KEY_CLEAR ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main", "主 Key 掩码沿用不受池删除影响");
+        assert!(p.api_keys.is_empty(), "池行全为 CLEAR = 显式清池");
+    }
+
+    /// 掩码 = 沿用主 Key；{keep: i} = 按索引沿用池内键（删行/插行不串位）
+    #[test]
+    fn 密钥解析_掩码与keep索引对位沿用() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ { "keep": 1 }, "sk-new" ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert_eq!(p.api_keys, vec!["sk-pool-2".to_string(), "sk-new".to_string()]);
+    }
+
+    /// clearKeys 与掩码并存时清空优先（删除是显式意图，优先级最高）
+    #[test]
+    fn 密钥解析_清空标志优先于掩码() {
+        let old = existing();
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ { "keep": 0 } ],
+            "clearKeys": true
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "");
+        assert!(p.api_keys.is_empty());
     }
 }

@@ -18,7 +18,7 @@ pub fn run_memory_list(core: &Core, kind: Option<String>, agent: Option<&str>, l
     };
     let entries = core.memory_list_filtered(kind, agent, limit)?;
     if let Some(id) = agent {
-        println!("{}", format!("个体 {} 可见的记忆（私有 + 群体共享）", id).bold().to_string());
+        println!("{}", format!("个体 {} 可见的记忆（私有 + 群体共享）", id).bold());
     }
     if entries.is_empty() {
         println!("{}", dim("（记忆库为空；执行任务或 `exm memory add` 后写入）"));
@@ -66,7 +66,7 @@ pub fn run_memory_search(core: &Core, query: &str, agent: Option<&str>, limit: u
     let scope = agent
         .map(|a| format!("个体 {a} 可见范围（私有 + 共享，激活组 {gid}）"))
         .unwrap_or_else(|| format!("全部记忆（激活组 {gid} + 全局条目）"));
-    println!("{}", format!("检索「{query}」命中 {} 条（{}）", hits.len(), scope).bold().to_string());
+    println!("{}", format!("检索「{query}」命中 {} 条（{}）", hits.len(), scope).bold());
     for h in hits {
         println!(
             "  {} {} {}",
@@ -80,6 +80,7 @@ pub fn run_memory_search(core: &Core, query: &str, agent: Option<&str>, limit: u
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_memory_add(
     core: &Core,
     kind: &str,
@@ -137,7 +138,7 @@ pub fn run_memory_decay(core: &Core, floor: f64) -> anyhow::Result<()> {
 
 pub fn run_memory_stats(core: &Core) -> anyhow::Result<()> {
     let s = core.memory_stats()?;
-    println!("{}", "记忆库统计".bold().to_string());
+    println!("{}", "记忆库统计".bold());
     println!("  {} {}", dim("库文件"), s["dbPath"]);
     println!("  {} {}", dim("条目总数"), s["total"]);
     println!("  {} {}", dim("组级记忆（含组归属）"), s["groupScoped"]);
@@ -151,7 +152,7 @@ pub fn run_memory_stats(core: &Core) -> anyhow::Result<()> {
         }
     }
     println!();
-    println!("{}", "个体可靠性统计（自我进化反馈）".bold().to_string());
+    println!("{}", "个体可靠性统计（自我进化反馈）".bold());
     let stats = core.memory.agent_stats(20)?;
     if stats.is_empty() {
         println!("  {}", dim("（暂无；执行任务后累积）"));

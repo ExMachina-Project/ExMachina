@@ -708,7 +708,7 @@ async fn notify_cron_result(
         summary
     );
     for ch in load_channels(core) {
-        if !ch.enabled || !job.notify_channels.iter().any(|id| *id == ch.id) {
+        if !ch.enabled || !job.notify_channels.contains(&ch.id) {
             continue;
         }
         let ok = push_channel_text(&ch, &text).await;
@@ -832,6 +832,134 @@ pub struct ApprovalsQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchTreeQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub depth: Option<usize>,
+}
+
+/// 工作台文件树（GET /api/workbench/tree）：.gitignore 口径过滤 + 工作区边界校验
+pub async fn workbench_tree(
+    State(st): State<AppState>,
+    Query(q): Query<WorkbenchTreeQuery>,
+) -> impl IntoResponse {
+    match st
+        .core
+        .workbench_tree(q.path.as_deref().unwrap_or(""), q.depth.unwrap_or(6))
+    {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchFileQuery {
+    pub path: String,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+/// 工作台文件读取（GET /api/workbench/file）：read 工具同口径分页
+pub async fn workbench_file(
+    State(st): State<AppState>,
+    Query(q): Query<WorkbenchFileQuery>,
+) -> impl IntoResponse {
+    match st
+        .core
+        .workbench_file(&q.path, q.offset.unwrap_or(1), q.limit.unwrap_or(400))
+    {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// 计划清单（GET /api/sessions/:id/plan）：当前条目 + 模式位
+pub async fn plan_list(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let items = st.core.plan_list(&id);
+    Json(json!({
+        "sessionId": id,
+        "mode": if exm_core::plan::is_plan_mode(&id) { "plan" } else { "execute" },
+        "items": items,
+        "count": items.len(),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDecideBody {
+    /// approve = 批准回放；reject = 拒绝保留；setMode = 切换模式
+    pub action: String,
+    #[serde(default)]
+    pub plan: Option<bool>,
+}
+
+/// 计划裁决（POST /api/sessions/:id/plan）：{action: "approve"|"reject"|"setMode"}
+pub async fn plan_decide(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<PlanDecideBody>,
+) -> impl IntoResponse {
+    match b.action.as_str() {
+        "approve" => match st.core.plan_approve(&id).await {
+            Ok(results) => Json(json!({
+                "sessionId": id,
+                "applied": results.iter().map(|(item, r)| json!({
+                    "itemId": item.id, "tool": item.tool, "target": item.target, "ok": r.ok,
+                })).collect::<Vec<_>>(),
+                "okCount": results.iter().filter(|(_, r)| r.ok).count(),
+                "failCount": results.iter().filter(|(_, r)| !r.ok).count(),
+            }))
+            .into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
+        "reject" => {
+            let items = st.core.plan_reject(&id);
+            Json(json!({
+                "sessionId": id,
+                "kept": items.len(),
+                "mode": if exm_core::plan::is_plan_mode(&id) { "plan" } else { "execute" },
+            }))
+            .into_response()
+        }
+        "setMode" => {
+            let plan = b.plan.unwrap_or(true);
+            st.core.set_plan_mode(&id, plan);
+            Json(json!({
+                "sessionId": id,
+                "mode": if exm_core::plan::is_plan_mode(&id) { "plan" } else { "execute" },
+            }))
+            .into_response()
+        }
+        other => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("未知 action：{other}（支持 approve/reject/setMode）") })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn list_approvals(
@@ -994,6 +1122,59 @@ impl Channel {
         self.memory_isolation
             .then(|| format!("{}::channel:{}", group_id, self.id))
     }
+}
+
+// ---------------------------------------------------------------- 绑定目标（单智能体 / 组） ----
+
+/// 通道绑定目标的统一口径：`group` 字段既可存组 id（历史形态），也可存 `single:<智能体id>`。
+/// 单智能体是通道的一等目标（默认形态），组为次要形态。
+pub(crate) const SINGLE_PREFIX: &str = "single:";
+
+/// 解析绑定目标是否为单智能体；返回 (single:<id> 前缀剥出的 id, 组 id)
+pub(crate) fn parse_target(raw: &str) -> (Option<String>, Option<String>) {
+    let s = raw.trim();
+    if let Some(id) = s.strip_prefix(SINGLE_PREFIX) {
+        let id = id.trim();
+        if !id.is_empty() {
+            return (Some(id.to_string()), None);
+        }
+    }
+    if s.is_empty() {
+        (None, None)
+    } else {
+        (None, Some(s.to_string()))
+    }
+}
+
+/// 切换全局交互上下文到通道绑定目标（单智能体或组），返回是否发生了切换。
+/// 目标不存在/未配置时不动当前上下文（回落调用方各自的默认）。
+pub(crate) fn switch_context_to(core: &exm_core::Core, target: &str) -> bool {
+    let (single, group) = parse_target(target);
+    if let Some(id) = single {
+        if core.registry().active_single().as_deref() != Some(id.as_str()) {
+            return core.registry().set_active_single(Some(&id)).is_ok();
+        }
+        return false;
+    }
+    if let Some(g) = group {
+        // 进入组模式前清掉单智能体上下文（set_active_group 不清，会残留 single 模式）
+        if core.registry().single_mode() {
+            let _ = core.registry().set_active_single(None);
+        }
+        if g != core.active_group() && core.group_meta(&g).is_some() {
+            return core.registry().set_active_group(&g).is_ok();
+        }
+    }
+    false
+}
+
+/// 通道绑定目标是否存在（校验用）：单智能体查 singles 表，组查组表
+pub(crate) fn target_exists(core: &exm_core::Core, target: &str) -> bool {
+    let (single, group) = parse_target(target);
+    if let Some(id) = single {
+        return core.registry().single(&id).is_some();
+    }
+    group.as_deref().map(|g| core.group_meta(g).is_some()).unwrap_or(true)
 }
 
 // ---------------------------------------------------------------- 出站能力矩阵与回复整形（组 6）
@@ -1326,12 +1507,10 @@ pub(crate) async fn admit(
     }
 
     // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引
-    if identity_cfg.identity_required {
-        if core.identity_of(&ch.id, ctx.external_id).is_none() {
-            return GateDecision::Deny(
-                "【报告】未绑定身份：请在控制台「通道身份」页签发配对码，然后在此发送 /pair <配对码> 完成绑定。".into(),
-            );
-        }
+    if identity_cfg.identity_required && core.identity_of(&ch.id, ctx.external_id).is_none() {
+        return GateDecision::Deny(
+            "【报告】未绑定身份：请在控制台「通道身份」页签发配对码，然后在此发送 /pair <配对码> 完成绑定。".into(),
+        );
     }
 
     // ④ 用量治理：通道主体滑动窗口限流 + 周期请求数配额（仅外部入口；组内派发不经此处）
@@ -1403,15 +1582,18 @@ pub(crate) struct ChannelRun {
     core: std::sync::Arc<exm_core::Core>,
     pub session_id: String,
     prev_group: String,
+    prev_single: Option<String>,
     switched: bool,
     /// 平台 kind（能力矩阵判定用）
     pub kind: String,
     /// 本轮能力边界（通道配置在 begin 时快照，执行期不变）
     scope: exm_core::types::ToolScope,
+    /// 自动任务来源标记（None = 人工触发的平台消息；"auto:video" = 主动观看等系统自动内容）
+    pub origin: Option<&'static str>,
 }
 
 impl ChannelRun {
-    /// 账号绑定组切换 + 会话键复用（`channel:<通道id>:<会话键>`）；
+    /// 账号绑定目标切换（单智能体或组）+ 会话键复用（`channel:<通道id>:<会话键>`）；
     /// 返回 (上下文, 运行事件订阅)
     pub(crate) async fn begin(
         core: &std::sync::Arc<exm_core::Core>,
@@ -1419,29 +1601,30 @@ impl ChannelRun {
         chat_key: &str,
     ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
         let prev_group = core.active_group();
-        let mut switched = false;
-        if let Some(g) = &ch.group {
-            if *g != prev_group && core.group_meta(g).is_some() {
-                switched = core.registry().set_active_group(g).is_ok();
-            }
-        }
-        let gid = core.active_group();
+        let prev_single = core.registry().active_single();
+        // 绑定目标缺省回落单智能体默认体（machina），未配置单智能体时维持当前上下文
+        let target = ch
+            .group
+            .clone()
+            .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(core)));
+        let switched = switch_context_to(core, &target);
+        let scope = core.registry().active_scope();
         let title = format!("channel:{}:{chat_key}", ch.id);
         let session = core
-            .list_sessions_in_group(&gid)
+            .list_sessions_in_group(&scope)
             .ok()
             .and_then(|list| list.into_iter().find(|s| s.title == title))
             .or_else(|| core.create_session(&title).ok());
         let Some(session) = session else {
-            // 会话建立失败也别把组上下文留在别人身上
+            // 会话建立失败也别把交互上下文留在别人身上
             if switched {
-                let _ = core.registry().set_active_group(&prev_group);
+                restore_context(core, &prev_group, &prev_single);
             }
             return None;
         };
         // 记忆隔离即时生效：通道每次执行前把分区键同步到会话；
         // 关闭隔离时清空分区，立即回到同组共享记忆。
-        let partition = ch.memory_partition(&gid);
+        let partition = ch.memory_partition(&scope);
         let _ = core
             .store
             .set_session_memory_partition(&session.id, partition.as_deref());
@@ -1451,12 +1634,20 @@ impl ChannelRun {
                 core: core.clone(),
                 session_id: session.id,
                 prev_group,
+                prev_single,
                 switched,
                 kind: ch.kind.clone(),
                 scope: ch.tool_scope(),
+                origin: None,
             },
             rx,
         ))
+    }
+
+    /// 标记本轮为系统自动任务（落库消息带来源，展示层区分于真人消息）
+    pub(crate) fn with_origin(mut self, origin: &'static str) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     /// 收束事件 → 回帖文本（非收束事件返回 None；已按平台上限截断）
@@ -1471,17 +1662,80 @@ impl ChannelRun {
                     .unwrap_or("运行失败");
                 Some(format!("【警告】{msg}").chars().take(max_chars).collect())
             }
+            // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
+            // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
+            "plan.pending" => {
+                let count = evt.payload.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let items = self.core.plan_list(&self.session_id);
+                let mut lines = vec![format!("📋 计划待审批（{count} 条）：")];
+                for (i, it) in items.iter().take(8).enumerate() {
+                    let target: String = it.target.chars().take(60).collect();
+                    lines.push(format!("{}. [{}] {} {}", i + 1, it.action, it.tool, target));
+                }
+                if items.len() > 8 {
+                    lines.push(format!("… 共 {} 条", items.len()));
+                }
+                lines.push("回复「plan:yes」批准执行，「plan:no」拒绝保留".into());
+                Some(lines.join("\n").chars().take(max_chars).collect())
+            }
+            "plan.applied" => {
+                let ok = evt.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                let target = evt.payload.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                Some(format!(
+                    "{} 计划条目已执行：{target}",
+                    if ok { "✅" } else { "❌" }
+                ))
+            }
             _ => None,
         }
     }
 
-    /// 执行本轮；返回后组上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
+    /// 执行本轮；返回后交互上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
     pub(crate) async fn run(self, text: &str) {
         let _restore = GroupRestore {
             core: self.core.clone(),
-            prev: self.prev_group.clone(),
+            prev_group: self.prev_group.clone(),
+            prev_single: self.prev_single.clone(),
             switched: self.switched,
         };
+        // 计划快捷审批（spec plan-mode 跨端审批）：plan:yes / plan:no 直达裁决，
+        // 不进模型轮次；无待审清单时提示当前状态
+        let trimmed = text.trim();
+        if trimmed == "plan:yes" || trimmed == "plan:no" {
+            let approve = trimmed == "plan:yes";
+            let items = self.core.plan_list(&self.session_id);
+            if items.is_empty() {
+                self.core.emit_run_error(
+                    &self.session_id,
+                    "【报告】当前无待审批计划（清单为空或已处理）。",
+                );
+                return;
+            }
+            if approve {
+                match self.core.plan_approve(&self.session_id).await {
+                    Ok(rs) => {
+                        let ok_n = rs.iter().filter(|(_, r)| r.ok).count();
+                        let fail_n = rs.len() - ok_n;
+                        self.core.emit_run_error(
+                            &self.session_id,
+                            &format!(
+                                "【报告】计划已批准并回放：{ok_n} 条成功，{fail_n} 条失败。"
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        self.core.emit_run_error(&self.session_id, &format!("【警告】计划回放失败：{e}"));
+                    }
+                }
+            } else {
+                self.core.plan_reject(&self.session_id);
+                self.core.emit_run_error(
+                    &self.session_id,
+                    "【报告】计划已拒绝（清单保留，可继续修改后再次生成）。",
+                );
+            }
+            return;
+        }
         // 周期 token 配额（外部来源会话）：耗尽即拒绝新轮次并经 run.error 回帖提示；
         // 组内派发会话无来源登记，天然不受限（设计 D10）
         let limits = self.core.config().limits.clone();
@@ -1503,7 +1757,7 @@ impl ChannelRun {
         let _ = limits;
         if let Err(e) = self
             .core
-            .chat_scoped(&self.session_id, text, self.scope)
+            .chat_scoped_origin(&self.session_id, text, self.scope, self.origin)
             .await
         {
             eprintln!("[channel:{}] 执行失败：{e}", self.session_id);
@@ -1511,20 +1765,45 @@ impl ChannelRun {
     }
 }
 
-/// 组上下文兜底还原：任务正常结束、提前返回、甚至被 abort 时都执行 Drop，
-/// 避免视频轮询等后台任务超时中止后把全局激活组留在通道绑定组上。
+/// 交互上下文兜底还原：任务正常结束、提前返回、甚至被 abort 时都执行 Drop，
+/// 避免视频轮询等后台任务超时中止后把全局激活组/单智能体留在通道绑定目标上。
 struct GroupRestore {
     core: std::sync::Arc<exm_core::Core>,
-    prev: String,
+    prev_group: String,
+    prev_single: Option<String>,
     switched: bool,
 }
 
 impl Drop for GroupRestore {
     fn drop(&mut self) {
         if self.switched {
-            let _ = self.core.registry().set_active_group(&self.prev);
+            restore_context(&self.core, &self.prev_group, &self.prev_single);
         }
     }
+}
+
+/// 还原到之前的交互上下文（组 + 单智能体快照）
+pub(crate) fn restore_context(core: &exm_core::Core, prev_group: &str, prev_single: &Option<String>) {
+    if let Some(id) = prev_single {
+        let _ = core.registry().set_active_single(Some(id));
+    } else {
+        if core.registry().single_mode() {
+            let _ = core.registry().set_active_single(None);
+        }
+        let _ = core.registry().set_active_group(prev_group);
+    }
+}
+
+/// 通道缺省绑定目标：默认单智能体 machina；不存在时取任意首个单智能体；都无则回落组模式
+pub(crate) fn default_single_id(core: &exm_core::Core) -> String {
+    if core.registry().single("machina").is_some() {
+        return "machina".into();
+    }
+    core.registry()
+        .list_singles()
+        .first()
+        .map(|d| d.identifier.clone())
+        .unwrap_or_default()
 }
 
 /// 挂本轮回帖任务：订阅运行事件，收束即用 `send` 把文本发回原会话（发完或流断即退出）。
@@ -1759,6 +2038,49 @@ pub async fn channel_status() -> impl IntoResponse {
     Json(serde_json::to_value(snapshot).unwrap_or(Value::Null)).into_response()
 }
 
+// ---------------------------------------------------------------- B 站扫码登录
+// 出码与轮询都是无副作用的 passport 只读接口；登录态 Cookie 只在 poll 确认瞬间产生，
+// 直接回给前端填表单，不落盘（保存通道时才随 config 入库并掩码）。
+
+pub async fn bili_qr_start() -> impl IntoResponse {
+    match crate::video::bili_qr_generate().await {
+        Ok(s) => Json(json!({ "qrcodeKey": s.qrcode_key, "url": s.url })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("B 站出码失败：{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
+    if qrcode_key.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺少 qrcode_key" })),
+        )
+            .into_response();
+    }
+    match crate::video::bili_qr_poll(qrcode_key.trim()).await {
+        // Ok(登录态) → 成功；Err(业务码) → 86101 未扫 / 86090 待确认 / 86083 过期
+        Ok(Ok(login)) => Json(json!({
+            "state": "confirmed",
+            "sessdata": login.sessdata,
+            "biliJct": login.bili_jct,
+            "uid": login.dede_user_id,
+            "uname": login.uname,
+        }))
+        .into_response(),
+        Ok(Err(code)) => Json(json!({ "state": "waiting", "code": code })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("B 站轮询失败：{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+
 // ---------------------------------------------------------------- 通道 CRUD（脱敏回显）
 
 /// 平台 config 中的敏感键（掩码回显；更新时掩码值 = 沿用旧值）
@@ -1880,8 +2202,7 @@ pub async fn create_channel(
     if platform == "telegram"
         && b.token
             .as_deref()
-            .map(|t| t.trim().is_empty())
-            .unwrap_or(true)
+            .is_none_or(|t| t.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1897,10 +2218,10 @@ pub async fn create_channel(
         .collect();
     // 新平台必填项：qqbot 需要 appId + appSecret；napcat 需要 WS 地址
     if platform == "qqbot"
-        && (config.get("appId").map_or(true, |v| v.trim().is_empty())
+        && (config.get("appId").is_none_or(|v| v.trim().is_empty())
             || config
                 .get("appSecret")
-                .map_or(true, |v| v.trim().is_empty()))
+                .is_none_or(|v| v.trim().is_empty()))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1908,7 +2229,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "napcat" && config.get("url").map_or(true, |v| v.trim().is_empty()) {
+    if platform == "napcat" && config.get("url").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "napcat 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" })),
@@ -1919,8 +2240,7 @@ pub async fn create_channel(
     if matches!(platform.as_str(), "discord" | "slack" | "matrix")
         && b.token
             .as_deref()
-            .map(|t| t.trim().is_empty())
-            .unwrap_or(true)
+            .is_none_or(|t| t.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1928,7 +2248,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "slack" && config.get("appToken").map_or(true, |v| v.trim().is_empty()) {
+    if platform == "slack" && config.get("appToken").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "slack 通道需要 config.appToken（Socket Mode 应用级令牌）" })),
@@ -1938,7 +2258,7 @@ pub async fn create_channel(
     if platform == "matrix"
         && config
             .get("homeserver")
-            .map_or(true, |v| v.trim().is_empty())
+            .is_none_or(|v| v.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1947,8 +2267,8 @@ pub async fn create_channel(
             .into_response();
     }
     if platform == "bilibili"
-        && (config.get("sessdata").map_or(true, |v| v.trim().is_empty())
-            || config.get("biliJct").map_or(true, |v| v.trim().is_empty()))
+        && (config.get("sessdata").is_none_or(|v| v.trim().is_empty())
+            || config.get("biliJct").is_none_or(|v| v.trim().is_empty()))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1956,7 +2276,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "youtube" && config.get("apiKey").map_or(true, |v| v.trim().is_empty()) {
+    if platform == "youtube" && config.get("apiKey").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "youtube 通道需要 config.apiKey（YouTube Data API v3）" })),
@@ -1975,6 +2295,16 @@ pub async fn create_channel(
             Json(json!({ "error": "capability 须为 chat / tools / computer" })),
         )
             .into_response();
+    }
+    // 绑定目标校验：组 id 或 single:<智能体id>（单智能体为默认形态）
+    if let Some(g) = b.group.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !target_exists(&st.core, g) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "绑定的智能体或组不存在（智能体写 single:<id>，组写组 id）" })),
+            )
+                .into_response();
+        }
     }
     let mut channels = load_channels(&st.core);
     if channels.iter().any(|c| c.id == id) {
@@ -2197,25 +2527,25 @@ pub async fn channel_inbound(
         )
             .into_response();
     }
-    // 账号绑定组：入站消息在绑定的组上下文执行（会话也归属该组）
+    // 账号绑定目标（单智能体或组）：入站消息在绑定的上下文执行（会话也归属该 scope）
     let prev_group = st.core.active_group();
-    let mut switched = false;
-    if let Some(g) = &channel.group {
-        if *g != prev_group && st.core.group_meta(g).is_some() {
-            switched = st.core.registry().set_active_group(g).is_ok();
-        }
-    }
-    // 会话复用（组内）：channel:{id}:{sessionKey|senderId|default}
+    let prev_single = st.core.registry().active_single();
+    let target = channel
+        .group
+        .clone()
+        .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(&st.core)));
+    let switched = switch_context_to(&st.core, &target);
+    // 会话复用（scope 内）：channel:{id}:{sessionKey|senderId|default}
     let key = b
         .session_key
         .clone()
         .or_else(|| b.sender_id.clone())
         .unwrap_or_else(|| "default".into());
     let title = format!("channel:{}:{}", channel.id, key);
-    let gid = st.core.active_group();
+    let scope_id = st.core.registry().active_scope();
     let session = match st
         .core
-        .list_sessions_in_group(&gid)
+        .list_sessions_in_group(&scope_id)
         .ok()
         .and_then(|list| list.into_iter().find(|s| s.title == title))
     {
@@ -2224,7 +2554,7 @@ pub async fn channel_inbound(
             Ok(s) => s,
             Err(e) => {
                 if switched {
-                    let _ = st.core.registry().set_active_group(&prev_group);
+                    restore_context(&st.core, &prev_group, &prev_single);
                 }
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2235,8 +2565,8 @@ pub async fn channel_inbound(
         },
     };
     // 能力边界 + 记忆隔离：webhook 与内置适配器走同一套通道配置语义
-    let scope = channel.tool_scope();
-    let partition = channel.memory_partition(&gid);
+    let tool_scope = channel.tool_scope();
+    let partition = channel.memory_partition(&scope_id);
     let _ = st
         .core
         .store
@@ -2266,14 +2596,14 @@ pub async fn channel_inbound(
             }
         });
     }
-    // 202 受理，运行过程经 WS 推流；运行结束后恢复激活组
+    // 202 受理，运行过程经 WS 推流；运行结束后恢复交互上下文
     let core = st.core.clone();
     let text = b.text.clone();
     let sid = session.id.clone();
     tokio::spawn(async move {
-        let r = core.chat_scoped(&sid, &text, scope).await;
+        let r = core.chat_scoped(&sid, &text, tool_scope).await;
         if switched {
-            let _ = core.registry().set_active_group(&prev_group);
+            restore_context(&core, &prev_group, &prev_single);
         }
         if let Err(e) = r {
             let _ = core.events.send(CoreEvent {
@@ -2324,7 +2654,12 @@ pub fn routes() -> Router<AppState> {
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/:id/approve", post(approve_request))
         .route("/api/approvals/:id/deny", post(deny_request))
+        .route("/api/sessions/:id/plan", get(plan_list).post(plan_decide))
+        .route("/api/workbench/tree", get(workbench_tree))
+        .route("/api/workbench/file", get(workbench_file))
         .route("/api/channels/status", get(channel_status))
+        .route("/api/channels/bili-qr", post(bili_qr_start))
+        .route("/api/channels/bili-qr/:key", get(bili_qr_poll))
         .route("/api/channels", get(list_channels).post(create_channel))
         .route(
             "/api/channels/:id",
@@ -2605,6 +2940,7 @@ mod heartbeat_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                max_steps: None,
             }
         };
         core.registry()
@@ -2805,6 +3141,224 @@ mod cron_notify_tests {
 }
 
 #[cfg(test)]
+mod plan_endpoint_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt; // oneshot
+
+    fn core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-plan-e2e-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        exm_core::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn app(c: exm_core::Core) -> axum::Router {
+        crate::build_router(std::sync::Arc::new(c))
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// 三动作 e2e：setMode →（拦截产生清单）→ GET 清单 → approve 落地
+    #[tokio::test]
+    async fn 计划端点_三动作全链路() {
+        let c1 = core();
+        let s = c1.create_session("计划e2e").unwrap();
+        let app = app(c1);
+        // 1) setMode 开启
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/plan", s.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "action": "setMode", "plan": true }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["mode"], "plan");
+        // 2) 模拟拦截产生清单（等价工具网关拦截写操作）
+        {
+            let orch = {
+                // core 已移入 app——重建一个同配置 Core 不可行，直接用进程级 plan API
+                exm_core::plan::push_item(
+                    &s.id,
+                    exm_core::plan::to_plan_item(
+                        exm_core::types::ToolName::Filesystem,
+                        &serde_json::json!({ "op": "write", "path": "e2e.txt", "content": "x" }),
+                    ),
+                );
+            };
+            let _ = orch;
+        }
+        // 3) GET 清单
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/sessions/{}/plan", s.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["items"][0]["target"], "e2e.txt");
+        // 4) approve：清单消费 + 模式切回 execute
+        let router = app;
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/plan", s.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "action": "approve" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["okCount"], 1, "回放应成功：{v}");
+        // 5) 未知动作报 400
+        let c2 = core();
+        let s2 = c2.create_session("计划e2e2").unwrap();
+        let app2 = crate::build_router(std::sync::Arc::new(c2));
+        let resp = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/plan", s2.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "action": "bogus" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 工作台端点：树/读取/越权拒绝
+    #[tokio::test]
+    async fn 工作台端点_树读取与越权拒绝() {
+        let c1 = core();
+        // 造文件结构
+        let ws = c1.config().workspace_root.clone();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(ws.join("README.md"), "# t\nhello\nworld\n").unwrap();
+        let app = app(c1);
+        // 树
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/workbench/tree")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let nodes = v["nodes"].as_array().expect("树节点数组");
+        assert!(
+            nodes.iter().any(|n| n["path"] == "src/main.rs"),
+            "树应含 src/main.rs：{v}"
+        );
+        assert!(
+            !nodes.iter().any(|n| n["path"].as_str().unwrap_or("").starts_with(".git")),
+            "不应含 .git"
+        );
+        // 读文件（分页）
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/workbench/file?path=README.md&offset=2&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["content"], "hello", "第二行：{v}");
+        assert_eq!(v["totalLines"], 3);
+        // 越权路径拒绝
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/workbench/file?path=../../../etc/passwd")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "越权路径应 400");
+    }
+
+    /// 拒绝动作：清单保留、模式不变
+    #[tokio::test]
+    async fn 计划端点_拒绝保留清单() {
+        let c1 = core();
+        let s = c1.create_session("拒绝e2e").unwrap();
+        c1.set_plan_mode(&s.id, true);
+        exm_core::plan::push_item(
+            &s.id,
+            exm_core::plan::to_plan_item(
+                exm_core::types::ToolName::Edit,
+                &serde_json::json!({ "path": "r.rs", "old_string": "a", "new_string": "b" }),
+            ),
+        );
+        let app = app(c1);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/plan", s.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "action": "reject" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["kept"], 1);
+        assert_eq!(v["mode"], "plan");
+        assert_eq!(exm_core::plan::list_items(&s.id).len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod channel_boundary_tests {
     use super::*;
 
@@ -2884,5 +3438,82 @@ mod channel_boundary_tests {
             ch("telegram", "chat", true).memory_partition("g"),
             ch("telegram", "chat", true).memory_partition("h")
         );
+    }
+
+    // ---------------- 计划模式跨端审批（spec plan-mode 通道面） ----------------
+
+    /// 快捷审批指令：plan:yes 回放 / plan:no 保留，均不进模型轮次
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 通道计划审批_快捷指令直达裁决() {
+        let core = std::sync::Arc::new(core());
+        let c = ch("webhook", "tools", false);
+        let (run, _rx) = ChannelRun::begin(&core, &c, "plan-chat")
+            .await
+            .expect("建立执行上下文");
+        let sid = run.session_id.clone();
+        // 无清单时提示，不报错
+        run.run("plan:yes").await;
+        // 造清单（等价拦截）并拒绝
+        core.set_plan_mode(&sid, true);
+        exm_core::plan::push_item(
+            &sid,
+            exm_core::plan::to_plan_item(
+                exm_core::types::ToolName::Filesystem,
+                &serde_json::json!({ "op": "write", "path": "ch.txt", "content": "x" }),
+            ),
+        );
+        let (run2, _rx2) = ChannelRun::begin(&core, &c, "plan-chat")
+            .await
+            .expect("建立执行上下文");
+        run2.run("plan:no").await;
+        assert!(exm_core::plan::is_plan_mode(&sid), "拒绝后仍在 plan 模式");
+        assert_eq!(exm_core::plan::list_items(&sid).len(), 1, "清单保留");
+        // 再批准：回放落地
+        let (run3, _rx3) = ChannelRun::begin(&core, &c, "plan-chat")
+            .await
+            .expect("建立执行上下文");
+        run3.run("plan:yes").await;
+        assert!(!exm_core::plan::is_plan_mode(&sid), "批准后切 execute");
+        assert!(
+            core.config().workspace_root.join("ch.txt").exists(),
+            "回放应写文件"
+        );
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    /// plan.pending 事件 → 通道文本摘要卡（含快捷审批指引）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 通道计划审批_待审事件转文本摘要() {
+        let core = std::sync::Arc::new(core());
+        let c = ch("webhook", "tools", false);
+        let (run, _rx) = ChannelRun::begin(&core, &c, "plan-chat2")
+            .await
+            .expect("建立执行上下文");
+        let sid = run.session_id.clone();
+        core.set_plan_mode(&sid, true);
+        exm_core::plan::push_item(
+            &sid,
+            exm_core::plan::to_plan_item(
+                exm_core::types::ToolName::Edit,
+                &serde_json::json!({ "path": "s.rs", "old_string": "a", "new_string": "b" }),
+            ),
+        );
+        let evt = exm_core::types::CoreEvent {
+            kind: "plan.pending".into(),
+            session_id: sid.clone(),
+            payload: serde_json::json!({ "count": 1 }),
+        };
+        let text = run.take_reply(&evt, 500).expect("应有文本回复");
+        assert!(text.contains("计划待审批"), "摘要标题：{text}");
+        assert!(text.contains("edit"), "含条目工具：{text}");
+        assert!(text.contains("plan:yes"), "含快捷审批指引：{text}");
+        // plan.applied → 逐条结果
+        let evt2 = exm_core::types::CoreEvent {
+            kind: "plan.applied".into(),
+            session_id: sid,
+            payload: serde_json::json!({ "ok": true, "target": "s.rs" }),
+        };
+        let text2 = run.take_reply(&evt2, 500).expect("应有结果回复");
+        assert!(text2.contains("s.rs"), "含目标：{text2}");
     }
 }

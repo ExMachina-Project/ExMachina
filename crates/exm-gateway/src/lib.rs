@@ -18,8 +18,9 @@ use std::sync::Arc;
 
 pub mod channel_test;
 pub mod channel_util;
-pub mod git_panel;
-pub mod identity;pub mod limits;
+
+pub mod identity;
+pub mod limits;
 pub mod llm_admin;
 pub mod singles;
 pub mod discord;
@@ -278,7 +279,6 @@ pub fn build_router(core: Arc<Core>) -> Router {
         )
         .merge(platform::routes())
         .merge(llm_admin::routes())
-        .merge(git_panel::routes())
         .merge(identity::routes())
         .merge(limits::routes())
         .merge(singles::routes())
@@ -312,11 +312,6 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .merge(mcp_mount(core.clone()))
         // 工作区资产（截图 / 工具输出落盘）：沙箱内只读，聊天工具卡内联预览
         .route("/api/asset", get(get_asset))
-        // 工作区文件浏览（编码页文件树与预览）：沙箱内只读
-        .route("/api/fs/list", get(fs_list))
-        .route("/api/fs/file", get(fs_file).put(fs_save))
-        // 工作区变更清单（编码页变更视图）：git 口径优先，非 git 回退检查点口径
-        .route("/api/workspace/changes", get(workspace_changes))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         // 提取器拒绝归一为全站错误契约（放在鉴权之内：拒绝体不含数据，但口径一致优先）
         .layer(axum::middleware::from_fn(normalize_rejection))
@@ -330,6 +325,29 @@ pub fn build_router(core: Arc<Core>) -> Router {
         router = router.fallback_service(
             tower_http::services::ServeDir::new(dist).not_found_service(index),
         );
+        // 静态资源缓存语义（SW 换版可靠性）：
+        // - sw.js / index.html：no-cache（每次回源验证）——sw.js 被浏览器/旧 SW 缓存会阻塞新版接管，
+        //   v1 cache-first 时代的 SW 尤其顽固；index.html 引用 hash 资产，同样必须每次回源
+        // - /assets/：immutable 长缓存（内容 hash 文件名，内容变则名变）
+        router = router.layer(axum::middleware::from_fn(|req: axum::extract::Request, next: axum::middleware::Next| async move {
+            let is_static = !req.uri().path().starts_with("/api") && !req.uri().path().starts_with("/ws");
+            let path = req.uri().path().to_string();
+            let mut resp = next.run(req).await;
+            if !is_static {
+                return resp;
+            }
+            let cc = if path.starts_with("/assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                // sw.js / index.html / 文档 / 其余：每次回源验证
+                "no-cache"
+            };
+            resp.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static(cc),
+            );
+            resp
+        }));
     }
     router
 }
@@ -393,242 +411,6 @@ struct AssetQuery {
     /// <img> 无法携带请求头：与 /ws 同款查询参数密钥
     #[serde(default)]
     key: Option<String>,
-}
-
-/// 工作区内安全解析（与工具面 resolve_safe 同口径的只读版）：拒绝 `..`，规范化后须落在工作区内。
-/// 返回（绝对路径, 归一相对路径）
-fn resolve_ws_path(st: &AppState, raw: &str) -> Result<(std::path::PathBuf, String), (StatusCode, &'static str)> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "path 不能为空"));
-    }
-    let norm = raw.replace('\\', "/").trim_matches('/').to_string();
-    if norm.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "path 不能为空"));
-    }
-    let root = st.core.config().workspace_root.clone();
-    let candidate = root.join(&norm);
-    let ok = std::path::Path::new(&norm).is_relative()
-        && !norm.split('/').any(|seg| seg == "..")
-        && std::fs::canonicalize(&candidate)
-            .map(|c| c.starts_with(std::fs::canonicalize(&root).unwrap_or(root.clone())))
-            .unwrap_or(false);
-    if !ok {
-        return Err((StatusCode::FORBIDDEN, "路径越界（仅允许工作区内的路径）"));
-    }
-    Ok((candidate, norm))
-}
-
-/// 工作区目录清单（GET /api/fs/list?path=）：编码页文件树数据源（只读）
-async fn fs_list(State(st): State<AppState>, Query(q): Query<FsQuery>) -> impl IntoResponse {
-    let (dir, norm) = match resolve_ws_path(&st, &q.path) {
-        Ok(p) => p,
-        Err(e) => return e.into_response(),
-    };
-    if !dir.is_dir() {
-        return (StatusCode::NOT_FOUND, "目录不存在").into_response();
-    }
-    let mut entries: Vec<Value> = Vec::new();
-    let mut rd = match tokio::fs::read_dir(&dir).await {
-        Ok(r) => r,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "目录读取失败").into_response(),
-    };
-    while let Ok(Some(ent)) = rd.next_entry().await {
-        let name = ent.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue; // 隐藏目录/文件不入树（.git / .exmachina 等）
-        }
-        let Ok(meta) = ent.metadata().await else { continue };
-        let dir_flag = meta.is_dir();
-        entries.push(json!({
-            "name": name,
-            "dir": dir_flag,
-            "size": if dir_flag { 0 } else { meta.len() },
-            "path": format!("{norm}/{name}"),
-        }));
-        if entries.len() >= 500 {
-            break;
-        }
-    }
-    entries.sort_by(|a, b| {
-        let da = a["dir"].as_bool().unwrap_or(false);
-        let db = b["dir"].as_bool().unwrap_or(false);
-        db.cmp(&da).then(a["name"].as_str().cmp(&b["name"].as_str()))
-    });
-    Json(json!({ "path": norm, "entries": entries })).into_response()
-}
-
-/// 工作区文本文件预览（GET /api/fs/file?path=）：编码页查看代码用；200KB 截断
-async fn fs_file(State(st): State<AppState>, Query(q): Query<FsQuery>) -> impl IntoResponse {
-    let (file, norm) = match resolve_ws_path(&st, &q.path) {
-        Ok(p) => p,
-        Err(e) => return e.into_response(),
-    };
-    if !file.is_file() {
-        return (StatusCode::NOT_FOUND, "文件不存在").into_response();
-    }
-    let bytes = match tokio::fs::read(&file).await {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "文件读取失败").into_response(),
-    };
-    const CAP: usize = 200 * 1024;
-    let truncated = bytes.len() > CAP;
-    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(CAP)]).to_string();
-    Json(json!({
-        "path": norm,
-        "size": bytes.len(),
-        "truncated": truncated,
-        "content": text,
-    }))
-    .into_response()
-}
-
-#[derive(Deserialize)]
-struct FsQuery {
-    path: String,
-}
-
-// ---------------------------------------------------------------- 工作区变更清单（编码页变更视图）
-
-/// git 只读调用：固定子命令与参数（status/diff/rev-parse），不拼接任何用户输入
-async fn git_read(ws: &std::path::Path, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(ws)
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-const CHANGES_FILE_CAP: usize = 50;
-const CHANGES_DIFF_CAP: usize = 100 * 1024;
-
-/// 工作区变更清单：git 仓库走 HEAD 对比口径；非 git 仓库回退检查点口径并标注来源
-pub async fn collect_workspace_changes(ws: &std::path::Path, checkpoints: &[(String, String, u64)]) -> Value {
-    let git_ok = git_read(ws, &["rev-parse", "--is-inside-work-tree"])
-        .await
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false);
-    if git_ok {
-        let branch = git_read(ws, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .await
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        let porcelain = git_read(ws, &["status", "--porcelain"]).await.unwrap_or_default();
-        let mut files: Vec<Value> = Vec::new();
-        for line in porcelain.lines().take(CHANGES_FILE_CAP) {
-            if line.len() < 4 {
-                continue;
-            }
-            let xy = &line[..2];
-            // git 对含空格/中文路径会加引号：展示口径去引号即可
-            let path = line[3..].trim().trim_matches('"').to_string();
-            if path.is_empty() {
-                continue;
-            }
-            let untracked = xy == "??";
-            let (status, staged) = if untracked {
-                ("A".to_string(), false)
-            } else {
-                let x = xy.as_bytes()[0] as char;
-                let y = xy.as_bytes()[1] as char;
-                (if x != ' ' { x } else { y }.to_string(), x != ' ')
-            };
-            let diff = if untracked {
-                Value::Null // 未跟踪文件：整个文件都是新的，内容走 /api/fs/file 预览
-            } else {
-                match git_read(ws, &["diff", "HEAD", "--", &path]).await {
-                    Some(d) => {
-                        let truncated = d.len() > CHANGES_DIFF_CAP;
-                        let cut = if truncated { d[..CHANGES_DIFF_CAP].to_string() } else { d };
-                        json!({ "text": cut, "truncated": truncated })
-                    }
-                    None => Value::Null,
-                }
-            };
-            files.push(json!({ "path": path, "status": status, "staged": staged, "diff": diff }));
-        }
-        return json!({ "source": "git", "branch": branch, "files": files });
-    }
-
-    // 检查点口径：最近一份检查点 vs 当前文件（list_checkpoints 已按日期倒序，首见即最新）
-    let mut latest: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for (date, rel, _) in checkpoints {
-        latest.entry(rel.as_str()).or_insert(date.as_str());
-    }
-    let mut files: Vec<Value> = Vec::new();
-    for (rel, date) in latest.iter().take(CHANGES_FILE_CAP) {
-        let cp = ws.join(".exmachina").join("checkpoints").join(date).join(rel);
-        let cur = ws.join(rel);
-        let (Ok(old), Ok(new)) = (std::fs::read_to_string(&cp), std::fs::read_to_string(&cur)) else {
-            continue;
-        };
-        if old == new {
-            continue; // 检查点之后未变（或已被恢复）
-        }
-        let diff = exm_core::patch::simple_unified_diff(&old, &new, rel, 3);
-        files.push(json!({
-            "path": rel, "status": "M", "staged": false,
-            "diff": { "text": diff, "truncated": false }
-        }));
-    }
-    files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-    json!({ "source": "checkpoint", "branch": Value::Null, "files": files })
-}
-
-/// 工作区变更清单（GET /api/workspace/changes）：编码页变更视图数据源
-async fn workspace_changes(State(st): State<AppState>) -> impl IntoResponse {
-    let ws = st.core.config().workspace_root.clone();
-    let checkpoints = st.core.list_checkpoints();
-    let payload = collect_workspace_changes(&ws, &checkpoints).await;
-    Json(payload).into_response()
-}
-
-/// 工作区文件保存（PUT /api/fs/file）：编码页编辑器写入。
-/// 允许保存新文件（父目录规范化后须落在工作区内）；写入经 Core 同口径（检查点 + 审计）
-pub async fn fs_save(State(st): State<AppState>, Json(body): Json<Value>) -> impl IntoResponse {
-    let Some(path) = body.get("path").and_then(|v| v.as_str()) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "path 不能为空" }))).into_response();
-    };
-    let Some(content) = body.get("content").and_then(|v| v.as_str()) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "content 不能为空" }))).into_response();
-    };
-    let norm = path.replace('\\', "/").trim_matches('/').to_string();
-    let path_legal = !norm.is_empty()
-        && !std::path::Path::new(path.trim()).is_absolute() // 绝对路径直接拒绝（不改写为相对）
-        && !norm.split('/').any(|seg| seg == "..");
-    if !path_legal {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "路径越界（仅允许工作区内的相对路径）" })),
-        )
-            .into_response();
-    }
-    let root = st.core.config().workspace_root.clone();
-    // 父目录可能尚不存在（保存新文件）：向上找最近的已存在祖先做规范化判定
-    let target = root.join(&norm);
-    let mut probe = target.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| root.clone());
-    while !probe.exists() && probe != root {
-        match probe.parent() {
-            Some(p) => probe = p.to_path_buf(),
-            None => break,
-        }
-    }
-    let root_canon = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-    let parent_ok = std::fs::canonicalize(&probe)
-        .map(|c| c.starts_with(&root_canon))
-        .unwrap_or(false);
-    if !parent_ok {
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "路径越界（仅允许工作区内的路径）" }))).into_response();
-    }
-    match st.core.save_workspace_file(&norm, content) {
-        Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
-    }
 }
 
 async fn health(State(st): State<AppState>) -> impl IntoResponse {
@@ -706,6 +488,10 @@ async fn get_config(State(st): State<AppState>) -> impl IntoResponse {
         "tools": {
             "custom": cfg.tools.custom,
         },
+        "experiments": {
+            "dynamicCompaction": cfg.experiments.dynamic_compaction,
+            "groupSharedContext": cfg.experiments.group_shared_context,
+        },
         "mock": st.core.is_mock(),
     }))
 }
@@ -744,6 +530,9 @@ struct ConfigBody {
     /// 工具面（声明式自定义工具；custom 接受数组或 JSON 字符串两种形态）
     #[serde(default)]
     tools: Option<PartialTools>,
+    /// 实验性功能开关（动态压缩 / 组共享上下文）
+    #[serde(default)]
+    experiments: Option<PartialExperiments>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -751,6 +540,16 @@ struct ConfigBody {
 struct PartialTools {
     #[serde(default)]
     custom: Option<serde_json::Value>,
+}
+
+/// 实验性功能开关（设置页）：部分更新语义——缺省字段沿用旧值
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct PartialExperiments {
+    #[serde(default)]
+    dynamic_compaction: Option<bool>,
+    #[serde(default)]
+    group_shared_context: Option<bool>,
 }
 
 /// 自定义工具清单归一：JSON 数组（程序化）或 JSON 字符串（设置页文本框）；解析失败返回 None（沿用旧值）
@@ -820,6 +619,8 @@ struct PartialSecurity {
     tool_output_spill_chars: Option<usize>,
     #[serde(default)]
     approval_wait_secs: Option<u64>,
+    chat_max_steps: Option<usize>,
+    context_budget_ratio: Option<f64>,
 }
 
 /// Computer Use（设置页）：部分更新语义——缺省字段沿用旧值
@@ -906,6 +707,8 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
         terminal_timeout_secs: None,
         tool_output_spill_chars: None,
         approval_wait_secs: None,
+        chat_max_steps: None,
+        context_budget_ratio: None,
     });
     let computer = body.computer.clone().unwrap_or(PartialComputer {
         enabled: None,
@@ -991,7 +794,7 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
                 .unwrap_or_else(|| current.security.exec_allowlist.clone()),
             // 掩码/缺省 = 沿用旧密钥；显式空串 = 清除（回到免鉴权）
             auth_key: match sec.auth_key.as_deref() {
-                Some(k) if k == "***已配置***" => current.security.auth_key.clone(),
+                Some("***已配置***") => current.security.auth_key.clone(),
                 Some(k) => k.trim().to_string(),
                 None => current.security.auth_key.clone(),
             },
@@ -1004,6 +807,14 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
             approval_wait_secs: sec
                 .approval_wait_secs
                 .unwrap_or(current.security.approval_wait_secs),
+            chat_max_steps: sec
+                .chat_max_steps
+                .filter(|v| *v > 0)
+                .unwrap_or(current.security.chat_max_steps),
+            context_budget_ratio: sec
+                .context_budget_ratio
+                .filter(|v| (0.5..=1.0).contains(v))
+                .unwrap_or(current.security.context_budget_ratio),
             // 首启引导提醒：不由设置页改写（专属端点 auth/dismiss 控制）
             key_setup_dismissed: current.security.key_setup_dismissed,
         },
@@ -1035,6 +846,17 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
         sandbox,
         browser,
         tools,
+        experiments: {
+            let e = body.experiments.clone().unwrap_or_default();
+            exm_core::config::ExperimentsConfig {
+                dynamic_compaction: e
+                    .dynamic_compaction
+                    .unwrap_or(current.experiments.dynamic_compaction),
+                group_shared_context: e
+                    .group_shared_context
+                    .unwrap_or(current.experiments.group_shared_context),
+            }
+        },
         ..(*current).clone()
     };
     // 测试替身状态由运行期/环境决定，配置载荷不改变它（设置页的 llm 修改只在"真实通道"语义内生效）
@@ -1442,18 +1264,15 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
         let Some(gid) = b.group.clone() else {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": "模板创建必须指定目标组 group" }))).into_response();
         };
-        let meta = st.core.group_meta(&gid);
         let was_empty = st.core.registry().group_agent_count(&gid) == 0;
         let result = st
             .core
             .registry()
             .create_agent_from_template(&gid, tpl, &b.identifier, &b.name, &b.description)
-            .map(|saved| {
+            .inspect(|saved| {
                 if was_empty {
                     let _ = st.core.registry().set_primary(&gid, &saved.identifier);
                 }
-                let _ = meta;
-                saved
             });
         return match result {
             Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
@@ -1480,29 +1299,26 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
         prompt_file: String::new(),
         model_hint: b.model.filter(|s| !s.trim().is_empty()),
         link: None,
+        max_steps: None,
     };
     // 目标组：显式指定时写入该组（首个个体自动成为该组主智能体），否则激活组
     let result = match &b.group {
         Some(gid) => {
-            let meta = st.core.group_meta(gid);
             let was_empty = st.core.registry().group_agent_count(gid) == 0;
             st.core
                 .registry()
                 .upsert_agent(gid, def, b.prompt.clone())
-                .map(|saved| {
+                .inspect(|saved| {
                     // 主智能体由系统指定：仅组的首个个体自动成为主智能体（tier 不再触发换主）
                     if was_empty {
                         let _ = st.core.registry().set_primary(gid, &saved.identifier);
                     }
-                    let _ = meta;
-                    saved
                 })
         }
-        None => st.core.upsert_agent(def, b.prompt).map(|saved| {
+        None => st.core.upsert_agent(def, b.prompt).inspect(|saved| {
             if st.core.registry().count() == 1 {
                 let _ = st.core.set_primary(&saved.identifier);
             }
-            saved
         }),
     };
     match result {

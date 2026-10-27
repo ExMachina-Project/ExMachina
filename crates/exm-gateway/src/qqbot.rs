@@ -277,7 +277,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                     continue;
                                                 }
                                                 let full = if url.starts_with("http") { url.to_string() } else { format!("https://multimedia.qq.com{url}") };
-                                                let kind = if is_image_name(&name) { "image" } else { "file" };
+                                                let kind = if is_image_name(name) { "image" } else { "file" };
                                                 if let Some(bytes) = crate::platform::download_bytes(&full).await {
                                                     inbound.push((kind.into(), name.into(), peer.key().to_string(), bytes));
                                                 }
@@ -316,7 +316,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                 let peer2 = peer.clone();
                                                 let msg_id2 = msg_id.clone();
                                                 tokio::spawn(async move {
-                                                    send_passive(&creds2, &base, &peer2, &msg_id2, 1, &reply).await;
+                                                    send_passive(&creds2, base, &peer2, &msg_id2, 1, &reply).await;
                                                 });
                                                 continue;
                                             }
@@ -328,7 +328,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                             let peer2 = peer.clone();
                                             let msg_id2 = msg_id.clone();
                                             tokio::spawn(async move {
-                                                send_passive(&creds2, &base, &peer2, &msg_id2, 1, &reply).await;
+                                                send_passive(&creds2, base, &peer2, &msg_id2, 1, &reply).await;
                                             });
                                             continue;
                                         }
@@ -464,6 +464,8 @@ fn strip_mentions(s: &str) -> String {
 }
 
 /// 一条用户消息：组绑定 → 会话复用 → 订阅回复 → 执行 → 被动回复
+#[allow(clippy::too_many_arguments)]
+// 平台适配器的消息上下文逐项透传
 async fn handle_message(
     core: &Arc<Core>,
     ch: &Channel,
