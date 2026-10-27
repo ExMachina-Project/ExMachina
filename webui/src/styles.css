@@ -681,6 +681,46 @@ textarea.ant-input:focus,
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 .chat-composer .attach-row { padding: 10px 12px 0; }
+
+/* `@` 文件提及弹层（对话即编码）：浮在输入框上方 */
+.chat-composer { position: relative; }
+.mention-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 12px;
+  right: 12px;
+  max-width: 560px;
+  margin: 0 auto;
+  background: var(--panel, #1e1f24);
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  z-index: 30;
+  overflow: hidden;
+}
+.mention-pop-head, .mention-pop-foot {
+  padding: 6px 12px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+.mention-pop-head { border-bottom: 1px solid var(--line, rgba(127,127,127,.2)); }
+.mention-pop-foot { border-top: 1px solid var(--line, rgba(127,127,127,.2)); }
+.mention-pop-list { max-height: 264px; overflow-y: auto; padding: 4px; }
+.mention-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.mention-pop-item.on { background: rgba(64, 128, 255, 0.14); }
+.mention-pop-item .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .chat-composer .composer-textarea.ant-input {
   min-height: 42px;
   padding: 11px 14px 2px !important;
@@ -1048,6 +1088,32 @@ textarea.ant-input:focus,
 .model-caps .anticon { font-size: 11px; opacity: 0.85; }
 .model-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .model-row > .ant-form-item { flex: 1; min-width: 0; margin: 0; }
+
+/* 远端模型选择窗（获取可用模型 → 勾选后入表单） */
+.model-picker-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.25));
+  border-radius: 8px;
+  padding: 4px;
+}
+.model-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.model-picker-item:hover { background: rgba(127, 127, 127, 0.1); }
+.model-picker-item.on { background: rgba(64, 128, 255, 0.12); }
+.model-picker-item input[type="checkbox"] { accent-color: #4080ff; cursor: pointer; }
+.model-picker-item .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cap-switch {
   display: inline-flex;
   align-items: center;

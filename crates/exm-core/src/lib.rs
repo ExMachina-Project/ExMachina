@@ -1354,12 +1354,19 @@ pub fn build_orchestrator(
     // 记忆模式对齐（深层记忆关闭 = 文件记忆模式）：工具面读 md、拒写库，与规划注入同源
     gateway = gateway.with_memory_mode(cfg.memory_enabled, cfg.memory_md_path.clone());
     let tools = Arc::new(gateway);
-    let unit_runtime = Arc::new(AgentRuntime::new(
-        registry.clone(),
-        provider.clone(),
-        tools.clone(),
-        cfg.llm.model.clone(),
-    ));
+    let unit_runtime = Arc::new(
+        AgentRuntime::new(
+            registry.clone(),
+            provider.clone(),
+            tools.clone(),
+            cfg.llm.model.clone(),
+        )
+        .with_experiments(cfg.experiments.clone()),
+    );
+    // 动态上下文压缩（实验性）：开关开启才装配压缩器——schema 下发与执行体同门
+    if cfg.experiments.dynamic_compaction {
+        tools.set_compactor(provider.clone(), cfg.llm.model.clone());
+    }
     // 模型档案运行池：每个档案独立 Provider。
     // 规则：**显式配置优先**——有端点与密钥即真实推理；未配置时，测试替身模式给替身，产品模式给「未配置」指引通道。
     let mut pool = ModelPool::new();

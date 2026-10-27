@@ -1,5 +1,8 @@
 # WebUI 代码工作台手动验收清单（任务 6.5）
 
+> **[已废弃]** 独立「代码」视图已移除（对话即编码：@ 文件提及 + 工具卡 diff/回滚承担全部编码体验）。
+> 本文档保留作历史验收记录；其中会话流 diff 卡片、终端面板、回滚等条目仍有效（见 `docs/验收-对话即编码.md`）。
+>
 > 对象：WebUI「代码」视图（CodeWorkbenchView）+ 会话流 diff 审查卡片 + 终端产出面板。
 > 后端：`GET /api/workbench/tree`、`GET /api/workbench/file`（e2e 已覆盖树/分页/越权拒绝）。
 
