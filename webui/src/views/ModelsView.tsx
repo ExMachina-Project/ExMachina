@@ -246,51 +246,49 @@ export function ModelsView(): React.ReactElement {
     try {
       const all = form.getFieldsValue(true) as KeyForm & Record<string, unknown>;
       const existing = editing;
-      // 行级意图三态：掩码 = 沿用旧值；明文 = 设置/替换；掩码行被清空 = 显式删除（KEY_CLEAR 哨兵）。
+      // 行级意图三态：掩码 = 沿用旧值；明文 = 设置/替换；掩码行被清空/删除 = 显式删除（KEY_CLEAR 哨兵）。
       // 空串在后端是「沿用旧值」——删除必须用哨兵表达，否则「清空输入框保存」永远删不掉密钥。
       // 首行 = 主 Key 位（keep: -1 = 主沿用），其余行按原序进 Key 池（keep = 旧池索引）。
+      // 关键：Form.List 删行是物理移除，被删行不会出现在 all.keys 里——
+      // 后端会把「apiKeys 缺省/空列表」当旧客户端沿用旧池，删行保存就白删了。
+      // 所以池提交序列必须与「初始池掩码行」等长对齐：初始池第 j 把若不在当前行里，补 KEY_CLEAR 占位。
       const rawRows = (all.keys ?? []).map((r) => ({
         value: (r?.value ?? "").trim(),
         keep: r?.keep,
       }));
       // 行是否携带沿用标记（编辑时由 openEdit 注入；-1 = 主 Key 位，>=0 = 旧池索引）
       const hasKeep = (r: { keep?: number }) => r.keep !== undefined;
+      // 当前各行表达的旧池意图：keep=j 的掩码行 = 沿用第 j 把；keep=j 的空行 = 删除第 j 把
+      const oldPoolSize = existing ? (existing.apiKeys ?? []).filter((k) => k && k.trim()).length : 0;
+      const poolIntent = new Map<number, string>(); // j -> KEY_MASK(沿用) | KEY_CLEAR(删除)
+      for (const r of rawRows) {
+        if (hasKeep(r) && (r.keep ?? -1) >= 0) {
+          poolIntent.set(r.keep ?? 0, r.value === KEY_MASK ? KEY_MASK : r.value === "" ? KEY_CLEAR : r.value);
+        }
+      }
+      // 新增明文行（无 keep 标记且非空、非掩码）按序追加在池序列之后
+      const freshPool = rawRows.filter((r) => !hasKeep(r) && r.value !== "" && r.value !== KEY_MASK).map((r) => r.value);
       const firstRaw = rawRows[0];
       let apiKey: string;
       let apiKeys: (string | { keep: number })[];
       let clearKeys = false;
       if (existing) {
         const first = firstRaw;
-        if (first && first.value === KEY_MASK) {
-          // 首行掩码保留：主 Key 沿用旧值（服务端无主 Key 时保持空），其余行进池
-          apiKey = existing.apiKey ? KEY_MASK : "";
-          apiKeys = rawRows.slice(1).map((r) =>
-            hasKeep(r) && r.value === KEY_MASK
-              ? { keep: r.keep ?? 0 }
-              : hasKeep(r) && r.value === ""
-                ? KEY_CLEAR // 掩码行被清空 = 删除该池键
-                : r.value,
-          );
-        } else if (first && first.value !== "") {
-          // 首行明文：设置/替换主 Key，其余行进池
-          apiKey = first.value;
-          apiKeys = rawRows.slice(1).map((r) =>
-            hasKeep(r) && r.value === KEY_MASK
-              ? { keep: r.keep ?? 0 }
-              : hasKeep(r) && r.value === ""
-                ? KEY_CLEAR
-                : r.value,
-          );
-        } else if (first && first.value === "" && hasKeep(first)) {
-          // 首行是掩码位但被用户清空 = 显式删除主 Key（KEY_CLEAR），其余行进池
+        // 池提交序列：按初始池索引 0..oldPoolSize-1 对齐（缺位 = 该行被删除 = KEY_CLEAR），再接新增明文
+        apiKeys = Array.from({ length: oldPoolSize }, (_, j) => poolIntent.get(j) ?? KEY_CLEAR).concat(freshPool);
+        // 主 Key 行（keep=-1）已被物理删除 → 删除主 Key 意图（剩余行的池意图已在 poolIntent 里对齐）
+        const mainRowGone = hasKeep(first) && (first.keep ?? -1) >= 0;
+        if (mainRowGone && (existing.apiKey ?? "") !== "") {
           apiKey = KEY_CLEAR;
-          apiKeys = rawRows.slice(1).map((r) =>
-            hasKeep(r) && r.value === KEY_MASK
-              ? { keep: r.keep ?? 0 }
-              : hasKeep(r) && r.value === ""
-                ? KEY_CLEAR
-                : r.value,
-          );
+        } else if (first && first.value === KEY_MASK) {
+          // 首行掩码保留：主 Key 沿用旧值（服务端无主 Key 时保持空）
+          apiKey = existing.apiKey ? KEY_MASK : "";
+        } else if (first && first.value !== "") {
+          // 首行明文：设置/替换主 Key
+          apiKey = first.value;
+        } else if (first && first.value === "" && hasKeep(first)) {
+          // 首行是掩码位但被用户清空 = 显式删除主 Key（KEY_CLEAR）
+          apiKey = KEY_CLEAR;
         } else {
           // 行已删空（或首行是新的空行）：显式清空全部密钥（clearKeys）——
           // 空串在后端是「沿用旧值」，不带标志位保存后密钥依然存在
