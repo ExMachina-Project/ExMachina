@@ -743,6 +743,12 @@ export const zh = {
   "channels.f.dailyLimitHelp": "每天最多发布多少条评论 + 回复（1–60）",
   "channels.f.maxCommentChars": "评论字数上限",
   "channels.f.maxCommentCharsHelp": "生成的评论/回复最长字数（20–800）",
+  "channels.f.approval": "互动审批",
+  "channels.f.approvalOff": "关闭（直接发送）",
+  "channels.f.approvalAlways": "开启（发出前需人工审批）",
+  "channels.f.approvalHelp": "评论/回复发出前是否需要人工批准；开启后 act 动作产生审批单，批准由系统代发",
+  "channels.f.maxWatchSteps": "观看步数上限",
+  "channels.f.maxWatchStepsHelp": "每轮观看中智能体可调用的工具步数上限（1–32，默认 8）；达限后系统注入收束提示",
   "channels.f.required": "该项必填",
 
   // ── 子个体页 ──

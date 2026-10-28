@@ -744,6 +744,12 @@ export const en: Partial<Dict> = {
   "channels.f.dailyLimitHelp": "Maximum comments + replies per day (1–60)",
   "channels.f.maxCommentChars": "Comment length limit",
   "channels.f.maxCommentCharsHelp": "Maximum characters for generated comments/replies (20–800)",
+  "channels.f.approval": "Interaction approval",
+  "channels.f.approvalOff": "Off (send directly)",
+  "channels.f.approvalAlways": "On (require manual approval)",
+  "channels.f.approvalHelp": "Whether comments/replies need manual approval before sending; when on, act creates an approval slip and the system sends on approval",
+  "channels.f.maxWatchSteps": "Watch step limit",
+  "channels.f.maxWatchStepsHelp": "Maximum tool-call steps per watch round (1–32, default 8); a wrap-up note is injected at the limit",
   "channels.f.required": "Required",
 
   // ── Units ──

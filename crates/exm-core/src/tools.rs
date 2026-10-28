@@ -1096,6 +1096,13 @@ pub struct ToolGateway {
             ),
         >,
     >,
+    /// 会话级工具注入（视频观看会话等「按会话来源收窄」的插件工具）：
+    /// key = session_id；schema 下发与执行都只对本会话生效，普通会话不可见。
+    session_scoped_tools: parking_lot::RwLock<
+        std::collections::HashMap<String, Vec<(crate::config::CustomTool, DynamicToolExec)>>,
+    >,
+    /// 会话级步数预算覆盖（自动任务「防失控」面；None = 走三级默认解析）
+    session_step_budgets: parking_lot::RwLock<std::collections::HashMap<String, usize>>,
     /// 记忆库（memory_read/write/link 三工具的受控入口；组隔离在工具层强制）
     memory: Option<Arc<crate::memory::MemoryStore>>,
     /// 深层记忆开关（config.memory.enabled）。false = 文件记忆模式：
@@ -1141,6 +1148,8 @@ impl ToolGateway {
             custom: Vec::new(),
             plugin_tools: parking_lot::RwLock::new(Vec::new()),
             dynamic_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
+            session_scoped_tools: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            session_step_budgets: parking_lot::RwLock::new(std::collections::HashMap::new()),
             memory: None,
             // 默认深层记忆开启 = 历史行为（未接线 memory 模式的调用方零感知）
             memory_deep: true,
@@ -1240,6 +1249,65 @@ impl ToolGateway {
     /// 当前注册的动态工具 schema 清单（诊断用）
     pub fn dynamic_tool_names(&self) -> Vec<String> {
         self.dynamic_tools.read().keys().cloned().collect()
+    }
+
+    /// 会话级工具注入：把一组工具绑定到指定会话（视频观看会话等「按会话来源
+    /// 收窄」的场景）。同名重复注入 = 覆盖；轮次结束须调用 clear_session_tools 清理。
+    pub fn inject_session_tools(
+        &self,
+        session_id: &str,
+        tools: Vec<(crate::config::CustomTool, DynamicToolExec)>,
+    ) {
+        self.session_scoped_tools
+            .write()
+            .insert(session_id.to_string(), tools);
+    }
+
+    /// 清理会话级注入（观看轮次收束时调用；防泄漏）
+    pub fn clear_session_tools(&self, session_id: &str) {
+        self.session_scoped_tools.write().remove(session_id);
+    }
+
+    /// 按会话查注入工具（执行面用）
+    fn session_tool(&self, session_id: &str, name: &str) -> Option<(crate::config::CustomTool, DynamicToolExec)> {
+        self.session_scoped_tools
+            .read()
+            .get(session_id)
+            .and_then(|v| v.iter().find(|(c, _)| c.name == name).cloned())
+    }
+
+    /// 会话级注入工具的 schema（runtime 下发用：session_id 变体）
+    pub fn session_tool_specs(&self, session_id: &str) -> Vec<crate::provider::ToolSpec> {
+        let to_spec = |c: &crate::config::CustomTool| crate::provider::ToolSpec {
+            name: c.name.trim().to_string(),
+            description: if c.description.trim().is_empty() {
+                format!("插件会话工具 {}", c.name)
+            } else {
+                c.description.clone()
+            },
+            parameters: c.param_schema(),
+        };
+        self.session_scoped_tools
+            .read()
+            .get(session_id)
+            .map(|v| v.iter().map(|(c, _)| to_spec(c)).collect())
+            .unwrap_or_default()
+    }
+
+    /// 设置会话级步数预算（视频观看轮次等自动任务的「防失控」通道面配置）：
+    /// n=0 清除覆盖（回落个体 maxSteps / 档位 / 全局默认）。
+    pub fn set_session_step_budget(&self, session_id: &str, steps: usize) {
+        let mut map = self.session_step_budgets.write();
+        if steps == 0 {
+            map.remove(session_id);
+        } else {
+            map.insert(session_id.to_string(), steps);
+        }
+    }
+
+    /// 查会话级步数覆盖（None = 未设置，走默认三级解析）
+    pub fn session_step_budget(&self, session_id: &str) -> Option<usize> {
+        self.session_step_budgets.read().get(session_id).copied()
     }
 
     /// 该个体可见的自定义工具 schema（与内置工具一起随 function calling 下发）。
@@ -2082,10 +2150,23 @@ impl ToolGateway {
                     self.dispatch(agent_id, session_id, tool, args).await
                 }
             }
-            // 非内置名：动态命名空间工具（T3 内置插件）→ 声明式自定义工具
+            // 非内置名：会话级注入（视频观看会话）→ 动态命名空间工具（T3 内置插件）→ 声明式自定义工具
             None => {
-                // 动态表优先（video__* 等带自定义执行面的插件工具）
-                if let Some((spec, exec)) = self.dynamic_tool(name) {
+                // 会话级注入优先（按会话收窄的插件工具：video__* 等）
+                if let Some((spec, exec)) = self.session_tool(session_id, name) {
+                    if spec.visible_to(agent_id) {
+                        let (ok, text) = exec(agent_id, session_id, args.clone()).await;
+                        if ok {
+                            ToolResult::ok(text)
+                        } else {
+                            ToolResult::err(text)
+                        }
+                    } else {
+                        ToolResult::err(format!(
+                            "工具 {name} 未对本个体开放（插件工具的 agents 未包含 {agent_id}）"
+                        ))
+                    }
+                } else if let Some((spec, exec)) = self.dynamic_tool(name) {
                     // 动态表（T3 内置插件全局注册面）
                     if spec.visible_to(agent_id) {
                         let (ok, text) = exec(agent_id, session_id, args.clone()).await;
@@ -6515,5 +6596,92 @@ mod terminal_gate_tests {
         assert!(text.contains("demo__ping") || text.len() < 500, "错误面应含工具名或简洁");
         // 不应泄露内部路径
         assert!(!text.contains("/home/"), "不应泄露内部路径");
+    }
+}
+
+// ---------------------------------------------------------------- 会话级工具注入（video-watch-agent 组 2 单测）
+
+#[cfg(test)]
+mod session_tool_tests {
+    use super::*;
+
+    fn ct(name: &str) -> crate::config::CustomTool {
+        crate::config::CustomTool {
+            name: name.into(),
+            description: "测试会话工具".into(),
+            kind: "builtin".into(),
+            method: String::new(),
+            target: String::new(),
+            headers: Default::default(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } }
+            }),
+            agents: vec![],
+        }
+    }
+
+    #[test]
+    fn 会话注入_可见性收窄() {
+        let dir = std::env::temp_dir().join(format!("exm-sess-tools-{}", crate::types::new_id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, crate::config::SecurityConfig::default());
+
+        // 注入前：普通会话看不到
+        assert!(gw.session_tool_specs("s-video").is_empty());
+
+        // 注入 video__summary 到 s-video 会话
+        let exec = dynamic_exec(|_a, _s, args| async move {
+            Ok(format!("看到了：{}", args.get("q").and_then(|v| v.as_str()).unwrap_or("?")))
+        });
+        gw.inject_session_tools("s-video", vec![(ct("video__summary"), exec)]);
+
+        // 本会话可见、别的会话不可见
+        let specs = gw.session_tool_specs("s-video");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "video__summary");
+        assert!(gw.session_tool_specs("s-other").is_empty());
+
+        // 执行面同样收窄：非注入会话调不到（未知工具）
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // 命名空间工具名走 execute_named 动态/会话表查找
+            let r = gw
+                .execute_named(
+                    "a1",
+                    "s-video",
+                    &[],
+                    "video__summary",
+                    &serde_json::json!({ "q": "测试" }),
+                )
+                .await;
+            // 会话工具执行：ok 或业务错误均可，但不应是「未知工具」
+            let text = r.output.clone();
+            assert!(!text.contains("未知工具"), "会话注入会话应命中工具：{text}");
+
+            let r2 = gw
+                .execute_named(
+                    "a1",
+                    "s-other",
+                    &[],
+                    "video__summary",
+                    &serde_json::json!({ "q": "测试" }),
+                )
+                .await;
+            assert!(!r2.ok, "普通会话不可见应失败");
+            let t2 = r2.error.clone().unwrap_or_default();
+            assert!(t2.contains("未知工具"), "普通会话不可见应报未知工具：{t2}");
+        });
+
+        // 清理后再不可见
+        gw.clear_session_tools("s-video");
+        assert!(gw.session_tool_specs("s-video").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

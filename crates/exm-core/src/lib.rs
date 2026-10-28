@@ -68,6 +68,8 @@ pub struct Core {
     remote: parking_lot::RwLock<Option<Arc<dyn crate::remote::RemoteExecutor>>>,
     /// 插件管理器（plugins/ 目录装载 + 注册面）
     plugins: parking_lot::RwLock<Arc<crate::plugin::PluginManager>>,
+    /// 视频动作代发执行器（video__act 审批批准后回调；网关侧注入）
+    video_act_executor: parking_lot::RwLock<Option<crate::types::VideoActExecutor>>,
     orchestrator: RwLock<Arc<Orchestrator>>,
     config: RwLock<Arc<ExmConfig>>,
 }
@@ -133,6 +135,7 @@ impl Core {
             mcp: mcp_handle.clone(),
             remote: parking_lot::RwLock::new(None),
             plugins: parking_lot::RwLock::new(plugins),
+            video_act_executor: parking_lot::RwLock::new(None),
             orchestrator: RwLock::new(orchestrator),
             config: RwLock::new(Arc::new(cfg)),
         })
@@ -1089,6 +1092,31 @@ impl Core {
         if req.status != "pending" {
             anyhow::bail!("审批单已处理: {}", req.status);
         }
+        // 视频动作审批单（[video] 前缀）：批准 = 回调代发执行器，拒绝 = 记录跳过
+        if req.command.starts_with("[video]") {
+            let payload = req.command.trim_start_matches("[video]").trim().to_string();
+            req.decided_at = Some(now_iso());
+            if !approve {
+                req.status = "denied".into();
+                req.result = Some("视频互动被拒绝（未发送）".into());
+                self.store.update_approval(&req)?;
+                self.emit_approval_resolved(&req);
+                return Ok(req);
+            }
+            match self.execute_video_act_approval(&payload).await {
+                Ok(out) => {
+                    req.status = "executed".into();
+                    req.result = Some(out.chars().take(4000).collect());
+                }
+                Err(e) => {
+                    req.status = "failed".into();
+                    req.result = Some(e.to_string());
+                }
+            }
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
+        }
         // 计划审批单（[plan] 前缀）：转发计划通道——批准 = 回放清单，拒绝 = 保留清单
         if req.command.starts_with("[plan]") {
             let sid = req.session_id.clone();
@@ -1138,6 +1166,19 @@ impl Core {
         let _ = self.store.put_session_origin(session_id, external_id, role);
     }
 
+    // ---------------- 视频互动审批（video__act 批准代发） ----------------
+
+    pub fn register_video_act_executor(&self, exec: crate::types::VideoActExecutor) {
+        *self.video_act_executor.write() = Some(exec);
+    }
+
+    async fn execute_video_act_approval(&self, payload: &str) -> anyhow::Result<String> {
+        let exec = self.video_act_executor.read().clone();
+        let Some(exec) = exec else {
+            anyhow::bail!("视频动作代发执行器未注册（网关未启动？）");
+        };
+        exec(payload.to_string()).await
+    }
 
     // ---------------- 计划模式（spec: plan-mode） ----------------
 
@@ -1905,4 +1946,50 @@ mod plan_tests {
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
+    /// 视频动作审批往返（[video] 前缀）：批准 = 回调代发执行器；拒绝 = 记录跳过
+    #[tokio::test]
+    async fn 视频动作审批_批准回调与拒绝跳过() {
+        let core = plan_core();
+        // 注入代发执行器（模拟网关侧注册；记录被调载荷）
+        let called = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let sink = called.clone();
+        core.register_video_act_executor(Arc::new(move |payload| {
+            let sink = sink.clone();
+            Box::pin(async move {
+                sink.lock().push(payload);
+                Ok("已代发：测试文本".into())
+            })
+        }));
+        // 产一张 [video] 审批单（模拟 tool_act 的 create_act_approval）
+        let req = crate::types::ApprovalRequest {
+            id: format!("apr{}", &crate::types::new_id()[..14]),
+            session_id: "s-video".into(),
+            node_id: None,
+            agent_id: "video".into(),
+            command: "[video] {\"channelId\":\"bili\",\"videoId\":\"BV1\",\"text\":\"测试文本\"}".into(),
+            status: "pending".into(),
+            result: None,
+            created_at: crate::types::now_iso(),
+            decided_at: None,
+            origin_user: None,
+            origin_role: None,
+        };
+        core.store.add_approval(&req).unwrap();
+        // 批准 → 执行器被调、审批单 executed
+        let decided = core.approval_decide(&req.id, true).await.unwrap();
+        assert_eq!(decided.status, "executed");
+        assert!(decided.result.as_deref().unwrap_or("").contains("已代发"));
+        assert_eq!(called.lock().len(), 1, "代发执行器应被调用一次");
+        assert!(called.lock()[0].contains("BV1"));
+        // 拒绝路径：再产一张 → denied，不触执行器
+        let mut req2 = req.clone();
+        req2.id = format!("apr{}", &crate::types::new_id()[..14]);
+        req2.status = "pending".into();
+        req2.decided_at = None;
+        core.store.add_approval(&req2).unwrap();
+        let denied = core.approval_decide(&req2.id, false).await.unwrap();
+        assert_eq!(denied.status, "denied");
+        assert_eq!(called.lock().len(), 1, "拒绝不应触代发");
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
 }
