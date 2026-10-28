@@ -12,6 +12,8 @@
 //! - 「观看」= 读取平台公开内容（简介 / 字幕 / 热评）作为观看材料，不伪造播放量、
 //!   不发送心跳骗播放；需要更高权限时由用户自己提供登录 Cookie / OAuth。
 
+pub(crate) mod tools;
+
 use crate::platform::{self, Channel, ChannelRun};
 use exm_core::Core;
 use serde::{Deserialize, Serialize};
@@ -114,7 +116,7 @@ async fn run_loop(core: Arc<Core>, ch: Channel) {
 
 // ---------------------------------------------------------------- 配置
 
-struct Settings {
+pub(crate) struct Settings {
     watch: bool,
     comment: bool,
     reply: bool,
@@ -122,12 +124,16 @@ struct Settings {
     interval_minutes: u64,
     max_actions: usize,
     daily_limit: u32,
+    /// 每轮观看的工具调用步数上限（防失控深挖；默认 8，可配 1-32）
+    max_watch_steps: usize,
+    /// 互动审批模式：off = 直接发；always = 评论发出前需人工审批（批准代发）
+    approval: String,
     max_comment_chars: usize,
     source: String,
     keywords: Vec<String>,
     /// 内容倾向：自由文本提示词，整段注入观看提示作口味参考；分词仅用于候选软排序
     interests: String,
-    reply_keywords: Vec<String>,
+    /// 评论风格提示（软约束，注入观看提示）
     comment_style: String,
     region: String,
 }
@@ -145,11 +151,16 @@ impl Settings {
             interval_minutes: cfg_u64(ch, "intervalMinutes", 10).clamp(5, 24 * 60),
             max_actions: cfg_u64(ch, "maxActionsPerRun", 1).clamp(1, 5) as usize,
             daily_limit: cfg_u64(ch, "dailyLimit", 6).clamp(1, 60) as u32,
+            max_watch_steps: cfg_u64(ch, "maxWatchSteps", 8).clamp(1, 32) as usize,
+            approval: ch
+                .cfg("approval")
+                .unwrap_or_else(|| "off".into())
+                .trim()
+                .to_lowercase(),
             max_comment_chars: cfg_u64(ch, "maxCommentChars", 120).clamp(20, 800) as usize,
             source: ch.cfg("source").unwrap_or_else(|| "popular".into()),
             keywords: split_list(ch.cfg("keywords").as_deref()),
             interests: ch.cfg("interests").unwrap_or_default(),
-            reply_keywords: split_list(ch.cfg("replyKeywords").as_deref()),
             comment_style: ch.cfg("commentStyle").unwrap_or_default(),
             region: ch.cfg("region").unwrap_or_else(|| "US".into()),
         }
@@ -232,20 +243,6 @@ impl VideoState {
             }
         }
     }
-
-    fn mark_comment(&mut self, key: &str) {
-        if !self.seen_comments.iter().any(|k| k == key) {
-            self.seen_comments.push(key.to_string());
-            if self.seen_comments.len() > 1000 {
-                let drop = self.seen_comments.len() - 1000;
-                self.seen_comments.drain(0..drop);
-            }
-        }
-    }
-
-    fn comment_seen(&self, key: &str) -> bool {
-        self.seen_comments.iter().any(|k| k == key)
-    }
 }
 
 fn state_path(core: &Core, channel_id: &str) -> std::path::PathBuf {
@@ -310,139 +307,101 @@ async fn tick(core: &Arc<Core>, ch: &Channel, s: &Settings) -> anyhow::Result<St
         return Ok("本轮没有新的候选视频".into());
     }
 
+    // 候选限量投喂：一次观看轮次给智能体一份候选清单（自主选看/搜索/跳过），
+    // 不再由系统逐个拼材料。限量 = 每轮动作数上限的 2 倍（有挑选余地但不至于刷屏）。
+    let feed: Vec<VideoItem> = items.into_iter().take(s.max_actions * 2).collect();
+    let keys: Vec<String> = feed.iter().map(video_key).collect();
     let mut processed = 0usize;
     let mut posted = 0u32;
-    for item in items.into_iter().take(s.max_actions) {
-        let key = video_key(&item);
-        match process_video(core, ch, s, &mut state, item).await {
-            Ok(did_post) => {
-                posted += did_post;
-                processed += 1;
-                state.mark_video(&key);
-            }
-            Err(e) => {
-                // 单条失败不打断整轮；标记已见，避免同一坏数据每轮重试
-                state.mark_video(&key);
-                state.save(core, &ch.id);
-                return Err(e);
+    match process_video(core, ch, s, &mut state, &feed).await {
+        Ok(did_post) => {
+            posted += did_post;
+            processed += feed.len();
+            for k in &keys {
+                state.mark_video(k);
             }
         }
-        state.save(core, &ch.id);
+        Err(e) => {
+            // 轮次失败不打断轮询；候选全部标记已见，避免同批坏数据每轮重试
+            for k in &keys {
+                state.mark_video(k);
+            }
+            state.save(core, &ch.id);
+            return Err(e);
+        }
     }
     state.save(core, &ch.id);
     let mode = if s.dry_run { "dry-run" } else { "已发布" };
     Ok(format!(
-        "本轮观看 {processed} 条，互动 {posted} 次（{mode}）；今日互动 {}/{}",
+        "本轮投喂候选 {processed} 条，互动 {posted} 次（{mode}）；今日互动 {}/{}",
         state.actions_today, s.daily_limit
     ))
 }
 
-/// 返回值 = 本轮实际发布的互动条数（dry-run 恒为 0）。
+// ---------------------------------------------------------------- 智能体调用
+
 async fn process_video(
     core: &Arc<Core>,
     ch: &Channel,
     s: &Settings,
     state: &mut VideoState,
-    mut item: VideoItem,
+    candidates: &[VideoItem],
 ) -> anyhow::Result<u32> {
-    let (material, detail) = watch_material(ch, &item).await?;
-    item = detail;
-    let comments = list_comments(ch, &item).await.unwrap_or_default();
-    let prompt = build_prompt(ch, s, &item, &material, &comments);
-    let raw = ask_agent(core, ch, &prompt).await?;
-    let action = parse_action(&raw).ok_or_else(|| {
-        anyhow::anyhow!(
-            "智能体未返回约定 JSON：{}",
-            raw.chars().take(200).collect::<String>()
-        )
-    })?;
-    let has_comment = !action.comment.trim().is_empty();
-    let has_reply = action
-        .reply
-        .as_ref()
-        .map(|r| !r.text.trim().is_empty())
-        .unwrap_or(false);
-    if !has_comment && !has_reply && !action.skip_reason.trim().is_empty() {
-        platform::report_status(
-            &ch.id,
-            "ok",
-            format!("跳过：{}｜{}", item.title, action.skip_reason.trim()),
-        );
-    }
+    // 自主观看轮次：系统只投喂候选清单，观看过程由智能体经 video__* 工具完成。
+    // 会话注入与 act 闸门随轮次建立，收束后清理（凭据不外泄到普通会话）。
+    let prompt = build_prompt(s, candidates);
+    let WatchOutcome {
+        text: raw,
+        acted,
+        skipped,
+        acted_notes,
+    } = ask_agent(core, ch, &prompt).await?;
 
-    let mut count = 0u32;
-    let summary = clean_text(&action.summary, 400);
-    if s.dry_run {
-        platform::report_status(
-            &ch.id,
-            "ok",
-            format!(
-                "[dry-run] {}｜摘要：{}｜评论：{}｜回复：{}",
-                item.title,
-                summary,
-                if action.comment.trim().is_empty() {
-                    "—"
-                } else {
-                    action.comment.trim()
-                },
-                action
-                    .reply
-                    .as_ref()
-                    .map(|r| r.text.trim())
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or("—")
-            ),
-        );
-        return Ok(0);
+    // 轮次摘要：观感（智能体收束文本）+ 动作/跳过记录 → 状态面板
+    let summary = clean_text(&raw, 400);
+    let mut status = format!("观感：{summary}");
+    if !acted_notes.is_empty() {
+        status.push_str(&format!("｜动作：{}", acted_notes.join("；")));
     }
-
-    if s.comment {
-        let text = clean_comment(&action.comment, s.max_comment_chars);
-        if !text.is_empty() {
-            post_comment(ch, &item, &text, None).await?;
-            count += 1;
-            state.actions_today += 1;
-            platform::report_status(&ch.id, "ok", format!("已评论：{}｜{}", item.title, text));
-        }
+    if !skipped.is_empty() {
+        status.push_str(&format!("｜跳过：{}", skipped.join("；")));
     }
+    platform::report_status(&ch.id, "ok", status);
 
-    if s.reply {
-        if let Some(reply) = action.reply.as_ref() {
-            let to = reply_id(&reply.to);
-            let text = clean_comment(&reply.text, s.max_comment_chars);
-            let target = comments.iter().find(|c| c.id == to);
-            if let Some(target) = target {
-                if !text.is_empty()
-                    && !state.comment_seen(&format!("{}:{}", item.id, target.id))
-                    && (s.reply_keywords.is_empty()
-                        || s.reply_keywords.iter().any(|k| target.text.contains(k)))
-                {
-                    post_comment(ch, &item, &text, Some(target.id.as_str())).await?;
-                    state.mark_comment(&format!("{}:{}", item.id, target.id));
-                    state.actions_today += 1;
-                    count += 1;
-                    platform::report_status(
-                        &ch.id,
-                        "ok",
-                        format!("已回复 @{}：{}", target.author, text),
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(count)
+    state.actions_today = state.actions_today.max(acted);
+    Ok(acted.min(1))
 }
 
-// ---------------------------------------------------------------- 智能体调用
+/// 观看轮次产出（会话收束后从工具面收集）
+struct WatchOutcome {
+    text: String,
+    acted: u32,
+    skipped: Vec<String>,
+    acted_notes: Vec<String>,
+}
 
-async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Result<String> {
+async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Result<WatchOutcome> {
     let (run, mut rx) = ChannelRun::begin(core, ch, "video")
         .await
         .ok_or_else(|| anyhow::anyhow!("视频通道会话建立失败"))?;
+    // 视频观看会话：注入 video__* 工具组 + act 闸门（绑定本通道凭据与配额）。
+    // 注入键 = ChannelRun 的数据库会话 id（工具面与事件订阅同键）。
+    let sid = run.session_id.clone();
+    {
+        let s = Settings::from_channel(ch);
+        let mut state_probe = VideoState::load(core, &ch.id);
+        state_probe.reset_day();
+        tools::register_act_gate(&sid, tools::ActGate::from_settings(&s, state_probe.actions_today));
+    }
+    let injections = tools::build_injections(core, ch);
+    core.orchestrator().tools.inject_session_tools(&sid, injections);
+    // 步数预算（防失控深挖）：通道面 maxWatchSteps 覆盖会话（默认 8）
+    core.orchestrator()
+        .tools
+        .set_session_step_budget(&sid, Settings::from_channel(ch).max_watch_steps);
+
     // 系统自动任务标记：落库消息带 auto:video 来源，展示层与真人消息区分
     let run = run.with_origin("auto:video");
-    let sid = run.session_id.clone();
     let reply_run = run.clone();
     let prompt = prompt.to_string();
     let task = tokio::spawn(async move { run.run(&prompt).await });
@@ -463,139 +422,88 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
             }
         }
     };
-    match tokio::time::timeout(Duration::from_secs(300), wait).await {
-        Ok(_) => {}
-        Err(_) => {
-            // 超时中止：ChannelRun::run 内部的组还原 guard 会随 Drop 执行
-            task.abort();
-            anyhow::bail!("视频观看推理超时（300s）");
-        }
+    // 自主探索多轮工具调用需更长收束窗口：600s（原单轮投喂 300s）
+    let timed_out = tokio::time::timeout(Duration::from_secs(600), wait).await.is_err();
+    if timed_out {
+        // 超时中止：ChannelRun::run 内部的组还原 guard 会随 Drop 执行
+        task.abort();
+        let _ = task.await;
+        tools::drop_act_gate(&sid);
+        tools::drop_session(&sid);
+        let _ = core.orchestrator().tools.clear_session_tools(&sid);
+        core.orchestrator().tools.set_session_step_budget(&sid, 0);
+        anyhow::bail!("视频观看推理超时（600s）");
     }
     let _ = task.await;
+    // 收束：收集轮次产出（动作计数/跳过理由），清理注入与闸门
+    let acted = tools::act_gate_count(&sid);
+    let st = tools::session_state(&sid);
+    let (skipped, acted_notes) = {
+        let mut g = st.lock().unwrap();
+        (std::mem::take(&mut g.skipped), std::mem::take(&mut g.acted_notes))
+    };
+    tools::drop_act_gate(&sid);
+    tools::drop_session(&sid);
+    let _ = core.orchestrator().tools.clear_session_tools(&sid);
+    core.orchestrator().tools.set_session_step_budget(&sid, 0);
     if out.trim().is_empty() {
         anyhow::bail!("智能体没有产出收束文本");
     }
-    Ok(out)
+    Ok(WatchOutcome { text: out, acted, skipped, acted_notes })
 }
 
-fn build_prompt(
-    _ch: &Channel,
-    s: &Settings,
-    item: &VideoItem,
-    material: &str,
-    comments: &[CommentItem],
-) -> String {
-    let mut c = String::new();
-    for x in comments.iter().take(12) {
-        c.push_str(&format!(
-            "- id={}｜{}｜赞{}｜{}\n",
-            x.id,
-            x.author,
-            x.likes,
-            x.text.replace('\n', " ")
+/// 观看轮次任务框架（新 build_prompt）：只给候选清单 + 工具用法 + 产出要求，
+/// 不预拼材料、不限定探索顺序——观看过程完全由智能体自主完成。
+fn build_prompt(s: &Settings, candidates: &[VideoItem]) -> String {
+    let mut list = String::new();
+    for (i, v) in candidates.iter().take(10).enumerate() {
+        list.push_str(&format!(
+            "{}. {}｜{}｜{}播放（id={}）\n",
+            i + 1,
+            v.title,
+            v.author,
+            v.views,
+            v.id
         ));
     }
-    if c.is_empty() {
-        c.push_str("（暂无可见评论）\n");
-    }
-    let comment_rule = if s.comment {
-        format!(
-            "写一条具体、有信息量的中文评论，不超过 {} 字；不复读标题、不空泛夸赞、不营销腔，不提自己是 AI。语气保持你自身的说话风格——观众感来自内容具体，不靠刻意模仿人类口吻。",
-            s.max_comment_chars
-        )
-    } else {
-        "不要写公开评论（comment 字段留空）。".into()
+    let platform_label = match candidates.first().map(|v| v.platform.as_str()) {
+        Some("bilibili") => "B站",
+        Some("youtube") => "YouTube",
+        _ => "视频平台",
     };
-    let reply_rule = if s.reply {
-        format!(
-            "从评论区挑选一条最值得回应的评论（排除自己）写回复，不超过 {} 字；reply.to 必须使用上面列出的 id，不能编造。没有合适目标时 reply 设为 null。",
-            s.max_comment_chars
-        )
+    let interact = if s.comment || s.reply {
+        let mut parts: Vec<String> = vec!["可以互动：经 video__act 发表评论或回复（回复目标必须是本会话已见的评论 id）。".into()];
+        if s.dry_run {
+            parts.push("注意：通道处于 dry-run 模式，act 只记录拟发内容，不会真正发出。".into());
+        }
+        parts.join("")
     } else {
-        "不要回复评论（reply 设为 null）。".into()
+        "本轮不互动（通道未开启评论/回复）：只产出观感，不要调用 video__act。".into()
     };
-    let style = if s.comment_style.is_empty() {
+    let interest = if s.interests.trim().is_empty() {
         String::new()
     } else {
-        format!("【风格要求】{}（与本账号人设冲突时，以人设为准）\n", s.comment_style)
+        format!("\n内容倾向参考（软偏好，不是硬约束）：{}\n", s.interests.trim())
     };
-    // 内容倾向：观看与互动的口味参考（软偏好，不排斥其他内容）
-    let taste = if s.interests.trim().is_empty() {
+    let style = if s.comment_style.trim().is_empty() {
         String::new()
     } else {
-        format!("【内容倾向】{}\n这是账号主理人给的内容口味提示——命中倾向的视频可以多聊、多深挖，未命中的正常观看即可，不必硬凑，也不要在评论里复述这段要求。\n", s.interests.trim())
+        format!("\n评论风格提示（与人设冲突时以人设为准）：{}\n", s.comment_style.trim())
     };
-    let published = if item.published_at > 0 {
-        chrono::DateTime::from_timestamp(item.published_at, 0)
-            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "未知".into())
-    } else {
-        "未知".into()
-    };
+    let budget = format!(
+        "\n预算提示：本轮工具调用步数上限 {} 步，达限后系统会要求你直接收束——材料够用就好，不必穷尽。\n",
+        s.max_watch_steps
+    );
     format!(
-        "你是 EXMACHINA 在视频平台的观看与互动代理。请先认真“看”完下面的视频材料，再决定如何互动。\n\n\
-【视频资料】\n平台：{}\n标题：{}\n作者：{}\n链接：{}\n播放量：{}\n发布时间：{}\n\n{}\n\n\
-【评论区摘录（按热度）】\n{}\n\
-【任务】\n\
-1. 以观众视角概括视频内容、亮点或问题（summary，80 字以内）。summary 用你自己的语言，保持你一贯的说话方式。\n\
-2. {} \n\
-3. {} \n\
-{}{}\
-【硬性要求】\n\
-- 你的人格、语气、口头禅全部沿用你自身的设定（SOUL/人设）；本任务不要求你扮演别人，只用你自己的方式谈论视频内容。\n\
-- 只输出一个 JSON 对象，不要 Markdown 代码块、不要解释、不要使用任何工具。\n\
-- 格式：{{\"summary\":\"...\",\"comment\":\"...\",\"reply\":{{\"to\":\"评论id\",\"text\":\"...\"}}}}；不回复时 reply 为 null。\n\
-- 不要捏造视频里没有的事实；看不懂或材料不足时在 summary 说明，评论/回复宁可留空。\n",
-        item.platform_label(),
-        item.title,
-        item.author,
-        item.url,
-        item.views,
-        published,
-        material,
-        c,
-        comment_rule,
-        reply_rule,
-        style,
-        taste
+        "你是{platform_label}观众代理。本轮候选视频：\n{list}\n\
+用 video__* 工具自主观看：自己选一个（或搜索新视频），自己决定看哪些侧面（简介/字幕/弹幕/评论/UP主）、看多深。\
+材料足够时就收束，不必穷尽工具。\n{interest}{style}{budget}\n\
+产出要求：\n\
+- 观感：用你自己的话讲这个视频讲了什么、你的看法（不要复述元信息）\n\
+- 互动：{interact}\n\
+- 不感兴趣可以都跳过——直接说明理由即可，不强制观看\n\
+风格保持你自己的说话方式，不要套模板腔。"
     )
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct AgentAction {
-    #[serde(default)]
-    summary: String,
-    #[serde(default)]
-    comment: String,
-    #[serde(default)]
-    reply: Option<AgentReply>,
-    #[serde(default, alias = "skipReason")]
-    skip_reason: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentReply {
-    #[serde(default)]
-    to: Value,
-    #[serde(default)]
-    text: String,
-}
-
-fn parse_action(raw: &str) -> Option<AgentAction> {
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    serde_json::from_str::<AgentAction>(&raw[start..=end]).ok()
-}
-
-fn reply_id(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.trim().to_string(),
-        Value::Number(n) => n.to_string(),
-        _ => String::new(),
-    }
 }
 
 fn clean_text(raw: &str, max: usize) -> String {
@@ -674,27 +582,10 @@ struct VideoItem {
     description: String,
     author: String,
     views: u64,
-    url: String,
-    published_at: i64,
 }
 
-impl VideoItem {
-    fn platform_label(&self) -> &str {
-        match self.platform.as_str() {
-            "bilibili" => "B站",
-            "youtube" => "YouTube",
-            other => other,
-        }
-    }
-}
 
-#[derive(Clone, Debug)]
-struct CommentItem {
-    id: String,
-    author: String,
-    text: String,
-    likes: u64,
-}
+
 
 fn video_key(v: &VideoItem) -> String {
     format!("{}:{}", v.platform, v.id)
@@ -837,39 +728,7 @@ async fn search_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<Vid
     }
 }
 
-async fn watch_material(ch: &Channel, item: &VideoItem) -> anyhow::Result<(String, VideoItem)> {
-    match ch.kind.as_str() {
-        "bilibili" => bili_watch_material(ch, item).await,
-        "youtube" => {
-            let mut material = format!(
-                "简介：\n{}\n\n（YouTube 未提供字幕下载时，以简介与评论区作为观看材料；不伪造播放行为。）",
-                item.description
-            );
-            if let Ok(comments) = yt_comments(ch, item, 8).await {
-                if !comments.is_empty() {
-                    material.push_str("\n\n观众反应摘录：\n");
-                    for c in comments {
-                        material.push_str(&format!(
-                            "- {}：{}\n",
-                            c.author,
-                            c.text.replace('\n', " ")
-                        ));
-                    }
-                }
-            }
-            Ok((material, item.clone()))
-        }
-        other => anyhow::bail!("不支持的视频平台：{other}"),
-    }
-}
 
-async fn list_comments(ch: &Channel, item: &VideoItem) -> anyhow::Result<Vec<CommentItem>> {
-    match ch.kind.as_str() {
-        "bilibili" => bili_comments(ch, item).await,
-        "youtube" => yt_comments(ch, item, 15).await,
-        _ => Ok(Vec::new()),
-    }
-}
 
 async fn post_comment(
     ch: &Channel,
@@ -1058,8 +917,7 @@ async fn bili_popular(ch: &Channel, limit: usize) -> anyhow::Result<Vec<VideoIte
                     .unwrap_or("")
                     .to_string(),
                 views: x.pointer("/stat/view").and_then(as_u64).unwrap_or(0),
-                url: format!("https://www.bilibili.com/video/{bvid}"),
-                published_at: x.get("pubdate").and_then(as_i64).unwrap_or(0),
+
             })
         })
         .collect())
@@ -1113,163 +971,13 @@ async fn bili_search(ch: &Channel, keyword: &str, _s: &Settings) -> anyhow::Resu
                 ),
                 author: strip_html(x.get("author").and_then(|v| v.as_str()).unwrap_or("")),
                 views: x.get("play").and_then(as_u64).unwrap_or(0),
-                url: format!("https://www.bilibili.com/video/{bvid}"),
-                published_at: x.get("pubdate").and_then(as_i64).unwrap_or(0),
+
             })
         })
         .collect())
 }
 
-async fn bili_watch_material(
-    ch: &Channel,
-    item: &VideoItem,
-) -> anyhow::Result<(String, VideoItem)> {
-    let body = bili_get(
-        ch,
-        &format!(
-            "https://api.bilibili.com/x/web-interface/view?bvid={}",
-            item.id
-        ),
-    )
-    .await?;
-    api_ok(&body)?;
-    let data = body.get("data").cloned().unwrap_or(Value::Null);
-    let mut out = item.clone();
-    out.aid = data.get("aid").and_then(as_u64).or(out.aid);
-    out.title = data
-        .get("title")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .unwrap_or(out.title);
-    out.description = data
-        .get("desc")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    out.author = data
-        .pointer("/owner/name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&out.author)
-        .to_string();
-    out.views = data
-        .pointer("/stat/view")
-        .and_then(as_u64)
-        .unwrap_or(out.views);
-    let cid = data
-        .pointer("/pages/0/cid")
-        .and_then(as_u64)
-        .or_else(|| data.get("cid").and_then(as_u64))
-        .unwrap_or(0);
 
-    let mut material = format!("简介：\n{}\n", out.description);
-    if cid > 0 {
-        if let Ok(v) = bili_get(
-            ch,
-            &format!(
-                "https://api.bilibili.com/x/player/v2?bvid={}&cid={}",
-                out.id, cid
-            ),
-        )
-        .await
-        {
-            if let Some(subs) = v
-                .pointer("/data/subtitle/subtitles")
-                .and_then(|s| s.as_array())
-            {
-                if let Some(url) = subs
-                    .iter()
-                    .find(|s| {
-                        s.get("lan")
-                            .and_then(|l| l.as_str())
-                            .map(|l| l.contains("zh"))
-                            .unwrap_or(false)
-                    })
-                    .or_else(|| subs.first())
-                    .and_then(|s| s.get("subtitle_url"))
-                    .and_then(|u| u.as_str())
-                {
-                    let url = if url.starts_with("//") {
-                        format!("https:{url}")
-                    } else {
-                        url.to_string()
-                    };
-                    if let Ok(sub) = bili_get(ch, &url).await {
-                        let text = sub
-                            .pointer("/body")
-                            .and_then(|b| b.as_array())
-                            .map(|lines| {
-                                lines
-                                    .iter()
-                                    .filter_map(|l| l.get("content").and_then(|c| c.as_str()))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            })
-                            .unwrap_or_default();
-                        if !text.trim().is_empty() {
-                            material.push_str("\n字幕（观看材料）：\n");
-                            material.push_str(&text.chars().take(8_000).collect::<String>());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if material.trim().len() < 20 {
-        material.push_str("\n（该视频没有可用字幕，以上简介即为观看材料。）");
-    }
-    Ok((material, out))
-}
-
-async fn bili_comments(ch: &Channel, item: &VideoItem) -> anyhow::Result<Vec<CommentItem>> {
-    let aid = item.aid.ok_or_else(|| anyhow::anyhow!("缺少 aid"))?;
-    let body = bili_get(
-        ch,
-        &format!("https://api.bilibili.com/x/v2/reply?type=1&oid={aid}&pn=1&ps=20&sort=2"),
-    )
-    .await?;
-    api_ok(&body)?;
-    let owner_mid = ch.cfg("uid");
-    let replies = body
-        .pointer("/data/replies")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut out = Vec::new();
-    for r in replies {
-        let id = r
-            .get("rpid")
-            .and_then(as_u64)
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        let mid = r.pointer("/member/mid").and_then(as_u64);
-        if let (Some(owner), Some(mid)) = (owner_mid.as_deref(), mid) {
-            if owner == mid.to_string() {
-                continue;
-            }
-        }
-        out.push(CommentItem {
-            id,
-            author: r
-                .pointer("/member/uname")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            text: r
-                .pointer("/content/message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            likes: r.get("like").and_then(as_u64).unwrap_or(0),
-        });
-        if out.len() >= 15 {
-            break;
-        }
-    }
-    Ok(out)
-}
 
 async fn bili_post_comment(
     ch: &Channel,
@@ -1603,8 +1311,6 @@ async fn yt_search(ch: &Channel, q: &str, _s: &Settings) -> anyhow::Result<Vec<V
                             .unwrap_or("")
                             .to_string(),
                         views: 0,
-                        url: format!("https://www.youtube.com/watch?v={id}"),
-                        published_at: 0,
                     })
                 })
                 .collect()
@@ -1639,62 +1345,9 @@ fn yt_item(x: &Value) -> Option<VideoItem> {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0),
-        url: format!("https://www.youtube.com/watch?v={id}"),
-        published_at: 0,
     })
 }
 
-async fn yt_comments(
-    ch: &Channel,
-    item: &VideoItem,
-    limit: usize,
-) -> anyhow::Result<Vec<CommentItem>> {
-    let key = yt_key(ch)?;
-    let body = yt_get(
-        "commentThreads",
-        &[
-            ("part", "snippet".into()),
-            ("videoId", item.id.clone()),
-            ("maxResults", limit.to_string()),
-            ("order", "relevance".into()),
-            ("textFormat", "plainText".into()),
-            ("key", key),
-        ],
-    )
-    .await?;
-    let mut out = Vec::new();
-    for x in body
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default()
-    {
-        let sn = x.pointer("/snippet/topLevelComment");
-        let Some(sn) = sn else { continue };
-        let id = sn.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if id.is_empty() {
-            continue;
-        }
-        out.push(CommentItem {
-            id: id.to_string(),
-            author: sn
-                .pointer("/snippet/authorDisplayName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            text: sn
-                .pointer("/snippet/textDisplay")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            likes: sn
-                .pointer("/snippet/likeCount")
-                .and_then(as_u64)
-                .unwrap_or(0),
-        });
-    }
-    Ok(out)
-}
 
 async fn yt_post_comment(
     ch: &Channel,
@@ -1800,11 +1453,6 @@ fn as_u64(v: &Value) -> Option<u64> {
         .or_else(|| v.as_f64().map(|f| f as u64))
 }
 
-fn as_i64(v: &Value) -> Option<i64> {
-    v.as_i64()
-        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        .or_else(|| v.as_u64().map(|u| u as i64))
-}
 
 /// B 站搜索标题/简介里带 `<em class="keyword">` 高亮标签，展示前去掉标签保留文字。
 fn strip_html(s: &str) -> String {
@@ -1861,13 +1509,81 @@ mod tests {
     }
 
     #[test]
-    fn 动作解析_容忍代码块与数字id() {
-        let raw = "```json\n{\"summary\":\"讲了一个技巧\",\"comment\":\"学到了\",\"reply\":{\"to\":123,\"text\":\"同意\"}}\n```";
-        let a = parse_action(raw).expect("应解析");
-        assert_eq!(a.comment, "学到了");
-        let r = a.reply.expect("reply");
-        assert_eq!(reply_id(&r.to), "123");
-        assert_eq!(r.text, "同意");
+    fn 任务框架prompt_候选清单与产出要求() {
+        let ch = Channel {
+            id: "bili".into(),
+            kind: "bilibili".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: None,
+            capability: "chat".into(),
+            memory_isolation: true,
+            created_at: String::new(),
+        };
+        let s = Settings::from_channel(&ch);
+        let cands = vec![VideoItem {
+            platform: "bilibili".into(),
+            id: "BV1xx".into(),
+            aid: Some(1),
+            title: "Rust 教程".into(),
+            description: String::new(),
+            author: "up主".into(),
+            views: 1234,
+        }];
+        let p = build_prompt(&s, &cands);
+        // 候选清单带标识（智能体可据此调工具）
+        assert!(p.contains("BV1xx"), "候选 id 应入 prompt：{p}");
+        assert!(p.contains("Rust 教程"));
+        // 任务框架要素：自主观看 + 产出要求 + 跳过自由
+        assert!(p.contains("video__"), "应说明工具用法：{p}");
+        assert!(p.contains("观感"));
+        assert!(p.contains("跳过"));
+        // 未开启互动时不引导 act
+        assert!(!s.comment && !s.reply);
+        assert!(p.contains("不要调用 video__act"));
+        // 不再预拼材料（旧管道特征文本不出现）
+        assert!(!p.contains("【视频资料】"));
+        assert!(!p.contains("评论区摘录"));
+    }
+
+    #[test]
+    fn 任务框架prompt_互动开启与dry_run标注() {
+        let ch = Channel {
+            id: "bili".into(),
+            kind: "bilibili".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: [
+                ("comment".to_string(), "true".to_string()),
+                ("dryRun".to_string(), "true".to_string()),
+                ("commentStyle".to_string(), "口语化、不用书面语".to_string()),
+                ("interests".to_string(), "技术类视频".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            group_gate: None,
+            capability: "chat".into(),
+            memory_isolation: true,
+            created_at: String::new(),
+        };
+        let s = Settings::from_channel(&ch);
+        assert!(s.comment && s.dry_run);
+        let p = build_prompt(&s, &[]);
+        assert!(p.contains("video__act"));
+        assert!(p.contains("dry-run"), "应提示 dry-run 模式：{p}");
+        assert!(p.contains("技术类视频"), "内容倾向应注入：{p}");
+        assert!(p.contains("口语化、不用书面语"), "评论风格应注入：{p}");
     }
 
     #[test]
@@ -1890,8 +1606,6 @@ mod tests {
             description: String::new(),
             author: "up".into(),
             views: 0,
-            url: String::new(),
-            published_at: 0,
         };
         assert!(matches_keywords(&v, &["rust".into()]));
         assert!(!matches_keywords(&v, &["python".into()]));
@@ -1908,5 +1622,125 @@ mod interest_tests {
         println!("提取结果: {terms:?}");
         assert!(!terms.is_empty());
         assert!(terms.iter().any(|t| t.contains("AI")));
+    }
+}
+
+#[cfg(test)]
+mod watch_loop_tests {
+    use super::*;
+
+    fn item(id: &str) -> VideoItem {
+        VideoItem {
+            platform: "bilibili".into(),
+            id: id.into(),
+            aid: None,
+            title: format!("视频{id}"),
+            description: String::new(),
+            author: "up".into(),
+            views: 0,
+        }
+    }
+
+    /// 已看去重沿用 VideoState：seen/mark_video 环路 + 上限滚动
+    #[test]
+    fn 候选去重_VideoState环路() {
+        let mut st = VideoState::default();
+        assert!(!st.seen(&video_key(&item("BV1"))));
+        st.mark_video(&video_key(&item("BV1")));
+        assert!(st.seen(&video_key(&item("BV1"))), "标记后应已看");
+        // 上限滚动：超过 500 条自动淘汰最旧
+        for i in 0..510 {
+            st.mark_video(&format!("bilibili:BV{i}"));
+        }
+        assert!(st.seen("bilibili:BV509"));
+        assert!(!st.seen("bilibili:BV1"), "超限后最旧应被淘汰");
+    }
+
+    /// 跳过记录：收束文本承载跳过理由（状态面板呈现），WatchSession.skipped
+    /// 记录系统面跳过（act 拒绝等）
+    #[test]
+    fn 跳过理由_会话状态与收束文本() {
+        let sid = "skip-test";
+        let st = tools::session_state(sid);
+        st.lock().unwrap().skipped.push("候选均不感兴趣：题材重复".into());
+        let skipped = st.lock().unwrap().skipped.clone();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("题材重复"));
+        tools::drop_session(sid);
+    }
+}
+
+#[cfg(test)]
+mod tick_smoke_tests {
+    use super::*;
+
+    fn core(tag: &str) -> Arc<Core> {
+        let dir = std::env::temp_dir().join(format!("exm-tick-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        Arc::new(Core::with_config(cfg).expect("Core 创建失败"))
+    }
+
+    /// 无凭据轮次：tick 返回结构化错误（不 panic）；错误说明含凭据指引
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 冒烟_无凭据结构化降级() {
+        let core = core("nocred");
+        let ch = Channel {
+            id: "yt-smoke".into(),
+            kind: "youtube".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: [("watch".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+            group_gate: None,
+            capability: "computer".into(),
+            memory_isolation: false,
+            created_at: String::new(),
+        };
+        let s = Settings::from_channel(&ch);
+        let r = tick(&core, &ch, &s).await;
+        assert!(r.is_err(), "无 apiKey 应失败：{r:?}");
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("apiKey"), "错误应指向凭据缺失：{msg}");
+    }
+
+    /// 互动全关：tick 直接短路返回（不触网）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 冒烟_全关短路() {
+        let core = core("off");
+        let ch = Channel {
+            id: "bili-off".into(),
+            kind: "bilibili".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: [
+                ("watch".to_string(), "false".to_string()),
+                ("comment".to_string(), "false".to_string()),
+                ("reply".to_string(), "false".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            group_gate: None,
+            capability: "computer".into(),
+            memory_isolation: false,
+            created_at: String::new(),
+        };
+        let s = Settings::from_channel(&ch);
+        let r = tick(&core, &ch, &s).await.unwrap();
+        assert!(r.contains("均已关闭"), "{r}");
     }
 }

@@ -2196,6 +2196,14 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
     matrix::spawn_supervisor(core.clone());
     // 插件装载面：builtin 插件注册 + watcher 拉起（video 走新路径，行为等价）
     plugins::spawn_all(core.clone());
+    // 视频互动审批代发执行器（video__act approval=always 批准后的 [video] 回调）
+    {
+        let core_for_act = core.clone();
+        core.register_video_act_executor(Arc::new(move |payload| {
+            let core = core_for_act.clone();
+            Box::pin(async move { plugins::video::tools::execute_act_payload(&core, &payload).await })
+        }));
+    }
     // 事件触发器（7.1）：文件监听（配置启用时才启动）
     triggers::spawn_file_watcher(core.clone());
     // 分布式执行：工作者池注入（有工作者在线即自动路由远程，失败回落本地）
