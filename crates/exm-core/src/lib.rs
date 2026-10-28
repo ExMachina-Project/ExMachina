@@ -22,6 +22,7 @@ pub mod orchestrator;
 pub mod parse;
 pub mod patch;
 pub mod plan;
+pub mod plugin;
 pub mod provider;
 pub mod nexus;
 pub mod registry;
@@ -65,6 +66,8 @@ pub struct Core {
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 远程执行器（工作者池；网关在 serve 时注入）
     remote: parking_lot::RwLock<Option<Arc<dyn crate::remote::RemoteExecutor>>>,
+    /// 插件管理器（plugins/ 目录装载 + 注册面）
+    plugins: parking_lot::RwLock<Arc<crate::plugin::PluginManager>>,
     orchestrator: RwLock<Arc<Orchestrator>>,
     config: RwLock<Arc<ExmConfig>>,
 }
@@ -83,6 +86,17 @@ impl Core {
         let (events, _rx) = broadcast::channel(8192);
         let mcp_handle = crate::mcp::McpRegistry::shared();
         mcp_handle.configure(&cfg.mcp_servers);
+        // 插件装载：plugins/ 目录扫描 + builtin 静态注册（exm-gateway 在 create 后补 video）
+        let plugins = Arc::new(crate::plugin::PluginManager::new(
+            cfg.workspace_root.join("plugins"),
+        ));
+        plugins.load_all(&cfg.plugins.state);
+        // 收编既有机制为虚拟插件（管理面呈现；执行面零变化 = 零迁移）
+        plugins.register_virtual("custom-tools", !cfg.tools.custom.is_empty());
+        plugins.register_virtual(
+            "builtin-resources",
+            cfg.workspace_root.join("entities/skills").is_dir(),
+        );
         let orchestrator = Arc::new(build_orchestrator(
             &cfg,
             &store,
@@ -93,6 +107,20 @@ impl Core {
             None,
             Some(cron.clone()),
         )?);
+        // 回接：插件声明式工具并入工具网关（custom 执行链全套复用）。
+        // ToolGateway 构建在 build_orchestrator 内，此处经 orchestrator.tools 追加。
+        {
+            let plugin_tools: Vec<_> = plugins
+                .declarative_tools()
+                .into_iter()
+                .map(|(_, _, t)| t)
+                .collect();
+            if !plugin_tools.is_empty() {
+                let orch = orchestrator.clone();
+                let gateway = orch.tools.clone();
+                gateway.append_plugin_tools(plugin_tools);
+            }
+        }
 
         Ok(Core {
             bus,
@@ -104,6 +132,7 @@ impl Core {
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             mcp: mcp_handle.clone(),
             remote: parking_lot::RwLock::new(None),
+            plugins: parking_lot::RwLock::new(plugins),
             orchestrator: RwLock::new(orchestrator),
             config: RwLock::new(Arc::new(cfg)),
         })
@@ -113,10 +142,51 @@ impl Core {
     pub fn apply_config(&self, cfg: ExmConfig) -> anyhow::Result<()> {
         cfg.save()?;
         self.mcp.configure(&cfg.mcp_servers);
-        let orch = build_orchestrator(&cfg, &self.store, &self.registry, &self.events, &self.memory, Some(self.mcp.clone()), self.remote(), Some(self.cron.clone()))?;
+        // 插件状态热更新：重扫目录并应用启停覆盖（进程插件重启在桥接层处理）
+        self.plugins.read().load_all(&cfg.plugins.state);
+        // 虚拟插件跟随内容出现/消失（CustomTool 增删、skills 目录有无）
+        {
+            let pm = self.plugins.read().clone();
+            if cfg.tools.custom.is_empty() {
+                pm.remove_entry("custom-tools");
+            } else {
+                pm.register_virtual("custom-tools", true);
+            }
+            if cfg.workspace_root.join("entities/skills").is_dir() {
+                pm.register_virtual("builtin-resources", true);
+            } else {
+                pm.remove_entry("builtin-resources");
+            }
+        }
+        let orch = build_orchestrator(
+            &cfg,
+            &self.store,
+            &self.registry,
+            &self.events,
+            &self.memory,
+            Some(self.mcp.clone()),
+            self.remote(),
+            Some(self.cron.clone()),
+        )?;
+        // 回接：插件声明式工具并入新工具网关（与 with_config 同口径）
+        let plugin_tools: Vec<_> = self
+            .plugins
+            .read()
+            .declarative_tools()
+            .into_iter()
+            .map(|(_, _, t)| t)
+            .collect();
+        if !plugin_tools.is_empty() {
+            orch.tools.append_plugin_tools(plugin_tools);
+        }
         *self.orchestrator.write() = Arc::new(orch);
         *self.config.write() = Arc::new(cfg);
         Ok(())
+    }
+
+    /// 插件管理器（注册面/管理端点共用）
+    pub fn plugins(&self) -> Arc<crate::plugin::PluginManager> {
+        self.plugins.read().clone()
     }
 
     // ---------------- 记忆系统便捷方法（组感知，docs/09 §6） ----------------
@@ -1068,6 +1138,7 @@ impl Core {
         let _ = self.store.put_session_origin(session_id, external_id, role);
     }
 
+
     // ---------------- 计划模式（spec: plan-mode） ----------------
 
     /// 工作台文件树（spec: webui-code-workbench）：.gitignore 口径过滤 + 越权拒绝
@@ -1833,4 +1904,5 @@ mod plan_tests {
         crate::plan::approve(&s.id);
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
+
 }

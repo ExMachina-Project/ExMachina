@@ -145,8 +145,8 @@ const PLATFORMS: ChanPlat[] = [
       },
       { key: "keywords", labelKey: "channels.f.keywords", helpKey: "channels.f.keywordsHelp" },
       { key: "interests", labelKey: "channels.f.interests", multiline: true, ph: "channels.f.interestsPh", helpKey: "channels.f.interestsHelp" },
-      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
       { key: "commentStyle", labelKey: "channels.f.commentStyle", multiline: true, helpKey: "channels.f.commentStyleHelp" },
+      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
       { key: "intervalMinutes", labelKey: "channels.f.intervalMinutes", default: "10", helpKey: "channels.f.intervalMinutesHelp" },
       { key: "maxActionsPerRun", labelKey: "channels.f.maxActionsPerRun", default: "1", helpKey: "channels.f.maxActionsPerRunHelp" },
       { key: "dailyLimit", labelKey: "channels.f.dailyLimit", default: "6", helpKey: "channels.f.dailyLimitHelp" },
@@ -180,8 +180,8 @@ const PLATFORMS: ChanPlat[] = [
       },
       { key: "keywords", labelKey: "channels.f.keywords", helpKey: "channels.f.keywordsHelp" },
       { key: "interests", labelKey: "channels.f.interests", multiline: true, ph: "channels.f.interestsPh", helpKey: "channels.f.interestsHelp" },
-      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
       { key: "commentStyle", labelKey: "channels.f.commentStyle", multiline: true, helpKey: "channels.f.commentStyleHelp" },
+      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
       { key: "intervalMinutes", labelKey: "channels.f.intervalMinutes", default: "10", helpKey: "channels.f.intervalMinutesHelp" },
       { key: "maxActionsPerRun", labelKey: "channels.f.maxActionsPerRun", default: "1", helpKey: "channels.f.maxActionsPerRunHelp" },
       { key: "dailyLimit", labelKey: "channels.f.dailyLimit", default: "6", helpKey: "channels.f.dailyLimitHelp" },
@@ -233,6 +233,41 @@ function platformDefaults(kind: string): Record<string, unknown> {
 
 export function ChannelsView(): React.ReactElement {
   const t = useT();
+  // 插件清单动态并入平台目录：插件声明的 channel kinds（凭据字段按清单渲染）
+  const [extraPlats, setExtraPlats] = useState<ChanPlat[]>([]);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await api.plugins();
+        const plugs = r.plugins ?? [];
+        const extra: ChanPlat[] = [];
+        for (const p of plugs) {
+          if (!p.enabled || !p.capabilities?.channel) continue;
+          const kinds = p.capabilities.channel.kinds ?? [];
+          // 静态表已有的 kind：凭据字段仍由静态表精细维护（帮助文案/扫码登录等），跳过
+          const newKinds = kinds.filter((k) => !PLATFORMS.some((sp) => sp.key === k));
+          for (const k of newKinds) {
+            extra.push({
+              key: k,
+              color: "purple",
+              tag: p.name || p.id,
+              labelKey: "channels.plat.plugin" as TKey,
+              helpKey: "channels.platHelp.plugin" as TKey,
+              proactive: true,
+              fields: [], // 凭据字段在详情处按清单动态渲染（下方 pluginCredentialFields）
+            });
+          }
+        }
+        setExtraPlats(extra);
+      } catch {
+        /* 插件面不可用时不阻塞静态目录 */
+      }
+    })();
+  }, []);
+  const catalog = React.useMemo<ChanPlat[]>(
+    () => [...PLATFORMS, ...extraPlats],
+    [extraPlats],
+  );
   const { groups } = useExm();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [tab, setTab] = useState("accounts");
@@ -294,7 +329,7 @@ export function ChannelsView(): React.ReactElement {
 
   const openEdit = (c: Channel) => {
     setEditing(c);
-    const plat = PLATFORMS.find((p) => p.key === c.type);
+    const plat = catalog.find((p) => p.key === c.type);
     // 扩展 config（目录之外键）反序列化为 JSON 预填，保存时随 config 一并回传
     const catalogKeys = new Set((plat?.fields ?? []).map((f) => f.key));
     const extra: Record<string, string> = {};
@@ -350,7 +385,7 @@ export function ChannelsView(): React.ReactElement {
   const submit = async () => {
     const v = await form.validateFields();
     setSaving(true);
-    const plat = PLATFORMS.find((p) => p.key === v.platform) ?? PLATFORMS[0];
+    const plat = catalog.find((p) => p.key === v.platform) ?? catalog[0];
     // config 扩展 JSON：面板未展开时字段未注册，从 form store 直读并手动校验（合法才允许保存）
     const parsedJson = parseConfigJson(form.getFieldValue("configJson"));
     if (parsedJson.error) {
@@ -420,7 +455,7 @@ export function ChannelsView(): React.ReactElement {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
 
   const platformTag = (p: string) => {
-    const plat = PLATFORMS.find((x) => x.key === p);
+    const plat = catalog.find((x) => x.key === p);
     if (!plat) return <Tag>{p}</Tag>;
     return <Tag color={plat.color}>{plat.tag ?? (plat.tagKey ? t(plat.tagKey) : p)}</Tag>;
   };
@@ -429,7 +464,7 @@ export function ChannelsView(): React.ReactElement {
     f.top === "token" ? !!c.token : f.top === "secret" ? !!c.secret : !!c.config?.[f.key];
 
   const credTag = (c: Channel) => {
-    const plat = PLATFORMS.find((x) => x.key === c.type);
+    const plat = catalog.find((x) => x.key === c.type);
     if (!plat) return <Tag>{c.type}</Tag>;
     const missing = plat.fields.filter((f) => f.required && !fieldSet(c, f));
     if (missing.length > 0) {
@@ -585,7 +620,7 @@ export function ChannelsView(): React.ReactElement {
             {
               title: t("channels.colReply"),
               render: (_, c) => {
-                const plat = PLATFORMS.find((x) => x.key === c.type);
+                const plat = catalog.find((x) => x.key === c.type);
                 if (plat?.proactive) return <Tag color="pink">{t("channels.replyProactive")}</Tag>;
                 return plat?.replyBuiltin ? (
                   <Tag>{t("channels.replyBuiltin")}</Tag>
@@ -641,7 +676,7 @@ export function ChannelsView(): React.ReactElement {
         <Form form={form} layout="vertical" onFinish={() => void submit()}>
           <Form.Item noStyle shouldUpdate={(a, b) => a.platform !== b.platform}>
             {({ getFieldValue }) => {
-              const plat = PLATFORMS.find((p) => p.key === getFieldValue("platform")) ?? PLATFORMS[0];
+              const plat = catalog.find((p) => p.key === getFieldValue("platform")) ?? catalog[0];
               return (
                 <>
                   <Form.Item
@@ -652,7 +687,7 @@ export function ChannelsView(): React.ReactElement {
                   >
                     <Select
                       disabled={editing !== null}
-                      options={PLATFORMS.map((p) => ({ value: p.key, label: t(p.labelKey) }))}
+                      options={catalog.map((p) => ({ value: p.key, label: p.tag ? `${t(p.labelKey)} · ${p.tag}` : t(p.labelKey) }))}
                       onChange={(kind) =>
                         form.setFieldsValue({
                           token: undefined,

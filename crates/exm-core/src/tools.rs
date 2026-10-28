@@ -1020,6 +1020,31 @@ fn strip_html(html: &str) -> String {
     compact
 }
 
+/// 动态工具执行器（T3 内置插件注册）：接收 (agent_id, session_id, args)，
+/// 返回 (ok, 输出或错误文本)。异步闭包由注册方构造（平台 API / 会话态访问）。
+pub type DynamicToolExec = std::sync::Arc<
+    dyn Fn(&str, &str, serde_json::Value) -> futures_util::future::BoxFuture<'static, (bool, String)>
+        + Send
+        + Sync,
+>;
+
+/// 便捷构造动态执行器（闭包返回 anyhow::Result<String>）
+pub fn dynamic_exec<F, Fut>(f: F) -> DynamicToolExec
+where
+    F: Fn(&str, &str, serde_json::Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
+{
+    std::sync::Arc::new(move |agent, session, args| {
+        let fut = f(agent, session, args);
+        Box::pin(async move {
+            match fut.await {
+                Ok(text) => (true, text),
+                Err(e) => (false, e.to_string()),
+            }
+        })
+    })
+}
+
 pub struct ToolGateway {
     workspace_root: PathBuf,
     store: Arc<Store>,
@@ -1057,6 +1082,20 @@ pub struct ToolGateway {
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 声明式自定义工具（配置驱动，免写 MCP 服务器；按 agents 可见性放行）
     custom: Vec<crate::config::CustomTool>,
+    /// 插件声明式工具（T1 清单内联 HTTP 工具，命名空间 `<plugin>__<tool>`；
+    /// 与 custom 共用执行链——run_custom 全套（http/shell、审计、钩子、落盘））
+    plugin_tools: parking_lot::RwLock<Vec<crate::config::CustomTool>>,
+    /// 动态工具执行器（T3 内置插件用：命名空间工具注册 schema + 自定义 async 执行面）。
+    /// key = 工具全名；执行优先级：动态表 > plugin_tools/custom（可覆盖声明式同名）。
+    dynamic_tools: parking_lot::RwLock<
+        std::collections::BTreeMap<
+            String,
+            (
+                crate::config::CustomTool,
+                DynamicToolExec,
+            ),
+        >,
+    >,
     /// 记忆库（memory_read/write/link 三工具的受控入口；组隔离在工具层强制）
     memory: Option<Arc<crate::memory::MemoryStore>>,
     /// 深层记忆开关（config.memory.enabled）。false = 文件记忆模式：
@@ -1100,6 +1139,8 @@ impl ToolGateway {
             computer: Arc::new(tokio::sync::Mutex::new(None)),
             mcp: crate::mcp::McpRegistry::shared(),
             custom: Vec::new(),
+            plugin_tools: parking_lot::RwLock::new(Vec::new()),
+            dynamic_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
             memory: None,
             // 默认深层记忆开启 = 历史行为（未接线 memory 模式的调用方零感知）
             memory_deep: true,
@@ -1153,20 +1194,84 @@ impl ToolGateway {
         self
     }
 
-    /// 该个体可见的自定义工具 schema（与内置工具一起随 function calling 下发）
+    /// 追加插件声明式工具（T1 零代码形态：构建期注入用；Core 回接走 append_plugin_tools）
+    pub fn with_plugin_tools(self, tools: Vec<crate::config::CustomTool>) -> Self {
+        self.append_plugin_tools(tools);
+        self
+    }
+
+    /// 就地追加插件工具（Core 装配后回接用：ToolGateway 已包在 Arc 里不可再构建）。
+    /// 重复调用幂等（同名先注册者胜，custom 与本表都算已注册）。
+    pub fn append_plugin_tools(&self, tools: Vec<crate::config::CustomTool>) {
+        let mut guard = self.plugin_tools.write();
+        for t in tools {
+            if guard.iter().any(|c| c.name == t.name) {
+                continue; // 先注册者胜
+            }
+            if self.custom.iter().any(|c| c.name == t.name) {
+                continue; // 与 config CustomTool 冲突：config 优先
+            }
+            guard.push(t);
+        }
+    }
+
+    /// 当前注册的全部插件工具（诊断/管理端点用）
+    pub fn plugin_tools(&self) -> Vec<crate::config::CustomTool> {
+        self.plugin_tools.read().clone()
+    }
+
+    /// 注册动态命名空间工具（T3 内置插件：schema + 自定义 async 执行面）。
+    /// 名字须含 `<plugin>__<tool>` 命名空间；同名重复注册 = 覆盖（热更新用）。
+    pub fn register_dynamic_tool(
+        &self,
+        spec: crate::config::CustomTool,
+        exec: DynamicToolExec,
+    ) {
+        self.dynamic_tools
+            .write()
+            .insert(spec.name.clone(), (spec, exec));
+    }
+
+    /// 按名查动态工具（执行面用）
+    pub fn dynamic_tool(&self, name: &str) -> Option<(crate::config::CustomTool, DynamicToolExec)> {
+        self.dynamic_tools.read().get(name).cloned()
+    }
+
+    /// 当前注册的动态工具 schema 清单（诊断用）
+    pub fn dynamic_tool_names(&self) -> Vec<String> {
+        self.dynamic_tools.read().keys().cloned().collect()
+    }
+
+    /// 该个体可见的自定义工具 schema（与内置工具一起随 function calling 下发）。
+    /// 插件工具（`<plugin>__<tool>` 命名空间）一并发下——清单未配 agents = 全体可见。
     pub fn custom_specs_for(&self, agent_id: &str) -> Vec<crate::provider::ToolSpec> {
+        let to_spec = |c: &crate::config::CustomTool| crate::provider::ToolSpec {
+            name: c.name.trim().to_string(),
+            description: if c.description.trim().is_empty() {
+                format!("自定义工具 {}（{}）", c.name, c.kind_norm())
+            } else {
+                c.description.clone()
+            },
+            parameters: c.param_schema(),
+        };
         self.custom
             .iter()
             .filter(|c| c.visible_to(agent_id))
-            .map(|c| crate::provider::ToolSpec {
-                name: c.name.trim().to_string(),
-                description: if c.description.trim().is_empty() {
-                    format!("自定义工具 {}（{}）", c.name, c.kind_norm())
-                } else {
-                    c.description.clone()
-                },
-                parameters: c.param_schema(),
-            })
+            .map(to_spec)
+            .chain(
+                self.plugin_tools
+                    .read()
+                    .iter()
+                    .filter(|c| c.visible_to(agent_id))
+                    .map(to_spec),
+            )
+            .chain(
+                self.dynamic_tools
+                    .read()
+                    .values()
+                    .filter(|(c, _)| c.visible_to(agent_id))
+                    .map(|(c, _)| to_spec(c)),
+            )
             .collect()
     }
 
@@ -1851,11 +1956,16 @@ impl ToolGateway {
         let started = Instant::now();
         let call_id = format!("t{}", &crate::types::new_id()[..12]);
         // 工具执行事件（call）：文件操作 / 终端命令 / 截屏对用户全程可见——编程软件式的过程透明
+        // 插件工具归因：`<plugin>__<tool>` 名字解析出 plugin id 写入事件（审计可检索）
+        let plugin_attr = crate::plugin::parse_namespaced(name)
+            .map(|(p, _)| serde_json::json!(p))
+            .unwrap_or(serde_json::Value::Null);
         self.emit_and_persist(CoreEvent {
             kind: "tool.call".into(),
             session_id: session_id.to_string(),
             payload: serde_json::json!({
                 "callId": call_id, "agentId": agent_id, "tool": name, "args": args,
+                "plugin": plugin_attr,
             }),
         });
         // 计划模式拦截（spec: plan-mode）：写类工具不执行，转为计划条目累积清单。
@@ -1972,16 +2082,48 @@ impl ToolGateway {
                     self.dispatch(agent_id, session_id, tool, args).await
                 }
             }
-            // 非内置名：声明式自定义工具（可扩展工具面，免写 MCP 服务器）
-            None => match self.custom.iter().find(|c| c.name == name) {
-                Some(ct) if ct.visible_to(agent_id) => {
-                    self.run_custom(agent_id, session_id, ct, args).await
+            // 非内置名：动态命名空间工具（T3 内置插件）→ 声明式自定义工具
+            None => {
+                // 动态表优先（video__* 等带自定义执行面的插件工具）
+                if let Some((spec, exec)) = self.dynamic_tool(name) {
+                    // 动态表（T3 内置插件全局注册面）
+                    if spec.visible_to(agent_id) {
+                        let (ok, text) = exec(agent_id, session_id, args.clone()).await;
+                        if ok {
+                            ToolResult::ok(text)
+                        } else {
+                            ToolResult::err(text)
+                        }
+                    } else {
+                        ToolResult::err(format!(
+                            "工具 {name} 未对本个体开放（插件工具的 agents 未包含 {agent_id}）"
+                        ))
+                    }
+                } else {
+                    // 查找顺序：config CustomTool 先于插件工具（先注册者胜）
+                    let found = self
+                        .custom
+                        .iter()
+                        .find(|c| c.name == name)
+                        .cloned()
+                        .or_else(|| {
+                            self.plugin_tools
+                                .read()
+                                .iter()
+                                .find(|c| c.name == name)
+                                .cloned()
+                        });
+                    match found {
+                        Some(ct) if ct.visible_to(agent_id) => {
+                            self.run_custom(agent_id, session_id, &ct, args).await
+                        }
+                        Some(_) => ToolResult::err(format!(
+                            "工具 {name} 未对本个体开放（自定义工具的 agents 未包含 {agent_id}）"
+                        )),
+                        None => ToolResult::err(format!("未知工具：{name}")),
+                    }
                 }
-                Some(_) => ToolResult::err(format!(
-                    "工具 {name} 未对本个体开放（自定义工具的 agents 未包含 {agent_id}）"
-                )),
-                None => ToolResult::err(format!("未知工具：{name}")),
-            },
+            }
         };
         let result = self.spill_if_large(name, result);
         // postTool 钩子：仅留痕（失败不改变工具结果，但会追加到输出末尾提示）
@@ -2077,6 +2219,10 @@ impl ToolGateway {
         } else {
             result.error.clone().unwrap_or_default()
         };
+        // 插件归因（与 tool.call 对称；非插件工具为 null 不占字段语义）
+        let plugin_attr = crate::plugin::parse_namespaced(name)
+            .map(|p| serde_json::json!(p.0))
+            .unwrap_or(serde_json::Value::Null);
         self.emit_and_persist(CoreEvent {
             kind: "tool.result".into(),
             session_id: session_id.to_string(),
@@ -2086,6 +2232,7 @@ impl ToolGateway {
                 "durationMs": started.elapsed().as_millis() as u64,
                 "summary": text.chars().take(400).collect::<String>(),
                 "images": result.images,
+                "plugin": plugin_attr,
             }),
         });
         // 历史回放可见工具的成败与耗时摘要（不止「开始了」）——落库在 emit_and_persist 内完成
@@ -6298,5 +6445,75 @@ mod terminal_gate_tests {
             .await;
         assert!(r2.ok);
         assert!(r2.output.contains("无需压缩"), "二次压缩应报无可压缩");
+    }
+
+    // ---------------- 插件声明式工具（T1：命名空间接入 custom 执行链）
+
+    fn mk_custom(name: &str, target: &str) -> crate::config::CustomTool {
+        crate::config::CustomTool {
+            name: name.into(),
+            description: format!("插件工具 {name}"),
+            kind: "http".into(),
+            method: "GET".into(),
+            target: target.into(),
+            headers: Default::default(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } },
+                "required": ["q"]
+            }),
+            agents: vec![],
+        }
+    }
+
+    /// 下发面：插件工具以命名空间名出现在 schema 下发里
+    #[test]
+    fn 插件工具_schema下发含命名空间前缀() {
+        let gw = gw_with_approval("off", 0);
+        gw.append_plugin_tools(vec![mk_custom("demo__ping", "https://example.com")]);
+        let specs = gw.custom_specs_for("a1");
+        let name = specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert!(name.contains(&"demo__ping".to_string()), "下发应含 demo__ping");
+    }
+
+    /// 冲突面：插件工具与 config CustomTool 同名 → 先注册者胜（custom 优先，插件被拒）
+    #[test]
+    fn 插件工具_与config同名冲突先注册者胜() {
+        let dir = std::env::temp_dir().join(format!("exm-gate-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default())
+            .with_custom_tools(vec![mk_custom("dupe", "https://config-first.example")]);
+        gw.append_plugin_tools(vec![mk_custom("dupe", "https://plugin.example")]);
+        // custom 优先：下发的是 config 版 target
+        assert_eq!(gw.custom_specs_for("a1").len(), 1);
+        assert!(gw.has_custom_tool("dupe"));
+        assert!(gw.plugin_tools().is_empty(), "同名插件工具应被拒绝注册");
+    }
+
+    /// 执行面：命名空间名走 custom 执行链（HTTP 往返可见行为）。
+    /// 用不可达地址验证错误路径也走通（不 panic、错误信息含工具名口径）。
+    #[tokio::test]
+    async fn 插件工具_执行走custom链路() {
+        let gw = gw_with_approval("off", 0);
+        gw.append_plugin_tools(vec![mk_custom("demo__ping", "https://127.0.0.1:1/nope")]);
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        let r = gw
+            .execute_named(
+                "a1",
+                &sid,
+                &[],
+                "demo__ping",
+                &serde_json::json!({ "q": "hi" }),
+            )
+            .await;
+        // 不可达地址 → 返回错误但 ok=false 而非 panic；错误面含工具名
+        assert!(!r.ok, "不可达地址应为失败结果: {:?}", r.output);
+        let text = format!("{}{}", r.output, r.error.unwrap_or_default());
+        assert!(text.contains("demo__ping") || text.len() < 500, "错误面应含工具名或简洁");
+        // 不应泄露内部路径
+        assert!(!text.contains("/home/"), "不应泄露内部路径");
     }
 }

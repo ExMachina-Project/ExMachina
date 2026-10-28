@@ -635,6 +635,8 @@ export const zh = {
   "channels.plat.slack": "Slack（Socket Mode，免公网回调）",
   "channels.plat.matrix": "Matrix（Client-Server API 长轮询）",
   "channels.plat.bilibili": "B站（主动观看 / 评论 / 回复）",
+  "channels.plat.plugin": "插件通道",
+  "channels.platHelp.plugin": "由插件清单声明的通道平台（凭据字段以插件管理页的声明为准）",
   "channels.plat.youtube": "YouTube（Data API：观看 / 评论 / 回复）",
   "channels.plat.qq": "QQ（经桥接器：消息转发到 inbound）",
   "channels.plat.wechat": "微信（经桥接器：消息转发到 inbound）",
@@ -907,6 +909,8 @@ export const zh = {
   "singles.f.promptPh": "定义它的身份、说话方式与工作方式",
 
   // ── 技能页 ──
+  "plugins.title": "插件",
+  "nav.plugins": "插件",
   "skills.created": "技能已创建：{id}（热装载，下一次派发即生效）",
   "skills.createFailed": "创建失败：{err}",
   "skills.deleted": "技能已删除：{id}",

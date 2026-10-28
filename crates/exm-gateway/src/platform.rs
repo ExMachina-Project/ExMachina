@@ -2043,7 +2043,7 @@ pub async fn channel_status() -> impl IntoResponse {
 // 直接回给前端填表单，不落盘（保存通道时才随 config 入库并掩码）。
 
 pub async fn bili_qr_start() -> impl IntoResponse {
-    match crate::video::bili_qr_generate().await {
+    match crate::plugins::video::bili_qr_generate().await {
         Ok(s) => Json(json!({ "qrcodeKey": s.qrcode_key, "url": s.url })).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -2061,7 +2061,7 @@ pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
         )
             .into_response();
     }
-    match crate::video::bili_qr_poll(qrcode_key.trim()).await {
+    match crate::plugins::video::bili_qr_poll(qrcode_key.trim()).await {
         // Ok(登录态) → 成功；Err(业务码) → 86101 未扫 / 86090 待确认 / 86083 过期
         Ok(Ok(login)) => Json(json!({
             "state": "confirmed",
@@ -2083,9 +2083,10 @@ pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
 
 // ---------------------------------------------------------------- 通道 CRUD（脱敏回显）
 
-/// 平台 config 中的敏感键（掩码回显；更新时掩码值 = 沿用旧值）
-fn secret_config_keys(kind: &str) -> &'static [&'static str] {
-    match kind {
+/// 平台 config 中的敏感键（掩码回显；更新时掩码值 = 沿用旧值）。
+/// 插件通道（经注册面声明的 kind）再并入清单 sensitive 凭据键（双源并集）。
+fn secret_config_keys(kind: &str) -> Vec<&'static str> {
+    let static_keys: &[&'static str] = match kind {
         "qqbot" => &["appSecret"],
         "napcat" => &["token"],
         // Slack Socket Mode 应用级令牌（xapp-）；机器人令牌走顶层 token
@@ -2094,11 +2095,31 @@ fn secret_config_keys(kind: &str) -> &'static [&'static str] {
         "bilibili" => &["sessdata", "biliJct"],
         "youtube" => &["apiKey", "accessToken"],
         _ => &[],
+    };
+    static_keys.to_vec()
+}
+
+/// 通道脱敏判定：静态表或任一已注册插件清单的 sensitive 凭据键命中即掩码。
+/// （插件凭据面由 PluginChannelDecl.credentials.sensitive 声明——通道页渲染与
+/// 脱敏回显共用同一清单，两边不会漂移。）
+fn is_sensitive_config_key(kind: &str, key: &str, core: &exm_core::Core) -> bool {
+    if secret_config_keys(kind).contains(&key) {
+        return true;
     }
+    core.plugins()
+        .enabled_providers()
+        .iter()
+        .filter_map(|p| p.channel_provider())
+        .any(|cp| {
+            cp.kinds().iter().any(|k| k == kind)
+                && cp.credential_fields()
+                    .iter()
+                    .any(|f| f.sensitive && f.key == key)
+        })
 }
 
 /// 通道脱敏序列化：顶层 token/secret 与平台敏感 config 键掩码回显，任何接口都不出明文密钥
-fn channel_json(ch: &Channel) -> Value {
+fn channel_json(ch: &Channel, core: &exm_core::Core) -> Value {
     let mut v = serde_json::to_value(ch).unwrap_or(Value::Null);
     let Some(obj) = v.as_object_mut() else {
         return v;
@@ -2121,9 +2142,10 @@ fn channel_json(ch: &Channel) -> Value {
         obj.insert("token".into(), mask.clone());
     }
     if let Some(cfg) = obj.get_mut("config").and_then(|c| c.as_object_mut()) {
-        for k in secret_config_keys(&ch.kind) {
-            if ch.cfg(k).is_some() {
-                cfg.insert((*k).to_string(), mask.clone());
+        let keys: Vec<String> = cfg.keys().cloned().collect();
+        for k in keys {
+            if ch.cfg(&k).is_some() && is_sensitive_config_key(&ch.kind, &k, core) {
+                cfg.insert(k, mask.clone());
             }
         }
     }
@@ -2131,7 +2153,10 @@ fn channel_json(ch: &Channel) -> Value {
 }
 
 pub async fn list_channels(State(st): State<AppState>) -> impl IntoResponse {
-    let list: Vec<Value> = load_channels(&st.core).iter().map(channel_json).collect();
+    let list: Vec<Value> = load_channels(&st.core)
+        .iter()
+        .map(|c| channel_json(c, &st.core))
+        .collect();
     Json(list).into_response()
 }
 
@@ -2334,7 +2359,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    Json(channel_json(&ch)).into_response()
+    Json(channel_json(&ch, &st.core)).into_response()
 }
 
 /// 更新通道（启停 / 换组 / 换 token 等）
@@ -2441,7 +2466,7 @@ pub async fn update_channel(
     }
     let saved = ch.clone();
     match save_channels(&st.core, &channels) {
-        Ok(_) => Json(channel_json(&saved)).into_response(),
+        Ok(_) => Json(channel_json(&saved, &st.core)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -3515,5 +3540,109 @@ mod channel_boundary_tests {
         };
         let text2 = run.take_reply(&evt2, 500).expect("应有结果回复");
         assert!(text2.contains("s.rs"), "含目标：{text2}");
+    }
+}
+
+#[cfg(test)]
+mod plugin_secret_mask_tests {
+    use super::*;
+
+    fn core_with_video() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-mask-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        exm_core::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    /// 插件清单声明的 sensitive 键（video：sessdata/biliJct/apiKey）脱敏回显
+    #[test]
+    fn 脱敏_插件清单敏感键掩码() {
+        let core = core_with_video();
+        // 手动注册 video builtin（spawn_all 需 Arc<Core>；此处仅需注册面凭据声明）
+        core.plugins()
+            .register_builtin_late(Box::new(crate::plugins::VideoPlugin::new()));
+        let ch = load_channels(&core)
+            .into_iter()
+            .find(|c| c.kind == "bilibili")
+            .unwrap_or(Channel {
+                id: "bili-main".into(),
+                kind: "bilibili".into(),
+                enabled: true,
+                group: None,
+                allowed_chats: vec![],
+                account: None,
+                secret: None,
+                token: None,
+                reply_webhook: None,
+                group_gate: None,
+                capability: "computer".into(),
+                memory_isolation: false,
+                created_at: String::new(),
+                config: [
+                    ("sessdata".to_string(), "real-secret-value".to_string()),
+                    ("biliJct".to_string(), "real-jct".to_string()),
+                    ("uid".to_string(), "12345".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            });
+        let v = channel_json(&ch, &core);
+        let cfg = &v["config"];
+        assert_eq!(cfg["sessdata"], crate::llm_admin::KEY_MASK);
+        assert_eq!(cfg["biliJct"], crate::llm_admin::KEY_MASK);
+        // 非敏感键明文
+        assert_eq!(cfg["uid"], "12345");
+        // 原值不泄露
+        assert!(!v.to_string().contains("real-secret-value"));
+    }
+
+    /// 审计归因：插件工具调用的 tool.call/tool.result 事件带 plugin 字段
+    #[tokio::test]
+    async fn 审计_插件工具归因字段() {
+        let dir = std::env::temp_dir().join(format!("exm-audit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        let core = exm_core::Core::with_config(cfg).unwrap();
+        let sid = core.store.create_session("审计", "a1").unwrap().id;
+        let orch = core.orchestrator();
+        let gw = orch.tools.clone();
+        // 订阅事件流
+        let mut rx = core.subscribe();
+        // 注册一个插件工具并调用（不可达地址，走错误路径也带归因）
+        gw.append_plugin_tools(vec![exm_core::config::CustomTool {
+            name: "demo__ping".into(),
+            description: "审计用".into(),
+            kind: "http".into(),
+            method: "GET".into(),
+            target: "https://127.0.0.1:1/x".into(),
+            headers: Default::default(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            agents: vec![],
+        }]);
+        let _ = gw
+            .execute_named("a1", &sid, &[], "demo__ping", &serde_json::json!({}))
+            .await;
+        // 收事件验证 plugin 归因
+        let mut saw_call = false;
+        let mut saw_result = false;
+        while let Ok(evt) = rx.try_recv() {
+            match evt.kind.as_str() {
+                "tool.call" if evt.payload["tool"] == "demo__ping" => {
+                    assert_eq!(evt.payload["plugin"], "demo", "call 事件应带 plugin 归因");
+                    saw_call = true;
+                }
+                "tool.result" if evt.payload["tool"] == "demo__ping" => {
+                    assert_eq!(evt.payload["plugin"], "demo", "result 事件应带 plugin 归因");
+                    saw_result = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_call, "应有 tool.call 事件");
+        assert!(saw_result, "应有 tool.result 事件");
     }
 }
