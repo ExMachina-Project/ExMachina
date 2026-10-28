@@ -1,7 +1,7 @@
 //! 插件装载面（gateway 侧）：把 builtin Rust 插件接进 Core 的 PluginManager。
 //!
 //! video 是第一个 builtin 插件：manifest 声明 channel（bilibili/youtube 凭据面）
-//! + watch（自动观看轮询），实现经 plugins/video.rs 的既有 supervisor 生命周期
+//! 与 watch（自动观看轮询），实现经 plugins/video.rs 的既有 supervisor 生命周期
 //! （spawn_supervisor / reconcile / run_loop 全套保持不变——迁移验收线 = 行为等价）。
 //!
 //! 其余内置通道（telegram/napcat/qqbot/discord/slack/matrix）保留静态注册

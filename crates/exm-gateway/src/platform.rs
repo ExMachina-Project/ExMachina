@@ -3168,7 +3168,7 @@ mod cron_notify_tests {
 
 #[cfg(test)]
 mod plan_endpoint_tests {
-    use super::*;
+    
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // oneshot
@@ -3219,7 +3219,7 @@ mod plan_endpoint_tests {
         assert_eq!(v["mode"], "plan");
         // 2) 模拟拦截产生清单（等价工具网关拦截写操作）
         {
-            let orch = {
+            {
                 // core 已移入 app——重建一个同配置 Core 不可行，直接用进程级 plan API
                 exm_core::plan::push_item(
                     &s.id,
@@ -3228,8 +3228,7 @@ mod plan_endpoint_tests {
                         &serde_json::json!({ "op": "write", "path": "e2e.txt", "content": "x" }),
                     ),
                 );
-            };
-            let _ = orch;
+            }
         }
         // 3) GET 清单
         let resp = app

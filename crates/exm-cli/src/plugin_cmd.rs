@@ -11,7 +11,7 @@ use std::path::Path;
 
 /// 插件管理入口（dispatch 内直 await——外层已在 tokio runtime）
 pub async fn run_plugin_action(workspace: &Path, action: PluginAction) -> anyhow::Result<()> {
-    let core = Core::create(workspace.to_path_buf())?;
+    let core = Core::create(workspace)?;
     match action {
         PluginAction::List => list(&core).await,
         PluginAction::Install { source, update } => install_cmd(&core, &source, update).await,

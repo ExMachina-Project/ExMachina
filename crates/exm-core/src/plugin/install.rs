@@ -492,7 +492,7 @@ fn strip_exec_except(root: &Path, keep: &[String]) -> Result<(), String> {
             Ok(())
         }
         // 简化：walk 的 dir 参数即插件根（strip 前缀用）
-        fn root_arg<'a>(d: &'a Path) -> &'a Path {
+        fn root_arg(d: &Path) -> &Path {
             d
         }
         fn root_parent_of<'a>(_p: &'a Path, d: &'a Path) -> &'a Path {

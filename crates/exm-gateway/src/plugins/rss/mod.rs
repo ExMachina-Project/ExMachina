@@ -13,7 +13,7 @@ use exm_core::config::{
 };
 use exm_core::Core;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -562,6 +562,7 @@ impl exm_core::plugin::PluginProvider for RssPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn mock_channel(feeds: &str, push: &str, max: u64) -> Channel {
         Channel {
@@ -659,8 +660,7 @@ mod tests {
     /// 材料拼装：标题/链接/摘要齐全，无摘要条目降级占位
     #[test]
     fn 单轮_材料拼装() {
-        let items = vec![
-            (
+        let items = [(
                 "源A".to_string(),
                 feed::FeedItem {
                     title: "t1".into(),
@@ -677,8 +677,7 @@ mod tests {
                     published: String::new(),
                     summary: String::new(),
                 },
-            ),
-        ];
+            )];
         // 与 read_session 相同的拼装口径（抽出来便于断言）
         let mut material = String::from("以下是本轮 RSS 新条目。请逐条给出一句话要点（格式：标题｜要点），最后给一行整体摘要：\n");
         for (i, (src, it)) in items.iter().enumerate() {

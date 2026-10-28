@@ -70,9 +70,9 @@ pub fn parse_feed(text: &str) -> anyhow::Result<Vec<FeedItem>> {
                     depth_in_item = 0;
                 }
             }
-            Ok(Event::Empty(e)) => {
+            Ok(Event::Empty(e))
                 // 自闭合（Atom link 常见形态）：直接赋值（无 End 事件兜底）
-                if cur.in_item {
+                if cur.in_item => {
                     let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     let local = tag.rsplit(':').next().unwrap_or(&tag).to_string();
                     if local == "link" {
@@ -83,29 +83,25 @@ pub fn parse_feed(text: &str) -> anyhow::Result<Vec<FeedItem>> {
                         }
                     }
                 }
-            }
-            Ok(Event::Text(t)) => {
-                if cur.in_item && !cur.cur_field.is_empty() {
+            Ok(Event::Text(t))
+                if cur.in_item && !cur.cur_field.is_empty() => {
                     cur.cur_text.push_str(&t.unescape()?);
                 }
-            }
-            Ok(Event::CData(t)) => {
-                if cur.in_item && !cur.cur_field.is_empty() {
+            Ok(Event::CData(t))
+                if cur.in_item && !cur.cur_field.is_empty() => {
                     cur.cur_text.push_str(&String::from_utf8_lossy(t.as_ref()));
                 }
-            }
             Ok(Event::End(e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 let local = tag.rsplit(':').next().unwrap_or(&tag).to_string();
                 if cur.in_item {
                     match cur.cur_field {
                         "title" => cur.title = cur.cur_text.clone(),
-                        "link" => {
+                        "link"
                             // 文本形态（RSS）优先；属性形态已在 Start/Empty 时直赋
-                            if !cur.cur_text.trim().is_empty() {
+                            if !cur.cur_text.trim().is_empty() => {
                                 cur.link = cur.cur_text.clone();
                             }
-                        }
                         "published" => cur.published = cur.cur_text.clone(),
                         "summary" => cur.summary = cur.cur_text.clone(),
                         _ => {}

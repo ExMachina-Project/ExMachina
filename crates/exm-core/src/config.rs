@@ -483,6 +483,7 @@ impl Default for LimitsConfig {
 /// 实验性功能开关（未稳定的行为面；默认全关，开启即自担体验波动）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct ExperimentsConfig {
     /// 动态上下文压缩：模型获得 context_compact 工具，自行判断压缩时机
     /// （判断依据：上下文变得冗长 / 早期细节已不再关键 / 即将进入长任务阶段），
@@ -495,14 +496,6 @@ pub struct ExperimentsConfig {
     pub group_shared_context: bool,
 }
 
-impl Default for ExperimentsConfig {
-    fn default() -> Self {
-        ExperimentsConfig {
-            dynamic_compaction: false,
-            group_shared_context: false,
-        }
-    }
-}
 
 // ---------------------------------------------------------------- 插件系统（plugins/ 目录）
 

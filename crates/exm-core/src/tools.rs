@@ -659,6 +659,10 @@ impl WinJob {
 #[cfg(not(target_os = "windows"))]
 impl WinJob {
     /// 非 Windows 恒不可用（签名与 Windows 侧保持一致，见其 Safety 约定）
+    ///
+    /// # Safety
+    ///
+    /// 非 Windows 桩实现恒返回 Err，无实际 unsafe 语义；签名保持与 Windows 侧一致。
     pub unsafe fn attach(
         _process: *mut core::ffi::c_void,
         _memory_mb: usize,
@@ -1045,6 +1049,16 @@ where
     })
 }
 
+/// 子智能体派生执行器闭包：(主个体 id, 会话 id, 任务描述, 工具白名单) → 执行产出
+pub type SpawnExec = Arc<
+    dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + Sync,
+>;
+
+/// 插件凭据解析闭包：(插件 id, 键) → 真值（None = 未配置）
+pub type PluginCredResolver = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
 pub struct ToolGateway {
     workspace_root: PathBuf,
     store: Arc<Store>,
@@ -1061,8 +1075,7 @@ pub struct ToolGateway {
     cron: Option<Arc<crate::cron::CronStore>>,
     /// 子智能体派生执行器（spawn 工具；未注入 = spawn 返回未装配错误）。
     /// RwLock 槽：Core 装配后回接（tools 已 Arc 共享给 runtime，无法再拿可变引用）
-    spawn_executor:
-        parking_lot::RwLock<Option<Arc<dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>>>,
+    spawn_executor: parking_lot::RwLock<Option<SpawnExec>>,
     /// 上下文压缩执行器（context_compact 工具，实验性；未注入 = 工具返回未装配说明）。
     /// 槽位语义同 spawn_executor：Core 装配后回接 (provider, model)。
     compactor: parking_lot::RwLock<Option<(Arc<dyn LlmProvider>, String)>>,
@@ -1084,9 +1097,7 @@ pub struct ToolGateway {
     custom: Vec<crate::config::CustomTool>,
     /// 插件凭据解析面（T1 声明式工具 `${credentials.<key>}` 变量；Core 装配后回接——
     /// ToolGateway 构建期 config 尚未定稿，运行期经此闭包查 `plugins.credentials.<id>`）
-    plugin_credentials: parking_lot::RwLock<
-        Option<Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>>,
-    >,
+    plugin_credentials: parking_lot::RwLock<Option<PluginCredResolver>>,
     /// 插件声明式工具（T1 清单内联 HTTP 工具，命名空间 `<plugin>__<tool>`；
     /// 与 custom 共用执行链——run_custom 全套（http/shell、审计、钩子、落盘））
     plugin_tools: parking_lot::RwLock<Vec<crate::config::CustomTool>>,
@@ -1172,10 +1183,7 @@ impl ToolGateway {
     /// 注入子智能体派生执行器（spawn 工具）：Core 装配后回接 AgentRuntime。
     /// 闭包签名：(主个体 id, 会话 id, 任务描述, 工具白名单) → 执行产出（结论文本）。
     /// 并发/超时控制由网关层实现（spec: subagent-spawn）。
-    pub fn set_spawn_executor(
-        &self,
-        exec: Arc<dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>,
-    ) {
+    pub fn set_spawn_executor(&self, exec: SpawnExec) {
         *self.spawn_executor.write() = Some(exec);
     }
 
@@ -1238,7 +1246,7 @@ impl ToolGateway {
     /// 注入插件凭据解析面（Core 装配后回接：查 `plugins.credentials.<插件id>.<键>`）
     pub fn set_plugin_credentials_resolver(
         &self,
-        f: Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>,
+        f: PluginCredResolver,
     ) {
         *self.plugin_credentials.write() = Some(f);
     }
@@ -3995,7 +4003,7 @@ impl ToolGateway {
         let Ok(_permit) = sem.clone().try_acquire_owned() else {
             return ToolResult::err(format!(
                 "子智能体并发已达上限（{}）：请等待在跑子任务完成后再派生",
-                sem.available_permits().max(0)
+                sem.available_permits()
             ));
         };
         let task_owned = task.to_string();
@@ -6880,7 +6888,7 @@ mod terminal_gate_tests {
     async fn 凭据变量_无插件归属拒绝() {
         let gw = gw_with_approval("off", 0);
         let sid = gw.store.create_session("s", "a1").unwrap().id;
-        let mut t = mk_custom("plain_tool", "https://example.com/${credentials.k}");
+        let t = mk_custom("plain_tool", "https://example.com/${credentials.k}");
         gw.append_plugin_tools(vec![t]);
         let r = gw
             .execute_named("a1", &sid, &[], "plain_tool", &serde_json::json!({}))

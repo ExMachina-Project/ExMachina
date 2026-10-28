@@ -52,7 +52,7 @@ impl RateLimiter {
             })
             .filter(|(_, c)| *c > 0)
             .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
         out
     }
 }
