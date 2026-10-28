@@ -231,6 +231,28 @@ export interface PluginSummary {
 export interface PluginDetail extends PluginSummary {
   manifest: Record<string, unknown>;
   health: "ok" | "degraded";
+  installation?: { kind: string; url: string; subdir?: string; ref?: string } | null;
+  credentialsConfigured?: boolean;
+  /** 进程插件握手后 tools/list 快照（空 = 未拉起或非进程形态） */
+  toolsSnapshot?: string[];
+}
+
+/** 插件凭据区回显（值一律掩码） */
+export interface PluginCredentials {
+  id: string;
+  credentials: Record<string, string>;
+  configured: boolean;
+}
+
+/** 索引目录条目（GET /api/plugins/index） */
+export interface PluginIndexEntry {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  status: "available" | "installed" | "updatable" | "incompatible";
+  localVersion?: string;
+  exmMin?: string;
 }
 
 export interface CronJob {
@@ -640,6 +662,23 @@ export const api = {
     }),
   deletePlugin: (id: string) =>
     req<{ id: string; removed: boolean }>(`/plugins/${id}`, { method: "DELETE" }),
+  pluginCredentials: (id: string) =>
+    req<PluginCredentials>(`/plugins/${id}/credentials`),
+  setPluginCredentials: (id: string, credentials: Record<string, string>) =>
+    req<{ id: string; saved: boolean }>(`/plugins/${id}/credentials`, {
+      method: "PUT",
+      body: JSON.stringify({ credentials }),
+    }),
+  pluginIndex: () => req<{ indexUrl: string; entries: PluginIndexEntry[] }>("/plugins/index"),
+  installPlugin: (source: string, overwrite = false) =>
+    req<{ id: string; version: string; updated: boolean }>("/plugins/install", {
+      method: "POST",
+      body: JSON.stringify({ source, overwrite }),
+    }),
+  updatePlugin: (id: string) =>
+    req<{ id: string; updated: boolean; message: string }>(`/plugins/${id}/update`, {
+      method: "POST",
+    }),
 
   listCron: () => req<CronJob[]>("/cron"),
   createCron: (body: {

@@ -1688,6 +1688,8 @@ async fn 自定义工具_http与命令模板() {
             target: format!("http://{addr}/now?city={{city}}"),
             method: "GET".into(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec![],
         },
         // POST + JSON body
@@ -1703,6 +1705,8 @@ async fn 自定义工具_http与命令模板() {
             target: format!("http://{addr}/echo"),
             method: "POST".into(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec![],
         },
         // shell 模板（仅 machina 可见）
@@ -1718,6 +1722,8 @@ async fn 自定义工具_http与命令模板() {
             target: "echo hi-{word}".into(),
             method: String::new(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec!["machina".into()],
         },
         // 对 machina 不可见
@@ -1729,6 +1735,8 @@ async fn 自定义工具_http与命令模板() {
             target: "http://127.0.0.1:1/x".into(),
             method: "GET".into(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec!["someone-else".into()],
         },
     ];

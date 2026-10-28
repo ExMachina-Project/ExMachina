@@ -300,7 +300,7 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
     // 插件系统：装载计数 / 失败原因 / 形态分布（进程健康在网关运行时看管理页）
     {
         let plugins_dir = cfg.workspace_root.join("plugins");
-        let mut pm = exm_core::plugin::PluginManager::new(&plugins_dir);
+        let pm = exm_core::plugin::PluginManager::new(&plugins_dir);
         // CLI 诊断无法拿到 gateway 的 builtin 注册（video 等），只扫目录面——口径注明
         let (ok, rejected) = pm.load_all(&cfg.plugins.state);
         let entries = pm.list();

@@ -309,6 +309,12 @@ pub struct CustomTool {
     /// 可见个体（identifier 列表）；空 = 全部个体可用
     #[serde(default)]
     pub agents: Vec<String>,
+    /// http：响应文本上限（缺省 8000 维持既有截断口径；插件生态扩展）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_max_chars: Option<usize>,
+    /// http：JSON path 摘取（`$.a.b[0].c`；JSON 响应按表达式摘取片段，非 JSON 忽略）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_select: Option<String>,
 }
 
 impl CustomTool {
@@ -636,6 +642,33 @@ pub struct PluginsConfig {
     /// 运行状态覆盖：false = 禁用（清单初始态之上的人为覆盖）
     #[serde(default)]
     pub state: std::collections::BTreeMap<String, bool>,
+    /// 插件级凭据区（插件id → 键值；T1 声明式工具 `${credentials.<key>}` 变量解析
+    /// 与 T2 进程插件 config/set 下发的数据源）。管理端点回显一律掩码。
+    #[serde(default)]
+    pub credentials: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// 安装来源记录（插件id → 来源；更新流解析用。手工拷入的插件无记录 = 无法更新）
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub installations: std::collections::BTreeMap<String, PluginInstallation>,
+    /// 插件索引地址（缺省官方源；自定义源需自担信任）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub index_url: String,
+}
+
+/// 插件安装来源（plugin-ecosystem：更新流按此解析最新版）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallation {
+    /// targz | git
+    pub kind: String,
+    /// 包 URL 或 git 仓库地址
+    #[serde(default)]
+    pub url: String,
+    /// git 子目录（清单在仓库子目录时）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subdir: String,
+    /// git ref（分支/标签；缺省默认分支）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub r#ref: String,
 }
 
 /// MCP 服务端（把内置工具面按 ACL 暴露给外部客户端；与客户端接入段 mcpServers 解耦）

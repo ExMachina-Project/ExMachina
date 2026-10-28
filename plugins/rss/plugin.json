@@ -1,0 +1,18 @@
+{
+  "id": "rss",
+  "name": "RSS 阅读",
+  "version": "0.5.3",
+  "description": "订阅 RSS/Atom 源：定时轮询新条目唤醒阅读简报，rss__digest 随手查阅。内置插件：实现随宿主发布，本清单为能力声明（可自定义描述/凭据标签，不可改实现形态）。",
+  "channel": {
+    "kinds": ["rss"],
+    "credentials": [
+      { "key": "feeds", "label": "订阅源（每行「名称=URL」或裸 URL）", "sensitive": false },
+      { "key": "intervalMinutes", "label": "轮询间隔（分钟，5-1440）", "sensitive": false },
+      { "key": "maxPerRound", "label": "每轮阅读上限（1-50，超出顺延）", "sensitive": false },
+      { "key": "push", "label": "简报推送通道 id（逗号分隔，空=不推送）", "sensitive": false }
+    ]
+  },
+  "watch": {
+    "intervalMinutes": 30
+  }
+}

@@ -8,6 +8,7 @@
 //! （lib.rs 启动序列直呼 spawn_supervisor），不强制走插件面——统一边界渐进收敛。
 
 pub mod video;
+pub mod rss;
 
 use exm_core::config::{PluginChannelDecl, PluginCredentialField, PluginManifest};
 use exm_core::plugin::{ChannelProvider, WatchProvider};
@@ -124,6 +125,42 @@ pub fn spawn_all(core: Arc<Core>) {
         // 简化口径：Core 装配时 plugins/ 目录可能还没被扫（builtin 在 gateway 侧），
         // 这里补一次 register——PluginManager 的 builtin 表设计为编译期注册。
         pm.register_builtin_late(Box::new(VideoPlugin::new()));
+        pm.register_builtin_late(Box::new(rss::RssPlugin::new()));
+    }
+    // process 插件拉起（plugin-ecosystem 组 3）：握手协商 + tools 快照 + 凭据下发。
+    // 失败不阻塞网关启动——entry.error 已记原因（管理页可见），健康检查可重试。
+    {
+        let pm2 = pm.clone();
+        let core2 = core.clone();
+        tokio::spawn(async move {
+            for e in pm2.list() {
+                if e.form != "process" || !e.enabled || e.error.is_some() {
+                    continue;
+                }
+                let Some(dir) = e.dir.clone() else { continue };
+                let creds = core2
+                    .config()
+                    .plugins
+                    .credentials
+                    .get(&e.manifest.id)
+                    .cloned();
+                let r = exm_core::plugin::bridge::spawn_process_plugin(
+                    &pm2,
+                    &e.manifest,
+                    &dir,
+                    creds,
+                )
+                .await;
+                match r {
+                    Ok(_) => eprintln!("[plugins] 进程插件 {} 已拉起（握手协商通过）", e.manifest.id),
+                    Err(err) => {
+                        pm2.set_tools_snapshot(&e.manifest.id, vec![]);
+                        pm2.record_error(&e.manifest.id, Some(format!("拉起失败：{err}")));
+                        eprintln!("[plugins] 进程插件 {} 拉起失败：{err}", e.manifest.id);
+                    }
+                }
+            }
+        });
     }
     // watcher：已启用插件的 WatchProvider 逐个拉起
     for p in pm.enabled_providers() {

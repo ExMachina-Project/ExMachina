@@ -61,6 +61,8 @@ fn spec(name: &str, desc: &str, params: Value) -> CustomTool {
         headers: Default::default(),
         parameters: params,
         agents: vec![],
+        response_max_chars: None,
+        response_select: None,
     }
 }
 
