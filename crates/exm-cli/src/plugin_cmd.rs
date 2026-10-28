@@ -152,7 +152,8 @@ async fn resolve_source(core: &Core, input: &str) -> anyhow::Result<InstallSourc
         .find(|e| e.id == s)
         .ok_or_else(|| anyhow::anyhow!("索引中未找到插件 {s}（或直传 tar.gz / git URL 安装）"))?;
     let host = exm_core::plugin::host_version_pub();
-    if !hit.exm_min.trim().is_empty() && !exm_core::plugin::version_newer(&host, &hit.exm_min) {
+    // ≥ 语义：要求不高于宿主即满足（version_newer 是严格高于，相等会误拒）
+    if !hit.exm_min.trim().is_empty() && !exm_core::plugin::version_ok(&hit.exm_min, &host) {
         anyhow::bail!("插件 {} 需要宿主 ≥ {}，当前 {}", hit.id, hit.exm_min, host);
     }
     Ok(hit.to_install_source())
