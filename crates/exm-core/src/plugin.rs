@@ -10,6 +10,7 @@
 //! 注册进 ToolGateway / 通道工厂 / watcher 调度 / skills 装载。
 
 pub mod bridge;
+pub mod install;
 
 use crate::config::{CustomTool, PluginManifest};
 use serde_json::Value;
@@ -80,6 +81,8 @@ pub struct PluginEntry {
     pub dir: Option<PathBuf>,
     /// 装载拒绝/运行错误原因（None = 正常）
     pub error: Option<String>,
+    /// 进程插件握手后 tools/list 快照（装载期发现面；T2 协商用，管理端点回显）
+    pub tools_snapshot: Vec<String>,
 }
 
 /// 插件管理器：扫描 plugins/ 目录、校验清单、持注册表与启停状态
@@ -99,9 +102,37 @@ fn host_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// 版本比较（简化 SemVer：按点分段数字比较，预发布后缀截断；解析失败视为兼容）
-fn version_ok(exm_min: &str, host: &str) -> bool {
+/// 宿主版本（安装流等外部面用）
+pub fn host_version_pub() -> String {
+    host_version()
+}
+
+/// a 版本号是否高于 b（简化 SemVer 数值段比较；相等/解析失败 = false）
+pub fn version_newer(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
+        s.split(['-', '+'])
+            .next()
+            .unwrap_or(s)
+            .split('.')
+            .map(|p| p.trim().trim_start_matches('v').parse().unwrap_or(0))
+            .collect()
+    };
+    let (x, y) = (parse(a), parse(b));
+    for i in 0..x.len().max(y.len()) {
+        let xi = x.get(i).copied().unwrap_or(0);
+        let yi = y.get(i).copied().unwrap_or(0);
+        if xi > yi {
+            return true;
+        }
+        if xi < yi {
+            return false;
+        }
+    }
+    false
+}
+
+/// 版本比较（简化 SemVer：按点分段数字比较，预发布后缀截断；解析失败视为兼容）
+fn version_ok(exm_min: &str, host: &str) -> bool {    let parse = |s: &str| -> Vec<u64> {
         // 先整体截掉预发布/构建后缀（-rc.1 / +build），再按点分段
         let core = s.split(['-', '+']).next().unwrap_or(s);
         core.split('.')
@@ -182,6 +213,7 @@ impl PluginManager {
                 enabled,
                 dir: dir.exists().then_some(dir),
                 error: None,
+                tools_snapshot: Vec::new(),
             },
         );
     }
@@ -218,6 +250,7 @@ impl PluginManager {
                 enabled: true,
                 dir: None,
                 error: None,
+                tools_snapshot: Vec::new(),
             },
         );
         true
@@ -251,6 +284,7 @@ impl PluginManager {
                         enabled: false,
                         dir: dir.exists().then_some(dir),
                         error: Some(e),
+                        tools_snapshot: Vec::new(),
                     }
                 }
                 Ok(()) => {
@@ -267,6 +301,7 @@ impl PluginManager {
                         enabled,
                         dir: dir.exists().then_some(dir),
                         error: None,
+                        tools_snapshot: Vec::new(),
                     }
                 }
             };
@@ -290,6 +325,7 @@ impl PluginManager {
                         enabled: false,
                         dir: Some(dir.clone()),
                         error: Some("缺少 plugin.json 或不可解析".into()),
+                        tools_snapshot: Vec::new(),
                     },
                 );
                 continue;
@@ -300,7 +336,7 @@ impl PluginManager {
                     rejected += 1;
                     self.entries.write().insert(
                         id.clone(),
-                        PluginEntry { manifest: m, form: form.into(), enabled: false, dir: Some(dir), error: Some(e) },
+                        PluginEntry { manifest: m, form: form.into(), enabled: false, dir: Some(dir), error: Some(e), tools_snapshot: Vec::new() },
                     );
                 }
                 Ok(()) => {
@@ -308,7 +344,7 @@ impl PluginManager {
                     ok += 1;
                     self.entries.write().insert(
                         id.clone(),
-                        PluginEntry { manifest: m, form: form.into(), enabled, dir: Some(dir), error: None },
+                        PluginEntry { manifest: m, form: form.into(), enabled, dir: Some(dir), error: None, tools_snapshot: Vec::new() },
                     );
                 }
             }
@@ -317,9 +353,115 @@ impl PluginManager {
         (ok, rejected)
     }
 
+    /// 单插件热装载（安装/更新流用）：只扫 `plugins/<id>/` 一个目录并替换注册表项。
+    /// 校验路径与 load_all 完全一致；builtin 静态注册表项不被覆盖（同名以 builtin 优先）。
+    /// 返回是否装载成功（false = 清单缺失/校验失败——失败原因已写入 entry.error）
+    pub fn load_one(&self, id: &str) -> bool {
+        let dir = self.plugins_dir.join(id);
+        if !dir.is_dir() {
+            return false;
+        }
+        // builtin 静态注册表已有 → 走 builtin 口径（磁盘清单覆盖能力声明）
+        if let Some((manifest, build)) = self.builtin.get(id).cloned() {
+            let dir = self.plugins_dir.join(id);
+            let mut m = manifest;
+            if let Some(disk) = read_manifest(&dir) {
+                m = disk;
+            }
+            match validate(&m, id, &self.host_version) {
+                Err(e) => {
+                    self.entries.write().insert(
+                        id.to_string(),
+                        PluginEntry {
+                            manifest: m,
+                            form: "builtin".into(),
+                            enabled: false,
+                            dir: Some(dir),
+                            error: Some(e),
+                            tools_snapshot: Vec::new(),
+                        },
+                    );
+                    self.providers.write().remove(id);
+                    return false;
+                }
+                Ok(()) => {
+                    let enabled = self.overrides.read().get(id).copied().unwrap_or(true);
+                    let entry = PluginEntry {
+                        manifest: m,
+                        form: "builtin".into(),
+                        enabled,
+                        dir: Some(dir),
+                        error: None,
+                        tools_snapshot: Vec::new(),
+                    };
+                    // builtin provider 由静态注册表重建
+                    if enabled {
+                        if let Some(p) = build() {
+                            self.providers.write().insert(id.to_string(), p);
+                        }
+                    } else {
+                        self.providers.write().remove(id);
+                    }
+                    self.entries.write().insert(id.to_string(), entry);
+                    return true;
+                }
+            }
+        }
+        let dir = self.plugins_dir.join(id);
+        let Some(m) = read_manifest(&dir) else {
+            self.entries.write().insert(
+                id.to_string(),
+                PluginEntry {
+                    manifest: PluginManifest { id: id.into(), ..Default::default() },
+                    form: "unknown".into(),
+                    enabled: false,
+                    dir: Some(dir),
+                    error: Some("缺少 plugin.json 或不可解析".into()),
+                    tools_snapshot: Vec::new(),
+                },
+            );
+            return false;
+        };
+        let form = if m.is_process() { "process" } else { "declarative" };
+        match validate(&m, id, &self.host_version) {
+            Err(e) => {
+                self.entries.write().insert(
+                    id.to_string(),
+                    PluginEntry { manifest: m, form: form.into(), enabled: false, dir: Some(dir), error: Some(e), tools_snapshot: Vec::new() },
+                );
+                self.providers.write().remove(id);
+                false
+            }
+            Ok(()) => {
+                let enabled = self.overrides.read().get(id).copied().unwrap_or(true);
+                self.entries.write().insert(
+                    id.to_string(),
+                    PluginEntry { manifest: m, form: form.into(), enabled, dir: Some(dir), error: None, tools_snapshot: Vec::new() },
+                );
+                // 声明式能力即时生效：返回 true 后由调用方回接 declarative_tools 到 ToolGateway；
+                // process 形态的 provider 由进程桥握手后 set_provider
+                true
+            }
+        }
+    }
+
     /// 登记运行期 provider（进程桥握手完成后由桥调用）
     pub fn set_provider(&self, id: &str, provider: Arc<dyn PluginProvider>) {
         self.providers.write().insert(id.to_string(), provider);
+    }
+
+    /// 更新进程插件 tools/list 快照（握手完成后由监管器回写；管理端点回显用）
+    pub fn set_tools_snapshot(&self, id: &str, tools: Vec<String>) {
+        if let Some(e) = self.entries.write().get_mut(id) {
+            e.tools_snapshot = tools;
+        }
+    }
+
+    /// 记录/清除运行错误（拉起失败、运行异常；None = 恢复正常）
+    pub fn record_error(&self, id: &str, error: Option<String>) {
+        if let Some(e) = self.entries.write().get_mut(id) {
+            e.error = error;
+        }
     }
 
     /// 移除 provider（插件禁用/进程死亡）

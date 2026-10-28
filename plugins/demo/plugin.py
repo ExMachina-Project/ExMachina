@@ -69,7 +69,8 @@ def main() -> None:
         rid = req.get("id")
 
         if method == "initialize":
-            resp = {"result": {"serverInfo": {"name": "demo", "version": "0.1.0"}}}
+            # serverInfo.exmMin：握手协商演示（宿主版本低于此值会被拒绝装载）
+            resp = {"result": {"serverInfo": {"name": "demo", "version": "0.1.0", "exmMin": "0.5.3"}}}
         elif method == "tools/list":
             resp = {"result": {"tools": tools_list()}}
         elif method == "tools/call":

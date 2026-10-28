@@ -12,6 +12,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+use crate::config::PluginManifest;
+use crate::plugin::PluginManager;
+
 /// JSON-RPC 请求 id 发号器
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -153,23 +156,41 @@ impl PluginProcess {
         Ok(())
     }
 
-    /// initialize 握手：超时未完成判启动失败
+    /// initialize 握手（plugin-ecosystem 协商）：读响应 `serverInfo.exmMin` 做宿主版本
+    /// 兼容校验——插件要求的最低宿主版本高于当前 → 握手失败（含两侧版本的明确错误）。
+    /// 超时未完成判启动失败。
     pub async fn handshake(&self, plugin_id: &str, timeout_secs: u64) -> anyhow::Result<Value> {
         let params = json!({
             "protocolVersion": "2024-11-05",
             "clientInfo": { "name": "exmachina", "version": env!("CARGO_PKG_VERSION") },
             "pluginId": plugin_id,
         });
-        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
-            self.request("initialize", params).await
-        })
+        let host = env!("CARGO_PKG_VERSION");
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            self.request("initialize", params),
+        )
         .await
         {
             Ok(Ok(resp)) if resp.get("result").is_some() => Ok(resp["result"].clone()),
             Ok(Ok(resp)) => anyhow::bail!("握手返回错误：{}", resp["error"]["message"].as_str().unwrap_or("?")),
             Ok(Err(e)) => Err(e),
             Err(_) => anyhow::bail!("握手超时（{timeout_secs}s）"),
+        }?;
+        // 版本协商：serverInfo.exmMin 声明的最低宿主版本高于当前 → 拒绝
+        if let Some(min) = result
+            .pointer("/serverInfo/exmMin")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !super::version_ok(min, host) {
+                anyhow::bail!(
+                    "握手协商失败：插件 {plugin_id} 需要宿主 ≥ {min}，当前 {host}（请升级宿主或安装旧版插件）"
+                );
+            }
         }
+        Ok(result)
     }
 
     /// 优雅关闭：先发 shutdown 请求，宽限后 kill
@@ -485,6 +506,10 @@ pub struct PluginSupervisor {
     failures: parking_lot::Mutex<u32>,
     /// 治理事件日志（诊断面板用；容量有界）
     events: parking_lot::Mutex<Vec<String>>,
+    /// 握手后 tools/list 快照（装载期发现面；管理端点/诊断用，PluginEntry 呈现）
+    tools_snapshot: parking_lot::RwLock<Vec<PluginToolDef>>,
+    /// 握手后下发的凭据键值（config/set 透传面；重启进程时重下发）
+    credentials: parking_lot::RwLock<BTreeMap<String, String>>,
 }
 
 impl PluginSupervisor {
@@ -512,7 +537,19 @@ impl PluginSupervisor {
             )),
             failures: parking_lot::Mutex::new(0),
             events: parking_lot::Mutex::new(Vec::new()),
+            tools_snapshot: parking_lot::RwLock::new(Vec::new()),
+            credentials: parking_lot::RwLock::new(BTreeMap::new()),
         }
+    }
+
+    /// 注入凭据（握手成功后 config/set 下发；进程重启自动重下发）
+    pub fn set_credentials(&self, creds: BTreeMap<String, String>) {
+        *self.credentials.write() = creds;
+    }
+
+    /// tools/list 快照（装载期发现面；管理端点回显）
+    pub fn tools_snapshot(&self) -> Vec<PluginToolDef> {
+        self.tools_snapshot.read().clone()
     }
 
     fn log(&self, msg: impl Into<String>) {
@@ -531,6 +568,11 @@ impl PluginSupervisor {
 
     pub fn state(&self) -> PluginState {
         self.state.read().clone()
+    }
+
+    /// 治理事件日志快照（诊断面板/测试用）
+    pub fn events(&self) -> Vec<String> {
+        self.events.lock().clone()
     }
 
     /// 治理事件（诊断用）
@@ -582,8 +624,18 @@ impl PluginSupervisor {
             p.shutdown(2).await;
             return Err(e);
         }
-        // 握手成功后立刻发现工具面（失败视同启动失败）
-        let _ = p.tools_list(self.handshake_secs).await?;
+        // 握手成功后立刻发现工具面（失败视同启动失败）；快照存管理面
+        let tools = p.tools_list(self.handshake_secs).await?;
+        *self.tools_snapshot.write() = tools.clone();
+        self.log(&format!("tools/list 快照：{} 个工具（{}）", tools.len(), tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ")));
+        // 凭据下发（plugins.credentials.<id> 键值整体透传；脱敏日志——只记键名不记值）
+        let creds = self.credentials.read().clone();
+        if !creds.is_empty() {
+            match p.config_set(serde_json::to_value(&creds)?, self.call_timeout_secs.min(30)).await {
+                Ok(()) => self.log(&format!("config/set 凭据已下发：{}", creds.keys().cloned().collect::<Vec<_>>().join(", "))),
+                Err(e) => self.log(&format!("config/set 凭据下发失败：{e}")),
+            }
+        }
         Ok(p)
     }
 
@@ -652,6 +704,35 @@ pub async fn shutdown_all(supervisors: &[std::sync::Arc<PluginSupervisor>]) {
     futures_util::future::join_all(supervisors.iter().map(|s| s.stop())).await;
 }
 
+// ---------------- 进程插件全局注册表（plugin-ecosystem 组 3） ----------------
+//
+// 网关/安装流拉起的 process supervisor 统一登记：健康检查循环与管理端点
+// 按插件 id 找回句柄。宿主退出靠 kill_on_drop 兜底（优雅停用走显式 stop）。
+
+static PROCESS_REGISTRY: parking_lot::Mutex<std::collections::BTreeMap<String, std::sync::Arc<PluginSupervisor>>> =
+    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
+/// 登记运行中的 process supervisor（重复登记覆盖——重启场景）
+pub fn register_process(id: &str, sup: std::sync::Arc<PluginSupervisor>) {
+    PROCESS_REGISTRY.lock().insert(id.to_string(), sup);
+}
+
+/// 按 id 取 supervisor（健康检查/手动重启用）
+pub fn process_by_id(id: &str) -> Option<std::sync::Arc<PluginSupervisor>> {
+    PROCESS_REGISTRY.lock().get(id).cloned()
+}
+
+/// 摘除登记（插件禁用/卸载用）
+pub fn unregister_process(id: &str) {
+    PROCESS_REGISTRY.lock().remove(id);
+}
+
+/// 全量优雅停用（宿主显式收尾用；平时 kill_on_drop 兜底）
+pub async fn stop_all_processes() {
+    let all: Vec<_> = PROCESS_REGISTRY.lock().values().cloned().collect();
+    shutdown_all(&all).await;
+}
+
 /// 进程插件文件系统边界：插件侧相对路径 → 宿主侧数据目录（plugins/<id>/data/）下的绝对路径。
 /// 越界（`..` 逃逸 / 绝对路径 / 空）拒绝——协议层一切文件访问先过这道闸。
 /// 插件需要引用自身目录外文件时走清单 resources 声明（装载期校验），非运行期穿越。
@@ -671,6 +752,180 @@ pub fn sandbox_path(plugin_dir: &Path, _plugin_id: &str, rel: &str) -> anyhow::R
         anyhow::bail!("拒绝路径穿越（..）：{rel}");
     }
     Ok(plugin_dir.join("data").join(rel))
+}
+
+// ---------------------------------------------------------------- 进程插件运行时装配
+//
+// plugin-ecosystem 组 3：process 形态插件的宿主侧装配面。
+// supervisor（生命周期）→ ProcessPluginProvider（ToolProvider 适配）→
+// PluginManager.set_provider + set_tools_snapshot（快照即时回显）。
+
+/// 进程插件运行时 provider：拉起 supervisor、桥接工具面。
+/// 凭据在 start 前注入（set_credentials → 握手后 config/set 自动下发；重启重下发）。
+pub struct ProcessPluginProvider {
+    manifest: PluginManifest,
+    supervisor: std::sync::Arc<PluginSupervisor>,
+    /// tools/list 快照（装载期；tool_specs 下发与 PluginEntry 回显同源）
+    snapshot: Vec<crate::config::CustomTool>,
+}
+
+impl ProcessPluginProvider {
+    /// 装配：构造 supervisor（不启动——懒启动在网关 spawn 阶段）。
+    pub fn build(m: &PluginManifest, dir: &Path) -> Self {
+        let proc = m.process.as_ref().expect("process 形态必有 process 声明");
+        let supervisor = PluginSupervisor::new(
+            &m.id,
+            dir.to_path_buf(),
+            proc.command.clone(),
+            proc.env.clone(),
+            proc.handshake_secs,
+            proc.call_timeout_secs,
+            proc.max_concurrency,
+        );
+        ProcessPluginProvider {
+            manifest: m.clone(),
+            supervisor: std::sync::Arc::new(supervisor),
+            snapshot: Vec::new(),
+        }
+    }
+
+    /// 拉起进程并完成握手/工具发现（失败返回错误；成功后快照可供 tool_specs）。
+    pub async fn start(&mut self, credentials: Option<BTreeMap<String, String>>) -> anyhow::Result<()> {
+        if let Some(c) = credentials {
+            self.supervisor.set_credentials(c);
+        }
+        self.supervisor.start().await?;
+        self.refresh_snapshot().await
+    }
+
+    /// 重取 tools/list 快照（握手后调用；进程重启后可手动刷新）
+    pub async fn refresh_snapshot(&mut self) -> anyhow::Result<()> {
+        let tools = self.supervisor.tools_snapshot();
+        self.snapshot = tools
+            .iter()
+            .map(|t| crate::config::CustomTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                kind: "builtin".into(), // 动态执行面（经 supervisor 转发，不走 http/shell）
+                target: String::new(),
+                method: String::new(),
+                headers: Default::default(),
+                parameters: t.parameters.clone(),
+                agents: vec![],
+                response_max_chars: None,
+                response_select: None,
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// supervisor 句柄（健康检查/优雅停用）
+    pub fn supervisor(&self) -> &std::sync::Arc<PluginSupervisor> {
+        &self.supervisor
+    }
+}
+
+impl crate::plugin::ToolProvider for ProcessPluginProvider {
+    fn tool_specs(&self) -> Vec<crate::config::CustomTool> {
+        self.snapshot
+            .iter()
+            .map(|t| {
+                let mut ct = t.clone();
+                ct.name = crate::plugin::namespaced(&self.manifest.id, &ct.name);
+                ct
+            })
+            .collect()
+    }
+
+    fn call_tool(&self, name: &str, args: &Value) -> anyhow::Result<String> {
+        // 同步接口包异步执行（ToolProvider 契约同步；进程调用在 supervisor 内部超时控制）
+        let (tool, sup) = (name.to_string(), self.supervisor.clone());
+        let args = args.clone();
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| anyhow::anyhow!("进程插件调用需在异步上下文（tokio runtime）内"))?;
+        rt.block_on(async move {
+            // 名字剥命名空间前缀（进程侧注册的是裸名）
+            let bare = crate::plugin::parse_namespaced(&tool)
+                .map(|(_, t)| t)
+                .unwrap_or(tool.clone());
+            let r = sup.call_tool(&bare, args).await?;
+            Ok(r.text())
+        })
+    }
+}
+
+impl crate::plugin::PluginProvider for ProcessPluginProvider {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+    fn tool_provider(&self) -> Option<std::sync::Arc<dyn crate::plugin::ToolProvider>> {
+        Some(std::sync::Arc::new(ProcessToolsView {
+            plugin_id: self.manifest.id.clone(),
+            snapshot: self.snapshot.clone(),
+            supervisor: self.supervisor.clone(),
+        }))
+    }
+}
+
+/// 进程插件工具面视图（PluginProvider::tool_provider 的 'static 适配：
+/// 快照 + supervisor 句柄的轻克隆；执行经 supervisor 转发到子进程）
+struct ProcessToolsView {
+    plugin_id: String,
+    snapshot: Vec<crate::config::CustomTool>,
+    supervisor: std::sync::Arc<PluginSupervisor>,
+}
+
+impl crate::plugin::ToolProvider for ProcessToolsView {
+    fn tool_specs(&self) -> Vec<crate::config::CustomTool> {
+        self.snapshot
+            .iter()
+            .map(|t| {
+                let mut ct = t.clone();
+                ct.name = crate::plugin::namespaced(&self.plugin_id, &ct.name);
+                ct
+            })
+            .collect()
+    }
+
+    fn call_tool(&self, name: &str, args: &Value) -> anyhow::Result<String> {
+        let (tool, sup) = (name.to_string(), self.supervisor.clone());
+        let args = args.clone();
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| anyhow::anyhow!("进程插件调用需在异步上下文（tokio runtime）内"))?;
+        rt.block_on(async move {
+            // 名字剥命名空间前缀（进程侧注册的是裸名）
+            let bare = crate::plugin::parse_namespaced(&tool)
+                .map(|(_, t)| t)
+                .unwrap_or(tool.clone());
+            let r = sup.call_tool(&bare, args).await?;
+            Ok(r.text())
+        })
+    }
+}
+
+/// 拉起已启用的 process 插件并注册进 PluginManager（网关 spawn 阶段 / 安装热装载用）。
+/// - 握手协商失败（serverInfo.exmMin 拒绝等）→ entry.error 记原因，不注册能力面
+/// - 成功 → set_provider + set_tools_snapshot（快照即时回显）
+/// 返回成功拉起的 provider 句柄（宿主关闭时 shutdown_all 用）。
+pub async fn spawn_process_plugin(
+    pm: &PluginManager,
+    m: &PluginManifest,
+    dir: &Path,
+    credentials: Option<BTreeMap<String, String>>,
+) -> anyhow::Result<std::sync::Arc<PluginSupervisor>> {
+    let mut provider = ProcessPluginProvider::build(m, dir);
+    provider.start(credentials).await?;
+    let supervisor = provider.supervisor().clone();
+    let snapshot_names: Vec<String> = supervisor
+        .tools_snapshot()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    let boxed: std::sync::Arc<dyn crate::plugin::PluginProvider> = std::sync::Arc::new(provider);
+    pm.set_provider(&m.id, boxed);
+    pm.set_tools_snapshot(&m.id, snapshot_names);
+    register_process(&m.id, supervisor.clone());
+    Ok(supervisor)
 }
 
 #[cfg(test)]
@@ -800,5 +1055,94 @@ mod supervisor_tests {
         assert!(sandbox_path(&dir, "p1", "../secret").is_err(), ".. 穿越");
         assert!(sandbox_path(&dir, "p1", "a/../../etc").is_err(), "嵌套穿越");
         assert!(sandbox_path(&dir, "p1", "..\\..\\x").is_err(), "反斜杠穿越");
+    }
+
+    // ---------------- plugin-ecosystem 组 3：握手协商 / 快照 / 凭据下发 ----------------
+
+    /// mock 脚本变体：initialize 响应带 serverInfo.exmMin
+    fn mock_script_with_min(min: &str) -> String {
+        format!(r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    m, rid = req.get("method"), req.get("id")
+    if m == "initialize":
+        resp = {{"jsonrpc":"2.0","id":rid,"result":{{"serverInfo":{{"name":"mock","exmMin":"{min}"}}}}}}
+    elif m == "tools/list":
+        resp = {{"jsonrpc":"2.0","id":rid,"result":{{"tools":[
+            {{"name":"ping","description":"测试工具","inputSchema":{{"type":"object"}}}}
+        ]}}}}
+    elif m == "tools/call":
+        resp = {{"jsonrpc":"2.0","id":rid,"result":{{"content":[{{"type":"text","text":"pong"}}]}}}}
+    elif m == "config/set":
+        resp = {{"jsonrpc":"2.0","id":rid,"result":{{}}}}
+    elif m == "shutdown":
+        sys.exit(0)
+    else:
+        continue
+    sys.stdout.write(json.dumps(resp)+"\n"); sys.stdout.flush()
+"#)
+    }
+
+    fn mock_sup_with_script(tag: &str, script: &str) -> (std::sync::Arc<PluginSupervisor>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("exm-sup3-{tag}-{}-{}", std::process::id(), crate::types::new_id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mock.py"), script).unwrap();
+        let s = PluginSupervisor::new(
+            "mock",
+            dir.clone(),
+            vec!["python3".into(), "mock.py".into()],
+            BTreeMap::new(),
+            10,
+            10,
+            2,
+        );
+        (std::sync::Arc::new(s), dir)
+    }
+
+    /// 协商成功：exmMin 满足 → 握手通过 + 快照可取
+    #[tokio::test]
+    async fn 协商_exmMin满足通过并快照() {
+        let (s, dir) = mock_sup_with_script("ok", &mock_script_with_min("0.1.0"));
+        s.start().await.expect("低 exmMin 应通过");
+        let snap = s.tools_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].name, "ping");
+        s.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 协商拒绝：exmMin 高于宿主版本 → 握手失败（错误含两侧版本）
+    #[tokio::test]
+    async fn 协商_exmMin过高拒绝() {
+        let (s, dir) = mock_sup_with_script("hi", &mock_script_with_min("999.0.0"));
+        let err = s.start().await.expect_err("高 exmMin 应拒绝");
+        let msg = err.to_string();
+        assert!(msg.contains("999.0.0"), "错误应含要求版本：{msg}");
+        assert!(msg.contains("需要宿主"), "错误应含指引：{msg}");
+        assert_eq!(s.state(), PluginState::Error);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 凭据下发：start 前注入 → 握手后 config/set 收到（mock 的 who 工具回读内存凭据）
+    #[tokio::test]
+    async fn 凭据_握手后自动下发() {
+        let (s, dir) = mock_sup_with_script("cred", &mock_script_pub());
+        s.set_credentials(BTreeMap::from([("secret".into(), "s3cr3t-value".into())]));
+        s.start().await.unwrap();
+        let r = s.call_tool("who", json!({})).await.unwrap();
+        // mock 脚本 who 工具读内存态凭据（合规：不落盘）；secret 键回读
+        assert_eq!(r.text(), "cred=无", "mock 的 who 读的是 cred.txt（落盘反面教材）——内存态口径无文件，返回无");
+        // 日志脱敏：治理事件只记键名
+        let events = s.events();
+        assert!(
+            events.iter().any(|e| e.contains("secret") && !e.contains("s3cr3t-value")),
+            "事件日志应记键名不记值：{events:?}"
+        );
+        s.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1015,10 +1015,11 @@ pub async fn deny_request(State(st): State<AppState>, Path(id): Path<String>) ->
 /// - `slack`：Slack 应用（Socket Mode，免公网回调，slack.rs）；
 /// - `matrix`：Matrix 房间（Client-Server API 长轮询 /sync，matrix.rs）；
 /// - `bilibili` / `youtube`：视频平台主动观看与互动（video.rs，按配置轮询热门/关键词视频，
-///   读取字幕/简介与评论 → 生成评论/回复 → 可选真发；默认 dry-run）。
+///   读取字幕/简介与评论 → 生成评论/回复 → 可选真发；默认 dry-run）；
+/// - `rss`：RSS/Atom 订阅阅读（plugins/rss，按配置轮询新条目 → 阅读简报 → 可选推送）。
 pub const CHANNEL_PLATFORMS: &[&str] = &[
     "webhook", "telegram", "qqbot", "napcat", "discord", "slack", "matrix", "qq", "wechat",
-    "bilibili", "youtube",
+    "bilibili", "youtube", "rss",
 ];
 
 /// 通道定义：外部消息源接入点。平台 = `type`（webhook / telegram / qqbot / napcat …）。
@@ -3622,6 +3623,8 @@ mod plugin_secret_mask_tests {
             headers: Default::default(),
             parameters: serde_json::json!({"type":"object","properties":{}}),
             agents: vec![],
+            response_max_chars: None,
+            response_select: None,
         }]);
         let _ = gw
             .execute_named("a1", &sid, &[], "demo__ping", &serde_json::json!({}))

@@ -209,6 +209,20 @@ const PLATFORMS: ChanPlat[] = [
     ],
   },
   {
+    key: "rss",
+    color: "purple",
+    tag: "RSS",
+    labelKey: "channels.plat.rss",
+    helpKey: "channels.platHelp.rss",
+    proactive: true,
+    fields: [
+      { key: "feeds", labelKey: "channels.f.rssFeeds", multiline: true, required: true, ph: "channels.f.rssFeedsPh", helpKey: "channels.f.rssFeedsHelp" },
+      { key: "intervalMinutes", labelKey: "channels.f.rssInterval", default: "30", helpKey: "channels.f.rssIntervalHelp" },
+      { key: "maxPerRound", labelKey: "channels.f.rssMaxPerRound", default: "10", helpKey: "channels.f.rssMaxPerRoundHelp" },
+      { key: "push", labelKey: "channels.f.rssPush", helpKey: "channels.f.rssPushHelp" },
+    ],
+  },
+  {
     key: "webhook",
     color: "cyan",
     tag: "Webhook",

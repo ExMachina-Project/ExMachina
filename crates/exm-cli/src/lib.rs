@@ -12,6 +12,7 @@ pub mod panel;
 pub mod tui;
 pub mod persona_cmd;
 pub mod platform_cmd;
+pub mod plugin_cmd;
 pub mod render;
 
 use clap::{Parser, Subcommand};
@@ -145,6 +146,11 @@ enum Commands {
     Checkpoint {
         #[command(subcommand)]
         action: CheckpointAction,
+    },
+    /// 插件管理：list / install / update / uninstall（目录装载 + 索引安装）
+    Plugin {
+        #[command(subcommand)]
+        action: plugin_cmd::PluginAction,
     },
     /// MCP 服务端：把启用的内置工具按 ACL 暴露给外部 MCP 客户端（默认关闭，配置 mcpServe.enabled 开启）
     Mcp {
@@ -562,6 +568,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let host_ref = if host.is_empty() { None } else { Some(host.as_str()) };
             exm_gateway::serve(core, port, host_ref).await
         }
+        Commands::Plugin { action } => plugin_cmd::run_plugin_action(&workspace, action).await,
         Commands::Mcp { action } => {
             let core = build_core(&workspace)?;
             let McpAction::Serve { session, client } = action;
