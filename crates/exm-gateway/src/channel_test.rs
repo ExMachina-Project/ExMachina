@@ -82,17 +82,17 @@ pub async fn probe(_core: &Core, ch: &Channel) -> TestResult {
             }
         }
         // 视频平台：登录态 / Data API 只读探针（不发布任何内容）
-        "bilibili" => match crate::video::probe_bilibili(ch).await {
+        "bilibili" => match crate::plugins::video::probe_bilibili(ch).await {
             Ok(name) => ok(name),
-            Err(crate::video::ProbeError::Missing(what)) => missing(&what),
-            Err(crate::video::ProbeError::Auth(msg)) => auth_fail(msg),
-            Err(crate::video::ProbeError::Network(msg)) => network(msg),
+            Err(crate::plugins::video::ProbeError::Missing(what)) => missing(&what),
+            Err(crate::plugins::video::ProbeError::Auth(msg)) => auth_fail(msg),
+            Err(crate::plugins::video::ProbeError::Network(msg)) => network(msg),
         },
-        "youtube" => match crate::video::probe_youtube(ch).await {
+        "youtube" => match crate::plugins::video::probe_youtube(ch).await {
             Ok(name) => ok(name),
-            Err(crate::video::ProbeError::Missing(what)) => missing(&what),
-            Err(crate::video::ProbeError::Auth(msg)) => auth_fail(msg),
-            Err(crate::video::ProbeError::Network(msg)) => network(msg),
+            Err(crate::plugins::video::ProbeError::Missing(what)) => missing(&what),
+            Err(crate::plugins::video::ProbeError::Auth(msg)) => auth_fail(msg),
+            Err(crate::plugins::video::ProbeError::Network(msg)) => network(msg),
         },
         // 长连接平台：以适配器上报的运行时状态为准（连接成功即上报 ok）
         "napcat" | "qqbot" => match platform::status_of(&ch.id) {

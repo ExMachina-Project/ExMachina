@@ -28,11 +28,12 @@ pub mod matrix;
 pub mod napcat;
 pub mod nexus_api;
 pub mod platform;
+pub mod plugin_admin;
+pub mod plugins;
 pub mod qqbot;
 pub mod slack;
 pub mod telegram;
 pub mod triggers;
-pub mod video;
 pub mod worker_hub;
 
 /// 提取器拒绝（请求体 / 查询串解析失败）统一成全站错误契约：400 + {"error": 可读中文}。
@@ -279,6 +280,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         )
         .merge(platform::routes())
         .merge(llm_admin::routes())
+        .merge(plugin_admin::routes())
         .merge(identity::routes())
         .merge(limits::routes())
         .merge(singles::routes())
@@ -2192,7 +2194,8 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
     discord::spawn_supervisor(core.clone());
     slack::spawn_supervisor(core.clone());
     matrix::spawn_supervisor(core.clone());
-    video::spawn_supervisor(core.clone());
+    // 插件装载面：builtin 插件注册 + watcher 拉起（video 走新路径，行为等价）
+    plugins::spawn_all(core.clone());
     // 事件触发器（7.1）：文件监听（配置启用时才启动）
     triggers::spawn_file_watcher(core.clone());
     // 分布式执行：工作者池注入（有工作者在线即自动路由远程，失败回落本地）

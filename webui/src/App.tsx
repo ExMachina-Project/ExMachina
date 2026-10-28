@@ -18,6 +18,7 @@ import {
   ClockCircleOutlined,
   TeamOutlined,
   CloudUploadOutlined,
+  AppstoreAddOutlined,
   DeploymentUnitOutlined,
 } from "@ant-design/icons";
 import { api } from "./api";
@@ -43,6 +44,7 @@ const GroupsView = lazy(() => import("./views/GroupsView").then((m) => ({ defaul
 const NexusView = lazy(() => import("./views/NexusView").then((m) => ({ default: m.NexusView })));
 const SinglesView = lazy(() => import("./views/SinglesView").then((m) => ({ default: m.SinglesView })));
 const SkillsView = lazy(() => import("./views/SkillsView").then((m) => ({ default: m.SkillsView })));
+const PluginsView = lazy(() => import("./views/PluginsView").then((m) => ({ default: m.PluginsView })));
 const AutomationsView = lazy(() => import("./views/AutomationsView").then((m) => ({ default: m.AutomationsView })));
 const ApprovalsView = lazy(() => import("./views/ApprovalsView").then((m) => ({ default: m.ApprovalsView })));
 const ChannelsView = lazy(() => import("./views/ChannelsView").then((m) => ({ default: m.ChannelsView })));
@@ -71,6 +73,7 @@ type ViewKey =
   | "groups"
   | "nexus"
   | "skills"
+  | "plugins"
   | "models"
   | "automations"
   | "approvals"
@@ -83,7 +86,7 @@ type ViewKey =
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
   "chat", "agent", "groups", "nexus", "graph", "automations",
-  "skills", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
+  "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
 ];
 
 /** 从 hash 解析视图：#/chat/<sessionId> → { view: chat, session }; 非法回落 chat */
@@ -112,6 +115,7 @@ export const NAV_ITEMS: {
   { key: "graph", en: "DAG", labelKey: "nav.dag", icon: <ApartmentOutlined /> },
   { key: "automations", en: "CRON", labelKey: "nav.cron", icon: <ClockCircleOutlined /> },
   { key: "skills", en: "SKILLS", labelKey: "nav.skills", icon: <DeploymentUnitOutlined /> },
+  { key: "plugins", en: "PLUGINS", labelKey: "nav.plugins", icon: <AppstoreAddOutlined /> },
   { key: "models", en: "MODELS", labelKey: "nav.models", icon: <ApiOutlined /> },
   { key: "approvals", en: "APPROVALS", labelKey: "nav.approvals", icon: <BellOutlined /> },
   { key: "channels", en: "CHANNELS", labelKey: "nav.channels", icon: <CloudUploadOutlined /> },
@@ -376,6 +380,7 @@ export default function App(): React.ReactElement {
             {view === "groups" && <GroupsView />}
             {view === "nexus" && <NexusView />}
             {view === "skills" && <SkillsView />}
+            {view === "plugins" && <PluginsView />}
             {view === "models" && <ModelsView />}
             {view === "automations" && <AutomationsView />}
             {view === "approvals" && <ApprovalsView />}
