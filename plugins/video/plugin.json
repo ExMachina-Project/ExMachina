@@ -1,0 +1,18 @@
+{
+  "id": "video",
+  "name": "视频观看",
+  "version": "0.5.3",
+  "description": "B站/YouTube 自动观看与互动（通道适配 + 轮询 watcher）。内置插件：实现随宿主发布，本清单为能力声明（可自定义描述/凭据标签，不可改实现形态）。",
+  "channel": {
+    "kinds": ["bilibili", "youtube"],
+    "credentials": [
+      { "key": "sessdata", "label": "B站 SESSDATA 凭据", "sensitive": true },
+      { "key": "biliJct", "label": "B站 bili_jct CSRF 令牌", "sensitive": true },
+      { "key": "uid", "label": "B站用户 uid", "sensitive": false },
+      { "key": "apiKey", "label": "YouTube Data API 密钥", "sensitive": true }
+    ]
+  },
+  "watch": {
+    "intervalMinutes": 10
+  }
+}

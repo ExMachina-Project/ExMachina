@@ -209,6 +209,30 @@ export interface SkillDef {
   createdAt: string;
 }
 
+/** 插件列表项（GET /api/plugins） */
+export interface PluginSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  form: "builtin" | "process" | "declarative" | "virtual" | "unknown";
+  enabled: boolean;
+  error?: string | null;
+  capabilities: {
+    tools: number;
+    channel?: { kinds: string[]; credentials: number };
+    watch: boolean;
+    resources: number;
+    process: boolean;
+  };
+}
+
+/** 插件详情（GET /api/plugins/:id） */
+export interface PluginDetail extends PluginSummary {
+  manifest: Record<string, unknown>;
+  health: "ok" | "degraded";
+}
+
 export interface CronJob {
   id: string;
   name: string;
@@ -605,6 +629,17 @@ export const api = {
     agents?: string[];
   }) => req<SkillDef>("/skills", { method: "POST", body: JSON.stringify(body) }),
   deleteSkill: (id: string) => req<{ ok: boolean }>(`/skills/${id}`, { method: "DELETE" }),
+
+  // ---------------- 插件系统（/api/plugins）
+  plugins: () => req<{ plugins: PluginSummary[] }>("/plugins"),
+  pluginDetail: (id: string) => req<PluginDetail>(`/plugins/${id}`),
+  setPluginEnabled: (id: string, enabled: boolean) =>
+    req<{ id: string; enabled: boolean }>(`/plugins/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  deletePlugin: (id: string) =>
+    req<{ id: string; removed: boolean }>(`/plugins/${id}`, { method: "DELETE" }),
 
   listCron: () => req<CronJob[]>("/cron"),
   createCron: (body: {

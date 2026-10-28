@@ -498,6 +498,146 @@ impl Default for ExperimentsConfig {
     }
 }
 
+// ---------------------------------------------------------------- 插件系统（plugins/ 目录）
+
+/// 插件清单（plugins/<id>/plugin.json）：能力包的打包与安装单元。
+/// 四类能力（tools/channel/watch/resources）全部可选但至少声明一类；
+/// 形态由声明决定——内联 tools/resources = 声明式（零代码零进程）、
+/// process 字段 = 进程插件（stdio JSON-RPC）、builtin = 宿主内置实现（清单只做声明）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginManifest {
+    /// 插件 id（目录名；字母开头，字母/数字/-/_；全局唯一）
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    /// 最低宿主版本（SemVer；缺省 = 兼容）
+    #[serde(default)]
+    pub exm_min: String,
+    /// 工具组：内联 HTTP 工具声明（CustomTool 字面形状，零代码）；
+    /// process 形态时留空经协议 tools/list 发现
+    #[serde(default)]
+    pub tools: Vec<CustomTool>,
+    /// 通道适配声明（平台 kind 与凭据字段清单）
+    #[serde(default)]
+    pub channel: Option<PluginChannelDecl>,
+    /// 自动化 watcher 轮询声明
+    #[serde(default)]
+    pub watch: Option<PluginWatchDecl>,
+    /// 资源注入：技能/提示词文件的相对路径清单（相对插件目录）
+    #[serde(default)]
+    pub resources: Vec<String>,
+    /// 进程插件声明（存在即 process 形态）
+    #[serde(default)]
+    pub process: Option<PluginProcessDecl>,
+}
+
+/// 通道能力声明：凭据字段清单供 WebUI 通道配置页按清单渲染
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginChannelDecl {
+    /// 平台 kind 列表（一个插件可适配多平台，如 video 插件的 bilibili/youtube）
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// 凭据字段（字段名/标签/是否敏感）
+    #[serde(default)]
+    pub credentials: Vec<PluginCredentialField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCredentialField {
+    /// 配置键名（存 channel.config）
+    pub key: String,
+    /// 展示标签
+    #[serde(default)]
+    pub label: String,
+    /// 敏感字段（管理端点/日志/诊断一律脱敏）
+    #[serde(default)]
+    pub sensitive: bool,
+}
+
+/// watcher 轮询声明
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginWatchDecl {
+    /// 轮询间隔分钟（实现可按通道配置覆盖）
+    #[serde(default = "default_watch_interval")]
+    pub interval_minutes: u64,
+}
+
+fn default_watch_interval() -> u64 {
+    10
+}
+
+/// 进程插件声明：宿主按 command 拉起子进程，stdio JSON-RPC 通信
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginProcessDecl {
+    /// 可执行命令（argv；相对路径相对插件目录）
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// 附加环境变量
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// initialize 握手超时（秒；默认 15）
+    #[serde(default = "default_handshake_secs")]
+    pub handshake_secs: u64,
+    /// 单次工具调用超时（秒；默认 60，上限 300）
+    #[serde(default = "default_call_timeout_secs")]
+    pub call_timeout_secs: u64,
+    /// 并发调用上限（超出排队；默认 4）
+    #[serde(default = "default_plugin_concurrency")]
+    pub max_concurrency: usize,
+}
+
+fn default_handshake_secs() -> u64 {
+    15
+}
+fn default_call_timeout_secs() -> u64 {
+    60
+}
+fn default_plugin_concurrency() -> usize {
+    4
+}
+
+impl PluginManifest {
+    /// id 合法（字母开头，字母/数字/-/_；即目录名口径）
+    pub fn valid_id(&self) -> bool {
+        let id = self.id.trim();
+        !id.is_empty()
+            && id.len() <= 48
+            && id.starts_with(|c: char| c.is_ascii_alphabetic())
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    /// 至少声明一类能力（tools/channel/watch/resources 任一非空）
+    pub fn has_any_capability(&self) -> bool {
+        !self.tools.is_empty()
+            || self.channel.is_some()
+            || self.watch.is_some()
+            || !self.resources.is_empty()
+    }
+
+    /// 是否进程形态（声明了 process 且给了可执行命令）
+    pub fn is_process(&self) -> bool {
+        self.process.as_ref().map(|p| !p.command.is_empty()).unwrap_or(false)
+    }
+}
+
+/// 插件启用状态持久化（config.plugins.state：id → enabled；缺省 = 启用）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginsConfig {
+    /// 运行状态覆盖：false = 禁用（清单初始态之上的人为覆盖）
+    #[serde(default)]
+    pub state: std::collections::BTreeMap<String, bool>,
+}
+
 /// MCP 服务端（把内置工具面按 ACL 暴露给外部客户端；与客户端接入段 mcpServers 解耦）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -654,6 +794,8 @@ pub struct ExmConfig {
     pub nexus: NexusConfig,
     /// 实验性功能开关（动态压缩 / 组共享上下文等；默认全关）
     pub experiments: ExperimentsConfig,
+    /// 插件系统（plugins/ 目录装载；state 持久化启停覆盖）
+    pub plugins: PluginsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -709,6 +851,8 @@ struct ConfigFile {
     nexus: Option<NexusConfig>,
     #[serde(default)]
     experiments: Option<ExperimentsConfig>,
+    #[serde(default)]
+    plugins: Option<PluginsConfig>,
 }
 
 /// 能力模型槽位（模型设置页配置）：语音合成 / 语音识别 / 视觉转述。
@@ -1147,6 +1291,7 @@ impl ExmConfig {
             notify: file.notify.clone().unwrap_or_default(),
             nexus: file.nexus.clone().unwrap_or_default(),
             experiments: file.experiments.clone().unwrap_or_default(),
+            plugins: file.plugins.clone().unwrap_or_default(),
         }
     }
 
@@ -1227,6 +1372,7 @@ impl ExmConfig {
             notify: Some(self.notify.clone()),
             nexus: Some(self.nexus.clone()),
             experiments: Some(self.experiments.clone()),
+            plugins: Some(self.plugins.clone()),
         };
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;

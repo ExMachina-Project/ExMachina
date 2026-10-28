@@ -636,6 +636,8 @@ export const en: Partial<Dict> = {
   "channels.plat.slack": "Slack (Socket Mode, no public callback)",
   "channels.plat.matrix": "Matrix (Client-Server API long-polling)",
   "channels.plat.bilibili": "Bilibili (proactive watch / comment / reply)",
+  "channels.plat.plugin": "Plugin channel",
+  "channels.platHelp.plugin": "Channel platform declared by a plugin manifest (credential fields follow the plugin page)",
   "channels.plat.youtube": "YouTube (Data API: watch / comment / reply)",
   "channels.plat.qq": "QQ (via bridge: forwarded to inbound)",
   "channels.plat.wechat": "WeChat (via bridge: forwarded to inbound)",
@@ -908,6 +910,8 @@ export const en: Partial<Dict> = {
   "singles.f.promptPh": "Define its identity, tone and way of working",
 
   // ── Skills ──
+  "plugins.title": "Plugins",
+  "nav.plugins": "Plugins",
   "skills.created": "Skill created: {id} (hot-loaded, effective on next dispatch)",
   "skills.createFailed": "Create failed: {err}",
   "skills.deleted": "Skill deleted: {id}",
