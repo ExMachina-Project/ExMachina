@@ -152,6 +152,8 @@ impl AgentRuntime {
         if scope.allows_tools() {
             specs.extend(self.tools.custom_specs_for(&def.identifier));
             specs.extend(self.tools.mcp().tool_snapshot_for(&def.identifier));
+            // 会话级注入工具（视频观看会话等按会话收窄的插件工具）
+            specs.extend(self.tools.session_tool_specs(session_id));
         }
 
         for _step in 0..max_steps {
@@ -357,7 +359,12 @@ impl AgentRuntime {
 
         // 步数上限三级覆盖：个体 maxSteps > 作用域档位偏好 > 全局 security.chatMaxSteps
         // （Chat 档无工具循环，对话轮保护取半；Tools/Computer 档用全局默认）
-        let max_steps = resolve_max_steps(def.max_steps, scope, self.tools.chat_max_steps());
+        // 会话级预算（自动任务「防失控」面）优先级最高：通道配置显式收紧时生效
+        let max_steps = self
+            .tools
+            .session_step_budget(session_id)
+            .map(|v| v.max(1))
+            .unwrap_or_else(|| resolve_max_steps(def.max_steps, scope, self.tools.chat_max_steps()));
         // 步数耗尽时回显已完成的工具调用清单（便于归因）
         let mut done_tools: Vec<String> = Vec::new();
         let mut usage_prompt: u64 = 0;
@@ -382,6 +389,8 @@ impl AgentRuntime {
         if scope.allows_tools() {
             specs.extend(self.tools.custom_specs_for(&def.identifier));
             specs.extend(self.tools.mcp().tool_snapshot_for(&def.identifier));
+            // 会话级注入工具（视频观看会话等按会话收窄的插件工具）
+            specs.extend(self.tools.session_tool_specs(session_id));
         }
 
         for _step in 0..max_steps {
@@ -469,8 +478,22 @@ impl AgentRuntime {
             return Ok(text);
         }
 
+        // 步数预算耗尽的软着陆：注入收束提示再给最后一轮纯文本机会——
+        // 基于已有材料产出结论而非硬截断丢弃（视频观看轮次的观感收束依赖此路径）
+        let wrap_note = ChatMessage::user(
+            "【系统提示】工具调用步数预算已用完。不要再调用任何工具，直接基于已获取的材料给出最终结论。",
+        );
+        messages.push(wrap_note);
+        let (text, _calls, usage) = self
+            .call_llm(&messages, &agent_hint, &chain, &[], None, &mut on_delta)
+            .await?;
+        usage_prompt += usage.0;
+        usage_completion += usage.1;
         self.tools
             .record_usage(session_id, usage_prompt, usage_completion, &last_model);
+        if !text.trim().is_empty() {
+            return Ok(text);
+        }
         anyhow::bail!(
             "个体 {} 已达最大工具步数 {max_steps} 仍未产出最终回复；已完成的工具调用：{}",
             def.identifier,
@@ -1181,5 +1204,133 @@ mod max_steps_tests {
         assert_eq!(resolve_max_steps(None, ToolScope::Chat, 0), 12);
         // Chat 档取半后至少 1
         assert_eq!(resolve_max_steps(None, ToolScope::Chat, 1), 1);
+    }
+}
+
+#[cfg(test)]
+mod soft_landing_tests {
+    use super::*;
+    use crate::config::SecurityConfig;
+    use crate::provider::{ChatRequest, ChatResponse, ToolCall};
+    use crate::types::AgentDefinition;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 永远想调工具的替身：直到看见收束提示才吐最终文本
+    struct ToolLoopProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ToolLoopProvider {
+        fn name(&self) -> &'static str {
+            "tool-loop"
+        }
+        async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            let wrapped = req
+                .messages
+                .iter()
+                .any(|m| m.content.contains("步数预算已用完"));
+            if wrapped {
+                return Ok(ChatResponse {
+                    content: "最终结论：基于已看材料，视频值得一览。".into(),
+                    reasoning: String::new(),
+                    prompt_tokens: 10,
+                    completion_tokens: 10,
+                    tool_calls: Vec::new(),
+                });
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatResponse {
+                content: String::new(),
+                reasoning: String::new(),
+                prompt_tokens: 10,
+                completion_tokens: 10,
+                tool_calls: vec![ToolCall {
+                    id: format!("c{}", self.calls.load(Ordering::SeqCst)),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "/tmp/x" }),
+                }],
+            })
+        }
+        async fn embed(&self, _model: &str, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0f32; 8]).collect())
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            Ok(ChatResponse::default())
+        }
+    }
+
+    fn base_rig(provider: Arc<dyn LlmProvider>) -> (AgentRuntime, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("exm-rt-sl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let reg_dir = base.join("entities");
+        std::fs::create_dir_all(reg_dir.join("prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            capabilities: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(
+            reg_dir.join("group.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        let prompts_dir = reg_dir.join("groups").join("exmachina").join("prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(prompts_dir.join("watch-agent.md"), "# 观众代理\n你是观众代理。").unwrap();
+        let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
+        let store = Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
+        let tools = Arc::new(ToolGateway::new(&base, store, registry.clone(), events, SecurityConfig::default()));
+        (AgentRuntime::new(registry, provider, tools, "test-model"), base)
+    }
+
+    fn watch_def() -> AgentDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "观众代理", "identifier": "watch-agent", "domain": "公共",
+            "tier": "unit", "description": "观看演练", "capabilities": ["测试"],
+            "promptFile": "watch-agent.md"
+        }))
+        .unwrap()
+    }
+
+    /// 步数耗尽软着陆：注入收束提示后智能体产出结论（不硬截断）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 步数耗尽_软着陆产出结论() {
+        let provider = Arc::new(ToolLoopProvider { calls: AtomicUsize::new(0) });
+        let (rt, base) = base_rig(provider.clone());
+        let def = watch_def();
+        // 会话步数预算 = 2（模拟通道面 maxWatchSteps）
+        rt.tools.set_session_step_budget("s-sl", 2);
+        let out = rt
+            .chat_execute(
+                &def,
+                "系统提示".into(),
+                vec![],
+                "s-sl",
+                "test",
+                crate::provider::ModelChain {
+                    candidates: vec![("loop".into(), provider.clone(), "test-model".into())],
+                    failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
+                },
+                false,
+                ToolScope::Tools,
+                |_d| {},
+            )
+            .await
+            .expect("软着陆应收束成功");
+        assert!(out.contains("最终结论"), "应收束提示产出结论：{out}");
+        assert!(provider.calls.load(Ordering::SeqCst) >= 2, "工具调用至少走了预算步数");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
