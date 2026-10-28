@@ -732,7 +732,7 @@ impl Core {
                 .into_iter()
                 .filter(|s| s.turn > upto_turn && !s.checkpoint_ids.is_empty())
                 .collect();
-            later.sort_by(|a, b| b.turn.cmp(&a.turn)); // 后轮先回滚（后者覆盖前者的场景）
+            later.sort_by_key(|s| std::cmp::Reverse(s.turn)); // 后轮先回滚（后者覆盖前者的场景）
             for snap in later {
                 for cp in snap.checkpoint_ids.iter().rev() {
                     let Some((date, rel)) = cp.split_once('/') else { continue };
@@ -1636,12 +1636,7 @@ pub fn build_orchestrator(
     {
         let runtime = unit_runtime.clone();
         let default_model = cfg.llm.model.clone();
-        let spawn_exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<crate::types::ToolName>)
-                -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(move |agent_id: &str, session_id: &str, task: &str, tools: Vec<crate::types::ToolName>| {
+        let spawn_exec: crate::tools::SpawnExec = Arc::new(move |agent_id: &str, session_id: &str, task: &str, tools: Vec<crate::types::ToolName>| {
             let runtime = runtime.clone();
             let default_model = default_model.clone();
             let def = crate::types::AgentDefinition {

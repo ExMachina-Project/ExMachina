@@ -6,7 +6,6 @@
 //! ④ 严格审批下 git commit（审批单 → 批准 → 代执行）
 
 use exm_core::types::{SpeechTag, Statement};
-use std::sync::Arc;
 
 fn core() -> exm_core::Core {
     let dir = std::env::temp_dir().join(format!("exm-e2e-{}", exm_core::types::new_id()));

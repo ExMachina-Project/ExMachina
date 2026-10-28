@@ -822,7 +822,7 @@ async fn tool_act(
 
     // 闸门 5：审批模式（always = 产审批单，批准代发/拒绝跳过；off = 直接发）
     if gate.approval == "always" {
-        return create_act_approval(core, ch, session, st, &gate, &kind, &text, target.as_ref(), &item, &video_id)
+        return create_act_approval(core, ch, session, st, &gate, kind, &text, target.as_ref(), &item, &video_id)
             .await;
     }
 

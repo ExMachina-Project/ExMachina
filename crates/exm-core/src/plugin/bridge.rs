@@ -627,13 +627,13 @@ impl PluginSupervisor {
         // 握手成功后立刻发现工具面（失败视同启动失败）；快照存管理面
         let tools = p.tools_list(self.handshake_secs).await?;
         *self.tools_snapshot.write() = tools.clone();
-        self.log(&format!("tools/list 快照：{} 个工具（{}）", tools.len(), tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ")));
+        self.log(format!("tools/list 快照：{} 个工具（{}）", tools.len(), tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ")));
         // 凭据下发（plugins.credentials.<id> 键值整体透传；脱敏日志——只记键名不记值）
         let creds = self.credentials.read().clone();
         if !creds.is_empty() {
             match p.config_set(serde_json::to_value(&creds)?, self.call_timeout_secs.min(30)).await {
-                Ok(()) => self.log(&format!("config/set 凭据已下发：{}", creds.keys().cloned().collect::<Vec<_>>().join(", "))),
-                Err(e) => self.log(&format!("config/set 凭据下发失败：{e}")),
+                Ok(()) => self.log(format!("config/set 凭据已下发：{}", creds.keys().cloned().collect::<Vec<_>>().join(", "))),
+                Err(e) => self.log(format!("config/set 凭据下发失败：{e}")),
             }
         }
         Ok(p)
@@ -906,6 +906,7 @@ impl crate::plugin::ToolProvider for ProcessToolsView {
 /// 拉起已启用的 process 插件并注册进 PluginManager（网关 spawn 阶段 / 安装热装载用）。
 /// - 握手协商失败（serverInfo.exmMin 拒绝等）→ entry.error 记原因，不注册能力面
 /// - 成功 → set_provider + set_tools_snapshot（快照即时回显）
+///
 /// 返回成功拉起的 provider 句柄（宿主关闭时 shutdown_all 用）。
 pub async fn spawn_process_plugin(
     pm: &PluginManager,

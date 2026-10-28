@@ -85,12 +85,15 @@ pub struct PluginEntry {
     pub tools_snapshot: Vec<String>,
 }
 
+/// builtin 构造器：编译期登记的 provider 工厂（None = 当前构建未编入）
+pub type BuiltinCtor = fn() -> Option<Arc<dyn PluginProvider>>;
+
 /// 插件管理器：扫描 plugins/ 目录、校验清单、持注册表与启停状态
 pub struct PluginManager {
     entries: parking_lot::RwLock<BTreeMap<String, PluginEntry>>,
     providers: parking_lot::RwLock<BTreeMap<String, Arc<dyn PluginProvider>>>,
     /// builtin 静态注册表（编译期登记；video 是第一个）
-    builtin: BTreeMap<String, (PluginManifest, fn() -> Option<Arc<dyn PluginProvider>>)>,
+    builtin: BTreeMap<String, (PluginManifest, BuiltinCtor)>,
     /// config.plugins.state 覆盖快照（load_all 时更新；late 注册时读取）
     overrides: parking_lot::RwLock<BTreeMap<String, bool>>,
     plugins_dir: PathBuf,
