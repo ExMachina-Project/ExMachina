@@ -161,6 +161,36 @@ impl FsDb {
         atomic_write(&path, &buf)
     }
 
+    /// 枚举集合内全部追加日志的行（跨 key 合并；坏行跳过不致命）。
+    /// 与 `list`（.json 文档集合）相对——追加日志集合（tool_audit 等）的
+    /// 全量读取用这里。
+    pub fn list_all_lines<T: DeserializeOwned>(&self, collection: &str) -> Result<Vec<T>> {
+        let dir = self.coll_dir(collection)?;
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
+            .collect();
+        files.sort();
+        let mut out = Vec::new();
+        for f in files {
+            let content = match std::fs::read_to_string(&f) {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for line in content.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<T>(line) {
+                    Ok(v) => out.push(v),
+                    Err(e) => eprintln!("[fsdb] 跳过损坏日志行 {}: {e}", f.display()),
+                }
+            }
+        }
+        Ok(out)
+    }
+
     // ---------------- 分桶大映射（倒排索引等） ----------------
 
     pub fn bucket_id(term: &str) -> usize {
