@@ -470,7 +470,9 @@ impl Store {
         tool: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
-        let mut all: Vec<serde_json::Value> = self.db.list("tool_audit")?;
+        // 审计是追加日志（{agentId}.jsonl），须用 list_all_lines 跨文件枚举——
+        // 此前误用 list()（只扫 .json 文档）导致审计面永远为空
+        let mut all: Vec<serde_json::Value> = self.db.list_all_lines("tool_audit")?;
         if let Some(a) = agent {
             all.retain(|v| v.get("agentId").and_then(|x| x.as_str()) == Some(a));
         }
@@ -779,6 +781,25 @@ mod store_tests {
     fn test_store() -> Store {
         let dir = std::env::temp_dir().join(format!("exm-store-{}", uuid::Uuid::new_v4()));
         Store::open(&dir).expect("打开测试存储失败")
+    }
+
+    /// 审计追加日志：写入后过滤读回（回归——list() 只扫 .json 文档曾致审计面永远为空）
+    #[test]
+    fn 审计_写入与跨文件过滤读回() {
+        let store = test_store();
+        let _ = store.audit_tool("machina", "fs.read", &serde_json::json!({"path": "/a"}), "ok", 3);
+        let _ = store.audit_tool("webui", "editor.save", &serde_json::json!({"path": "/b"}), "ok", 1);
+        // 全量（跨 agent 文件合并）
+        let all = store.list_tool_audit_filtered(None, None, 100).unwrap();
+        assert_eq!(all.len(), 2, "两个 agent 的审计都要能读回");
+        // agent 过滤
+        let machina = store.list_tool_audit_filtered(Some("machina"), None, 100).unwrap();
+        assert_eq!(machina.len(), 1);
+        assert_eq!(machina[0]["agentId"], "machina");
+        // tool 模糊过滤（大小写不敏感）
+        let hit = store.list_tool_audit_filtered(None, Some("EDITOR"), 100).unwrap();
+        assert_eq!(hit.len(), 1, "tool 过滤大小写不敏感");
+        assert_eq!(hit[0]["tool"], "editor.save");
     }
 
     #[test]
