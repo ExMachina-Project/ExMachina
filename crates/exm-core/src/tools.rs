@@ -1082,6 +1082,11 @@ pub struct ToolGateway {
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 声明式自定义工具（配置驱动，免写 MCP 服务器；按 agents 可见性放行）
     custom: Vec<crate::config::CustomTool>,
+    /// 插件凭据解析面（T1 声明式工具 `${credentials.<key>}` 变量；Core 装配后回接——
+    /// ToolGateway 构建期 config 尚未定稿，运行期经此闭包查 `plugins.credentials.<id>`）
+    plugin_credentials: parking_lot::RwLock<
+        Option<Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>>,
+    >,
     /// 插件声明式工具（T1 清单内联 HTTP 工具，命名空间 `<plugin>__<tool>`；
     /// 与 custom 共用执行链——run_custom 全套（http/shell、审计、钩子、落盘））
     plugin_tools: parking_lot::RwLock<Vec<crate::config::CustomTool>>,
@@ -1146,6 +1151,7 @@ impl ToolGateway {
             computer: Arc::new(tokio::sync::Mutex::new(None)),
             mcp: crate::mcp::McpRegistry::shared(),
             custom: Vec::new(),
+            plugin_credentials: parking_lot::RwLock::new(None),
             plugin_tools: parking_lot::RwLock::new(Vec::new()),
             dynamic_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
             session_scoped_tools: parking_lot::RwLock::new(std::collections::HashMap::new()),
@@ -1227,6 +1233,61 @@ impl ToolGateway {
     /// 当前注册的全部插件工具（诊断/管理端点用）
     pub fn plugin_tools(&self) -> Vec<crate::config::CustomTool> {
         self.plugin_tools.read().clone()
+    }
+
+    /// 注入插件凭据解析面（Core 装配后回接：查 `plugins.credentials.<插件id>.<键>`）
+    pub fn set_plugin_credentials_resolver(
+        &self,
+        f: Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>,
+    ) {
+        *self.plugin_credentials.write() = Some(f);
+    }
+
+    /// 解析文本中的 `${credentials.<key>}` 变量（插件工具执行期）。
+    /// 返回 (解析后文本, 缺失键列表)——缺失时不发部分鉴权请求，由调用方拒绝。
+    fn resolve_credential_vars(&self, plugin_id: &str, text: &str) -> (String, Vec<String>) {
+        let mut missing = Vec::new();
+        // 形如 ${credentials.api_token}（键名：字母/数字/_/-）
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(i) = rest.find("${credentials.") {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + "${credentials.".len()..];
+            match after.find('}') {
+                Some(j) => {
+                    let key = &after[..j];
+                    if key.is_empty()
+                        || !key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    {
+                        // 非法键名：原样保留（不视为变量）
+                        out.push_str("${credentials.");
+                        rest = after;
+                        continue;
+                    }
+                    let resolver = self.plugin_credentials.read();
+                    let hit = resolver
+                        .as_ref()
+                        .and_then(|f| f(plugin_id, key));
+                    match hit {
+                        Some(v) => out.push_str(&v),
+                        None => {
+                            // 缺键：保留原文（调用方按 missing 拒绝；纯函数面可测）
+                            missing.push(key.to_string());
+                            out.push_str(&rest[i..i + "${credentials.".len() + key.len() + 1]);
+                        }
+                    }
+                    rest = &after[j + 1..];
+                }
+                None => {
+                    out.push_str("${credentials.");
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        (out, missing)
     }
 
     /// 注册动态命名空间工具（T3 内置插件：schema + 自定义 async 执行面）。
@@ -2803,7 +2864,38 @@ impl ToolGateway {
         vals: &std::collections::BTreeMap<String, String>,
         args: &serde_json::Value,
     ) -> ToolResult {
-        let url = interpolate(&tool.target, vals, urlencode);
+        // 插件凭据变量（plugin-ecosystem 1.3）：`${credentials.<key>}` 宿主侧解析——
+        // 清单零密钥分发。仅命名空间工具可解析（config CustomTool 无插件归属，
+        // 引用变量视为缺键）。缺失时拒绝调用（不发部分鉴权请求）。
+        let plugin_id = crate::plugin::parse_namespaced(&tool.name).map(|(p, _)| p);
+        let (url, mut missing) = match &plugin_id {
+            Some(pid) => self.resolve_credential_vars(pid, &tool.target),
+            None if tool.target.contains("${credentials.") => {
+                return ToolResult::err(format!(
+                    "工具 {} 引用了 ${{credentials.*}} 变量但无插件归属（仅插件清单工具可声明凭据变量）",
+                    tool.name
+                ))
+            }
+            None => (tool.target.clone(), Vec::new()),
+        };
+        let mut headers: std::collections::BTreeMap<String, String> = Default::default();
+        for (k, v) in &tool.headers {
+            let resolved = match &plugin_id {
+                Some(pid) => self.resolve_credential_vars(pid, v),
+                None => (v.clone(), Vec::new()),
+            };
+            missing.extend(resolved.1);
+            headers.insert(k.clone(), resolved.0);
+        }
+        if !missing.is_empty() {
+            return ToolResult::err(format!(
+                "工具 {} 的凭据未配置：{}（请在插件详情的凭据区配置后重试）",
+                tool.name,
+                missing.join("、")
+            ));
+        }
+        // 实参插值（凭据解析后的 URL 上做 `{参数名}` 占位替换）
+        let url = interpolate(&url, vals, urlencode);
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return ToolResult::err("http 类自定义工具的 target 必须是 http(s) URL");
         }
@@ -2825,7 +2917,7 @@ impl ToolGateway {
         let parsed =
             reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
         let mut req = client.request(parsed, &url);
-        for (k, v) in &tool.headers {
+        for (k, v) in &headers {
             req = req.header(k, v);
         }
         if method == "POST" || method == "PUT" || method == "PATCH" {
@@ -2841,7 +2933,7 @@ impl ToolGateway {
                         text.chars().take(2000).collect::<String>()
                     ));
                 }
-                ToolResult::ok(text.chars().take(8000).collect::<String>())
+                shape_response(tool, &text)
             }
             Err(e) => ToolResult::err(format!("请求失败: {e}")),
         }
@@ -5113,6 +5205,88 @@ fn interpolate(
     out
 }
 
+/// 简化 JSON path 求值：`$.a.b[0].c`（点取字段 / 下标取数组；前导 `$.` 可省）。
+/// 命中返回子树；路径不存在/类型不符返回 None。
+fn json_path<'v>(root: &'v serde_json::Value, path: &str) -> Option<&'v serde_json::Value> {
+    let p = path.trim();
+    let p = p.strip_prefix('$').unwrap_or(p);
+    let p = p.strip_prefix('.').unwrap_or(p);
+    if p.is_empty() {
+        // `$` 或 `$.` 之外的空段（如 `""`/`"$"`）= 整根；尾随孤立 `.` 非法
+        if path.trim() == "$" || path.trim().is_empty() {
+            return Some(root);
+        }
+        return None;
+    }
+    let mut cur = root;
+    let mut rest = p;
+    while !rest.is_empty() {
+        // 前导 `.` 分隔（首轮无）
+        if let Some(stripped) = rest.strip_prefix('.') {
+            if stripped.is_empty() {
+                return None; // 尾随 `.` 非法
+            }
+            rest = stripped;
+        }
+        // 字段名段：到下一个 `.` 或 `[`
+        let seg_end = rest.find(['.', '[']).unwrap_or(rest.len());
+        if seg_end > 0 {
+            let key = &rest[..seg_end];
+            cur = cur.as_object().and_then(|o| o.get(key))?;
+            rest = &rest[seg_end..];
+        }
+        // 下标段：连续的 `[n]`（必须紧跟字段或前一 `]`）
+        while rest.starts_with('[') {
+            let close = rest.find(']')?;
+            let idx: usize = rest[1..close].trim().parse().ok()?;
+            cur = cur.as_array().and_then(|a| a.get(idx))?;
+            rest = &rest[close + 1..];
+        }
+        if !rest.is_empty() && !rest.starts_with('.') {
+            return None; // 残余非法语法
+        }
+    }
+    Some(cur)
+}
+
+/// 自定义工具响应治理（插件生态扩展）：JSON 响应按 select 摘取 → maxChars 截断。
+/// select 路径不存在返回明确错误（拼空串比报错更坑）；非 JSON 忽略 select。
+fn shape_response(tool: &crate::config::CustomTool, text: &str) -> ToolResult {
+    if let Some(sel) = tool
+        .response_select
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            return match json_path(&v, sel) {
+                Some(sub) => {
+                    let s = match sub {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    shape_truncate(tool, &s)
+                }
+                None => ToolResult::err(format!(
+                    "工具 {} 的响应不含 select 路径 {sel}（响应为 JSON 但路径不存在）",
+                    tool.name
+                )),
+            };
+        }
+        // 非 JSON：忽略 select，仅截断
+    }
+    shape_truncate(tool, text)
+}
+
+fn shape_truncate(tool: &crate::config::CustomTool, text: &str) -> ToolResult {
+    let cap = tool.response_max_chars.unwrap_or(8000);
+    let mut out: String = text.chars().take(cap).collect();
+    if out.len() < text.len() {
+        out.push_str("…（截断）");
+    }
+    ToolResult::ok(out)
+}
+
 /// shell 实参不允许出现的元字符（模板插值 + 引号包裹之外的最后防线）
 fn shell_unsafe_char(c: char) -> bool {
     matches!(
@@ -6544,6 +6718,8 @@ mod terminal_gate_tests {
                 "required": ["q"]
             }),
             agents: vec![],
+            response_max_chars: None,
+            response_select: None,
         }
     }
 
@@ -6597,6 +6773,121 @@ mod terminal_gate_tests {
         // 不应泄露内部路径
         assert!(!text.contains("/home/"), "不应泄露内部路径");
     }
+
+    /// 响应治理（插件生态扩展 1.1）：两级裁剪纯函数面。
+    fn shaped(max: Option<usize>, select: Option<&str>, _body: &str) -> crate::config::CustomTool {
+        let mut t = mk_custom("demo__shaped", "https://example.com");
+        t.response_max_chars = max;
+        t.response_select = select.map(str::to_string);
+        t
+    }
+
+    #[test]
+    fn 响应治理_select摘取与截断() {
+        let body = r#"{"data":{"items":[{"title":"a"},{"title":"b"}],"total":2}}"#;
+        // select 摘取数组 → 序列化字符串
+        let r = shape_response(&shaped(None, Some("$.data.items"), body), body);
+        assert!(r.ok, "{:?}", r.error);
+        assert!(r.output.contains("\"title\":\"a\""), "应含摘取内容: {}", r.output);
+        // select + maxChars 两级
+        let long = format!("{{\"msg\":\"{}\"}}", "x".repeat(5000));
+        let r = shape_response(&shaped(Some(100), Some("$.msg"), &long), &long);
+        assert!(r.ok);
+        assert!(r.output.chars().count() <= 100 + "…（截断）".chars().count(), "应受 maxChars 限制");
+    }
+
+    #[test]
+    fn 响应治理_路径缺失明确报错() {
+        let body = r#"{"data":1}"#;
+        let r = shape_response(&shaped(None, Some("$.missing.path"), body), body);
+        assert!(!r.ok, "路径不存在应失败");
+        assert!(r.error.unwrap_or_default().contains("$.missing.path"), "错误应含路径");
+    }
+
+    #[test]
+    fn 响应治理_非JSON忽略select() {
+        let body = "纯文本响应".repeat(20);
+        let r = shape_response(&shaped(Some(50), Some("$.a"), &body), &body);
+        assert!(r.ok, "非 JSON 应忽略 select 仅截断");
+        assert!(r.output.contains("…（截断）"));
+    }
+
+    #[test]
+    fn 响应治理_缺省口径不变() {
+        // 未声明任何字段：8000 截断（与迁移前行为一致）
+        let long = "y".repeat(9000);
+        let r = shape_response(&shaped(None, None, &long), &long);
+        assert!(r.ok);
+        assert!(r.output.starts_with('y') && r.output.chars().count() <= 8000 + "…（截断）".chars().count());
+    }
+
+    #[test]
+    fn json_path_基本语法() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"a":{"b":[{"c":1},{"c":2}],"d":"x"}}"#).unwrap();
+        assert_eq!(json_path(&v, "$.a.b[1].c").and_then(|x| x.as_i64()), Some(2));
+        assert_eq!(json_path(&v, "a.d").and_then(|x| x.as_str()), Some("x")); // 前导 $. 可省
+        assert_eq!(json_path(&v, "$.a").map(|x| x.is_object()), Some(true));
+        assert!(json_path(&v, "$.a.b[9]").is_none(), "数组越界");
+        assert!(json_path(&v, "$.x").is_none(), "字段不存在");
+        assert!(json_path(&v, "$.").is_none(), "尾随点非法");
+    }
+
+    /// 凭据变量（plugin-ecosystem 1.3）：注入往返 / 缺键拒绝 / config 工具无归属拒绝
+    #[tokio::test]
+    async fn 凭据变量_注入与缺键() {
+        let gw = gw_with_approval("off", 0);
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        // 注入凭据解析面
+        gw.set_plugin_credentials_resolver(Box::new(|pid, key| {
+            (pid == "demo" && key == "api_token").then(|| "sk-real-value".to_string())
+        }));
+        // 缺键：调用被拒、错误含键名与指引、不发请求
+        let mut t = mk_custom("demo__secure", "https://example.com/api");
+        t.headers.insert("Authorization".into(), "Bearer ${credentials.api_token}".into());
+        gw.append_plugin_tools(vec![t]);
+        // 先不配置凭据（resolver 只认 demo.api_token——配置上后应通过；
+        // 此处 resolver 已配置，验证注入路径：把 resolver 换成缺键版本再验拒绝）
+        gw.set_plugin_credentials_resolver(Box::new(|_, _| None));
+        let r = gw
+            .execute_named("a1", &sid, &[], "demo__secure", &serde_json::json!({}))
+            .await;
+        assert!(!r.ok, "缺键应拒绝");
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("api_token") && err.contains("凭据未配置"), "错误应含键名与指引：{err}");
+    }
+
+    #[test]
+    fn 凭据变量_解析纯函数() {
+        let gw = gw_with_approval("off", 0);
+        // 无 resolver：全部视为缺键
+        let (out, missing) = gw.resolve_credential_vars("p", "Bearer ${credentials.k1}");
+        assert_eq!(out, "Bearer ${credentials.k1}");
+        assert_eq!(missing, vec!["k1"]);
+        // resolver 命中：明文注入
+        gw.set_plugin_credentials_resolver(Box::new(|pid, key| {
+            (pid == "p" && key == "k1").then(|| "V".to_string())
+        }));
+        let (out, missing) = gw.resolve_credential_vars("p", "Bearer ${credentials.k1} tail ${credentials.k2}");
+        assert_eq!(out, "Bearer V tail ${credentials.k2}");
+        assert_eq!(missing, vec!["k2"]);
+        // 非法键名原样保留（不视为变量）
+        let (out, missing) = gw.resolve_credential_vars("p", "${credentials.ba d}");
+        assert_eq!(out, "${credentials.ba d}");
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn 凭据变量_无插件归属拒绝() {
+        let gw = gw_with_approval("off", 0);
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        let mut t = mk_custom("plain_tool", "https://example.com/${credentials.k}");
+        gw.append_plugin_tools(vec![t]);
+        let r = gw
+            .execute_named("a1", &sid, &[], "plain_tool", &serde_json::json!({}))
+            .await;
+        assert!(!r.ok, "config 工具无插件归属，引用变量应拒绝");
+        assert!(r.error.unwrap_or_default().contains("无插件归属"));
+    }
 }
 
 // ---------------------------------------------------------------- 会话级工具注入（video-watch-agent 组 2 单测）
@@ -6618,6 +6909,8 @@ mod session_tool_tests {
                 "properties": { "q": { "type": "string" } }
             }),
             agents: vec![],
+            response_max_chars: None,
+            response_select: None,
         }
     }
 

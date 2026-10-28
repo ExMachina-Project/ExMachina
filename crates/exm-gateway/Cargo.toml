@@ -25,6 +25,8 @@ futures-util.workspace = true
 chrono.workspace = true
 # webhook 通道出站回调
 reqwest.workspace = true
+# RSS 阅读插件（plugins/rss）：RSS2/Atom 解析
+quick-xml.workspace = true
 # 平台适配器 WS 客户端（napcat 正向 WS / qqbot 官方网关 wss）
 tokio-tungstenite.workspace = true
 async-trait.workspace = true
@@ -43,3 +45,6 @@ sha2 = "0.10"
 uuid.workspace = true
 # MCP HTTP 挂载接口测试（tests/mcp_http.rs）：直接调 Service::call
 tower = "0.5"
+# 插件安装流接口测试（plugin_admin）：构造 tar.gz 安装包
+tar.workspace = true
+flate2.workspace = true
