@@ -360,6 +360,12 @@ async fn read_session(
 
 /// 简报推送：订阅通道文本直发（push_channel_text；失败不阻塞）
 async fn push_digest(core: &Arc<Core>, targets: &[String], digest: &str) {
+    // 全局推送闸门（与定时任务结果推送同口径）：关闭时不产生任何通道消息
+    if !core.config().notify.enabled {
+        return;
+    }
+    let max_chars = core.config().notify.max_chars.max(50);
+    let digest: String = digest.chars().take(max_chars).collect();
     let text = format!("📬 RSS 简报\n{}", digest);
     for ch in platform::load_channels(core) {
         if !ch.enabled || !targets.contains(&ch.id) {

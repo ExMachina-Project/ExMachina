@@ -322,11 +322,8 @@ pub async fn post_install(
     let out = match st.core.plugin_install(&src, overwrite).await {
         Ok(o) => o,
         Err(e) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response()
+            let msg = e.to_string();
+            return (install_error_status(&msg), Json(json!({ "error": msg }))).into_response();
         }
     };
     spawn_process_if_any(&st, &out.id).await;
@@ -334,6 +331,22 @@ pub async fn post_install(
         "id": out.id, "version": out.version, "updated": out.updated, "installed": true,
     }))
     .into_response()
+}
+
+/// 安装/更新错误的 HTTP 状态分类（安装层错误是 String 口径——CLI 与端点共用，
+/// 按消息特征映射：冲突 409 / 版本不满足 422 / 来源拉取失败 502 / 其余 400）
+fn install_error_status(msg: &str) -> StatusCode {
+    if msg.contains("已安装") {
+        StatusCode::CONFLICT
+    } else if msg.contains("无安装来源记录") {
+        StatusCode::NOT_FOUND
+    } else if msg.contains("需要宿主") {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else if msg.contains("拉取失败") || msg.contains("克隆失败") || msg.contains("下载失败") {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::BAD_REQUEST
+    }
 }
 
 /// POST /api/plugins/:id/update：按 installation 来源记录更新（已是最新返回 updated=false）
@@ -345,11 +358,10 @@ pub async fn post_update(State(st): State<AppState>, Path(id): Path<String>) -> 
             }
             Json(json!({ "id": id, "updated": updated, "message": msg })).into_response()
         }
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            (install_error_status(&msg), Json(json!({ "error": msg }))).into_response()
+        }
     }
 }
 

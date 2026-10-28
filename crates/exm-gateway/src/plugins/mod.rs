@@ -132,8 +132,7 @@ pub fn spawn_all(core: Arc<Core>) {
     {
         let pm2 = pm.clone();
         let core2 = core.clone();
-        tokio::spawn(async move {
-            for e in pm2.list() {
+        tokio::spawn(async move {            for e in pm2.list() {
                 if e.form != "process" || !e.enabled || e.error.is_some() {
                     continue;
                 }
@@ -162,6 +161,35 @@ pub fn spawn_all(core: Arc<Core>) {
             }
         });
     }
+    // 进程插件健康检查循环（30s 节拍）：崩溃检测 + 退避重启 + 失败清 error 恢复呈现。
+    // supervisor 内部自带失败计数与退避（连续 5 次置 Error 停止重试）。
+    // 并发驱动：单个插件的重启（含退避等待）不阻塞其他插件的检查节拍。
+    let pm3 = pm.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            for (id, sup) in exm_core::plugin::bridge::all_processes() {
+                if sup.state() != exm_core::plugin::bridge::PluginState::Running {
+                    continue;
+                }
+                let pm4 = pm3.clone();
+                tokio::spawn(async move {
+                    let ok = sup.health_check().await;
+                    if !ok {
+                        // false = 未运行或重启失败（Backoff 重试中 / Error 待人工干预）
+                        let err =
+                            format!("进程异常（状态 {:?}；退避重试中或需人工重新启用）", sup.state());
+                        pm4.record_error(&id, Some(err));
+                    } else {
+                        // 恢复：error 清除 + 快照重取（进程已换新）
+                        let names = sup.tools_snapshot().iter().map(|t| t.name.clone()).collect();
+                        pm4.set_tools_snapshot(&id, names);
+                        pm4.record_error(&id, None);
+                    }
+                });
+            }
+        }
+    });
     // watcher：已启用插件的 WatchProvider 逐个拉起
     for p in pm.enabled_providers() {
         if let Some(w) = p.watch_provider() {
