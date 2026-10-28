@@ -430,7 +430,7 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
         let _ = task.await;
         tools::drop_act_gate(&sid);
         tools::drop_session(&sid);
-        let _ = core.orchestrator().tools.clear_session_tools(&sid);
+        core.orchestrator().tools.clear_session_tools(&sid);
         core.orchestrator().tools.set_session_step_budget(&sid, 0);
         anyhow::bail!("视频观看推理超时（600s）");
     }
@@ -444,7 +444,7 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
     };
     tools::drop_act_gate(&sid);
     tools::drop_session(&sid);
-    let _ = core.orchestrator().tools.clear_session_tools(&sid);
+    core.orchestrator().tools.clear_session_tools(&sid);
     core.orchestrator().tools.set_session_step_budget(&sid, 0);
     if out.trim().is_empty() {
         anyhow::bail!("智能体没有产出收束文本");
@@ -787,9 +787,9 @@ fn bili_cookie(ch: &Channel) -> String {
 }
 
 /// 通道级 buvid 缓存（共享单例）：(buvid3, Option<buvid4>)
-fn buvid_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
-    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>> =
-        OnceLock::new();
+type BuvidCache = std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>;
+fn buvid_cache() -> &'static BuvidCache {
+    static CACHE: OnceLock<BuvidCache> = OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
