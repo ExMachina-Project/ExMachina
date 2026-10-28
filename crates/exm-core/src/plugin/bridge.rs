@@ -722,6 +722,11 @@ pub fn process_by_id(id: &str) -> Option<std::sync::Arc<PluginSupervisor>> {
     PROCESS_REGISTRY.lock().get(id).cloned()
 }
 
+/// 全量注册表快照（健康检查循环批量驱动用）
+pub fn all_processes() -> Vec<(String, std::sync::Arc<PluginSupervisor>)> {
+    PROCESS_REGISTRY.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
 /// 摘除登记（插件禁用/卸载用）
 pub fn unregister_process(id: &str) {
     PROCESS_REGISTRY.lock().remove(id);
@@ -1037,6 +1042,26 @@ mod supervisor_tests {
         assert_eq!(s.state(), PluginState::Stopped);
         // 进程句柄已回收（is_dead 需 process 已置 None；这里验证状态即可——
         // 无孤儿由 kill_on_drop + 显式 kill 双保险保证）
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 全局注册表：登记/按 id 取/全量快照/摘除（网关健康检查循环的依赖面）
+    #[tokio::test]
+    async fn 注册表_登记取回与摘除() {
+        let (s, dir) = mock_sup("reg").await;
+        let test_id = format!("reg-test-{}", crate::types::new_id());
+        register_process(&test_id, s.clone());
+        assert!(process_by_id(&test_id).is_some(), "登记后可按 id 取回");
+        assert!(
+            all_processes().iter().any(|(id, _)| id == &test_id),
+            "全量快照包含已登记项"
+        );
+        // 重复登记覆盖（重启场景同 id 新实例）
+        register_process(&test_id, s.clone());
+        assert_eq!(all_processes().iter().filter(|(id, _)| id == &test_id).count(), 1);
+        unregister_process(&test_id);
+        assert!(process_by_id(&test_id).is_none(), "摘除后取不回");
+        assert!(all_processes().iter().all(|(id, _)| id != &test_id));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
