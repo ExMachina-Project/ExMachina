@@ -134,8 +134,10 @@ pub fn version_newer(a: &str, b: &str) -> bool {
     false
 }
 
-/// 版本比较（简化 SemVer：按点分段数字比较，预发布后缀截断；解析失败视为兼容）
-fn version_ok(exm_min: &str, host: &str) -> bool {    let parse = |s: &str| -> Vec<u64> {
+/// 版本比较（简化 SemVer：按点分段数字比较，预发布后缀截断；解析失败视为兼容）。
+/// pub 化：CLI/网关的索引条目门槛判断与装载校验共用同一 ≥ 语义。
+pub fn version_ok(exm_min: &str, host: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
         // 先整体截掉预发布/构建后缀（-rc.1 / +build），再按点分段
         let core = s.split(['-', '+']).next().unwrap_or(s);
         core.split('.')
@@ -742,6 +744,18 @@ mod tests {
         assert!(!version_ok("0.6.0", "0.5.2"));
         assert!(version_ok("", "0.5.2"));
         assert!(version_ok("1.0.0-rc.1", "1.0.0"));
+    }
+
+    /// 索引门槛场景回归：min 与宿主相等必须放行（version_newer 严格高于语义曾致误拒）
+    #[test]
+    fn 版本门槛_相等放行_严格更高才拒() {
+        let host = "0.5.3";
+        // 曾经的 bug 形态：version_newer(&host, &exm_min) 相等时 false → 误拒
+        assert!(!version_newer(host, "0.5.3"), "相等不构成严格更高");
+        assert!(version_ok("0.5.3", host), "相等必须满足 ≥ 门槛");
+        assert!(!version_ok("0.5.4", host), "要求高于宿主才拒");
+        assert!(version_ok("0.5.2", host));
+        assert!(version_newer("0.5.4", host));
     }
 
     #[test]

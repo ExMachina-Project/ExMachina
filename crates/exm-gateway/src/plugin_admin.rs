@@ -290,10 +290,12 @@ pub async fn post_install(
                 match entries.iter().find(|e| e.id == source) {
                     Some(hit) => {
                         if !hit.exm_min.trim().is_empty()
-                            && !exm_core::plugin::version_newer(&host, &hit.exm_min)
+                            && !exm_core::plugin::version_ok(&hit.exm_min, &host)
                         {
+                            // 412 而非 422：422 是 axum serde 拒绝的固定状态码，
+                            // 会被请求体改写中间件截获重写成「请求体字段有误」
                             return (
-                                StatusCode::UNPROCESSABLE_ENTITY,
+                                StatusCode::PRECONDITION_FAILED,
                                 Json(json!({ "error": format!("插件 {} 需要宿主 ≥ {}，当前 {}", hit.id, hit.exm_min, host) })),
                             )
                                 .into_response();
@@ -341,7 +343,8 @@ fn install_error_status(msg: &str) -> StatusCode {
     } else if msg.contains("无安装来源记录") {
         StatusCode::NOT_FOUND
     } else if msg.contains("需要宿主") {
-        StatusCode::UNPROCESSABLE_ENTITY
+        // 412 而非 422：422 会被 axum serde 拒绝改写中间件重写
+        StatusCode::PRECONDITION_FAILED
     } else if msg.contains("拉取失败") || msg.contains("克隆失败") || msg.contains("下载失败") {
         StatusCode::BAD_GATEWAY
     } else {
