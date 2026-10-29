@@ -46,7 +46,40 @@
 - 批准（Popconfirm 二次确认）→ 卡片切回放结果视图（逐条 ✅/❌ + 成功/失败计数摘要）；拒绝 → 清单保留、卡片变灰（plan-card-done）。
 - 切会话即重置 plan 状态并拉取新会话清单。
 
-## 5. 遗留与后续
+## 5. 部署实测记录（2026-10-30，容器重建后实机走查）
 
-- **部署实测**：容器重建后按 `docs/验收-插件生态.md` 同口径走一轮真实 LLM 走查（计划模式开关 → 写拦截 → 卡片 → 批准回放；terminal 新命令实机验证 jq/sqlite3 可用性）。
+镜像重建（含 Dockerfile 补 jq/sqlite3/xxd）+ 巡检 26/26 全过后，按走查单执行：
+
+### A 组 terminal 白名单（machina 直聊）
+
+| # | 场景 | 结果 |
+|---|---|---|
+| A1 | `jq --version` | ✅ 免审批直执，回传 `jq-1.6` |
+| A2 | `sqlite3 --version` | ✅ 直执回传 `3.40.1` |
+| A3a | workspace 沙箱 `curl example.com` | ✅ 直执返回 200，无审批单（bwrap 隔离兜底） |
+| A3b | strict 沙箱（未开联网）同命令 | ✅ 转审批单（pending=1）；批准后系统代执行 status=executed result=200 |
+| A4 | 后台 `sleep 60` → `op=list` | ✅ 返回 `taskId=bg-cf95ade6 [运行中（已 1s）]`——跨轮次寻址贯通 |
+
+### B 组 计划模式全链路（REST 层模拟 WebUI 行为）
+
+| # | 场景 | 结果 |
+|---|---|---|
+| B1 | setMode plan | ✅ mode: plan |
+| B2 | edit + terminal 写操作 | ✅ 双条目拦截（args 完整：old/new_string、command），清单 count=2 |
+| B3 | 批准回放 | ✅ 2/2 ok；文件实际改为 line2 done；会话切回 execute、清单清空 |
+| B4 | 拒绝保留 | ✅ kept=1、line3 未动、仍在 plan 模式 |
+| B5 | 跨端审批单联动 | ✅ `[plan] 会话计划清单` 审批单随 REST 批准收口为 executed（CLI/WebUI/通道共享状态） |
+
+### C 组 检索与图像
+
+| # | 场景 | 结果 |
+|---|---|---|
+| C1 | grep contextLines=2 | ✅ 输出 `t.txt:2:> line2 target` + 上下文行号 + 块间 `t.txt—` 分隔（模型如实贴出，块语义正确） |
+| C2 | read shot.png | ✅ 返回 `图像文件：shot.png（png，68 字节）` + images 回灌声明（视觉模型判定链路由本地测试覆盖；当前部署模型非视觉时不回灌属预期） |
+
+走查中 machina 主动指出 grep 输出的「块分隔」形态并如实报告未收到图像回灌——不猜测不编造，PROMPT 协议生效的旁证。
+
+## 6. 遗留与后续
+
 - **spawn 子智能体并行化**（异步任务面）与 **TodoWrite 任务清单工具**未纳入本轮，作为下轮候选。
+- read 图像的视觉回灌在部署环境的端到端体验（生成截图→模型描述画面）待视觉模型接入后走查。
