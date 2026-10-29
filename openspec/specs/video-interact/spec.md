@@ -7,7 +7,7 @@
 
 ### Requirement: 互动动作工具
 
-`video__act(videoId, action)`：action 为评论（text）或回复（text + 目标评论 id，目标必须来自本会话已见评论）。工具返回执行结果（成功回执或结构化拒绝原因）。动作是否允许由通道配置面（comment/reply 开关）与闸门共同决定。
+`video__act(videoId, action)`：action 为评论（text）或回复（text + 目标评论 id，目标必须来自本会话已见评论）。工具返回执行结果（成功回执或结构化拒绝原因）。动作是否允许 MUST 由通道配置面（comment/reply 开关、actRole 准入口径）与闸门共同决定：自动观看轮次会话沿用轮次闸门；非轮次会话（点播）先按会话来源角色过 actRole 判权，再进同一闸门链。
 
 #### Scenario: 发表评论往返
 - **WHEN** 智能体产出合规评论并调用 act
@@ -16,6 +16,10 @@
 #### Scenario: 回复目标必须真实见过
 - **WHEN** 智能体回复的目标 id 不在本会话已获取的评论集合内
 - **THEN** 动作被拒绝并提示「目标评论未见」，防止编造 id
+
+#### Scenario: 点播会话判权后同闸门
+- **WHEN** 非轮次会话的 act 通过 actRole 判权
+- **THEN** 配额计数、字数清洗、dry-run 分流、审批模式与轮次会话完全同口径执行，点播不构成绕过
 
 ### Requirement: 系统硬闸门
 
