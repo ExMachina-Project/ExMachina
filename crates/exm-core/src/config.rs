@@ -620,6 +620,8 @@ impl PluginManifest {
             || self.channel.is_some()
             || self.watch.is_some()
             || !self.resources.is_empty()
+            // process 形态：工具在握手后动态发现，清单天然无静态能力声明
+            || self.is_process()
     }
 
     /// 是否进程形态（声明了 process 且给了可执行命令）
