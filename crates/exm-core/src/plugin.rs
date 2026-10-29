@@ -504,6 +504,11 @@ impl PluginManager {
         self.entries.read().get(id).cloned()
     }
 
+    /// 按 id 取 provider（工具面回接/管理端点诊断用）
+    pub fn provider_of(&self, id: &str) -> Option<Arc<dyn PluginProvider>> {
+        self.providers.read().get(id).cloned()
+    }
+
     /// 当前启用的 provider 清单（能力面枚举）
     pub fn enabled_providers(&self) -> Vec<Arc<dyn PluginProvider>> {
         let entries = self.entries.read();
