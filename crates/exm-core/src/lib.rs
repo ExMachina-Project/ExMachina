@@ -200,6 +200,22 @@ impl Core {
         if !plugin_tools.is_empty() {
             orch.tools.append_plugin_tools(plugin_tools);
         }
+        // 回接：进程插件（T2）运行时工具面重新注册——新 gateway 是空表，
+        // 不回接则任何配置热更新（启停插件/保存凭据/安装写入）都让进程工具
+        // 从会话面消失（provider 持 supervisor 句柄，进程不死、只丢注册）。
+        {
+            let pm = self.plugins.read().clone();
+            for e in pm.list() {
+                if e.form != "process" || !e.enabled {
+                    continue;
+                }
+                if let Some(p) = pm.provider_of(&e.manifest.id) {
+                    if let Some(tp) = p.tool_provider() {
+                        orch.tools.register_plugin_runtime_tools(&e.manifest.id, tp);
+                    }
+                }
+            }
+        }
         *self.orchestrator.write() = Arc::new(orch);
         *self.config.write() = Arc::new(cfg);
         Ok(())
