@@ -152,6 +152,7 @@ export function ChatView(): React.ReactElement {
     loadGroups,
     sessionsLoaded,
     plan, planApplied, planPending, decidePlan, setPlanMode,
+    todo,
   } = useExm();
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
@@ -838,7 +839,28 @@ export function ChatView(): React.ReactElement {
             ]}
           />
           {plan?.mode === "plan" && <span className="plan-mode-hint">{t("plan.modeHint")}</span>}
+          {/* 任务清单进度（spec agent-todo）：todo.updated 实时刷新 */}
+          {todo && todo.count > 0 && (
+            <span className={`todo-progress${todo.allDone ? " todo-all-done" : ""}`}>
+              <span className="todo-progress-label">📋 {t("todo.progress", { done: String(todo.doneCount), total: String(todo.count) })}</span>
+              <span className="todo-bar">
+                <span
+                  className="todo-bar-fill"
+                  style={{ width: `${Math.round((todo.doneCount / todo.count) * 100)}%` }}
+                />
+              </span>
+            </span>
+          )}
         </div>
+        {todo && todo.count > 0 && (
+          <div className="todo-strip">
+            {todo.items.map((it) => (
+              <span key={it.id} className={`todo-chip todo-${it.status}`}>
+                {it.status === "done" ? "✅" : it.status === "in_progress" ? "🔄" : "⬜"} {it.content}
+              </span>
+            ))}
+          </div>
+        )}
         {plan && (plan.items.length > 0 || planPending) && (
           <PlanCard
             info={plan}

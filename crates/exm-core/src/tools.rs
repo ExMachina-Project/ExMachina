@@ -674,6 +674,26 @@ pub struct BgTask {
     pub abort: tokio::task::AbortHandle,
 }
 
+/// 后台 spawn 子任务终态（spec: subagent-spawn 异步并行）
+#[derive(Debug, Clone)]
+pub enum SpawnBgState {
+    Running,
+    Done(String),
+    Failed(String),
+    Timeout,
+}
+
+/// 后台 spawn 注册条目：终态暂存 + 已读标记（未回收提醒注入用）
+pub struct SpawnBgTask {
+    pub spawn_id: String,
+    pub task_preview: String,
+    pub session: String,
+    pub started: Instant,
+    pub state: parking_lot::RwLock<SpawnBgState>,
+    /// 终态是否已被 status/list 读取（未读的终态进系统提示提醒）
+    pub read: parking_lot::RwLock<bool>,
+}
+
 /// 执行一条钩子命令（同步、30s 上界）；返回 (是否成功, 输出摘要)。
 /// 钩子在工作区内执行，环境变量注入上下文（工具名/参数/agent/工作区）。
 pub fn run_hook_command(hook: &str, cwd: &Path, envs: &[(&str, &str)]) -> (bool, String) {
@@ -1327,6 +1347,9 @@ pub struct ToolGateway {
     spawn_timeout_secs: u64,
     /// 后台任务注册表（长命令：启动后返回 id，可轮询/终止）
     background: Arc<parking_lot::Mutex<std::collections::HashMap<String, BgTask>>>,
+    /// 后台 spawn 子任务注册表（spec: subagent-spawn 异步并行）：
+    /// background=true 派生后立即返回，终态暂存供 op=status/list 回收
+    spawns_bg: Arc<parking_lot::Mutex<std::collections::HashMap<String, SpawnBgTask>>>,
     /// 浏览器配置与会话（懒启动常驻；串行化访问）
     browser_cfg: crate::config::BrowserConfig,
     browser: Arc<tokio::sync::Mutex<Option<crate::browser::BrowserSession>>>,
@@ -1402,6 +1425,7 @@ impl ToolGateway {
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
             background: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            spawns_bg: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             browser_cfg: crate::config::BrowserConfig::default(),
             browser: Arc::new(tokio::sync::Mutex::new(None)),
             computer_cfg: crate::config::ComputerUseConfig::default(),
@@ -2262,14 +2286,25 @@ impl ToolGateway {
             },
             "required": ["action"]
         }));
-        push(ToolName::Spawn, "派生子智能体执行封闭子任务：子智能体在独立上下文（不继承本会话历史）中执行任务描述，完成后返回结论摘要。适合全库检索、批量调研等可独立完成的工作。并发上限与超时受控；子智能体不可再派生（单层）", serde_json::json!({
+        push(ToolName::Spawn, "派生子智能体执行封闭子任务：子智能体在独立上下文（不继承本会话历史）中执行任务描述，完成后返回结论摘要。适合全库检索、批量调研等可独立完成的工作。并发上限与超时受控；子智能体不可再派生（单层）。background=true 立即返回 spawnId 后台执行（期间可继续对话/派生其它子任务），用 op=status/list 回收结果", serde_json::json!({
             "type": "object",
             "properties": {
                 "task": { "type": "string", "description": "自包含的任务书：目标、范围、期望产出（子智能体看不到本会话，必须写全背景）" },
                 "tools": { "type": "array", "items": { "type": "string", "enum": ["read", "edit", "patch", "grep", "glob", "filesystem", "terminal", "git", "web_search", "web_fetch"] }, "description": "子智能体工具白名单（缺省只读：read/grep/glob/web_fetch）" },
-                "timeoutSecs": { "type": "integer", "description": "子任务超时（秒；默认 300，上限 1800）" }
+                "timeoutSecs": { "type": "integer", "description": "子任务超时（秒；默认 300，范围 5-1800）" },
+                "background": { "type": "boolean", "description": "true = 后台执行：立即返回 spawnId，结果经 op=status 查询（长任务并行时用）" },
+                "op": { "type": "string", "enum": ["status", "list"], "description": "后台子任务回收：status 需配 spawnId；list 列当前会话全部子任务" },
+                "spawnId": { "type": "string", "description": "op=status 时指定子任务" }
             },
-            "required": ["task"]
+            "required": []
+        }));
+        push(ToolName::Todo, "维护会话任务清单（长任务自组织）：op=write 一次性全量重写整个清单（不是追加——每次都写全所有条目与最新状态）；清单会注入后续每轮上下文，让你随时掌握进度全景。任务开始时建清单、每完成一项立即更新状态、全部完成后收尾", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["write", "list"], "description": "默认 write" },
+                "items": { "type": "array", "items": { "type": "object", "properties": { "content": { "type": "string" }, "status": { "type": "string", "enum": ["pending", "in_progress", "done"] } }, "required": ["content"] }, "description": "全量条目（write 时必填；空数组 = 清空清单）" }
+            },
+            "required": []
         }));
         push(ToolName::ContextCompact, "主动压缩会话上下文：把最近窗口之外的更早历史压成滚动摘要（原文保留在会话记录中，仅上下文视图替换）。何时调用由你判断：上下文已冗长、早期细节不再关键、即将进入需要大量新鲜上下文的长任务阶段。压缩是增量的，可多次调用", serde_json::json!({
             "type": "object",
@@ -2744,6 +2779,7 @@ impl ToolGateway {
             ToolName::MemoryLink => self.tool_memory_link(agent_id, session_id, args),
             ToolName::Git => self.tool_git(agent_id, session_id, args).await,
             ToolName::Spawn => self.tool_spawn(agent_id, session_id, args).await,
+            ToolName::Todo => self.tool_todo(session_id, args),
             ToolName::ContextCompact => unreachable!("context_compact 在 execute_named 预分发"),
         }
     }
@@ -4312,6 +4348,16 @@ impl ToolGateway {
         session_id: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
+        // 后台回收面（spec: subagent-spawn 异步并行）：status/list 不走派生流程，
+        // 也不依赖执行器装配（只读注册表）
+        match args.get("op").and_then(|v| v.as_str()).unwrap_or("") {
+            "status" => {
+                let sid = args.get("spawnId").and_then(|v| v.as_str()).unwrap_or("");
+                return self.spawn_bg_status(session_id, sid);
+            }
+            "list" => return self.spawn_bg_list(session_id),
+            _ => {}
+        }
         let Some(exec) = self.spawn_executor.read().clone() else {
             return ToolResult::err("spawn 执行器未装配（运行时未就绪）");
         };
@@ -4345,7 +4391,7 @@ impl ToolGateway {
             .get("timeoutSecs")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.spawn_timeout_secs)
-            .clamp(10, 1800);
+            .clamp(5, 1800);
         let spawn_id = format!("sp-{}", &crate::types::new_id()[..8]);
         // 可观测：子任务启动事件
         self.emit_and_persist(CoreEvent {
@@ -4355,16 +4401,77 @@ impl ToolGateway {
                 "spawnId": spawn_id, "agentId": agent_id,
                 "taskPreview": task.chars().take(120).collect::<String>(),
                 "tools": requested.iter().map(|t| t.key()).collect::<Vec<_>>(),
+                "background": args.get("background").and_then(|v| v.as_bool()).unwrap_or(false),
             }),
         });
         // 并发闸：try_acquire 即时反馈（排队语义由主智能体重试承担）
         let sem = self.spawn_semaphore.clone();
-        let Ok(_permit) = sem.clone().try_acquire_owned() else {
+        let Ok(permit) = sem.clone().try_acquire_owned() else {
             return ToolResult::err(format!(
                 "子智能体并发已达上限（{}）：请等待在跑子任务完成后再派生",
                 sem.available_permits()
             ));
         };
+        // 后台模式（spec: subagent-spawn）：立即返回 spawnId，许可随任务体持有至终结；
+        // 终态写注册表 + spawn.finished 事件，主智能体期间可继续对话/派生/调工具
+        if args
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let agent_owned = agent_id.to_string();
+            let registry = self.spawns_bg.clone();
+            let events = self.events.clone();
+            let session = session_id.to_string();
+            let task_preview: String = task.chars().take(120).collect();
+            registry.lock().insert(
+                spawn_id.clone(),
+                SpawnBgTask {
+                    spawn_id: spawn_id.clone(),
+                    task_preview: task_preview.clone(),
+                    session: session.clone(),
+                    started: Instant::now(),
+                    state: parking_lot::RwLock::new(SpawnBgState::Running),
+                    read: parking_lot::RwLock::new(false),
+                },
+            );
+            let task_owned = task.to_string();
+            let sid_evt = spawn_id.clone();
+            let _handle = tokio::spawn(async move {
+                let _p = permit; // 许可随任务体存活，终结自动释放
+                let fut = exec(&agent_owned, &session, task_owned.as_str(), requested);
+                let (state, status, preview) = match tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout),
+                    fut,
+                )
+                .await
+                {
+                    Ok(Ok(text)) => {
+                        let p: String = text.chars().take(160).collect();
+                        (SpawnBgState::Done(text), "done", p)
+                    }
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        (SpawnBgState::Failed(msg.clone()), "failed", msg)
+                    }
+                    Err(_) => (SpawnBgState::Timeout, "timeout", String::new()),
+                };
+                if let Some(t) = registry.lock().get(&sid_evt) {
+                    *t.state.write() = state;
+                }
+                let _ = events.send(CoreEvent {
+                    kind: "spawn.finished".into(),
+                    session_id: session,
+                    payload: serde_json::json!({
+                        "spawnId": sid_evt, "status": status, "background": true,
+                        "summaryPreview": preview,
+                    }),
+                });
+            });
+            return ToolResult::ok(format!(
+                "子任务已后台启动：spawnId={spawn_id}\n任务：{task_preview}\n用 spawn(op=\"status\", spawnId=\"{spawn_id}\") 查询结果；spawn(op=\"list\") 列全部。完成后下一轮上下文会自动提醒。"
+            ));
+        }
         let task_owned = task.to_string();
         let fut = exec(agent_id, session_id, task_owned.as_str(), requested);
         let result = match tokio::time::timeout(std::time::Duration::from_secs(timeout), fut).await
@@ -4777,6 +4884,210 @@ impl ToolGateway {
         }
         drop(guard);
         ToolResult::ok(out)
+    }
+
+    /// 后台 spawn 单查（spec: subagent-spawn）：终态全文返回并置已读（提醒不再注入）
+    fn spawn_bg_status(&self, session_id: &str, spawn_id: &str) -> ToolResult {
+        if spawn_id.is_empty() {
+            return ToolResult::err("op=status 需要 spawnId");
+        }
+        let guard = self.spawns_bg.lock();
+        let Some(t) = guard.get(spawn_id) else {
+            return ToolResult::err(format!("后台子任务不存在: {spawn_id}（是否同步派生？同步结果直接在原调用返回）"));
+        };
+        if t.session != session_id {
+            return ToolResult::err(format!("后台子任务不属于当前会话: {spawn_id}"));
+        }
+        let elapsed = t.started.elapsed().as_secs();
+        let out = match &*t.state.read() {
+            SpawnBgState::Running => format!(
+                "子任务 {spawn_id} 运行中（已 {elapsed}s）\n任务：{}\n请稍后再查。",
+                t.task_preview
+            ),
+            SpawnBgState::Done(text) => {
+                *t.read.write() = true;
+                format!("子任务 {spawn_id} 已完成（耗时 {elapsed}s）：\n{text}")
+            }
+            SpawnBgState::Failed(msg) => {
+                *t.read.write() = true;
+                format!("子任务 {spawn_id} 失败（耗时 {elapsed}s）：{msg}")
+            }
+            SpawnBgState::Timeout => {
+                *t.read.write() = true;
+                format!("子任务 {spawn_id} 超时被终止（{elapsed}s）")
+            }
+        };
+        drop(guard);
+        ToolResult::ok(out)
+    }
+
+    /// 后台 spawn 清单（spec: subagent-spawn）：本会话全部子任务，最新在前；
+    /// 终态条目顺带置已读（list 全量浏览即视为收讫）
+    fn spawn_bg_list(&self, session_id: &str) -> ToolResult {
+        let mut guard = self.spawns_bg.lock();
+        let mut rows: Vec<&SpawnBgTask> = guard
+            .values()
+            .filter(|t| t.session == session_id)
+            .collect();
+        if rows.is_empty() {
+            return ToolResult::ok("当前会话无后台子任务。");
+        }
+        rows.sort_by_key(|t| std::cmp::Reverse(t.started));
+        let mut out = format!("后台子任务（{} 个，最新在前）：\n", rows.len());
+        for (i, t) in rows.iter().enumerate() {
+            let elapsed = t.started.elapsed().as_secs();
+            let status = match &*t.state.read() {
+                SpawnBgState::Running => format!("运行中（已 {elapsed}s）"),
+                SpawnBgState::Done(_) => {
+                    *t.read.write() = true;
+                    format!("已完成（耗时 {elapsed}s）——用 op=status 取结果")
+                }
+                SpawnBgState::Failed(_) => {
+                    *t.read.write() = true;
+                    format!("失败（耗时 {elapsed}s）——用 op=status 取详情")
+                }
+                SpawnBgState::Timeout => {
+                    *t.read.write() = true;
+                    format!("超时终止（{elapsed}s）")
+                }
+            };
+            out.push_str(&format!(
+                "{}. [spawnId={}] {} [{}]\n",
+                i + 1,
+                t.spawn_id,
+                t.task_preview,
+                status
+            ));
+        }
+        // 容量上界：每会话最近 50 条，超出丢最旧（防注册表无限膨胀）
+        let mut by_session: Vec<(String, Instant)> = guard
+            .values()
+            .filter(|t| t.session == session_id)
+            .map(|t| (t.spawn_id.clone(), t.started))
+            .collect();
+        if by_session.len() > 50 {
+            by_session.sort_by_key(|(_, s)| *s);
+            for (id, _) in by_session.drain(..by_session.len() - 50) {
+                guard.remove(&id);
+            }
+        }
+        drop(guard);
+        ToolResult::ok(out)
+    }
+
+    /// 未回收提醒（spec: subagent-spawn）：本会话已终结未被 status/list 读取的
+    /// 后台子任务终态摘要，注入下一轮系统提示（限 5 条，最新在前）
+    pub fn spawn_pending_note(&self, session_id: &str) -> Option<String> {
+        let guard = self.spawns_bg.lock();
+        // 拥有式收集：preview 转成 String，避免注册表锁内借用外泄
+        let mut unread: Vec<(std::time::Instant, String, String, usize)> = Vec::new();
+        for t in guard.values() {
+            if t.session != session_id || *t.read.read() {
+                continue;
+            }
+            let elapsed = t.started.elapsed().as_secs() as usize;
+            match &*t.state.read() {
+                SpawnBgState::Running => continue,
+                SpawnBgState::Done(text) => {
+                    let preview: String = text.chars().take(200).collect();
+                    unread.push((t.started, t.spawn_id.clone(), preview, elapsed));
+                }
+                SpawnBgState::Failed(msg) => {
+                    let preview: String = msg.chars().take(200).collect();
+                    unread.push((t.started, t.spawn_id.clone(), preview, elapsed));
+                }
+                SpawnBgState::Timeout => {
+                    unread.push((t.started, t.spawn_id.clone(), "超时被终止".into(), elapsed));
+                }
+            }
+        }
+        drop(guard);
+        if unread.is_empty() {
+            return None;
+        }
+        unread.sort_by_key(|(s, _, _, _)| std::cmp::Reverse(*s));
+        let mut out = String::from("## 后台子任务结果待收\n");
+        for (_, id, preview, elapsed) in unread.iter().take(5) {
+            out.push_str(&format!("- [{id}]（{elapsed}s）：{preview}\n"));
+        }
+        if unread.len() > 5 {
+            out.push_str(&format!("- …（另有 {} 个未列出）\n", unread.len() - 5));
+        }
+        out.push_str("用 spawn(op=\"status\", spawnId=...) 收取全文。");
+        Some(out)
+    }
+    /// 只读语义面（不进审批闸门）；write 后发 todo.updated 事件。
+    fn tool_todo(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
+        let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("write");
+        match op {
+            "list" => {
+                let items = crate::todo::list_items(session_id);
+                if items.is_empty() {
+                    return ToolResult::ok("当前会话无任务清单。");
+                }
+                let done = items.iter().filter(|t| t.status == "done").count();
+                let body = items
+                    .iter()
+                    .map(|t| {
+                        let mark = match t.status.as_str() {
+                            "done" => "✅",
+                            "in_progress" => "🔄",
+                            _ => "⬜",
+                        };
+                        format!("- {mark} {}", t.content)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ToolResult::ok(format!("任务清单（{done}/{} 完成）：\n{body}", items.len()))
+            }
+            "write" => {
+                let Some(arr) = args.get("items").and_then(|v| v.as_array()) else {
+                    return ToolResult::err("op=write 需要 items 数组（全量条目；空数组 = 清空）");
+                };
+                let mut parsed: Vec<(String, String)> = Vec::with_capacity(arr.len());
+                for (i, it) in arr.iter().enumerate() {
+                    let content = it
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if content.is_empty() {
+                        return ToolResult::err(format!(
+                            "第 {} 条 content 为空（每条必须有内容；空 items 清单请传空数组）",
+                            i + 1
+                        ));
+                    }
+                    let status = it
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pending")
+                        .to_string();
+                    parsed.push((content, status));
+                }
+                let items = crate::todo::write(session_id, parsed);
+                let done = items.iter().filter(|t| t.status == "done").count();
+                let all = items.is_empty() || done == items.len();
+                self.emit_and_persist(CoreEvent {
+                    kind: "todo.updated".into(),
+                    session_id: session_id.to_string(),
+                    payload: serde_json::json!({
+                        "count": items.len(),
+                        "doneCount": done,
+                        "allDone": all,
+                        "items": items,
+                    }),
+                });
+                if items.is_empty() {
+                    return ToolResult::ok("清单已清空。");
+                }
+                ToolResult::ok(format!(
+                    "清单已更新（{done}/{} 完成）。\n后续每轮上下文都会携带当前清单；全部完成后建议收尾总结。",
+                    items.len()
+                ))
+            }
+            other => ToolResult::err(format!("未知 op：{other}（支持 write/list）")),
+        }
     }
 
     /// Computer Use 工具：截屏（只读）与键鼠动作（过审批闸门 + 动作节流）。

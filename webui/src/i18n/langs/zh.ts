@@ -465,6 +465,7 @@ export const zh = {
   "plan.doneHint": "已按计划执行完毕；如需调整请继续对话生成新计划。",
   "plan.foldMore": "展开全部（{n} 行）",
   "plan.foldLess": "收起",
+  "todo.progress": "任务 {done}/{total}",
   "models.followGlobalOption": "跟随全局默认（当前生效提供商）",
   "models.followGlobalShort": "跟随全局",
   "models.noModel": "未指定模型",
