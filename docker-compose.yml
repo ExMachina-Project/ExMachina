@@ -23,6 +23,9 @@ services:
       - EXM_AUTH_KEY=${EXM_AUTH_KEY:-}
     volumes:
       - exmachina-state:/app/.exmachina
+      # 插件目录独立卷：进程/声明式插件安装产物持久化（容器重建不丢，
+      # 与 .exmachina 分离——镜像升级不连带插件目录语义）
+      - exmachina-plugins:/app/plugins
       # 编成数据挂载（组/智能体/技能/提示词可持久化编辑）
       - ./entities:/app/entities
       - ./skills:/app/skills
@@ -36,3 +39,4 @@ services:
 
 volumes:
   exmachina-state:
+  exmachina-plugins:
