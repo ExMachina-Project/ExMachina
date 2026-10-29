@@ -189,33 +189,8 @@ impl Core {
             self.remote(),
             Some(self.cron.clone()),
         )?;
-        // 回接：插件声明式工具并入新工具网关（与 with_config 同口径）
-        let plugin_tools: Vec<_> = self
-            .plugins
-            .read()
-            .declarative_tools()
-            .into_iter()
-            .map(|(_, _, t)| t)
-            .collect();
-        if !plugin_tools.is_empty() {
-            orch.tools.append_plugin_tools(plugin_tools);
-        }
-        // 回接：进程插件（T2）运行时工具面重新注册——新 gateway 是空表，
-        // 不回接则任何配置热更新（启停插件/保存凭据/安装写入）都让进程工具
-        // 从会话面消失（provider 持 supervisor 句柄，进程不死、只丢注册）。
-        {
-            let pm = self.plugins.read().clone();
-            for e in pm.list() {
-                if e.form != "process" || !e.enabled {
-                    continue;
-                }
-                if let Some(p) = pm.provider_of(&e.manifest.id) {
-                    if let Some(tp) = p.tool_provider() {
-                        orch.tools.register_plugin_runtime_tools(&e.manifest.id, tp);
-                    }
-                }
-            }
-        }
+        // 回接：插件工具面（T1 声明式 + T2 进程运行时）挂到新 orchestrator
+        self.rebind_plugin_tools(&orch);
         *self.orchestrator.write() = Arc::new(orch);
         *self.config.write() = Arc::new(cfg);
         Ok(())
@@ -1061,8 +1036,36 @@ impl Core {
     fn rebuild_orchestrator(&self) -> anyhow::Result<()> {
         let cfg = self.config();
         let orch = build_orchestrator(&cfg, &self.store, &self.registry, &self.events, &self.memory, Some(self.mcp.clone()), self.remote(), Some(self.cron.clone()))?;
+        self.rebind_plugin_tools(&orch);
         *self.orchestrator.write() = Arc::new(orch);
         Ok(())
+    }
+
+    /// 把插件工具面（T1 声明式 + T2 进程运行时）重新挂到新 orchestrator。
+    /// 所有换 orchestrator 的路径（apply_config / set_remote 等）重建后必调——
+    /// 否则进程工具的会话面注册随旧 ToolGateway 一起丢失。
+    fn rebind_plugin_tools(&self, orch: &Orchestrator) {
+        let pm = self.plugins.read().clone();
+        // T1：声明式内联工具
+        let plugin_tools: Vec<_> = pm
+            .declarative_tools()
+            .into_iter()
+            .map(|(_, _, t)| t)
+            .collect();
+        if !plugin_tools.is_empty() {
+            orch.tools.append_plugin_tools(plugin_tools);
+        }
+        // T2：进程运行时工具（provider 持 supervisor 句柄，重挂即恢复会话面）
+        for e in pm.list() {
+            if e.form != "process" || !e.enabled {
+                continue;
+            }
+            if let Some(p) = pm.provider_of(&e.manifest.id) {
+                if let Some(tp) = p.tool_provider() {
+                    orch.tools.register_plugin_runtime_tools(&e.manifest.id, tp);
+                }
+            }
+        }
     }
 
     /// 暂存图片附件（随该会话下一轮对话注入规划；每轮取走即清）
