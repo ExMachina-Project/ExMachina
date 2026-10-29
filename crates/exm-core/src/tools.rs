@@ -4034,6 +4034,40 @@ impl ToolGateway {
         ToolResult::ok(format!("{}\n（{n} 个文件）", files.join("\n")))
     }
 
+    /// 递归复制目录树/文件（回收站跨设备 fallback 用）：
+    /// 目标已存在则清空重建，保证「移入」语义的原子性近似
+    fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<()> {
+        use std::fs;
+        if src.is_dir() {
+            if dst.exists() {
+                // 目标可能是文件或目录，分别清理
+                if dst.is_dir() {
+                    fs::remove_dir_all(dst).context("回收站旧目标清理失败")?;
+                } else {
+                    fs::remove_file(dst).context("回收站旧目标清理失败")?;
+                }
+            }
+            fs::create_dir_all(dst).context("回收站目录创建失败")?;
+            for entry in fs::read_dir(src).context("读取源目录失败")? {
+                let entry = entry?;
+                let ty = entry.file_type()?;
+                let child_dst = dst.join(entry.file_name());
+                if ty.is_dir() {
+                    fs::create_dir_all(&child_dst)?;
+                    Self::copy_tree(&entry.path(), &child_dst)?;
+                } else {
+                    fs::copy(entry.path(), &child_dst).context("复制文件失败")?;
+                }
+            }
+            Ok(())
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(src, dst).context("复制文件失败").map(|_| ())
+        }
+    }
+
     fn tool_fs(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("write");
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -4124,7 +4158,24 @@ impl ToolGateway {
                     .strip_prefix(&self.workspace_root)
                     .map(|p| p.display().to_string().replace('\\', "/"))
                     .unwrap_or_else(|_| dst.display().to_string());
-                match std::fs::rename(&target, &dst) {
+                // fs::rename 跨设备（EXDEV：回收站常为独立挂载卷）时 fallback copy+删源。
+                // 逐条目复制保序（目录先建、文件后拷），任一失败即中止（残留部分文件不影响原位数据）
+                let moved = std::fs::rename(&target, &dst)
+                    .or_else(|_| Self::copy_tree(&target, &dst))
+                    .and_then(|_| {
+                        // rename 成功时源已不在；copy 路径源仍在，删源完成「移入」语义
+                        if target.exists() {
+                            if target.is_dir() {
+                                std::fs::remove_dir_all(&target)
+                            } else {
+                                std::fs::remove_file(&target)
+                            }
+                            .context("回收站已写入但删源失败（原位数据未动）")
+                        } else {
+                            Ok(())
+                        }
+                    });
+                match moved {
                     Ok(_) => ToolResult::ok(format!(
                         "已删除（移入回收站，可人工恢复）：{path} → {rel_disp}"
                     )),
@@ -6897,6 +6948,27 @@ mod terminal_gate_tests {
     use super::*;
 
     /// filesystem delete/rename（spec: filesystem-ops）回归
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_跨设备fallback用copy_tree() {
+        // rename EXDEV 场景无法在本机模拟挂载边界——直接验证 copy_tree 语义
+        //（fallback 路径的核心：目录树完整复制 + 目标已存在清空重建）
+        let dir = std::env::temp_dir().join(format!("exm-fscopy-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("src/nested")).unwrap();
+        std::fs::write(dir.join("src/a.txt"), "A").unwrap();
+        std::fs::write(dir.join("src/nested/b.txt"), "B").unwrap();
+        let dst = dir.join("trash-copy");
+        std::fs::write(&dst, "旧残留").unwrap(); // 已存在文件（非目录）
+        ToolGateway::copy_tree(&dir.join("src"), &dst).unwrap();
+        assert!(dst.is_dir(), "已存在文件应被清空重建为目录");
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(dst.join("nested/b.txt")).unwrap(), "B");
+        // 单文件路径
+        let f = dir.join("one.log");
+        std::fs::write(&f, "x").unwrap();
+        ToolGateway::copy_tree(&f, &dir.join("t/one.log")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("t/one.log")).unwrap(), "x");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fs删除_移入回收站可恢复() {
         let dir = std::env::temp_dir().join(format!("exm-fsdel-{}", crate::types::new_id()));
