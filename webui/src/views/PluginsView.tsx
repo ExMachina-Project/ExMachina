@@ -203,6 +203,13 @@ export function PluginsView(): React.ReactElement {
           {`工具 ×${p.capabilities.tools}`}
         </Tag>,
       );
+    // 进程形态：握手发现的工具在列表直接展示（manifest 内联计数为 0）
+    if (p.form === "process" && p.toolsSnapshot && p.toolsSnapshot.length > 0)
+      tags.push(
+        <Tag key="snap" color="geekblue">
+          {`工具 ×${p.toolsSnapshot.length}`}
+        </Tag>,
+      );
     if (p.capabilities?.channel)
       tags.push(
         <Tag key="ch" color="geekblue">

@@ -225,6 +225,8 @@ export interface PluginSummary {
     resources: number;
     process: boolean;
   };
+  /** 进程形态握手发现的工具名（列表页直接可见） */
+  toolsSnapshot?: string[];
 }
 
 /** 插件详情（GET /api/plugins/:id） */
