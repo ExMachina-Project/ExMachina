@@ -1232,42 +1232,50 @@ pub async fn execute_shell_with(
         }
     }
 }
-/// 极简 HTML 正文提取：剥 script/style 块与标签、压缩空白（零正则依赖）
+/// 极简 HTML 正文提取：剥 script/style 块与标签、压缩空白（零正则依赖）。
+/// 全程字符级推进（Vec<char> 索引）：lower 与原文同长对齐，杜绝字节级切片
+/// 落进多字节字符内部的 panic（部署实测旧实现 15177 字节边界崩溃）。
 fn strip_html(html: &str) -> String {
-    let lower = html.to_lowercase();
-    let mut out = String::with_capacity(html.len() / 2);
-    let bytes = html.as_bytes();
+    let src: Vec<char> = html.chars().collect();
+    // 小写化按字符逐个 to_lowercase 首字符（标签判定只涉及 ASCII，此处保语义即可）
+    let lower: Vec<char> = src
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    let starts_with = |from: usize, pat: &str| -> bool {
+        let pcs: Vec<char> = pat.chars().collect();
+        lower.len() >= from + pcs.len() && lower[from..from + pcs.len()].iter().eq(pcs.iter())
+    };
+    let mut out = String::with_capacity(src.len() / 2);
     let mut i = 0usize;
-    let mut skip_until: Option<&str> = None;
-    while i < bytes.len() {
+    let mut skip_until: Option<&'static str> = None;
+    while i < src.len() {
         if let Some(end) = skip_until {
-            // 在被跳过的块内寻找结束标记
-            if lower[i..].starts_with(end) {
+            if starts_with(i, end) {
                 skip_until = None;
-                i += end.len();
-                // 吞掉闭合标签的剩余部分
-                while i < bytes.len() && html[i..].chars().next().map(|c| c != '>').unwrap_or(false)
-                {
+                i += end.chars().count();
+                // 吞掉闭合标签的剩余部分（到 '>'）
+                while i < src.len() && src[i] != '>' {
                     i += 1;
                 }
-                i = (i + 1).min(bytes.len());
+                i = (i + 1).min(src.len());
             } else {
                 i += 1;
             }
             continue;
         }
-        if lower[i..].starts_with("<script") {
+        if starts_with(i, "<script") {
             skip_until = Some("</script");
-        } else if lower[i..].starts_with("<style") {
+        } else if starts_with(i, "<style") {
             skip_until = Some("</style");
-        } else if bytes[i] == b'<' {
-            while i < bytes.len() && bytes[i] != b'>' {
+        } else if src[i] == '<' {
+            while i < src.len() && src[i] != '>' {
                 i += 1;
             }
         } else {
-            let ch = html[i..].chars().next().unwrap_or(' ');
+            let ch = src[i];
             out.push(if ch.is_whitespace() { ' ' } else { ch });
-            i += ch.len_utf8();
+            i += 1;
         }
     }
     let mut compact = String::with_capacity(out.len());
@@ -8034,6 +8042,22 @@ mod terminal_gate_tests {
         assert!(!r.ok, "缺键应拒绝");
         let err = r.error.unwrap_or_default();
         assert!(err.contains("api_token") && err.contains("凭据未配置"), "错误应含键名与指引：{err}");
+    }
+
+    #[test]
+    fn strip_html_多字节字符不越界() {
+        // 部署实测回归：旧字节级实现在多字节字符中间切片 panic（15177 边界）
+        let html = "<html><body><p>你好世界，这是中文正文𝄞音符与 emoji 😀 混排</p>\
+<script>var s = \"中文脚本内容不影响正文\";</script>\
+<p>İstanbul 与 straße 的大小写归一也不崩</p></body></html>";
+        let text = strip_html(html);
+        assert!(text.contains("你好世界"), "正文保留：{text}");
+        assert!(text.contains("😀"), "emoji 完整：{text}");
+        assert!(!text.contains("中文脚本内容"), "script 块剥除：{text}");
+        assert!(text.contains("İstanbul"), "特殊大小写字符完整：{text}");
+        // 孤立多字节 + 未闭合标签：不 panic 即过
+        assert!(!strip_html("标题<").is_empty());
+        assert_eq!(strip_html("<script>永不闭合"), "");
     }
 
     #[test]
