@@ -159,8 +159,21 @@ pub async fn get_plugin(State(st): State<AppState>, Path(id): Path<String>) -> a
         "credentialsConfigured": cfg.plugins.credentials.contains_key(&id),
         // T2 握手后 tools/list 快照（装载期发现面；空 = 未拉起或非进程形态）
         "toolsSnapshot": e.tools_snapshot,
+        // 会话工具面注册诊断：该插件工具是否已并入 ToolGateway（下发面可见性）
+        "toolSurfaceRegistered": tool_surface_registered(&st, &id, &e.tools_snapshot),
     }))
     .into_response()
+}
+
+/// 该插件工具是否已注册进会话工具面（详情页健康诊断：快照有但未注册 = 装配断链）
+fn tool_surface_registered(st: &AppState, id: &str, snapshot: &[String]) -> bool {
+    if snapshot.is_empty() {
+        return false;
+    }
+    let specs = st.core.orchestrator().tools.custom_specs_for("orchestrator");
+    snapshot
+        .iter()
+        .any(|n| specs.iter().any(|s| s.name == format!("{id}__{n}")))
 }
 
 /// PUT /api/plugins/:id：启停（body: { "enabled": bool }；持久化 config.plugins.state）
