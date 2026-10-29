@@ -170,10 +170,15 @@ pub fn spawn_all(core: Arc<Core>) {
     // 进程插件健康检查循环（30s 节拍）：崩溃检测 + 退避重启 + 失败清 error 恢复呈现。
     // supervisor 内部自带失败计数与退避（连续 5 次置 Error 停止重试）。
     // 并发驱动：单个插件的重启（含退避等待）不阻塞其他插件的检查节拍。
+    // 附带自愈：每轮顺带确保进程工具的会话面注册在位（启动序列的 attach 可能被
+    // 后续 config 热更新顶掉——apply_config 重建会换 ToolGateway 实例）。
     let pm3 = pm.clone();
+    let core3 = core.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            // 注册自愈：provider 在且 Running → 确保注册（幂等覆盖）
+            crate::plugin_admin::attach_all_process_tools(&core3, &pm3);
             for (id, sup) in exm_core::plugin::bridge::all_processes() {
                 if sup.state() != exm_core::plugin::bridge::PluginState::Running {
                     continue;
