@@ -1101,6 +1101,10 @@ pub struct ToolGateway {
     /// 插件声明式工具（T1 清单内联 HTTP 工具，命名空间 `<plugin>__<tool>`；
     /// 与 custom 共用执行链——run_custom 全套（http/shell、审计、钩子、落盘））
     plugin_tools: parking_lot::RwLock<Vec<crate::config::CustomTool>>,
+    /// 进程插件运行时工具面（T2：握手后发现，无法静态声明）。
+    /// key = 插件 id；specs/执行转发到 provider（supervisor 持进程句柄）。
+    /// 注册时机：spawn_process_plugin 拉起成功后（Core 回接）。
+    plugin_runtime_tools: parking_lot::RwLock<std::collections::BTreeMap<String, std::sync::Arc<dyn crate::plugin::ToolProvider>>>,
     /// 动态工具执行器（T3 内置插件用：命名空间工具注册 schema + 自定义 async 执行面）。
     /// key = 工具全名；执行优先级：动态表 > plugin_tools/custom（可覆盖声明式同名）。
     dynamic_tools: parking_lot::RwLock<
@@ -1164,6 +1168,7 @@ impl ToolGateway {
             custom: Vec::new(),
             plugin_credentials: parking_lot::RwLock::new(None),
             plugin_tools: parking_lot::RwLock::new(Vec::new()),
+            plugin_runtime_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
             dynamic_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
             session_scoped_tools: parking_lot::RwLock::new(std::collections::HashMap::new()),
             session_step_budgets: parking_lot::RwLock::new(std::collections::HashMap::new()),
@@ -1236,6 +1241,19 @@ impl ToolGateway {
             }
             guard.push(t);
         }
+    }
+
+    /// 注册进程插件运行时工具面（T2：拉起握手成功后由 spawn_process_plugin 回接）。
+    /// 幂等：同 id 重复注册覆盖（重启场景新 supervisor 顶旧）。
+    pub fn register_plugin_runtime_tools(&self, plugin_id: &str, provider: std::sync::Arc<dyn crate::plugin::ToolProvider>) {
+        self.plugin_runtime_tools
+            .write()
+            .insert(plugin_id.to_string(), provider);
+    }
+
+    /// 摘除进程插件运行时工具面（禁用/卸载用）
+    pub fn unregister_plugin_runtime_tools(&self, plugin_id: &str) {
+        self.plugin_runtime_tools.write().remove(plugin_id);
     }
 
     /// 当前注册的全部插件工具（诊断/管理端点用）
@@ -1408,6 +1426,15 @@ impl ToolGateway {
                     .values()
                     .filter(|(c, _)| c.visible_to(agent_id))
                     .map(|(c, _)| to_spec(c)),
+            )
+            // 进程插件运行时工具（T2 握手发现；清单未配 agents = 全体可见）
+            .chain(
+                self.plugin_runtime_tools
+                    .read()
+                    .values()
+                    .flat_map(|p| p.tool_specs().into_iter())
+                    .filter(|c| c.visible_to(agent_id))
+                    .map(|c| to_spec(&c)),
             )
             .collect()
     }
@@ -2250,7 +2277,8 @@ impl ToolGateway {
                         ))
                     }
                 } else {
-                    // 查找顺序：config CustomTool 先于插件工具（先注册者胜）
+                    // 查找顺序：config CustomTool 先于插件工具（先注册者胜）；
+                    // 进程插件运行时工具最后（T2 握手发现面）
                     let found = self
                         .custom
                         .iter()
@@ -2270,7 +2298,24 @@ impl ToolGateway {
                         Some(_) => ToolResult::err(format!(
                             "工具 {name} 未对本个体开放（自定义工具的 agents 未包含 {agent_id}）"
                         )),
-                        None => ToolResult::err(format!("未知工具：{name}")),
+                        None => {
+                            // 进程插件运行时工具（T2）：转发到 provider（supervisor → 子进程）
+                            let provider = self
+                                .plugin_runtime_tools
+                                .read()
+                                .values()
+                                .find(|p| {
+                                    p.tool_specs().iter().any(|c| c.name == name)
+                                })
+                                .cloned();
+                            match provider {
+                                Some(p) => match p.call_tool(name, args) {
+                                    Ok(text) => ToolResult::ok(text),
+                                    Err(e) => ToolResult::err(format!("插件工具执行失败：{e}")),
+                                },
+                                None => ToolResult::err(format!("未知工具：{name}")),
+                            }
+                        }
                     }
                 }
             }
@@ -6780,6 +6825,68 @@ mod terminal_gate_tests {
         assert!(text.contains("demo__ping") || text.len() < 500, "错误面应含工具名或简洁");
         // 不应泄露内部路径
         assert!(!text.contains("/home/"), "不应泄露内部路径");
+    }
+
+    // ---------------- 进程插件运行时工具（T2：握手发现面接入工具网关）
+
+    /// 假进程工具 provider（模拟 supervisor 转发：specs 带命名空间、执行回显）
+    struct FakeProcessTools;
+
+    impl crate::plugin::ToolProvider for FakeProcessTools {
+        fn tool_specs(&self) -> Vec<crate::config::CustomTool> {
+            vec![crate::config::CustomTool {
+                name: "fakep__hello".into(),
+                description: "进程握手发现".into(),
+                kind: "process".into(),
+                method: "POST".into(),
+                target: String::new(),
+                headers: Default::default(),
+                parameters: serde_json::json!({ "type": "object" }),
+                agents: vec![],
+                response_max_chars: None,
+                response_select: None,
+            }]
+        }
+        fn call_tool(&self, name: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+            if name == "fakep__hello" {
+                Ok(format!("hello:{}", args.get("name").and_then(|v| v.as_str()).unwrap_or("?")))
+            } else {
+                anyhow::bail!("未知工具 {name}")
+            }
+        }
+    }
+
+    /// T2 工具面：注册 → specs 下发可见 → 执行转发 provider → 摘除后不可见
+    #[tokio::test]
+    async fn 进程插件工具_注册下发执行与摘除() {
+        let gw = gw_with_approval("off", 0);
+        // 注册前不可见
+        assert!(!gw.custom_specs_for("a1").iter().any(|s| s.name == "fakep__hello"));
+        gw.register_plugin_runtime_tools("fakep", Arc::new(FakeProcessTools));
+        // specs 可见（进程形态工具进入下发面）
+        let specs = gw.custom_specs_for("a1");
+        assert!(specs.iter().any(|s| s.name == "fakep__hello"), "注册后应下发");
+        // 执行转发
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        let r = gw
+            .execute_named(
+                "a1",
+                &sid,
+                &[],
+                "fakep__hello",
+                &serde_json::json!({ "name": "巡检" }),
+            )
+            .await;
+        assert!(r.ok, "执行应成功: {:?}", r.error);
+        assert!(r.output.contains("hello:巡检"), "输出应含 provider 回显: {}", r.output);
+        // 未知工具仍走原错误路径
+        let r2 = gw.execute_named("a1", &sid, &[], "fakep__nope", &serde_json::json!({})).await;
+        assert!(!r2.ok);
+        // 摘除后不可见
+        gw.unregister_plugin_runtime_tools("fakep");
+        assert!(!gw.custom_specs_for("a1").iter().any(|s| s.name == "fakep__hello"));
+        let r3 = gw.execute_named("a1", &sid, &[], "fakep__hello", &serde_json::json!({})).await;
+        assert!(!r3.ok, "摘除后执行应失败");
     }
 
     /// 响应治理（插件生态扩展 1.1）：两级裁剪纯函数面。

@@ -433,8 +433,26 @@ async fn spawn_process_if_any(st: &AppState, id: &str) {
     exm_core::plugin::bridge::unregister_process(id);
     let creds = st.core.config().plugins.credentials.get(id).cloned();
     match exm_core::plugin::bridge::spawn_process_plugin(&pm, &e.manifest, &dir, creds).await {
-        Ok(_) => pm.record_error(id, None),
+        Ok(_) => {
+            pm.record_error(id, None);
+            // T2 工具面回接：握手发现的工具并入会话工具网关（specs + 执行）
+            attach_process_tools(&st.core, &pm, id);
+        }
         Err(err) => pm.record_error(id, Some(format!("拉起失败：{err}"))),
+    }
+}
+
+/// 进程插件工具面回接：provider 的 tool_provider 挂进 ToolGateway
+/// （specs 随 custom_specs_for 下发；执行转发 supervisor → 子进程）。
+/// 幂等：重复注册覆盖（重启/更新场景新 supervisor 顶旧）。
+pub(crate) fn attach_process_tools(
+    core: &std::sync::Arc<exm_core::Core>,
+    pm: &std::sync::Arc<exm_core::plugin::PluginManager>,
+    id: &str,
+) {
+    let Some(p) = pm.provider_of(id) else { return };
+    if let Some(tp) = p.tool_provider() {
+        core.orchestrator().tools.register_plugin_runtime_tools(id, tp);
     }
 }
 

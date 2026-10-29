@@ -10,6 +10,8 @@
 pub mod video;
 pub mod rss;
 
+use crate::plugin_admin::attach_process_tools;
+
 use exm_core::config::{PluginChannelDecl, PluginCredentialField, PluginManifest};
 use exm_core::plugin::{ChannelProvider, WatchProvider};
 use exm_core::Core;
@@ -151,7 +153,11 @@ pub fn spawn_all(core: Arc<Core>) {
                 )
                 .await;
                 match r {
-                    Ok(_) => eprintln!("[plugins] 进程插件 {} 已拉起（握手协商通过）", e.manifest.id),
+                    Ok(_) => {
+                        eprintln!("[plugins] 进程插件 {} 已拉起（握手协商通过）", e.manifest.id);
+                        // T2 工具面回接：握手发现的工具并入会话工具网关（specs + 执行）
+                        attach_process_tools(&core2, &pm2, &e.manifest.id);
+                    }
                     Err(err) => {
                         pm2.set_tools_snapshot(&e.manifest.id, vec![]);
                         pm2.record_error(&e.manifest.id, Some(format!("拉起失败：{err}")));
