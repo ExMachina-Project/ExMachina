@@ -1842,6 +1842,42 @@ textarea.ant-input:focus,
 .approval-ops { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .approval-hint { font-size: 11px; color: var(--muted); }
 
+/* 计划模式卡片（spec plan-mode：WebUI 跨端审批呈现） */
+.plan-mode-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.plan-mode-hint { font-size: 11px; color: var(--muted); }
+.plan-card {
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent) !important;
+}
+.plan-card-done { border-color: var(--line) !important; opacity: 0.85; }
+.plan-title { display: inline-flex; align-items: center; }
+.plan-ops { display: inline-flex; gap: 8px; }
+.plan-result-summary { font-size: 12px; color: var(--muted); }
+.plan-item { padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.plan-item:last-child { border-bottom: none; }
+.plan-item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.plan-idx { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.plan-target { font-size: 12px; word-break: break-all; }
+.plan-item-badge { margin-left: auto; }
+.plan-item-ok .plan-target { color: var(--muted); }
+.plan-item-fail .plan-target { color: var(--danger, #e5484d); }
+.plan-diff {
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  background: var(--bg-sunken); border: 1px solid var(--line);
+  padding: 6px 10px; border-radius: var(--r-md); overflow-x: auto;
+  margin: 4px 0 0;
+}
+.plan-diff .plan-add { color: var(--ok, #46a758); }
+.plan-diff .plan-del { color: var(--danger, #e5484d); opacity: 0.8; }
+.plan-cmd {
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  background: var(--bg-sunken); border: 1px solid var(--line);
+  padding: 6px 10px; border-radius: var(--r-md); white-space: pre-wrap; word-break: break-all;
+  margin: 4px 0 0;
+}
+.plan-fold .ant-btn-link { padding: 0; height: auto; font-size: 11px; }
+.plan-hint { margin-top: 8px; font-size: 11px; color: var(--muted); }
+
 .server-row { display: flex; gap: 8px; }
 .server-row .ant-input { font-family: var(--mono); }
 

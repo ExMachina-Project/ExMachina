@@ -340,6 +340,242 @@ const TERMINAL_ALLOW: &[AllowRule] = &[
         cmd: "rake",
         subs: &[],
     },
+    // ---- harness 第二轮扩充（spec: agent-terminal-tools）----
+    // 信息只读类
+    AllowRule {
+        cmd: "stat",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "du",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "df",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "env",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "ps",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "file",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "basename",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "dirname",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "realpath",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "md5sum",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sha256sum",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "free",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "uptime",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "hostname",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "id",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "groups",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "locale",
+        subs: &[],
+    },
+    // 文本处理类
+    AllowRule {
+        cmd: "awk",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sort",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "uniq",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "xargs",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "cut",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "tr",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "column",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "bc",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "jq",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "yq",
+        subs: &[],
+    },
+    // 网络获取类（联网语义仍受沙箱联网闸门后置拦截）
+    AllowRule {
+        cmd: "curl",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "wget",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "ping",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "dig",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "nslookup",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "host",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "ip",
+        subs: &["addr", "route", "link", "a", "r", "l", "-brief"],
+    },
+    // 压缩归档类
+    AllowRule {
+        cmd: "tar",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "unzip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "zip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "gzip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "gunzip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "xz",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "zcat",
+        subs: &[],
+    },
+    // 权限与时间类
+    AllowRule {
+        cmd: "chmod",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "chown",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sleep",
+        subs: &[],
+    },
+    // 远程同步类（联网语义仍受沙箱联网闸门后置拦截）
+    AllowRule {
+        cmd: "ssh",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "scp",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "rsync",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sftp",
+        subs: &[],
+    },
+    // 容器类（只读 + exec/run；高危子命令仍走审批）
+    AllowRule {
+        cmd: "docker",
+        subs: &[
+            "ps", "images", "inspect", "logs", "exec", "run", "version",
+        ],
+    },
+    // 数据库类（本地文件库；psql/mysql 走审批）
+    AllowRule {
+        cmd: "sqlite3",
+        subs: &[],
+    },
+    // 媒体与工具类
+    AllowRule {
+        cmd: "ffmpeg",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "convert",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "openssl",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "base64",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "uuidgen",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "xxd",
+        subs: &[],
+    },
 ];
 
 /// shell 连接符：白名单只放行单一命令，带连接符一律拒绝（防「白名单命令 && 危险命令」绕过）
@@ -429,6 +665,8 @@ pub fn is_destructive_command(lowered: &str) -> bool {
 /// 后台任务（长命令）：输出累积缓冲 + 终态码 + 中止句柄
 pub struct BgTask {
     pub cmd: String,
+    /// 启动任务时会话（op=list 按会话过滤，跨会话不互见）
+    pub session: String,
     pub started: Instant,
     pub buf: Arc<parking_lot::Mutex<String>>,
     /// None = 运行中；Some(code) = 已退出
@@ -535,9 +773,13 @@ const NETWORK_COMMAND_MARKS: &[&str] = &[
     "git clone",
     "git fetch",
     "git pull",
+    "git push",
     "docker ",
+    "docker compose pull",
     "ssh ",
     "scp ",
+    "rsync ",
+    "sftp ",
     "invoke-webrequest",
 ];
 
@@ -1489,6 +1731,7 @@ impl ToolGateway {
             "jpg" | "jpeg" => "image/jpeg",
             "webp" => "image/webp",
             "gif" => "image/gif",
+            "bmp" => "image/bmp",
             _ => return None,
         };
         let data = std::fs::read(&p).ok()?;
@@ -1856,6 +2099,7 @@ impl ToolGateway {
                     "path": { "type": "string", "description": "搜索起始路径（默认工作区根）" },
                     "glob": { "type": "string", "description": "文件过滤，如 **/*.rs" },
                     "ignoreCase": { "type": "boolean", "description": "忽略大小写（默认 false）" },
+                    "contextLines": { "type": "integer", "description": "命中行前后各带 N 行上下文（0-5，默认 0 = 单行输出）" },
                     "maxResults": { "type": "integer", "description": "最多返回条数（默认 100，上限 500）" }
                 },
                 "required": ["pattern"]
@@ -1890,7 +2134,7 @@ impl ToolGateway {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "op=run 时必填；单一命令，不支持 && | ; 等连接符" },
-                "op": { "type": "string", "enum": ["run", "poll", "kill"], "description": "默认 run" },
+                "op": { "type": "string", "enum": ["run", "poll", "kill", "list"], "description": "默认 run；list 列出本会话后台任务（无需 taskId）" },
                 "taskId": { "type": "string", "description": "op=poll/kill 时的后台任务 id" },
                 "background": { "type": "boolean", "description": "true = 后台执行并立即返回任务 id（适合构建/测试等长任务）" },
                 "timeoutSecs": { "type": "integer", "description": "前台命令超时（秒），上限由安全设置决定" }
@@ -3258,6 +3502,27 @@ impl ToolGateway {
         if p.is_dir() {
             return self.list_dir(&p);
         }
+        // 图像副产物（spec: agent-terminal-tools read 图像副产物）：
+        // 按扩展名识别图像，返回摘要 + images 路径（runtime 视觉模型回灌）
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") {
+            let meta = match std::fs::metadata(&p) {
+                Ok(m) => m,
+                Err(e) => return ToolResult::err(format!("读取失败: {e}")),
+            };
+            let abs = std::fs::canonicalize(&p)
+                .map(|x| x.display().to_string())
+                .unwrap_or_else(|_| p.display().to_string());
+            return ToolResult::ok(format!(
+                "图像文件：{path}（{ext}，{} 字节）—— 已作为图像输入回灌，具备视觉能力的模型可直接查看",
+                meta.len()
+            ))
+            .with_images(vec![abs]);
+        }
         let bytes = match std::fs::read(&p) {
             Ok(b) => b,
             Err(e) => return ToolResult::err(format!("读取失败: {e}")),
@@ -3573,6 +3838,12 @@ impl ToolGateway {
             .and_then(|v| v.as_u64())
             .unwrap_or(100)
             .clamp(1, 500) as usize;
+        // 上下文行数（spec: agent-terminal-tools grep 上下文行）：0 = 现状单行输出
+        let ctx_n = args
+            .get("contextLines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .clamp(0, 5) as usize;
         let root = match self.resolve_safe(sub) {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e.to_string()),
@@ -3589,6 +3860,7 @@ impl ToolGateway {
         let mut out: Vec<String> = Vec::new();
         let mut hit_files = 0usize;
         let mut truncated = false;
+        let mut hit_lines: Vec<(usize, String)> = Vec::new();
         'files: for entry in walker {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
@@ -3609,14 +3881,56 @@ impl ToolGateway {
                 .to_string()
                 .replace('\\', "/");
             let mut file_hit = false;
+            hit_lines.clear();
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     if !file_hit {
                         file_hit = true;
                         hit_files += 1;
                     }
+                    // contextLines>0 时记录行号，稍后按块合并输出（含前后上下文行）
+                    if ctx_n > 0 {
+                        hit_lines.push((i, line.to_string()));
+                        continue;
+                    }
                     let trimmed: String = line.trim().chars().take(240).collect();
                     out.push(format!("{rel}:{}:{}", i + 1, trimmed));
+                    if out.len() >= max_results {
+                        truncated = true;
+                        break 'files;
+                    }
+                }
+            }
+            // 上下文块输出：相邻命中（间隔 ≤ 2N+1）合并为一块，
+            // 块内逐行 `rel:行号: 内容`，命中行内容保持 240 字符截断
+            if ctx_n > 0 && !hit_lines.is_empty() {
+                let all_lines: Vec<&str> = text.lines().collect();
+                let mut blocks: Vec<(usize, usize)> = Vec::new(); // [start, end] 行号闭区间
+                for (i, _) in &hit_lines {
+                    let s = i.saturating_sub(ctx_n);
+                    let e = (i + ctx_n).min(all_lines.len().saturating_sub(1));
+                    match blocks.last_mut() {
+                        Some((bs, be)) if s <= *be + 1 => {
+                            if e > *be {
+                                *be = e;
+                            }
+                        }
+                        _ => blocks.push((s, e)),
+                    }
+                }
+                for (s, e) in blocks {
+                    if !out.is_empty() {
+                        out.push(format!("{rel}—"));
+                    }
+                    for ln in s..=e {
+                        if ln >= all_lines.len() {
+                            break;
+                        }
+                        let content = &all_lines[ln];
+                        let mark = if re.is_match(content) { ">" } else { " " };
+                        let trimmed: String = content.trim().chars().take(240).collect();
+                        out.push(format!("{rel}:{}:{} {}", ln + 1, mark, trimmed));
+                    }
                     if out.len() >= max_results {
                         truncated = true;
                         break 'files;
@@ -4199,10 +4513,11 @@ impl ToolGateway {
         args: &serde_json::Value,
     ) -> ToolResult {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("run");
-        // 后台任务轮询 / 终止（不经过白名单与审批：对象是已批准过的任务）
+        // 后台任务轮询 / 终止 / 清单（不经过白名单与审批：对象是已批准过的任务）
         match op {
             "poll" => return self.bg_poll(args),
             "kill" => return self.bg_kill(args),
+            "list" => return self.bg_list(session_id),
             _ => {}
         }
         let cmd = args
@@ -4257,7 +4572,7 @@ impl ToolGateway {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            return self.bg_start(&cmd);
+            return self.bg_start(&cmd, session_id);
         }
         let timeout = args
             .get("timeoutSecs")
@@ -4280,7 +4595,7 @@ impl ToolGateway {
     }
 
     /// 启动后台任务：输出累积到共享缓冲，任务终结记录退出码
-    fn bg_start(&self, cmd: &str) -> ToolResult {
+    fn bg_start(&self, cmd: &str, session_id: &str) -> ToolResult {
         const BG_OUTPUT_CAP: usize = 200_000;
         let id = format!("bg-{}", &crate::types::new_id()[..8]);
         let buf = Arc::new(parking_lot::Mutex::new(String::new()));
@@ -4370,6 +4685,7 @@ impl ToolGateway {
         });
         let task = BgTask {
             cmd: cmd.to_string(),
+            session: session_id.to_string(),
             started: Instant::now(),
             buf,
             state,
@@ -4419,6 +4735,48 @@ impl ToolGateway {
             }
             None => ToolResult::err(format!("后台任务不存在: {id}")),
         }
+    }
+
+    /// 后台任务清单（spec: agent-terminal-tools 后台任务可寻址）：
+    /// 按会话过滤返回 id/命令/状态/输出尾摘要，跨轮次可寻址。
+    /// 只读内部状态，不经过白名单与审批。
+    fn bg_list(&self, session_id: &str) -> ToolResult {
+        let guard = self.background.lock();
+        let mut rows: Vec<(&String, &BgTask)> = guard
+            .iter()
+            .filter(|(_, t)| t.session == session_id)
+            .collect();
+        if rows.is_empty() {
+            return ToolResult::ok("当前会话无后台任务。");
+        }
+        rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.started));
+        let mut out = format!("后台任务（{} 个，最新在前）：\n", rows.len());
+        for (i, (id, t)) in rows.iter().enumerate() {
+            let state = *t.state.lock();
+            let elapsed = t.started.elapsed().as_secs();
+            let status = match state {
+                None => format!("运行中（已 {elapsed}s）"),
+                Some(0) => format!("已完成 exit=0（耗时 {elapsed}s）"),
+                Some(c) => format!("已结束 exit={c}（耗时 {elapsed}s）"),
+            };
+            let tail: String = {
+                let buf = t.buf.lock();
+                let chars: Vec<char> = buf.chars().collect();
+                let start = chars.len().saturating_sub(200);
+                chars[start..].iter().collect::<String>().replace('\n', " ⏎ ")
+            };
+            let tail_disp = if tail.trim().is_empty() { "（暂无）".to_string() } else { tail };
+            // taskId 必须在清单里——丢失 id 的模型靠它重新寻址 poll/kill
+            out.push_str(&format!(
+                "{}. [taskId={id}] {} [{}]\n   输出尾：{}\n",
+                i + 1,
+                t.cmd,
+                status,
+                tail_disp
+            ));
+        }
+        drop(guard);
+        ToolResult::ok(out)
     }
 
     /// Computer Use 工具：截屏（只读）与键鼠动作（过审批闸门 + 动作节流）。
@@ -6183,14 +6541,20 @@ mod terminal_gate_tests {
     fn 白名单_危险与未知命令不放行() {
         for cmd in [
             "rm -rf /",
-            "curl http://x",
-            "wget x",
-            "chmod 777 a",
             "sudo rm x",
             "vim",
             "unknown-cmd",
+            // docker 只放只读/exec/run 子命令；rmi/build 等高危仍拒
+            "docker rmi nginx",
+            "docker system prune",
+            // ip 只放 addr/route/link；netns 配置类仍拒
+            "ip netns add foo",
         ] {
             assert!(!terminal_allowed(cmd), "不应放行: {cmd}");
+        }
+        // curl/wget/chmod 已入白名单（harness 第二轮）：联网/权限语义由后置闸门分层把关
+        for cmd in ["curl http://x", "wget x", "chmod 777 a"] {
+            assert!(terminal_allowed(cmd), "应放行（后置闸门把关）: {cmd}");
         }
     }
 

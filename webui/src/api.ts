@@ -321,6 +321,30 @@ export interface ApprovalRequest {
   decidedAt?: string;
 }
 
+// 计划模式（spec plan-mode：WebUI 计划卡片数据契约）
+export interface PlanItem {
+  id: string;
+  tool: string;
+  target: string;
+  action: string;
+  args: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface PlanInfo {
+  sessionId: string;
+  mode: "plan" | "execute";
+  items: PlanItem[];
+  count: number;
+}
+
+export interface PlanAppliedItem {
+  itemId: string;
+  tool: string;
+  target: string;
+  ok: boolean;
+}
+
 export interface Channel {
   id: string;
   type: string;
@@ -721,6 +745,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+
+  // 计划模式（spec plan-mode：跨端审批呈现——WebUI 计划卡片）
+  getPlan: (id: string) => req<PlanInfo>(`/sessions/${id}/plan`),
+  decidePlan: (id: string, action: "approve" | "reject" | "setMode", plan?: boolean) =>
+    req<{ sessionId: string; ok?: boolean; okCount?: number; failCount?: number; applied?: PlanAppliedItem[] }>(
+      `/sessions/${id}/plan`,
+      { method: "POST", body: JSON.stringify({ action, plan }) },
+    ),
 
   listChannels: () => req<Channel[]>("/channels"),
   channelStatus: () => req<Record<string, ChannelStatus>>("/channels/status"),

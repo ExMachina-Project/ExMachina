@@ -1,6 +1,6 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
+import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
 import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { api, type LlmProfile } from "../api";
@@ -10,6 +10,7 @@ import { useT } from "../i18n/core";
 
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
 import { StatementList } from "../components/Statements";
+import { PlanCard } from "../components/PlanCard";
 import { Markdown } from "../components/Markdown";
 import { AsciiMeter } from "../components/Ascii";
 import { ToolCallList } from "../components/ToolCall";
@@ -150,6 +151,7 @@ export function ChatView(): React.ReactElement {
     refreshAgents,
     loadGroups,
     sessionsLoaded,
+    plan, planApplied, planPending, decidePlan, setPlanMode,
   } = useExm();
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
@@ -824,6 +826,28 @@ export function ChatView(): React.ReactElement {
             </div>
           </Card>
         ))}
+        {/* 计划模式（spec plan-mode：WebUI 跨端审批呈现）——模式开关 + 计划卡片 */}
+        <div className="plan-mode-bar">
+          <Segmented
+            size="small"
+            value={plan?.mode ?? "execute"}
+            onChange={(v) => void setPlanMode(v === "plan")}
+            options={[
+              { value: "execute", label: t("plan.modeExecute") },
+              { value: "plan", label: t("plan.modePlan") },
+            ]}
+          />
+          {plan?.mode === "plan" && <span className="plan-mode-hint">{t("plan.modeHint")}</span>}
+        </div>
+        {plan && (plan.items.length > 0 || planPending) && (
+          <PlanCard
+            info={plan}
+            applied={planApplied}
+            pending={planPending}
+            onApprove={() => void decidePlan("approve")}
+            onReject={() => void decidePlan("reject")}
+          />
+        )}
         <div className="chat-scroll">
           {/* 空态：当前会话尚无消息且未在运行 —— 目标捕获盘（与桌面端空态同源母题） */}
           {renderMessages.length === 0 && !running && (
