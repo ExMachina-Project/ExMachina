@@ -11,7 +11,7 @@ import type {
   TaskGraph,
   ToolCallItem,
 } from "./types";
-import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit, type TodoItem } from "./api";
+import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit, type SpawnBgItem, type TodoItem } from "./api";
 import { tr } from "./i18n/core";
 
 export interface TimelineItem {
@@ -66,6 +66,10 @@ interface ExmState {
   setPlanMode: (on: boolean) => Promise<void>;
   /** 任务清单（spec agent-todo）：todo.updated 事件快照 */
   todo: { count: number; doneCount: number; allDone: boolean; items: TodoItem[] } | null;
+  /** 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件维护 */
+  spawns: SpawnBgItem[];
+  /** 清除全部后台子任务卡（终态收讫后手动清理） */
+  clearSpawns: () => void;
   timeline: TimelineItem[];
   /** 时间线归属会话：切到子会话/其它会话时不在那里展示别处的调度轨迹 */
   timelineSession: string | null;
@@ -284,6 +288,7 @@ export const useExm = create<ExmState>((set, get) => ({
   planPending: false,
   planDirtyAt: 0,
   todo: null,
+  spawns: [],
   timeline: [],
   timelineSession: null,
   lastRecall: [],
@@ -396,6 +401,7 @@ export const useExm = create<ExmState>((set, get) => ({
       planApplied: null,
       planPending: false,
       todo: null,
+      spawns: [],
       timeline: [],
       timelineSession: null,
       running: false,
@@ -506,6 +512,8 @@ export const useExm = create<ExmState>((set, get) => ({
     await get().decidePlan("setMode", on);
   },
 
+  clearSpawns: () => set({ spawns: [] }),
+
   navRequest: null,
   requestNav: (view, sessionId) => set({ navRequest: { view, sessionId, nonce: Date.now() } }),
   markSessionsLoaded: () => set({ sessionsLoaded: true }),
@@ -562,6 +570,35 @@ export const useExm = create<ExmState>((set, get) => ({
           },
         });
       }
+      return;
+    }
+    // 后台子任务卡（spec subagent-spawn WebUI 呈现）：started 建条目 / finished 收终态
+    if (evt.type === "spawn.started" || evt.type === "spawn.finished") {
+      if (evt.sessionId !== get().sessionId) return;
+      const spawnId = String(p.spawnId ?? "");
+      if (!spawnId) return;
+      if (evt.type === "spawn.started") {
+        // 只跟踪后台派生（同步派生的结果在工具调用内直接可见）
+        if (!Boolean(p.background)) return;
+        const preview = String(p.taskPreview ?? "");
+        const fresh: SpawnBgItem = { spawnId, preview, status: "running", startedAt: Date.now() };
+        set({ spawns: [fresh, ...get().spawns.filter((s) => s.spawnId !== spawnId)].slice(0, 20) });
+        return;
+      }
+      // finished：更新终态；running 条目缺失时补建（事件先于 started 到达等边缘）
+      const status = p.status === "done" ? "done" : p.status === "timeout" ? "timeout" : "failed";
+      const existing = get().spawns.find((s) => s.spawnId === spawnId);
+      const next: SpawnBgItem = existing
+        ? { ...existing, status, resultPreview: String(p.summaryPreview ?? ""), finishedAt: Date.now() }
+        : {
+            spawnId,
+            preview: String(p.taskPreview ?? p.summaryPreview ?? ""),
+            status,
+            resultPreview: String(p.summaryPreview ?? ""),
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+          };
+      set({ spawns: [next, ...get().spawns.filter((s) => s.spawnId !== spawnId)] });
       return;
     }
     // 计划事件（spec plan-mode：WebUI 卡片实时刷新，不靠轮询）

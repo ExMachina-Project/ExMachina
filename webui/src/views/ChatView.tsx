@@ -153,6 +153,7 @@ export function ChatView(): React.ReactElement {
     sessionsLoaded,
     plan, planApplied, planPending, decidePlan, setPlanMode,
     todo,
+    spawns, clearSpawns,
   } = useExm();
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
@@ -191,6 +192,7 @@ export function ChatView(): React.ReactElement {
   };
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
+  const [expandedSpawns, setExpandedSpawns] = useState<string[]>([]);
   /** `@` 文件提及（对话即编码）：输入 @ 触发候选弹层，选中插入路径 */
   const [mention, setMention] = useState<MentionState>({ open: false, query: "", start: 0 });
   const [mentionIdx, setMentionIdx] = useState(0);
@@ -859,6 +861,43 @@ export function ChatView(): React.ReactElement {
                 {it.status === "done" ? "✅" : it.status === "in_progress" ? "🔄" : "⬜"} {it.content}
               </span>
             ))}
+          </div>
+        )}
+        {/* 后台子任务卡（spec subagent-spawn WebUI 呈现）：运行中 spinner + 终态展开 + 清除 */}
+        {spawns.length > 0 && (
+          <div className="spawns-strip">
+            {spawns.map((s) => (
+              <div key={s.spawnId} className={`spawn-card spawn-${s.status}`}>
+                <div
+                  className="spawn-card-head"
+                  onClick={() => setExpandedSpawns((prev) => (prev.includes(s.spawnId) ? prev.filter((x) => x !== s.spawnId) : [...prev, s.spawnId]))}
+                >
+                  <span className="spawn-status-icon">
+                    {s.status === "running" ? (
+                      <Spin size="small" />
+                    ) : s.status === "done" ? (
+                      "✅"
+                    ) : s.status === "timeout" ? (
+                      "⏱"
+                    ) : (
+                      "❌"
+                    )}
+                  </span>
+                  <span className="spawn-preview">{s.preview || s.spawnId}</span>
+                  {s.status !== "running" && s.resultPreview && (
+                    <span className="spawn-expand-hint">
+                      {expandedSpawns.includes(s.spawnId) ? t("spawn.foldLess") : t("spawn.foldMore")}
+                    </span>
+                  )}
+                </div>
+                {s.status !== "running" && s.resultPreview && expandedSpawns.includes(s.spawnId) && (
+                  <pre className="spawn-result">{s.resultPreview}</pre>
+                )}
+              </div>
+            ))}
+            <Button type="link" size="small" className="spawn-clear" onClick={clearSpawns}>
+              {t("spawn.clear")}
+            </Button>
           </div>
         )}
         {plan && (plan.items.length > 0 || planPending) && (

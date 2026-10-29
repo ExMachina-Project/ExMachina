@@ -338,6 +338,17 @@ export interface TodoItem {
   status: "pending" | "in_progress" | "done";
 }
 
+// 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件数据
+export interface SpawnBgItem {
+  spawnId: string;
+  preview: string;
+  status: "running" | "done" | "failed" | "timeout";
+  /** 终态结果预览（spawn.finished 的 summaryPreview） */
+  resultPreview?: string;
+  startedAt: number;
+  finishedAt?: number;
+}
+
 export interface PlanInfo {
   sessionId: string;
   mode: "plan" | "execute";
