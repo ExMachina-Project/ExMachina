@@ -8,6 +8,7 @@ import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DesktopOutline
 import { useExm } from "../store";
 import { useTheme } from "../theme";
 import { useT, type TKey } from "../i18n/core";
+import { LANGS, useLang } from "../i18n/core";
 import { PageHeader } from "../components/PageHeader";
 import { api, limitsStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
 import { loadNotifyPrefs, saveNotifyPrefs, type NotifyPrefs } from "../store";
@@ -215,6 +216,8 @@ function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
 export function SettingsView(): React.ReactElement {
   const { config, saveConfig } = useExm();
   const stream = useTheme((s) => s.stream);
+  const lang = useLang((s) => s.lang);
+  const setLang = useLang((s) => s.setLang);
   const setStream = useTheme((s) => s.setStream);
   const t = useT();
   const [schema, setSchema] = useState<ConfigSchema | null>(null);
@@ -361,6 +364,21 @@ export function SettingsView(): React.ReactElement {
                 </div>
                 <div className="cfg2-ctrl">
                   <Switch checked={stream === "on"} onChange={(v) => setStream(v ? "on" : "off")} />
+                </div>
+              </div>
+              {/* 界面语言（原侧栏语言菜单收编至此）：本地偏好，即时生效 */}
+              <div className="cfg2-row">
+                <div className="cfg2-label">
+                  <div className="cfg2-name">{t("settings.ui.langName")}</div>
+                  <div className="cfg2-help">{t("settings.ui.langHelp")}</div>
+                </div>
+                <div className="cfg2-ctrl">
+                  <Select
+                    value={lang}
+                    onChange={(v) => setLang(v)}
+                    style={{ minWidth: 140 }}
+                    options={LANGS.map((l) => ({ value: l.code, label: l.name }))}
+                  />
                 </div>
               </div>
             </div>

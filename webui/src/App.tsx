@@ -23,7 +23,7 @@ import {
 } from "@ant-design/icons";
 import { api } from "./api";
 import { useExm } from "./store";
-import { LANGS, useLang, useT, type TKey } from "./i18n/core";
+import { useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
 import { DataStream } from "./components/DataStream";
@@ -164,12 +164,10 @@ export default function App(): React.ReactElement {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
-  const [openMenu, setOpenMenu] = useState<"theme" | "accent" | "lang" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"theme" | "accent" | null>(null);
   /** 移动端侧栏抽屉（≤860px 时侧栏覆盖呈现） */
   const [navOpen, setNavOpen] = useState(false);
   const t = useT();
-  const lang = useLang((s) => s.lang);
-  const setLang = useLang((s) => s.setLang);
   // 登录门：checking = 鉴权中；setup = 首启未设密钥（引导设置）；locked = 未解锁；open = 已进入
   const [gate, setGate] = useState<"checking" | "setup" | "locked" | "open">("checking");
   /** 通道就绪 = 全局端点已配置密钥（apiKey 由服务端掩码回显，非空即已配置） */
@@ -339,28 +337,7 @@ export default function App(): React.ReactElement {
             ))}
           </div>
         </div>
-        <div className={`theme-switcher ${openMenu === "lang" ? "open" : ""}`}>
-          <button className="theme-toggle" onClick={() => setOpenMenu(openMenu === "lang" ? null : "lang")}>
-            <span className="theme-label">{t("lang.label")}</span>
-            <span className="theme-current">{LANGS.find((l) => l.code === lang)?.name ?? lang}</span>
-            <span className={`theme-caret ${openMenu === "lang" ? "up" : ""}`}>▸</span>
-          </button>
-          <div className="theme-panel">
-            {LANGS.map((l) => (
-              <button
-                key={l.code}
-                className={`theme-option ${lang === l.code ? "active" : ""}`}
-                onClick={() => {
-                  setLang(l.code);
-                  setOpenMenu(null);
-                }}
-              >
-                <span>{l.name}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-        {/* 界面偏好（数据流等）在「设置」页维护，侧栏只留主题与语言 */}
+        {/* 界面偏好（数据流/语言等）在「设置」页维护，侧栏只留主题与强调色 */}
         <div className="nav-footer">
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} />
           <span className="status-text">{wsConnected ? t("status.connected") : t("status.reconnecting")}</span>
