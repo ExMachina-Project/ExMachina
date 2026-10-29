@@ -466,6 +466,7 @@ export const en: Partial<Dict> = {
   "plan.doneHint": "Plan executed; keep chatting to make a new plan.",
   "plan.foldMore": "Show all ({n} lines)",
   "plan.foldLess": "Collapse",
+  "todo.progress": "Tasks {done}/{total}",
   "models.followGlobalOption": "Follow global default (active provider)",
   "models.followGlobalShort": "Follow global",
   "models.noModel": "no model",

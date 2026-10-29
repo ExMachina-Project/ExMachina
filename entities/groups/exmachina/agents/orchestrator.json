@@ -18,6 +18,7 @@
     "filesystem",
     "terminal",
     "edit",
+    "todo",
     "web_search"
   ],
   "whenToCall": "用户每次输入",

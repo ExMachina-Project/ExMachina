@@ -11,7 +11,7 @@ import type {
   TaskGraph,
   ToolCallItem,
 } from "./types";
-import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit } from "./api";
+import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit, type TodoItem } from "./api";
 import { tr } from "./i18n/core";
 
 export interface TimelineItem {
@@ -64,6 +64,8 @@ interface ExmState {
   refreshPlan: (sessionId: string) => Promise<void>;
   decidePlan: (action: "approve" | "reject" | "setMode", plan?: boolean) => Promise<void>;
   setPlanMode: (on: boolean) => Promise<void>;
+  /** 任务清单（spec agent-todo）：todo.updated 事件快照 */
+  todo: { count: number; doneCount: number; allDone: boolean; items: TodoItem[] } | null;
   timeline: TimelineItem[];
   /** 时间线归属会话：切到子会话/其它会话时不在那里展示别处的调度轨迹 */
   timelineSession: string | null;
@@ -281,6 +283,7 @@ export const useExm = create<ExmState>((set, get) => ({
   planApplied: null,
   planPending: false,
   planDirtyAt: 0,
+  todo: null,
   timeline: [],
   timelineSession: null,
   lastRecall: [],
@@ -392,6 +395,7 @@ export const useExm = create<ExmState>((set, get) => ({
       planSession: id,
       planApplied: null,
       planPending: false,
+      todo: null,
       timeline: [],
       timelineSession: null,
       running: false,
@@ -544,6 +548,20 @@ export const useExm = create<ExmState>((set, get) => ({
     }
     if (evt.type === "approval.resolved") {
       set({ approvals: get().approvals.filter((a) => a.approvalId !== String(p.approvalId)) });
+      return;
+    }
+    // 任务清单（spec agent-todo）：todo.updated 快照（仅当前会话）
+    if (evt.type === "todo.updated") {
+      if (evt.sessionId === get().sessionId) {
+        set({
+          todo: {
+            count: Number(p.count ?? 0),
+            doneCount: Number(p.doneCount ?? 0),
+            allDone: Boolean(p.allDone),
+            items: ((p.items ?? []) as unknown as TodoItem[]),
+          },
+        });
+      }
       return;
     }
     // 计划事件（spec plan-mode：WebUI 卡片实时刷新，不靠轮询）

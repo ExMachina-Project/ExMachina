@@ -331,6 +331,13 @@ export interface PlanItem {
   createdAt: string;
 }
 
+// 任务清单（spec agent-todo）：todo.updated 事件负载
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "done";
+}
+
 export interface PlanInfo {
   sessionId: string;
   mode: "plan" | "execute";

@@ -354,6 +354,17 @@ impl AgentRuntime {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(boundary);
         }
+        // 任务清单注入（spec: agent-todo）：清单非空时每轮带上进度全景（✅/🔄/⬜）
+        if let Some(todo_block) = crate::todo::render(session_id) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&todo_block);
+        }
+        // 后台子任务未回收提醒（spec: subagent-spawn）：已终结未读的终态摘要，
+        // 模型不必主动查询也知道有结果待收（限 5 条）
+        if let Some(spawn_note) = self.tools.spawn_pending_note(session_id) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&spawn_note);
+        }
         let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(history);
 

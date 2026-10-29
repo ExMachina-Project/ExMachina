@@ -16,6 +16,7 @@
     "filesystem",
     "terminal",
     "edit",
+    "todo",
     "patch",
     "web_search",
     "web_fetch"
