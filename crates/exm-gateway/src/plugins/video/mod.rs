@@ -61,6 +61,8 @@ pub fn spawn_supervisor(core: Arc<Core>) {
 }
 
 fn reconcile(core: &Arc<Core>) {
+    // 全局点播工具面同步（先于 runner 治理：通道启停立即反映到工具注册表）
+    tools::reconcile_ondemand(core);
     let wanted: HashMap<String, Channel> = platform::load_channels(core)
         .into_iter()
         .filter(|c| c.enabled && is_video_platform(&c.kind))
@@ -128,6 +130,9 @@ pub(crate) struct Settings {
     max_watch_steps: usize,
     /// 互动审批模式：off = 直接发；always = 评论发出前需人工审批（批准代发）
     approval: String,
+    /// 点播评论准入口径：admin（默认，仅管理者）/ member（所有绑定成员）；
+    /// 仅作用于非轮次会话的 video__act 判权，轮次闸门不受影响
+    act_role: String,
     max_comment_chars: usize,
     source: String,
     keywords: Vec<String>,
@@ -157,6 +162,14 @@ impl Settings {
                 .unwrap_or_else(|| "off".into())
                 .trim()
                 .to_lowercase(),
+            act_role: {
+                let v = ch
+                    .cfg("actRole")
+                    .unwrap_or_else(|| "admin".into())
+                    .trim()
+                    .to_lowercase();
+                if v == "member" { "member".into() } else { "admin".into() }
+            },
             max_comment_chars: cfg_u64(ch, "maxCommentChars", 120).clamp(20, 800) as usize,
             source: ch.cfg("source").unwrap_or_else(|| "popular".into()),
             keywords: split_list(ch.cfg("keywords").as_deref()),
@@ -191,7 +204,7 @@ fn split_list(raw: Option<&str>) -> Vec<String> {
 // ---------------------------------------------------------------- 状态
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct VideoState {
+pub(crate) struct VideoState {
     #[serde(default)]
     seen_videos: Vec<String>,
     #[serde(default)]
@@ -203,7 +216,7 @@ struct VideoState {
 }
 
 impl VideoState {
-    fn load(core: &Core, channel_id: &str) -> Self {
+    pub(crate) fn load(core: &Core, channel_id: &str) -> Self {
         let p = state_path(core, channel_id);
         std::fs::read_to_string(p)
             .ok()
@@ -211,7 +224,7 @@ impl VideoState {
             .unwrap_or_default()
     }
 
-    fn save(&self, core: &Core, channel_id: &str) {
+    pub(crate) fn save(&self, core: &Core, channel_id: &str) {
         let p = state_path(core, channel_id);
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -222,7 +235,7 @@ impl VideoState {
         }
     }
 
-    fn reset_day(&mut self) {
+    pub(crate) fn reset_day(&mut self) {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         if self.day != today {
             self.day = today;
@@ -762,6 +775,19 @@ fn http_client() -> reqwest::Client {
                 .unwrap_or_else(|_| reqwest::Client::new())
         })
         .clone()
+}
+
+/// b23.tv 短链重定向解析（不跟随重定向，读一层 Location；video 工具归一用）。
+/// 放行至 video 工具模块使用（tools.rs 的 expand_b23）。
+pub(crate) async fn head_no_redirect(url: &str) -> anyhow::Result<reqwest::Response> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(UA)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let resp = client.get(url).send().await?;
+    Ok(resp)
 }
 
 fn bili_cookie(ch: &Channel) -> String {
@@ -1479,6 +1505,99 @@ fn strip_html(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 全局点播注册_随通道启停同步() {
+        let dir = std::env::temp_dir().join(format!("exm-video-od-{}", exm_core::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        let core = Arc::new(exm_core::Core::with_config(cfg).expect("创建 Core 失败"));
+
+        let mk = |enabled: bool| Channel {
+            id: "bili-od".into(),
+            kind: "bilibili".into(),
+            enabled,
+            group: None,
+            allowed_chats: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("sessdata".into(), "x".into());
+                m.insert("biliJct".into(), "y".into());
+                m
+            },
+            group_gate: None,
+            capability: "computer".into(),
+            memory_isolation: false,
+            created_at: String::new(),
+        };
+
+        // 初始：无通道 → 无全局工具
+        tools::reconcile_ondemand(&core);
+        assert!(core.orchestrator().tools.dynamic_tool("video__summary").is_none());
+
+        // 启用 → 注册（含 act）
+        crate::platform::save_channels(&core, &[mk(true)]).unwrap();
+        tools::reconcile_ondemand(&core);
+        for n in ["video__summary", "video__comments", "video__act"] {
+            assert!(
+                core.orchestrator().tools.dynamic_tool(n).is_some(),
+                "{n} 应已注册"
+            );
+        }
+        // 全体可见（agents 空列表）
+        let specs = core.orchestrator().tools.custom_specs_for("machina");
+        assert!(specs.iter().any(|s| s.name == "video__summary"));
+
+        // 停用 → 注销回收
+        crate::platform::save_channels(&core, &[mk(false)]).unwrap();
+        tools::reconcile_ondemand(&core);
+        assert!(core.orchestrator().tools.dynamic_tool("video__summary").is_none());
+    }
+
+    #[test]
+    fn 配对码_预设角色兑换() {
+        let dir = std::env::temp_dir().join(format!("exm-pair-role-{}", exm_core::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        let core = exm_core::Core::with_config(cfg).expect("创建 Core 失败");
+
+        // 管理者配对码：兑换即落 admin
+        let admin_code = core.issue_pairing_code_role("管理员", None, 600, "admin").unwrap();
+        let idn = core
+            .redeem_pairing(&admin_code.code, "tg-main", "u1", "张三", "member")
+            .unwrap();
+        assert_eq!(idn.role, "admin", "预设角色应覆盖默认");
+
+        // 普通码（旧签名/无角色）：落 default_role
+        let member_code = core.issue_pairing_code("成员", None, 600).unwrap();
+        assert_eq!(member_code.role, "member");
+        let idn2 = core
+            .redeem_pairing(&member_code.code, "tg-main", "u2", "李四", "member")
+            .unwrap();
+        assert_eq!(idn2.role, "member");
+
+        // 存量码无角色字段（手工造码）：回落 default_role
+        let legacy = exm_core::types::PairingCode {
+            code: "legacy001".into(),
+            note: String::new(),
+            channel_platform: None,
+            created_by: "console".into(),
+            created_at: String::new(),
+            expires_at_ms: exm_core::types::now_ms() + 600_000,
+            role: String::new(),
+        };
+        core.save_pairing_code(&legacy).unwrap();
+        let idn3 = core.redeem_pairing("legacy001", "tg-main", "u3", "王五", "member").unwrap();
+        assert_eq!(idn3.role, "member");
+    }
 
     #[test]
     fn 配置解析_默认安全档() {

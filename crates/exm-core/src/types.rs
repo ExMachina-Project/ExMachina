@@ -1221,6 +1221,10 @@ pub struct PairingCode {
     pub created_at: String,
     /// 过期时间（Unix 毫秒）
     pub expires_at_ms: u64,
+    /// 预设角色：admin | member（缺省 member）；兑换时身份直接落此角色，
+    /// 免除「先 member 后手动提权」两步割裂
+    #[serde(default)]
+    pub role: String,
 }
 
 /// 绑定的外部用户身份：通道账号 → 平台用户档案（配对码换发的长期绑定）
