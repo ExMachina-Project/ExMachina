@@ -35,7 +35,7 @@ interface ChanField {
 }
 interface ChanPlat {
   key: string;
-  color: string;
+  color?: string;
   /** 表格里的平台标牌（品牌名，各语言一致） */
   tag?: string;
   tagKey?: TKey;
@@ -51,7 +51,7 @@ interface ChanPlat {
 const PLATFORMS: ChanPlat[] = [
   {
     key: "qqbot",
-    color: "geekblue",
+    color: undefined,
     tag: "QQ Bot",
     labelKey: "channels.plat.qqbot",
     helpKey: "channels.platHelp.qqbot",
@@ -64,7 +64,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "napcat",
-    color: "blue",
+    color: undefined,
     tag: "NapCat",
     labelKey: "channels.plat.napcat",
     helpKey: "channels.platHelp.napcat",
@@ -76,7 +76,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "telegram",
-    color: "processing",
+    color: undefined,
     tag: "Telegram",
     labelKey: "channels.plat.telegram",
     helpKey: "channels.platHelp.telegram",
@@ -85,7 +85,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "discord",
-    color: "purple",
+    color: undefined,
     tag: "Discord",
     labelKey: "channels.plat.discord",
     helpKey: "channels.platHelp.discord",
@@ -96,7 +96,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "slack",
-    color: "magenta",
+    color: undefined,
     tag: "Slack",
     labelKey: "channels.plat.slack",
     helpKey: "channels.platHelp.slack",
@@ -108,7 +108,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "matrix",
-    color: "gold",
+    color: undefined,
     tag: "Matrix",
     labelKey: "channels.plat.matrix",
     helpKey: "channels.platHelp.matrix",
@@ -120,7 +120,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "bilibili",
-    color: "pink",
+    color: undefined,
     tag: "B站",
     labelKey: "channels.plat.bilibili",
     helpKey: "channels.platHelp.bilibili",
@@ -158,6 +158,16 @@ const PLATFORMS: ChanPlat[] = [
           { value: "always", labelKey: "channels.f.approvalAlways" },
         ],
         helpKey: "channels.f.approvalHelp",
+      },
+      {
+        key: "actRole",
+        labelKey: "channels.f.actRole",
+        default: "admin",
+        options: [
+          { value: "admin", labelKey: "channels.f.actRoleAdmin" },
+          { value: "member", labelKey: "channels.f.actRoleMember" },
+        ],
+        helpKey: "channels.f.actRoleHelp",
       },
       { key: "maxWatchSteps", labelKey: "channels.f.maxWatchSteps", default: "8", helpKey: "channels.f.maxWatchStepsHelp" },
       { key: "maxCommentChars", labelKey: "channels.f.maxCommentChars", default: "120", helpKey: "channels.f.maxCommentCharsHelp" },
@@ -204,13 +214,23 @@ const PLATFORMS: ChanPlat[] = [
         ],
         helpKey: "channels.f.approvalHelp",
       },
+      {
+        key: "actRole",
+        labelKey: "channels.f.actRole",
+        default: "admin",
+        options: [
+          { value: "admin", labelKey: "channels.f.actRoleAdmin" },
+          { value: "member", labelKey: "channels.f.actRoleMember" },
+        ],
+        helpKey: "channels.f.actRoleHelp",
+      },
       { key: "maxWatchSteps", labelKey: "channels.f.maxWatchSteps", default: "8", helpKey: "channels.f.maxWatchStepsHelp" },
       { key: "maxCommentChars", labelKey: "channels.f.maxCommentChars", default: "120", helpKey: "channels.f.maxCommentCharsHelp" },
     ],
   },
   {
     key: "rss",
-    color: "purple",
+    color: undefined,
     tag: "RSS",
     labelKey: "channels.plat.rss",
     helpKey: "channels.platHelp.rss",
@@ -224,7 +244,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "webhook",
-    color: "cyan",
+    color: undefined,
     tag: "Webhook",
     labelKey: "channels.plat.webhook",
     helpKey: "channels.platHelp.webhook",
@@ -232,7 +252,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "qq",
-    color: "geekblue",
+    color: undefined,
     tagKey: "channels.tag.qq",
     labelKey: "channels.plat.qq",
     helpKey: "channels.platHelp.qq",
@@ -283,7 +303,7 @@ export function ChannelsView(): React.ReactElement {
           for (const k of newKinds) {
             extra.push({
               key: k,
-              color: "purple",
+              color: undefined,
               tag: p.name || p.id,
               labelKey: "channels.plat.plugin" as TKey,
               helpKey: "channels.platHelp.plugin" as TKey,
@@ -491,7 +511,7 @@ export function ChannelsView(): React.ReactElement {
   const platformTag = (p: string) => {
     const plat = catalog.find((x) => x.key === p);
     if (!plat) return <Tag>{p}</Tag>;
-    return <Tag color={plat.color}>{plat.tag ?? (plat.tagKey ? t(plat.tagKey) : p)}</Tag>;
+    return <Tag color={plat.color || undefined}>{plat.tag ?? (plat.tagKey ? t(plat.tagKey) : p)}</Tag>;
   };
 
   const fieldSet = (c: Channel, f: ChanField) =>
@@ -594,7 +614,7 @@ export function ChannelsView(): React.ReactElement {
                   <Space direction="vertical" size={2}>
                     {c.group ? (
                       isSingle ? (
-                        <Tag color="cyan">
+                        <Tag>
                           {t("channels.f.singleTag")} · {singles.find((s) => s.identifier === c.group!.slice(7))?.name ?? c.group.slice(7)}
                         </Tag>
                       ) : (
@@ -604,11 +624,11 @@ export function ChannelsView(): React.ReactElement {
                       <Tag>{t("channels.followSingle")}</Tag>
                     )}
                     <Space size={4} wrap>
-                      <Tag color={cap === "chat" ? "default" : cap === "tools" ? "blue" : "volcano"}>
+                      <Tag color={cap === "chat" ? undefined : "purple"}>
                         {t(`channels.cap.${cap}` as TKey)}
                       </Tag>
                       {c.memoryIsolation ? (
-                        <Tag color="orange">{t("channels.memIsolated")}</Tag>
+                        <Tag>{t("channels.memIsolated")}</Tag>
                       ) : (
                         <Tag>{t("channels.memShared")}</Tag>
                       )}
@@ -643,7 +663,7 @@ export function ChannelsView(): React.ReactElement {
                       {t("channels.testBtn")}
                     </Button>
                     {st && (
-                      <Tag color={st.ok ? "success" : st.category === "auth" ? "error" : st.category === "missing" ? "warning" : "default"}>
+                      <Tag color={st.ok ? undefined : st.category === "auth" ? "error" : st.category === "missing" ? "warning" : undefined}>
                         {st.ok ? st.identity || t("channels.testOkShort") : t("channels.testCat." + st.category, { msg: (st.message ?? "").slice(0, 60) })}
                       </Tag>
                     )}
@@ -655,7 +675,7 @@ export function ChannelsView(): React.ReactElement {
               title: t("channels.colReply"),
               render: (_, c) => {
                 const plat = catalog.find((x) => x.key === c.type);
-                if (plat?.proactive) return <Tag color="pink">{t("channels.replyProactive")}</Tag>;
+                if (plat?.proactive) return <Tag color="purple">{t("channels.replyProactive")}</Tag>;
                 return plat?.replyBuiltin ? (
                   <Tag>{t("channels.replyBuiltin")}</Tag>
                 ) : (

@@ -582,6 +582,17 @@ impl Core {
 
     /// 签发一次性配对码（8 位短码，TTL 由调用方给）
     pub fn issue_pairing_code(&self, note: &str, platform: Option<&str>, ttl_secs: u64) -> anyhow::Result<PairingCode> {
+        self.issue_pairing_code_role(note, platform, ttl_secs, "member")
+    }
+
+    /// 带预设角色签发（admin = 管理者配对码；兑换即落 admin）
+    pub fn issue_pairing_code_role(
+        &self,
+        note: &str,
+        platform: Option<&str>,
+        ttl_secs: u64,
+        role: &str,
+    ) -> anyhow::Result<PairingCode> {
         let code = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let c = PairingCode {
             code: code.clone(),
@@ -590,6 +601,7 @@ impl Core {
             created_by: "console".into(),
             created_at: now_iso(),
             expires_at_ms: now_ms() + ttl_secs * 1000,
+            role: if role == "admin" { "admin".into() } else { "member".into() },
         };
         self.store.put_pairing_code(&c)?;
         Ok(c)
@@ -631,7 +643,12 @@ impl Core {
             channel: channel.to_string(),
             external_id: external_id.to_string(),
             display_name: display_name.to_string(),
-            role: default_role.to_string(),
+            // 预设角色优先（签发时指定）；存量码无角色落 default_role（member）
+            role: if c.role.trim().is_empty() {
+                default_role.to_string()
+            } else {
+                c.role.clone()
+            },
             paired_at: now_iso(),
             note: c.note.clone(),
         };

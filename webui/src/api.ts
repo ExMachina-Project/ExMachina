@@ -903,8 +903,11 @@ export function identityList(): Promise<IdentityList> {
 }
 
 /** 通道身份：签发配对码（单次有效、限时） */
-export function identityIssue(note: string): Promise<{ code: string; expiresAtMs: number }> {
-  return req(`/identity/code`, { method: "POST", body: JSON.stringify({ note }) });
+export function identityIssue(note: string, role?: "admin" | "member"): Promise<{ code: string; expiresAtMs: number }> {
+  return req(`/identity/code`, {
+    method: "POST",
+    body: JSON.stringify({ note, role: role ?? "member" }),
+  });
 }
 
 /** 通道身份：调整角色（admin | member） */
