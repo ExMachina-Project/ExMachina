@@ -2143,13 +2143,14 @@ impl ToolGateway {
         );
         push(
             ToolName::Filesystem,
-            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）",
+            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["write", "mkdir", "list"] },
+                    "op": { "type": "string", "enum": ["write", "mkdir", "list", "delete", "rename"] },
                     "path": { "type": "string", "description": "相对工作区的路径" },
-                    "content": { "type": "string", "description": "op=write 时的文件内容" }
+                    "content": { "type": "string", "description": "op=write 时的文件内容" },
+                    "newPath": { "type": "string", "description": "op=rename 时的目标路径（相对工作区；目标存在则拒绝）" }
                 },
                 "required": ["op", "path"]
             }),
@@ -4080,8 +4081,93 @@ impl ToolGateway {
                     ToolResult::err(format!("不是目录: {path}"))
                 }
             }
+            // 删除进回收站（spec: filesystem-ops）：不裸删——整树移入
+            // .exmachina/trash/<日期>/<相对路径>，保留原内容供人工恢复
+            "delete" => {
+                let root = self.effective_root();
+                // 保护区：工作区根 / .exmachina 系统区（含检查点与回收站自身）
+                if target == root {
+                    return ToolResult::err("拒绝删除：工作区根目录不可删除");
+                }
+                let sys = self.workspace_root.join(".exmachina");
+                if target.starts_with(&sys) {
+                    return ToolResult::err(
+                        "拒绝删除：.exmachina 系统区（检查点/回收站/沙箱等）不可经此删除；确需清理请用终端并过审批",
+                    );
+                }
+                if !target.exists() {
+                    return ToolResult::err(format!("目标不存在: {path}"));
+                }
+                let Ok(rel) = target.strip_prefix(&root) else {
+                    return ToolResult::err("拒绝删除：目标不在当前工作区内");
+                };
+                let day: String = crate::types::now_iso().chars().take(10).collect();
+                let mut dst = sys.join("trash").join(&day).join(rel);
+                // 同日同名冲突：追加序号（build.log → build.log.2）
+                let mut seq = 2u32;
+                while dst.exists() {
+                    let name = format!(
+                        "{}.{seq}",
+                        rel.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    );
+                    dst = sys.join("trash").join(&day).join(rel.with_file_name(name));
+                    seq += 1;
+                }
+                if let Some(parent) = dst.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        return ToolResult::err(format!("回收站目录创建失败：{e}"));
+                    }
+                }
+                let rel_disp = dst
+                    .strip_prefix(&self.workspace_root)
+                    .map(|p| p.display().to_string().replace('\\', "/"))
+                    .unwrap_or_else(|_| dst.display().to_string());
+                match std::fs::rename(&target, &dst) {
+                    Ok(_) => ToolResult::ok(format!(
+                        "已删除（移入回收站，可人工恢复）：{path} → {rel_disp}"
+                    )),
+                    Err(e) => ToolResult::err(format!("删除失败（回收站移入）: {e}")),
+                }
+            }
+            // 重命名/移动（spec: filesystem-ops）：不覆盖 + 源检查点（undo 链不断）
+            "rename" => {
+                let new_path = args.get("newPath").and_then(|v| v.as_str()).unwrap_or("");
+                if new_path.trim().is_empty() {
+                    return ToolResult::err("op=rename 需要 newPath（相对工作区的目标路径）");
+                }
+                let new_target = match self.resolve_safe(new_path) {
+                    Ok(p) => p,
+                    Err(e) => return ToolResult::err(e.to_string()),
+                };
+                if !target.exists() {
+                    return ToolResult::err(format!("源不存在: {path}"));
+                }
+                if target == new_target {
+                    return ToolResult::err("newPath 与原路径相同，无需重命名");
+                }
+                if new_target.exists() {
+                    return ToolResult::err(format!(
+                        "目标已存在: {new_path}（rename 不覆盖；如需替换请先 delete）"
+                    ));
+                }
+                // 源写前检查点：undo 链可回滚到重命名前
+                if target.is_file() {
+                    if let Err(e) = self.checkpoint(&target, session_id) {
+                        return ToolResult::err(format!("写前检查点失败，已中止重命名：{e}"));
+                    }
+                }
+                if let Some(parent) = new_target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::rename(&target, &new_target) {
+                    Ok(_) => ToolResult::ok(format!("renamed: {path} -> {new_path}")),
+                    Err(e) => ToolResult::err(format!("重命名失败: {e}")),
+                }
+            }
             other => ToolResult::err(format!(
-                "未知 filesystem 操作: {other}（支持 write / mkdir / list；删除文件请用 terminal，受审批与审计约束）"
+                "未知 filesystem 操作: {other}（支持 write / mkdir / list / delete / rename）"
             )),
         }
     }
@@ -6809,6 +6895,220 @@ mod timeout_output_tests {
 #[cfg(test)]
 mod terminal_gate_tests {
     use super::*;
+
+    /// filesystem delete/rename（spec: filesystem-ops）回归
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_移入回收站可恢复() {
+        let dir = std::env::temp_dir().join(format!("exm-fsdel-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        std::fs::write(dir.join("tmp.log"), "hello").unwrap();
+        // 删除 → 回收站
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-1",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "tmp.log" }),
+            )
+            .await;
+        assert!(r.ok, "删除应成功：{:?}", r.error);
+        assert!(r.output.contains("回收站"), "应说明回收站路径：{}", r.output);
+        assert!(!dir.join("tmp.log").exists(), "原位应消失");
+        // 回收站里可找到（按日期目录搜索）
+        let trash_root = dir.join(".exmachina").join("trash");
+        let found = std::fs::read_dir(&trash_root)
+            .unwrap()
+            .any(|day| {
+                let day = day.unwrap().path();
+                day.join("tmp.log").exists()
+            });
+        assert!(found, "回收站应含被删文件");
+        // 不存在目标 → 报错
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-1",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "tmp.log" }),
+            )
+            .await;
+        assert!(!r.ok, "重复删除应报目标不存在");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_目录递归与同名序号() {
+        let dir = std::env::temp_dir().join(format!("exm-fsdir-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        // 目录树
+        std::fs::create_dir_all(dir.join("build").join("nested")).unwrap();
+        std::fs::write(dir.join("build").join("a.txt"), "1").unwrap();
+        std::fs::write(dir.join("build").join("nested").join("b.txt"), "2").unwrap();
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-2",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "build" }),
+            )
+            .await;
+        assert!(r.ok, "目录删除应成功：{:?}", r.error);
+        assert!(!dir.join("build").exists(), "目录树应整体移入");
+        // 同名序号：同日两次删除同名文件，第二次带 .2
+        std::fs::write(dir.join("x.log"), "v1").unwrap();
+        let r1 = gw
+            .execute(
+                "a",
+                "s-fs-2",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "x.log" }),
+            )
+            .await;
+        assert!(r1.ok, "第一次删除应成功");
+        std::fs::write(dir.join("x.log"), "v2").unwrap();
+        let r2 = gw
+            .execute(
+                "a",
+                "s-fs-2",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "x.log" }),
+            )
+            .await;
+        assert!(r2.ok);
+        assert!(r2.output.contains(".2"), "第二次删除应带序号：{}", r2.output);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_保护区拒绝() {
+        let dir = std::env::temp_dir().join(format!("exm-fspro-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        // .exmachina 系统区
+        std::fs::create_dir_all(dir.join(".exmachina").join("checkpoints")).unwrap();
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-3",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": ".exmachina" }),
+            )
+            .await;
+        assert!(!r.ok, "系统区删除应拒绝");
+        assert!(r.error.unwrap_or_default().contains("系统区"));
+        // 工作区根（resolve_safe(".") 应解析到根）
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-3",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "." }),
+            )
+            .await;
+        assert!(!r.ok, "根删除应拒绝");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs重命名_成功不覆盖与跨目录() {
+        let dir = std::env::temp_dir().join(format!("exm-fsren-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        std::fs::write(dir.join("old.txt"), "content-1").unwrap();
+        // 成功重命名
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-4",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "old.txt", "newPath": "new.txt" }),
+            )
+            .await;
+        assert!(r.ok, "重命名应成功：{:?}", r.error);
+        assert!(dir.join("new.txt").exists());
+        assert!(!dir.join("old.txt").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "content-1");
+        // 不覆盖：目标已存在拒绝
+        std::fs::write(dir.join("other.txt"), "x").unwrap();
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-4",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "other.txt", "newPath": "new.txt" }),
+            )
+            .await;
+        assert!(!r.ok, "覆盖应拒绝");
+        assert!(r.error.unwrap_or_default().contains("已存在"));
+        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "content-1", "原内容不应被破坏");
+        // 跨目录移动（父目录自动创建）
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-4",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "new.txt", "newPath": "sub/dir/moved.txt" }),
+            )
+            .await;
+        assert!(r.ok, "跨目录移动应成功：{:?}", r.error);
+        assert!(dir.join("sub").join("dir").join("moved.txt").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除重命名_plan模式拦截() {
+        let dir = std::env::temp_dir().join(format!("exm-fsplan-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        std::fs::write(dir.join("plan-target.txt"), "p").unwrap();
+        crate::plan::set_plan_mode("s-fs-5", true);
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-5",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "plan-target.txt" }),
+            )
+            .await;
+        assert!(r.ok);
+        assert!(dir.join("plan-target.txt").exists(), "plan 模式不应真删");
+        assert_eq!(crate::plan::list_items("s-fs-5").len(), 1, "应转为计划条目");
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-5",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "plan-target.txt", "newPath": "z.txt" }),
+            )
+            .await;
+        assert!(r.ok);
+        assert_eq!(crate::plan::list_items("s-fs-5").len(), 2, "rename 也应拦截");
+    }
 
     #[test]
     fn 白名单_日常开发命令放行() {
