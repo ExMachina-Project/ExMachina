@@ -848,13 +848,16 @@ impl crate::plugin::ToolProvider for ProcessPluginProvider {
         let args = args.clone();
         let rt = tokio::runtime::Handle::try_current()
             .map_err(|_| anyhow::anyhow!("进程插件调用需在异步上下文（tokio runtime）内"))?;
-        rt.block_on(async move {
-            // 名字剥命名空间前缀（进程侧注册的是裸名）
-            let bare = crate::plugin::parse_namespaced(&tool)
-                .map(|(_, t)| t)
-                .unwrap_or(tool.clone());
-            let r = sup.call_tool(&bare, args).await?;
-            Ok(r.text())
+        // block_in_place：worker 线程让位 blocking 再等（直接 block_on 必 panic）
+        tokio::task::block_in_place(|| {
+            rt.block_on(async move {
+                // 名字剥命名空间前缀（进程侧注册的是裸名）
+                let bare = crate::plugin::parse_namespaced(&tool)
+                    .map(|(_, t)| t)
+                    .unwrap_or(tool.clone());
+                let r = sup.call_tool(&bare, args).await?;
+                Ok(r.text())
+            })
         })
     }
 }
@@ -897,13 +900,17 @@ impl crate::plugin::ToolProvider for ProcessToolsView {
         let args = args.clone();
         let rt = tokio::runtime::Handle::try_current()
             .map_err(|_| anyhow::anyhow!("进程插件调用需在异步上下文（tokio runtime）内"))?;
-        rt.block_on(async move {
-            // 名字剥命名空间前缀（进程侧注册的是裸名）
-            let bare = crate::plugin::parse_namespaced(&tool)
-                .map(|(_, t)| t)
-                .unwrap_or(tool.clone());
-            let r = sup.call_tool(&bare, args).await?;
-            Ok(r.text())
+        // block_in_place：把当前 worker 线程让出为 blocking 位再等 future——
+        // 直接 block_on 会因「runtime 内起 runtime」panic（多线程 rt worker 上必现）
+        tokio::task::block_in_place(|| {
+            rt.block_on(async move {
+                // 名字剥命名空间前缀（进程侧注册的是裸名）
+                let bare = crate::plugin::parse_namespaced(&tool)
+                    .map(|(_, t)| t)
+                    .unwrap_or(tool.clone());
+                let r = sup.call_tool(&bare, args).await?;
+                Ok(r.text())
+            })
         })
     }
 }
