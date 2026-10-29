@@ -159,10 +159,23 @@ pub async fn get_plugin(State(st): State<AppState>, Path(id): Path<String>) -> a
         "credentialsConfigured": cfg.plugins.credentials.contains_key(&id),
         // T2 握手后 tools/list 快照（装载期发现面；空 = 未拉起或非进程形态）
         "toolsSnapshot": e.tools_snapshot,
-        // 会话工具面注册诊断：该插件工具是否已并入 ToolGateway（下发面可见性）
+        // 会话工具面注册诊断：实际下发面的该插件命名空间工具（排障用）
+        "sessionToolSurface": session_tool_surface(&st, &id),
         "toolSurfaceRegistered": tool_surface_registered(&st, &id, &e.tools_snapshot),
     }))
     .into_response()
+}
+
+/// 下发面中该插件的命名空间工具名（诊断：快照有但这里没有 = 装配断链）
+fn session_tool_surface(st: &AppState, id: &str) -> Vec<String> {
+    st.core
+        .orchestrator()
+        .tools
+        .custom_specs_for("orchestrator")
+        .iter()
+        .filter(|s| s.name.starts_with(&format!("{id}__")))
+        .map(|s| s.name.clone())
+        .collect()
 }
 
 /// 该插件工具是否已注册进会话工具面（详情页健康诊断：快照有但未注册 = 装配断链）
@@ -473,6 +486,25 @@ pub(crate) fn attach_process_tools(
             eprintln!("[plugins] {id} 工具面已并入会话工具网关");
         }
         None => eprintln!("[plugins] {id} 工具面回接失败：provider 无 tool_provider"),
+    }
+}
+
+/// 全量进程插件的工具面回接（健康检查循环自愈用：注册被 config 热更新顶掉后补齐）
+pub(crate) fn attach_all_process_tools(
+    core: &std::sync::Arc<exm_core::Core>,
+    pm: &std::sync::Arc<exm_core::plugin::PluginManager>,
+) {
+    for e in pm.list() {
+        if e.form != "process" || !e.enabled {
+            continue;
+        }
+        if let Some(p) = pm.provider_of(&e.manifest.id) {
+            if let Some(tp) = p.tool_provider() {
+                core.orchestrator()
+                    .tools
+                    .register_plugin_runtime_tools(&e.manifest.id, tp);
+            }
+        }
     }
 }
 
