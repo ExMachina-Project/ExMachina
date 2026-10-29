@@ -4559,6 +4559,8 @@ impl ToolGateway {
             let agent_owned = agent_id.to_string();
             let registry = self.spawns_bg.clone();
             let events = self.events.clone();
+            // 持久化通道一并移入任务体：终态事件落 store（REST 事件面/WebUI 刷新后可见）
+            let store = self.store.clone();
             let session = session_id.to_string();
             let task_preview: String = task.chars().take(120).collect();
             registry.lock().insert(
@@ -4596,14 +4598,25 @@ impl ToolGateway {
                 if let Some(t) = registry.lock().get(&sid_evt) {
                     *t.state.write() = state;
                 }
-                let _ = events.send(CoreEvent {
+                let evt = CoreEvent {
                     kind: "spawn.finished".into(),
                     session_id: session,
                     payload: serde_json::json!({
                         "spawnId": sid_evt, "status": status, "background": true,
                         "summaryPreview": preview,
                     }),
-                });
+                };
+                let _ = events.send(evt.clone());
+                // 落 store：REST 事件 API / WebUI 刷新后可查（与 emit_and_persist 同口径）
+                let env = crate::types::Envelope::new(
+                    format!("session.{}.events", evt.session_id),
+                    "tools",
+                    "broadcast",
+                    "event",
+                    evt.session_id.clone(),
+                    serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
+                );
+                let _ = store.append_event(&env);
             });
             return ToolResult::ok(format!(
                 "子任务已后台启动：spawnId={spawn_id}\n任务：{task_preview}\n用 spawn(op=\"status\", spawnId=\"{spawn_id}\") 查询结果；spawn(op=\"list\") 列全部。完成后下一轮上下文会自动提醒。"

@@ -255,6 +255,18 @@ async fn spawn_未读终态进入提醒注入() {
     let n = note.unwrap();
     assert!(n.contains("后台子任务结果待收"), "提醒格式：{n}");
     assert!(n.contains("提醒验证"), "提醒应含任务预览：{n}");
+    // 终态事件持久化：REST 事件面/前端刷新后可见（append_event 落 store）
+    let persisted = _core.store.list_events("ses-note").unwrap_or_default();
+    let finished: Vec<_> = persisted
+        .iter()
+        .filter(|env| {
+            env.get("payload")
+                .and_then(|p| p.get("type"))
+                .and_then(|v| v.as_str())
+                == Some("spawn.finished")
+        })
+        .collect();
+    assert_eq!(finished.len(), 1, "spawn.finished 应持久化到事件流");
     // 其它会话不受影响
     assert!(gw.spawn_pending_note("ses-other2").is_none());
 }
