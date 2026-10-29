@@ -569,8 +569,17 @@ export const useExm = create<ExmState>((set, get) => ({
           void get().refreshPlan(sid);
           break;
         case "plan.applied":
+          // 事件逐条发出（每 payload 单项）：增量累积成回放结果
           set({
-            planApplied: ((p.applied ?? []) as unknown as PlanAppliedItem[]),
+            planApplied: [
+              ...(get().planApplied ?? []),
+              {
+                itemId: String(p.itemId ?? ""),
+                tool: String(p.tool ?? ""),
+                target: String(p.target ?? ""),
+                ok: Boolean(p.ok),
+              },
+            ],
             planPending: false,
           });
           void get().refreshPlan(sid);
