@@ -38,7 +38,7 @@ WORKDIR /app
 RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git libxdo3 libx11-6 libxcb1 libxext6 libxinerama1 libxtst6 libxkbcommon0 \
-      python3 \
+      python3 jq sqlite3 xxd \
     && rm -rf /var/lib/apt/lists/*
 # 一键更新工具链:docker cli + compose 插件由 compose 从宿主机只读挂载(零构建期下载,版本与宿主引擎一致)
 COPY --from=rust-builder /build/target/release/exm /usr/local/bin/exm
