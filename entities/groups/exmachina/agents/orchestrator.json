@@ -19,6 +19,7 @@
     "terminal",
     "edit",
     "todo",
+    "spawn",
     "web_search"
   ],
   "whenToCall": "用户每次输入",

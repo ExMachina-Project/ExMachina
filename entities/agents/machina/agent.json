@@ -17,6 +17,7 @@
     "terminal",
     "edit",
     "todo",
+    "spawn",
     "patch",
     "web_search",
     "web_fetch"
