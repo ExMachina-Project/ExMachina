@@ -11,7 +11,7 @@ import type {
   TaskGraph,
   ToolCallItem,
 } from "./types";
-import { api, serverBase, type GatewayConfig, type GroupMeta, type RecallHit } from "./api";
+import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit } from "./api";
 import { tr } from "./i18n/core";
 
 export interface TimelineItem {
@@ -55,6 +55,15 @@ interface ExmState {
   runToolCalls: ToolCallItem[];
   /** 待人工审批单（聊天内联裁决） */
   approvals: ApprovalItem[];
+  /** 计划模式（spec plan-mode WebUI 卡片）：当前会话计划数据 + 拉取防抖 */
+  plan: PlanInfo | null;
+  planSession: string | null;
+  planApplied: PlanAppliedItem[] | null;
+  planPending: boolean;
+  planDirtyAt: number;
+  refreshPlan: (sessionId: string) => Promise<void>;
+  decidePlan: (action: "approve" | "reject" | "setMode", plan?: boolean) => Promise<void>;
+  setPlanMode: (on: boolean) => Promise<void>;
   timeline: TimelineItem[];
   /** 时间线归属会话：切到子会话/其它会话时不在那里展示别处的调度轨迹 */
   timelineSession: string | null;
@@ -267,6 +276,11 @@ export const useExm = create<ExmState>((set, get) => ({
   liveParts: {},
   runToolCalls: [],
   approvals: [],
+  plan: null,
+  planSession: null,
+  planApplied: null,
+  planPending: false,
+  planDirtyAt: 0,
   timeline: [],
   timelineSession: null,
   lastRecall: [],
@@ -374,10 +388,16 @@ export const useExm = create<ExmState>((set, get) => ({
       liveParts: {},
       runToolCalls: [],
       approvals: [],
+      plan: null,
+      planSession: id,
+      planApplied: null,
+      planPending: false,
       timeline: [],
       timelineSession: null,
       running: false,
     });
+    // 计划模式：进会话拉取当前清单与模式位（后续靠 plan.* 事件增量刷新）
+    void get().refreshPlan(id);
     connectWs(get);
   },
 
@@ -442,6 +462,46 @@ export const useExm = create<ExmState>((set, get) => ({
     }
   },
 
+  /** 拉取计划清单（plan.item 事件高频到达时 300ms 防抖合并） */
+  refreshPlan: async (sessionId) => {
+    if (get().planSession !== sessionId) {
+      set({ plan: null, planSession: sessionId, planApplied: null, planPending: false });
+    }
+    const stamp = Date.now();
+    set({ planDirtyAt: stamp });
+    await new Promise((r) => setTimeout(r, 300));
+    if (get().planDirtyAt !== stamp) return; // 已有更新的一次拉取接管
+    try {
+      const info = await api.getPlan(sessionId);
+      if (get().planSession === sessionId) set({ plan: info, planSession: sessionId });
+    } catch { /* 会话删除等场景静默 */ }
+  },
+
+  decidePlan: async (action, plan) => {
+    const sid = get().sessionId;
+    if (!sid) return;
+    try {
+      if (action === "approve") {
+        const r = await api.decidePlan(sid, "approve");
+        set({ planApplied: r.applied ?? [], planPending: false });
+        message.success(tr("store.plan.approved", { n: String(r.okCount ?? 0) }));
+      } else if (action === "reject") {
+        await api.decidePlan(sid, "reject");
+        set({ planPending: false });
+        message.info(tr("store.plan.rejected"));
+      } else {
+        await api.decidePlan(sid, "setMode", plan);
+      }
+      await get().refreshPlan(sid);
+    } catch (e) {
+      message.error(String(e));
+    }
+  },
+
+  setPlanMode: async (on) => {
+    await get().decidePlan("setMode", on);
+  },
+
   navRequest: null,
   requestNav: (view, sessionId) => set({ navRequest: { view, sessionId, nonce: Date.now() } }),
   markSessionsLoaded: () => set({ sessionsLoaded: true }),
@@ -484,6 +544,37 @@ export const useExm = create<ExmState>((set, get) => ({
     }
     if (evt.type === "approval.resolved") {
       set({ approvals: get().approvals.filter((a) => a.approvalId !== String(p.approvalId)) });
+      return;
+    }
+    // 计划事件（spec plan-mode：WebUI 卡片实时刷新，不靠轮询）
+    if (evt.type.startsWith("plan.")) {
+      const sid = evt.sessionId || get().sessionId;
+      if (!sid) return;
+      switch (evt.type) {
+        case "plan.item":
+          // 新条目累积：防抖拉取最新清单（条目可能连续到达）
+          void get().refreshPlan(sid);
+          break;
+        case "plan.pending":
+          set({ planPending: true });
+          void get().refreshPlan(sid);
+          break;
+        case "plan.approved":
+          // 回放中：applied 事件会带逐条结果
+          set({ planPending: false });
+          break;
+        case "plan.rejected":
+          set({ planPending: false });
+          void get().refreshPlan(sid);
+          break;
+        case "plan.applied":
+          set({
+            planApplied: ((p.applied ?? []) as unknown as PlanAppliedItem[]),
+            planPending: false,
+          });
+          void get().refreshPlan(sid);
+          break;
+      }
       return;
     }
     if (evt.sessionId !== get().sessionId) return;
