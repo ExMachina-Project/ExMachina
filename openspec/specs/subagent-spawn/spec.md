@@ -46,6 +46,8 @@ spawn MUST 受全局并发上限约束（默认可配），超限时排队或拒
 ### Requirement: 执行可观测
 子智能体的启动、工具调用、完成/失败 MUST 作为事件进入主会话事件流，CLI/WebUI 呈现为可展开的子任务卡片。后台子任务的终结事件 MUST 携带 spawnId 与结果预览，主智能体在后续轮次可见（系统提示注入未回收的后台子任务状态，模型不必主动查询也知道有结果待收）。
 
+WebUI 会话视图 MUST 呈现后台子任务卡：spawn.started（含 background 标记）产生运行中条目（任务预览 + spinner），spawn.finished 更新为终态（done/failed/timeout 着色 + 结果预览，点击展开全文）。终态条目 MUST 提供手动清除入口；仅跟随当前会话（跨会话不互见）。
+
 #### Scenario: 子任务卡片
 - **WHEN** 子智能体执行期间调用工具
 - **THEN** 主会话事件流记录子任务工具调用，UI 呈现为可展开卡片
@@ -53,3 +55,11 @@ spawn MUST 受全局并发上限约束（默认可配），超限时排队或拒
 #### Scenario: 未回收结果提醒
 - **WHEN** 后台子任务已终结但主智能体尚未 status 查询
 - **THEN** 下一轮系统提示包含该子任务的终态摘要（spawnId + 状态 + 结果预览）
+
+#### Scenario: WebUI 后台子任务卡
+- **WHEN** 后台子任务启动与终结
+- **THEN** WebUI 会话视图出现运行中条目并更新为终态卡（预览 + 展开全文 + 清除入口）
+
+#### Scenario: 后台事件跨端一致
+- **WHEN** CLI TUI 与 WebUI 同时观察同一会话
+- **THEN** 两端都呈现后台子任务的状态流转（CLI 事件行 / WebUI 卡片）
