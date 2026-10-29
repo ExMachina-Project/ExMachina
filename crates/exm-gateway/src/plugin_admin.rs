@@ -129,6 +129,8 @@ pub async fn list_plugins(State(st): State<AppState>) -> impl IntoResponse {
                 "enabled": e.enabled,
                 "error": e.error,
                 "capabilities": capability_summary(&e.manifest),
+                // 进程形态握手发现的工具名（列表直接可见；详情端点另有完整快照）
+                "toolsSnapshot": e.tools_snapshot,
             })
         })
         .collect();
