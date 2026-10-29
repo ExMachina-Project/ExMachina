@@ -463,9 +463,16 @@ pub(crate) fn attach_process_tools(
     pm: &std::sync::Arc<exm_core::plugin::PluginManager>,
     id: &str,
 ) {
-    let Some(p) = pm.provider_of(id) else { return };
-    if let Some(tp) = p.tool_provider() {
-        core.orchestrator().tools.register_plugin_runtime_tools(id, tp);
+    let Some(p) = pm.provider_of(id) else {
+        eprintln!("[plugins] {id} 工具面回接失败：provider 不存在");
+        return;
+    };
+    match p.tool_provider() {
+        Some(tp) => {
+            core.orchestrator().tools.register_plugin_runtime_tools(id, tp);
+            eprintln!("[plugins] {id} 工具面已并入会话工具网关");
+        }
+        None => eprintln!("[plugins] {id} 工具面回接失败：provider 无 tool_provider"),
     }
 }
 
