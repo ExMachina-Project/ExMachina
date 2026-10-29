@@ -167,7 +167,7 @@ fn spec(name: &str, desc: &str, params: Value) -> CustomTool {
 fn video_id_param(desc: &str) -> Value {
     json!({
         "type": "object",
-        "properties": { "videoId": { "type": "string", "description": desc } },
+        "properties": { "videoId": { "type": "string", "description": format!("{desc}；可直接传完整链接或 b23.tv 短链（系统自动归一）") } },
         "required": ["videoId"]
     })
 }
@@ -1300,7 +1300,7 @@ mod tests {
                 secret: None,
                 reply_webhook: None,
                 token: None,
-                config: BTreeMap::new(),
+                config: std::collections::BTreeMap::new(),
                 group_gate: None,
                 capability: "computer".into(),
                 memory_isolation: false,
