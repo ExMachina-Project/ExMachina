@@ -677,14 +677,30 @@ pub async fn fetch_index(url: &str) -> Result<Vec<IndexEntry>, String> {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| format!("HTTP 客户端构建失败：{e}"))?;
-        let resp = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("拉取插件索引失败：{e}"))?
-            .error_for_status()
-            .map_err(|e| format!("拉取插件索引失败：{e}"))?;
-        resp.text().await.map_err(|e| format!("读取索引失败：{e}"))?
+        // 网络抖动容错：3 次尝试 + 短退避（raw CDN 在部分网络下间歇超时）
+        let mut last_err = String::new();
+        let mut text = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt as u64)).await;
+            }
+            match client
+                .get(url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status().map_err(|e| e.without_url()))
+            {
+                Ok(resp) => match resp.text().await {
+                    Ok(t) => {
+                        text = Some(t);
+                        break;
+                    }
+                    Err(e) => last_err = format!("读取索引失败：{e}"),
+                },
+                Err(e) => last_err = format!("拉取插件索引失败：{e}"),
+            }
+        }
+        text.ok_or(last_err)?
     } else {
         std::fs::read_to_string(url).map_err(|e| format!("读取本地索引失败：{e}"))?
     };
