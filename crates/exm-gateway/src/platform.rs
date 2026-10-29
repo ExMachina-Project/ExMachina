@@ -1088,7 +1088,7 @@ pub(crate) fn load_channels(core: &exm_core::Core) -> Vec<Channel> {
         .unwrap_or_default()
 }
 
-fn save_channels(core: &exm_core::Core, channels: &[Channel]) -> anyhow::Result<()> {
+pub(crate) fn save_channels(core: &exm_core::Core, channels: &[Channel]) -> anyhow::Result<()> {
     let p = channels_path(core);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2309,6 +2309,17 @@ pub async fn create_channel(
         )
             .into_response();
     }
+    // actRole 合法性（点播评论准入：admin/member）
+    if let Some(r) = config.get("actRole") {
+        let r = r.trim();
+        if !r.is_empty() && r != "admin" && r != "member" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "config.actRole 须为 admin 或 member" })),
+            )
+                .into_response();
+        }
+    }
     let capability = b
         .capability
         .as_deref()
@@ -2447,6 +2458,17 @@ pub async fn update_channel(
         }
     }
     if let Some(v) = &b.config {
+        // actRole 合法性前置校验（点播评论准入：admin/member）
+        if let Some(r) = v.get("actRole") {
+            let r = r.trim();
+            if !r.is_empty() && r != "admin" && r != "member" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "config.actRole 须为 admin 或 member" })),
+                )
+                    .into_response();
+            }
+        }
         // 整表替换：UI 编辑时按平台提交完整配置；启停等局部更新不带 config 即保持不变。
         // 敏感键掩码回传 = 从旧表取回原值；空值键不入库（用户清空敏感键即删除）。
         let mut next: BTreeMap<String, String> = BTreeMap::new();
@@ -2845,6 +2867,7 @@ mod identity_gate_tests {
             created_by: "console".into(),
             created_at: exm_core::types::now_iso(),
             expires_at_ms: exm_core::types::now_ms() - 1000,
+            role: String::new(),
         };
         core.save_pairing_code(&expired).unwrap();
         let late = admit(&core, &ch, &ctx("/pair expired1", "u6", false, false)).await;

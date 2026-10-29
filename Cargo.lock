@@ -721,6 +721,7 @@ dependencies = [
  "notify",
  "parking_lot",
  "quick-xml 0.36.2",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

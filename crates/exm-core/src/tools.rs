@@ -1594,6 +1594,11 @@ impl ToolGateway {
             .insert(spec.name.clone(), (spec, exec));
     }
 
+    /// 注销动态命名空间工具（插件停用/通道下线回收工具面）
+    pub fn unregister_dynamic_tool(&self, name: &str) {
+        self.dynamic_tools.write().remove(name);
+    }
+
     /// 按名查动态工具（执行面用）
     pub fn dynamic_tool(&self, name: &str) -> Option<(crate::config::CustomTool, DynamicToolExec)> {
         self.dynamic_tools.read().get(name).cloned()

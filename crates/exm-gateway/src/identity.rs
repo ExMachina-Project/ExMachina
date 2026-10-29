@@ -28,6 +28,7 @@ async fn list(State(st): State<AppState>) -> Response {
                 "code": c.code, "note": c.note, "platform": c.channel_platform,
                 "createdAt": c.created_at, "expiresAtMs": c.expires_at_ms,
                 "expired": now > c.expires_at_ms,
+                "role": if c.role.is_empty() { "member" } else { c.role.as_str() },
             })
         })
         .collect();
@@ -49,14 +50,19 @@ pub struct PairingBody {
     /// 有效期（秒）；缺省取全局配置
     #[serde(default)]
     pub ttl_secs: Option<u64>,
+    /// 预设角色：admin | member（缺省 member）；兑换即落此角色
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
-/// POST /api/identity/code：签发配对码
+/// POST /api/identity/code：签发配对码（可预设角色）
 async fn issue(State(st): State<AppState>, Json(b): Json<PairingBody>) -> Response {
     let ttl = b.ttl_secs.unwrap_or(st.core.config().identity.pairing_ttl_secs).clamp(60, 86400);
-    match st.core.issue_pairing_code(b.note.as_deref().unwrap_or(""), b.platform.as_deref(), ttl) {
+    let role = b.role.as_deref().unwrap_or("member").trim();
+    let role = if role == "admin" { "admin" } else { "member" };
+    match st.core.issue_pairing_code_role(b.note.as_deref().unwrap_or(""), b.platform.as_deref(), ttl, role) {
         Ok(c) => Json(json!({
-            "code": c.code, "expiresAtMs": c.expires_at_ms,
+            "code": c.code, "expiresAtMs": c.expires_at_ms, "role": role,
             "hint": format!("让用户在通道内发送 /pair {}", c.code),
         }))
         .into_response(),

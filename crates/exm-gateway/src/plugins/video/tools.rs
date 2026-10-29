@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 /// 单个观看会话的运行期状态（工具间共享：已见评论/视频/步数/配额引用）
 #[derive(Default)]
 pub(crate) struct WatchSession {
+    /// videoId 归一缓存（原始输入 → 归一 id；同会话重复输入零重复解析）
+    pub resolved_ids: std::collections::HashMap<String, String>,
     /// 本会话已见评论 id 集合（act 回复目标的核验面——防编造 id）
     pub seen_comments: BTreeSet<String>,
     /// 本会话已发动作数（与全局每日配额联动由调用方在 act 内检查）
@@ -47,6 +49,102 @@ pub(crate) fn session_state(session_id: &str) -> Arc<Mutex<WatchSession>> {
 /// 会话结束清理（轮次收束后调用；防内存缓慢增长）
 pub(crate) fn drop_session(session_id: &str) {
     watch_sessions().lock().unwrap().remove(session_id);
+}
+
+// ---------------------------------------------------------------- videoId 归一解析
+
+/// videoId 归一：裸号直通 / 长链正则抽取 / b23.tv 短链一层重定向展开。
+/// 解析失败原样返回（下游平台接口报「视频不存在」）。
+/// 同步部分纯字符串处理；短链展开是唯一的异步分支（调用方 await）。
+pub(crate) fn normalize_video_id(input: &str) -> String {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    // 已是裸号形态（BV… / av… / YouTube 11 位 id）直接采用
+    if is_bare_id(raw) {
+        return raw.to_string();
+    }
+    // B 站长链：bilibili.com/video/BV…（剔除 ?p= 分 P 等查询参数）
+    if let Some(id) = extract_bili_from_url(raw) {
+        return id;
+    }
+    // YouTube 三形态：watch?v= / youtu.be/ / shorts/
+    if let Some(id) = extract_yt_from_url(raw) {
+        return id;
+    }
+    // 兜底：去掉空白后原样透传（可能是裸号的变体写法）
+    raw.to_string()
+}
+
+/// 是否裸视频号形态（不含 URL 结构）
+fn is_bare_id(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("bv") && s.len() >= 8 {
+        return true; // BV1xxxx…
+    }
+    if let Some(num) = lower.strip_prefix("av") {
+        return !num.is_empty() && num.chars().all(|c| c.is_ascii_digit());
+    }
+    // YouTube videoId：恰 11 位、字母数字-_、非 URL
+    s.len() == 11 && !s.contains('/') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// 从 B 站 URL 抽取 BV 号（bilibili.com/video/BV…；容忍查询串/锚点）
+fn extract_bili_from_url(url: &str) -> Option<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?:bilibili\.com|b23\.tv)/video/(BV[0-9A-Za-z]{8,})").unwrap()
+    });
+    re.captures(url).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+}
+
+/// 从 YouTube URL 抽取 videoId（watch?v= / youtu.be/ / shorts/ / live/）
+fn extract_yt_from_url(url: &str) -> Option<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r#"(?:youtube\.com/(?:watch\?v=|shorts/|live/)|youtu\.be/)([0-9A-Za-z_-]{11})"#)
+            .unwrap()
+    });
+    re.captures(url).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+}
+
+/// b23.tv 短链一层重定向展开（GET 跟随一次 Location；失败返回 None 原样透传）
+pub(crate) async fn expand_b23(input: &str) -> Option<String> {
+    let short = input.trim();
+    if !short.contains("b23.tv") {
+        return None;
+    }
+    // 归一短链形态（无协议头补 https://）
+    let url = if short.starts_with("http") {
+        format!("https://{short}")
+    } else {
+        short.to_string()
+    }
+    .replace("http://b23.tv", "https://b23.tv");
+    let resp = super::head_no_redirect(&url).await.ok()?;
+    let loc = resp.headers().get("location")?.to_str().ok()?.to_string();
+    extract_bili_from_url(&loc)
+}
+
+/// 分发入口的归一收口：同步归一 + 短链展开 + 会话缓存
+async fn resolve_video_id(st: &Arc<Mutex<WatchSession>>, input: &str) -> String {
+    let raw = input.trim().to_string();
+    if raw.is_empty() {
+        return raw;
+    }
+    // 缓存命中
+    if let Some(hit) = st.lock().unwrap().resolved_ids.get(&raw) {
+        return hit.clone();
+    }
+    let mut id = normalize_video_id(&raw);
+    if id == raw && raw.contains("b23.tv") {
+        if let Some(expanded) = expand_b23(&raw).await {
+            id = expanded;
+        }
+    }
+    st.lock().unwrap().resolved_ids.insert(raw, id.clone());
+    id
 }
 
 // ---------------------------------------------------------------- 工具 schema
@@ -166,10 +264,71 @@ pub(crate) fn act_tool_spec() -> CustomTool {
     )
 }
 
+// ---------------------------------------------------------------- 全局点播注册
+
+/// 全局点播注册表指纹（上次注册时的通道绑定快照；变更即重建）。
+/// Vec<(平台, 通道 fingerprint)>：任一平台通道增删/启停/凭据变化即重建工具闭包。
+type OndemandFp = Vec<(String, String)>;
+
+fn ondemand_fp() -> &'static Mutex<Option<OndemandFp>> {
+    static F: std::sync::OnceLock<Mutex<Option<OndemandFp>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(None))
+}
+
+/// 维护全局点播工具面：存在启用的视频通道 → 注册 video__* 为全局动态工具
+/// （全体个体可见）；全部停用/删除 → 注销。多平台时按平台各绑首个启用通道。
+/// 与 reconcile() 同周期调用（10s 内收敛）。
+pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
+    // 各平台取首个启用通道（与 push_channel_text 取 first 同口径）
+    let mut by_kind: std::collections::BTreeMap<String, Channel> = std::collections::BTreeMap::new();
+    for ch in platform::load_channels(core) {
+        if ch.enabled && super::is_video_platform(&ch.kind) && !by_kind.contains_key(&ch.kind) {
+            by_kind.insert(ch.kind.clone(), ch);
+        }
+    }
+    // 注册指纹：平台 → 通道 fingerprint（凭据/配置变化即重建闭包）
+    let fp: Vec<(String, String)> = by_kind
+        .iter()
+        .map(|(k, ch)| (k.clone(), super::fingerprint(ch)))
+        .collect();
+    {
+        let last = ondemand_fp().lock().unwrap();
+        if *last == Some(fp.clone()) {
+            return; // 无变化
+        }
+    }
+    let gateway = core.orchestrator().tools.clone();
+    // 先全部注销（通道全停时清面；平台消失时回收该平台工具）
+    for name in [
+        "video__summary", "video__subtitle", "video__danmaku", "video__comments",
+        "video__uploader", "video__related", "video__search", "video__act",
+    ] {
+        gateway.unregister_dynamic_tool(name);
+    }
+    for ch in by_kind.values() {
+        for (spec, exec) in build_injections(core, ch) {
+            gateway.register_dynamic_tool(spec, exec);
+        }
+    }
+    *ondemand_fp().lock().unwrap() = Some(fp);
+}
+
+/// 全局工具执行入口的兜底：工具已注册但通道已停用/删除（注册表尚未收敛）时
+/// 执行闭包内自检通道可用性，返回未配置提示而非恐慌。
+async fn guard_channel_alive(ch: &Channel) -> anyhow::Result<()> {
+    // 通道快照仍有效 = enabled（注册时已过滤；reconcile 周期内的停用由闭包重建兜底）
+    if !ch.enabled {
+        anyhow::bail!("未配置可用的视频通道（通道已停用）；请在控制台「通道」页启用后再试");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- 执行面注册
 
 /// 构建观看会话的完整注入集（观看工具组 + act 互动工具）。
 /// 每工具绑定通道快照（kind/凭据），执行闭包路由到 dispatch_tool。
+/// 观看轮次经 inject_session_tools 注入专属会话；全局点播经 register_dynamic_tool
+/// 注册全体可见——执行面同一闭包，会话内注入优先于全局注册。
 pub(crate) fn build_injections(
     core: &Arc<Core>,
     ch: &Channel,
@@ -194,6 +353,10 @@ fn build_exec(core: Arc<Core>, ch: Channel, name: String) -> DynamicToolExec {
         let name = name.clone();
         let session = session.to_string();
         async move {
+            // 兜底自检：全局点播闭包可能滞后于通道停用（reconcile 10s 收敛窗内）
+            if let Err(e) = guard_channel_alive(&ch).await {
+                return Ok(e.to_string());
+            }
             let st = session_state(&session);
             dispatch_tool(&core, &name, &ch, &session, &st, args).await
         }
@@ -209,31 +372,46 @@ async fn dispatch_tool(
     st: &Arc<Mutex<WatchSession>>,
     args: Value,
 ) -> anyhow::Result<String> {
+    // videoId 归一收口：所有吃 videoId 的工具统一过 resolve（裸号/长链/短链 → 归一 id）
     let vid = |k: &str| -> Option<String> { args.get(k).and_then(|v| v.as_str()).map(str::to_string) };
     match name {
-        "video__summary" => tool_summary(ch, vid("videoId").unwrap_or_default()).await,
+        "video__summary" => {
+            let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
+            tool_summary(ch, id).await
+        }
         "video__subtitle" => {
-            tool_subtitle(ch, vid("videoId").unwrap_or_default(), args.get("page").and_then(|p| p.as_u64()).unwrap_or(1)).await
+            let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
+            tool_subtitle(ch, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1)).await
         }
         "video__danmaku" => {
             if ch.kind != "bilibili" {
                 return Ok("该平台无弹幕数据（YouTube 不提供弹幕；请用评论/字幕了解观众反应）".into());
             }
-            tool_danmaku(ch, vid("videoId").unwrap_or_default(), args.get("segment").and_then(|s| s.as_u64()).map(|s| s as i64)).await
+            let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
+            tool_danmaku(ch, id, args.get("segment").and_then(|s| s.as_u64()).map(|s| s as i64)).await
         }
         "video__comments" => {
             let sort = args.get("sort").and_then(|s| s.as_str()).unwrap_or("hot").to_string();
-            tool_comments(ch, st, vid("videoId").unwrap_or_default(), args.get("page").and_then(|p| p.as_u64()).unwrap_or(1), &sort).await
+            let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
+            tool_comments(ch, st, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1), &sort).await
         }
         "video__uploader" => tool_uploader(ch, vid("uploaderId").unwrap_or_default()).await,
         "video__related" => {
             if ch.kind != "bilibili" {
                 return Ok("该平台工具暂不提供（YouTube 相关推荐请用 video__search）".into());
             }
-            tool_related(ch, vid("videoId").unwrap_or_default()).await
+            let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
+            tool_related(ch, id).await
         }
         "video__search" => tool_search(ch, vid("query").unwrap_or_default()).await,
-        "video__act" => tool_act(core, ch, st, session, args).await,
+        "video__act" => {
+            let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
+            let mut a = args.clone();
+            if let Some(obj) = a.as_object_mut() {
+                obj.insert("videoId".into(), serde_json::Value::String(id));
+            }
+            tool_act(core, ch, st, session, a).await
+        }
         other => anyhow::bail!("未知视频工具：{other}"),
     }
 }
@@ -736,6 +914,81 @@ pub(crate) fn act_gate_count(session_id: &str) -> u32 {
 }
 
 /// video__act：评论/回复（闸门链：开关→目标核验→清洗→配额→审批/dry-run→buvid→执行）
+/// 点播判权结果：通过（带一次性闸门）/ 拒绝（带指引文案）
+enum GateOutcome {
+    Granted(Arc<ActGate>),
+    Denied(String),
+}
+
+/// 点播会话（非轮次）的即时判权：按会话来源角色对照通道 actRole 口径。
+/// - 无外部来源（WebUI 控制台会话）→ 全权
+/// - 未绑定身份（origin 是 ch:… 原始标注）→ 拒绝 + 指引 /pair
+/// - 绑定身份但角色低于 actRole → 拒绝 + 提示提权
+///
+/// 通过后按通道 Settings 构建一次性 ActGate（开关/配额/清洗/dry-run/审批全量复用）。
+async fn build_ondemand_gate(
+    core: &Arc<Core>,
+    ch: &Channel,
+    session: &str,
+) -> anyhow::Result<GateOutcome> {
+    let s = super::Settings::from_channel(ch);
+    // actRole 口径：admin（默认）= 仅管理者；member = 所有绑定成员
+    let act_role = s.act_role.clone();
+    // 点播闸门不落 act_gates 注册表（一次性；配额计数即时回写 VideoState）
+    let gate = || {
+        let mut state_probe = super::VideoState::load(core, &ch.id);
+        state_probe.reset_day();
+        Arc::new(ActGate::from_settings(&s, state_probe.actions_today))
+    };
+    // 会话来源：无 origin = 控制台会话（全权）；有 origin 按角色判
+    let Some((origin_user, origin_role)) =
+        core.store.get_session_origin(session).ok().flatten()
+    else {
+        return Ok(GateOutcome::Granted(gate()));
+    };
+    // origin_role 形态：绑定身份 = identity id（"ch:xxx" 前缀的 UserIdentity.id）
+    // 未绑定的原始标注 = "ch:<channel>:<external_id>"——区分靠查询身份表
+    let _ = origin_user;
+    // 兼容旧标注：原始形态以 ch: 开头且不是绑定身份 id 的都视为未绑定
+    let is_bound = core
+        .identity_of_id(&origin_role)
+        .is_some();
+    if !is_bound {
+        return Ok(GateOutcome::Denied(
+            "已拒绝：当前用户未绑定通道身份，不能让智能体代发评论。请在控制台「通道身份」页签发配对码，然后发送 /pair <配对码> 完成绑定（观看视频不受影响）".into(),
+        ));
+    }
+    let role = core
+        .identity_of_id(&origin_role)
+        .map(|i| i.role)
+        .unwrap_or_else(|| "member".into());
+    let allowed = match act_role.as_str() {
+        "member" => role == "member" || role == "admin",
+        _ => role == "admin", // admin 口径：仅管理者
+    };
+    if !allowed {
+        return Ok(GateOutcome::Denied(format!(
+            "已拒绝：点播评论需「{act_role}」及以上角色，当前用户角色为 {role}。请联系管理员在控制台「通道身份」页调整角色（观看视频不受影响）"
+        )));
+    }
+    Ok(GateOutcome::Granted(gate()))
+}
+
+/// 点播会话配额即时回写：点播无 runner 收束，计数须当场落 VideoState。
+/// 轮次会话（act_gates 有注册）由 ask_agent 收束时统一回写，此处跳过。
+fn sync_ondemand_quota(core: &Arc<Core>, ch: &Channel, session: &str, gate: &ActGate) {
+    if act_gates().lock().unwrap().contains_key(session) {
+        return; // 轮次会话：收束时统一回写
+    }
+    let mut state = super::VideoState::load(core, &ch.id);
+    state.reset_day();
+    let today = gate
+        .actions_today
+        .load(std::sync::atomic::Ordering::SeqCst);
+    state.actions_today = state.actions_today.max(today);
+    state.save(core, &ch.id);
+}
+
 async fn tool_act(
     core: &Arc<Core>,
     ch: &Channel,
@@ -747,8 +1000,15 @@ async fn tool_act(
     if video_id.is_empty() {
         anyhow::bail!("缺少 videoId");
     }
-    let Some(gate) = act_gates().lock().unwrap().get(session).cloned() else {
-        anyhow::bail!("本会话无互动闸门（非观看轮次或已收束）；仅可观看不可互动");
+    // 闸门获取：轮次会话有注册闸门；点播会话（非轮次）按通道配置 + 会话来源角色
+    // 即时构建一次性闸门——判权失败直接拒绝并给绑定/提权指引。
+    let registered = act_gates().lock().unwrap().get(session).cloned();
+    let gate = match registered {
+        Some(g) => g, // 轮次闸门（ask_agent 注册；随轮次收束清理）
+        None => match build_ondemand_gate(core, ch, session).await? {
+            GateOutcome::Granted(g) => g,
+            GateOutcome::Denied(reason) => return Ok(reason),
+        },
     };
     let comment_text = args.get("comment").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let reply_text = args.get("replyText").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -810,6 +1070,7 @@ async fn tool_act(
     // 闸门 4：dry-run 分流（不落平台）
     if gate.dry_run {
         gate.actions_today.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        sync_ondemand_quota(core, ch, session, &gate);
         st.lock().unwrap().acted += 1;
         return Ok(format!(
             "[dry-run] 拟{}：{}{}｜目标视频 {}（{}）\n（dry-run 模式开启，未发送至平台；正式发送请在通道配置关闭 dryRun）",
@@ -834,6 +1095,7 @@ async fn tool_act(
     // 执行
     post_comment(ch, &item, &text, target.as_deref()).await?;
     gate.actions_today.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    sync_ondemand_quota(core, ch, session, &gate);
     {
         let mut s = st.lock().unwrap();
         s.acted += 1;
@@ -970,6 +1232,90 @@ async fn create_act_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_id_归一_裸号直通() {
+        assert_eq!(normalize_video_id("BV1xx411c7mD"), "BV1xx411c7mD");
+        assert_eq!(normalize_video_id("bv1xx411c7mD"), "bv1xx411c7mD");
+        assert_eq!(normalize_video_id("av170001"), "av170001");
+        assert_eq!(normalize_video_id("dQw4w9WgXcQ"), "dQw4w9WgXcQ"); // YouTube 11 位
+        assert_eq!(normalize_video_id("  BV1xx411c7mD  "), "BV1xx411c7mD");
+    }
+
+    #[test]
+    fn video_id_归一_长链抽取() {
+        assert_eq!(
+            normalize_video_id("https://www.bilibili.com/video/BV1xx411c7mD?p=5&spm_id_from=333"),
+            "BV1xx411c7mD"
+        );
+        assert_eq!(
+            normalize_video_id("https://m.bilibili.com/video/BV1AB2345678cd"),
+            "BV1AB2345678cd"
+        );
+        assert_eq!(
+            normalize_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            "dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            normalize_video_id("https://youtu.be/dQw4w9WgXcQ"),
+            "dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            normalize_video_id("https://www.youtube.com/shorts/abcdefghijk"),
+            "abcdefghijk"
+        );
+    }
+
+    #[test]
+    fn video_id_归一_解析失败原样透传() {
+        // 无 BV 的杂讯：原样返回（下游 API 报「视频不存在」）
+        assert_eq!(normalize_video_id("随便看看"), "随便看看");
+    }
+
+    #[tokio::test]
+    async fn video_id_归一_会话缓存() {
+        let st = session_state("test-resolve-cache");
+        let a = resolve_video_id(&st, "BV1xx411c7mD").await;
+        let b = resolve_video_id(&st, "BV1xx411c7mD").await;
+        assert_eq!(a, b);
+        assert_eq!(
+            st.lock().unwrap().resolved_ids.len(),
+            1,
+            "同输入只解析一次"
+        );
+        drop_session("test-resolve-cache");
+    }
+
+    #[test]
+    fn 点播判权_矩阵() {
+        // 纯函数面：act_role 解析口径（Settings::from_channel 的 actRole 读取）
+        let mk = |cfg: Option<&str>| {
+            let mut ch = Channel {
+                id: "bili-test".into(),
+                kind: "bilibili".into(),
+                enabled: true,
+                group: None,
+                allowed_chats: vec![],
+                account: None,
+                secret: None,
+                reply_webhook: None,
+                token: None,
+                config: BTreeMap::new(),
+                group_gate: None,
+                capability: "computer".into(),
+                memory_isolation: false,
+                created_at: String::new(),
+            };
+            if let Some(v) = cfg {
+                ch.config.insert("actRole".into(), v.into());
+            }
+            super::super::Settings::from_channel(&ch).act_role
+        };
+        assert_eq!(mk(None), "admin", "缺省 admin");
+        assert_eq!(mk(Some("member")), "member");
+        assert_eq!(mk(Some("ADMIN")), "admin", "大小写归一");
+        assert_eq!(mk(Some("hacker")), "admin", "非法值回落默认");
+    }
 
     #[test]
     fn 字幕分页_窗口与导航() {
