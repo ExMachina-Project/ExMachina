@@ -408,6 +408,26 @@ export const useExm = create<ExmState>((set, get) => ({
     });
     // 计划模式：进会话拉取当前清单与模式位（后续靠 plan.* 事件增量刷新）
     void get().refreshPlan(id);
+    // 任务清单回放（spec agent-todo）：todo 快照只由事件维护，切会话/刷新后
+    // 从事件流尾部找回最近一次 todo.updated（含清空语义——找到空清单即无卡）
+    void api.sessionEvents(id, 200).then((evts) => {
+      if (get().sessionId !== id) return;
+      for (let i = evts.length - 1; i >= 0; i--) {
+        const p = evts[i].payload as { type?: string; payload?: Record<string, unknown> } | undefined;
+        if (p?.type === "todo.updated") {
+          const d = (p.payload ?? {}) as Record<string, unknown>;
+          set({
+            todo: {
+              count: Number(d.count ?? 0),
+              doneCount: Number(d.doneCount ?? 0),
+              allDone: Boolean(d.allDone),
+              items: (d.items ?? []) as unknown as TodoItem[],
+            },
+          });
+          break;
+        }
+      }
+    }).catch(() => { /* 回放失败不阻断进会话 */ });
     connectWs(get);
   },
 
