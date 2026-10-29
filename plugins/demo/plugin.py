@@ -75,7 +75,8 @@ def main() -> None:
             resp = {"result": {"tools": tools_list()}}
         elif method == "tools/call":
             params = req.get("params") or {}
-            resp = handle_call(params.get("name", ""), params.get("arguments") or {})
+            # 响应须包 result 键（与 initialize/tools/list 同形；宿主按 resp.result 取内容）
+            resp = {"result": handle_call(params.get("name", ""), params.get("arguments") or {})}
         elif method == "config/set":
             cfg = (req.get("params") or {}).get("config") or {}
             CREDS.clear()
