@@ -1878,6 +1878,26 @@ textarea.ant-input:focus,
 .plan-fold .ant-btn-link { padding: 0; height: auto; font-size: 11px; }
 .plan-hint { margin-top: 8px; font-size: 11px; color: var(--muted); }
 
+/* 任务清单（spec agent-todo）：进度条 + 条目 chip 带 */
+.todo-progress { display: inline-flex; align-items: center; gap: 8px; margin-left: 8px; }
+.todo-progress-label { font-size: 11px; color: var(--muted); }
+.todo-all-done .todo-progress-label { color: var(--ok, #46a758); }
+.todo-bar {
+  display: inline-block; width: 90px; height: 5px; border-radius: 3px;
+  background: var(--bg-sunken); border: 1px solid var(--line); overflow: hidden;
+}
+.todo-bar-fill { display: block; height: 100%; background: var(--ok, #46a758); transition: width .3s; }
+.todo-strip {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+}
+.todo-chip {
+  font-size: 11px; padding: 2px 8px; border-radius: var(--r-md);
+  border: 1px solid var(--line); background: var(--bg-sunken); color: var(--muted);
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.todo-chip.todo-in_progress { color: var(--text); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.todo-chip.todo-done { color: var(--ok, #46a758); border-color: color-mix(in srgb, var(--ok, #46a758) 35%, transparent); }
+
 .server-row { display: flex; gap: 8px; }
 .server-row .ant-input { font-family: var(--mono); }
 

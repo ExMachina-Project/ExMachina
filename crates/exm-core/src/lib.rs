@@ -22,6 +22,7 @@ pub mod orchestrator;
 pub mod parse;
 pub mod patch;
 pub mod plan;
+pub mod todo;
 pub mod plugin;
 pub mod provider;
 pub mod nexus;

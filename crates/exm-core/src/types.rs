@@ -147,6 +147,9 @@ pub enum ToolName {
     /// 模型自行判断时机，把窗口外旧历史主动压成滚动摘要
     #[serde(rename = "context_compact")]
     ContextCompact,
+    /// 会话级任务清单（spec: agent-todo）：长任务自组织——全量重写条目（内容+状态），
+    /// 清单非空时每轮注入系统提示（✅/🔄/⬜ 渲染），模型随时看到进度全景
+    Todo,
 }
 
 impl ToolName {
@@ -171,6 +174,7 @@ impl ToolName {
             ToolName::Git => "git",
             ToolName::Spawn => "spawn",
             ToolName::ContextCompact => "context_compact",
+            ToolName::Todo => "todo",
         }
     }
 
@@ -184,6 +188,7 @@ impl ToolName {
                 | ToolName::WebSearch
                 | ToolName::WebFetch
                 | ToolName::MemoryRead
+                | ToolName::Todo
         )
     }
 
@@ -208,6 +213,7 @@ impl ToolName {
             "git" => Some(ToolName::Git),
             "spawn" => Some(ToolName::Spawn),
             "context_compact" => Some(ToolName::ContextCompact),
+            "todo" => Some(ToolName::Todo),
             _ => None,
         }
     }

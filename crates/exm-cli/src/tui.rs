@@ -214,14 +214,33 @@ fn event_to_msg(evt: &CoreEvent) -> Option<Msg> {
         }
         "spawn.started" => {
             let p = evt.payload.get("taskPreview").and_then(|v| v.as_str()).unwrap_or("");
-            Some(Msg::Plan(format!("🚀 派生子任务：{p}")))
+            let bg = evt.payload.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            if bg {
+                Some(Msg::Plan(format!("🚀 后台子任务启动：{p}（结果稍后可查）")))
+            } else {
+                Some(Msg::Plan(format!("🚀 派生子任务：{p}")))
+            }
         }
         "spawn.finished" => {
             let status = evt.payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let bg = evt.payload.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            let suffix = if bg { "（后台，结果待收）" } else { "" };
             match status {
-                "done" => Some(Msg::Plan("🚀 子任务完成（结论已回传）".into())),
-                "timeout" => Some(Msg::Plan("🚀 子任务超时终止".into())),
-                _ => Some(Msg::Plan(format!("🚀 子任务失败：{status}"))),
+                "done" => Some(Msg::Plan(format!("🚀 子任务完成（结论已回传）{suffix}"))),
+                "timeout" => Some(Msg::Plan(format!("🚀 子任务超时终止{suffix}"))),
+                _ => Some(Msg::Plan(format!("🚀 子任务失败：{status}{suffix}"))),
+            }
+        }
+        "todo.updated" => {
+            let done = evt.payload.get("doneCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total = evt.payload.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let all = evt.payload.get("allDone").and_then(|v| v.as_bool()).unwrap_or(false);
+            if total == 0 {
+                Some(Msg::Plan("📋 任务清单已清空".into()))
+            } else if all {
+                Some(Msg::Plan(format!("📋 任务清单全部完成（{done}/{total}）")))
+            } else {
+                Some(Msg::Plan(format!("📋 任务清单更新：{done}/{total} 完成")))
             }
         }
         _ => None,
