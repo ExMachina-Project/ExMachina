@@ -547,9 +547,10 @@ export const useExm = create<ExmState>((set, get) => ({
       return;
     }
     // 计划事件（spec plan-mode：WebUI 卡片实时刷新，不靠轮询）
+    // 卡片只跟随当前会话：子会话的计划条目不混入本视图（切过去自然加载）
     if (evt.type.startsWith("plan.")) {
       const sid = evt.sessionId || get().sessionId;
-      if (!sid) return;
+      if (!sid || sid !== get().sessionId) return;
       switch (evt.type) {
         case "plan.item":
           // 新条目累积：防抖拉取最新清单（条目可能连续到达）
