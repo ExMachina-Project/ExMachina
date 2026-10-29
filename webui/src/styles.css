@@ -1898,6 +1898,32 @@ textarea.ant-input:focus,
 .todo-chip.todo-in_progress { color: var(--text); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
 .todo-chip.todo-done { color: var(--ok, #46a758); border-color: color-mix(in srgb, var(--ok, #46a758) 35%, transparent); }
 
+/* 后台子任务卡（spec subagent-spawn WebUI 呈现） */
+.spawns-strip {
+  display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px;
+  max-height: 220px; overflow-y: auto;
+}
+.spawn-card {
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--bg-sunken); padding: 6px 10px; font-size: 12px;
+}
+.spawn-card-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.spawn-status-icon { display: inline-flex; align-items: center; min-width: 18px; }
+.spawn-preview {
+  flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.spawn-expand-hint { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.spawn-card.spawn-done { border-color: color-mix(in srgb, var(--ok, #46a758) 35%, transparent); }
+.spawn-card.spawn-failed { border-color: color-mix(in srgb, #e5484d 45%, transparent); }
+.spawn-card.spawn-timeout { border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.spawn-result {
+  margin: 6px 0 2px; padding: 8px; border-radius: var(--r-sm);
+  background: var(--bg); border: 1px solid var(--line);
+  font-size: 11px; white-space: pre-wrap; word-break: break-word;
+  max-height: 150px; overflow-y: auto; color: var(--muted);
+}
+.spawn-clear { align-self: flex-start; padding: 0; font-size: 11px; }
+
 .server-row { display: flex; gap: 8px; }
 .server-row .ant-input { font-family: var(--mono); }
 
