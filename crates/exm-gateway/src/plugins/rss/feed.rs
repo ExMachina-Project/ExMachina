@@ -152,7 +152,14 @@ pub fn strip_html(s: &str) -> String {
             _ => {}
         }
     }
-    for (ent, ch) in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&nbsp;", " ")] {
+    for (ent, ch) in [
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&nbsp;", " "),
+    ] {
         out = out.replace(ent, ch);
     }
     // 空白折叠
@@ -214,8 +221,17 @@ mod tests {
         assert_eq!(items.len(), 2, "缺 link 条目应跳过：{:?}", items);
         assert_eq!(items[0].title, "第一条");
         assert_eq!(items[0].link, "https://example.com/1");
-        assert!(items[0].published.contains("Oct"), "发布时间：{}", items[0].published);
-        assert_eq!(items[0].summary, "正文 &amp; 摘要".replace("&amp;", "&"), "实体应还原：{}", items[0].summary);
+        assert!(
+            items[0].published.contains("Oct"),
+            "发布时间：{}",
+            items[0].published
+        );
+        assert_eq!(
+            items[0].summary,
+            "正文 &amp; 摘要".replace("&amp;", "&"),
+            "实体应还原：{}",
+            items[0].summary
+        );
         assert_eq!(items[1].title, "https://example.com/2", "缺标题降级用链接");
     }
 

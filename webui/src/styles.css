@@ -1445,20 +1445,15 @@ textarea.ant-input:focus,
   display: flex;
   gap: 22px;
   align-items: stretch;
-  /* 短页占满视口（扣页头约 90px + 底 padding 26px）：内容不足一屏时不再悬空留白；
-     长页由内容自然撑高，不受此约束 */
-  min-height: calc(100dvh - 120px);
 }
 .cfg-nav {
   flex: none;
   width: 200px;
   display: flex;
   flex-direction: column;
-  /* 与右侧 cfg-panel 同款卡片语汇：stretch 对齐随内容区等高占满——
-     此前是裸按钮列，条目少时悬在半空与右侧面板视觉不齐。
-     视口封顶：长页面下卡片不随内容拉出数屏高的空壳（内层 sticky 保持条目可视），
-     短页面下配合 settings2 的 min-height 与右侧面板等高占满 */
-  max-height: calc(100dvh - 120px);
+  /* 视口封顶：长页下卡片不随面板内容拉出数屏空壳（内层 sticky 条目仍可视）。
+     旧魔数 calc(100dvh - 120px) 漏算遥测条 26 与页头实高，短页恒定溢出 ~50px */
+  max-height: calc(100dvh - var(--tel-h) - 168px);
   border: 1px solid var(--line);
   background: var(--bg-panel);
   border-radius: var(--r-lg);
@@ -1473,8 +1468,9 @@ textarea.ant-input:focus,
   flex-direction: column;
   gap: 3px;
   padding: 10px 8px;
-  /* 吸顶位 96px + 底部余量 24px：与外层卡片 max-height(100dvh-120px) 减 padding 协调 */
-  max-height: calc(100dvh - 120px);
+  /* 自身滚动封顶：滚动容口高 − 吸顶位 96 − 底距 24 − 遥测条。
+     旧魔数 120 漏算遥测条 26 与页头实高，短页恒定溢出 ~50px（「还能再滚一点」的根源） */
+  max-height: calc(100dvh - 96px - 24px - var(--tel-h));
   overflow-y: auto;
 }
 .cfg-nav-item {
@@ -2964,10 +2960,23 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   .app-shell { height: calc(100dvh - var(--tel-h)); }
   /* 对话 / 编码工作台贴底：两者是面板形态（不是可滚动长页）。.app-content 的
      18px 页底内边距会把面板从遥测条上顶起来，留一条缝；这里把它归零，
-     高度直接取外壳高度（视口 − 遥测条），面板底边正好落在遥测条上沿。 */
+    高度直接取外壳高度（视口 − 遥测条），面板底边正好落在遥测条上沿。 */
   .app-content:has(.chat-shell),
   .app-content:has(.code-shell) { padding-bottom: 0; }
   .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h)); }
+  /* 设置页「短分类占满一屏」改由 flex 链达成（不写视口魔数）：
+     滚动容器先把自己变成纵向 flex，让 view-stage → pane-wrap → settings2
+     逐层把剩余高度下放；settings2 以 flex:1 收下，短页即占满（顶部对齐页头、
+     底部贴滚动容器底，长页仍由内容自然撑高滚动。
+     此前用 min-height: calc(100dvh - 120px) 魔数：漏算遥测条 26px 与页头实高，
+     短页恒定溢出 ~50px，产生「总能再滚一点」的多余滚动。 */
+  .app-content:has(.pane-wrap > .settings2) {
+    display: flex;
+    flex-direction: column;
+  }
+  .app-content:has(.pane-wrap > .settings2) > .view-stage { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .app-content:has(.pane-wrap > .settings2) .pane-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .app-content:has(.pane-wrap > .settings2) .settings2 { flex: 1; }
 }
 @media (max-width: 860px) {
   .telemetry-bar { display: none; }
