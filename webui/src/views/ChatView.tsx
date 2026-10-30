@@ -917,10 +917,20 @@ export function ChatView(): React.ReactElement {
                 <Emblem size={224} />
               </span>
               <div className="chat-acquire-title">{t("chat.acquireTitle")}</div>
-              <div className="chat-acquire-desc">{t("chat.acquireDesc")}</div>
+              {/* 文案按目标模式分叉：单智能体说的是它自己的话（独立接单到交付），
+                  组目标才讲「切组/派发」——此前单一文案让单智能体空态也在讲组的故事 */}
+              <div className="chat-acquire-desc">
+                {target.mode === "single"
+                  ? t("chat.acquireDescSingle", { name: orchLabel })
+                  : t("chat.acquireDesc")}
+              </div>
               <div className="chat-acquire-readouts">
                 <span className="readout"><span className="k">TGT</span><span className="v">{orchLabel}</span></span>
-                <span className="readout"><span className="k">GROUP</span><span className="v">{activeMeta?.name ?? activeGroup}</span></span>
+                {target.mode === "single" ? (
+                  <span className="readout"><span className="k">AGENT</span><span className="v">{target.id}</span></span>
+                ) : (
+                  <span className="readout"><span className="k">GROUP</span><span className="v">{activeMeta?.name ?? activeGroup}</span></span>
+                )}
                 <span className="readout"><span className="k">LINK</span><span className={`v ${wsConnected ? "ok" : "err"}`}>{wsConnected ? "ONLINE" : "RECONN"}</span></span>
               </div>
             </div>
