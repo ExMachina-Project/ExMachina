@@ -92,6 +92,9 @@ interface ExmState {
   /** 会话输入草稿（内存态；sessionStorage 镜像持久化） */
   drafts: Record<string, string>;
   setDraft: (sessionId: string, text: string) => void;
+  /** 全局待审批数（侧栏角标数据源；轮询兜底——WS 丢事件时也能恢复） */
+  pendingApprovals: number;
+  refreshPendingApprovals: () => Promise<void>;
   /** 新消息落会话列表时刷新该会话的末条预览（chat-ergonomics） */
   updateSessionPreview: (sessionId: string, preview: string) => void;
   saveConfig: (body: Record<string, unknown>) => Promise<void>;
@@ -503,6 +506,7 @@ export const useExm = create<ExmState>((set, get) => ({
       await api.decideApproval(id, approve);
       // 乐观移除（approval.resolved 事件到达时幂等）
       set({ approvals: get().approvals.filter((a) => a.approvalId !== id) });
+      void get().refreshPendingApprovals();
     } catch (e) {
       message.error(String(e));
     }
@@ -561,6 +565,15 @@ export const useExm = create<ExmState>((set, get) => ({
     set((s) => ({ drafts: { ...s.drafts, [sessionId]: text } }));
     try { sessionStorage.setItem("exm.drafts", JSON.stringify({ ...useExm.getState().drafts, [sessionId]: text })); } catch { /* 隐私模式忽略 */ }
   },
+  pendingApprovals: 0,
+  refreshPendingApprovals: async () => {
+    try {
+      const items = await api.listApprovals("pending", 50);
+      set({ pendingApprovals: items.length });
+    } catch {
+      /* 审批接口不可用时保持旧值 */
+    }
+  },
   updateSessionPreview: (sessionId, preview) => {
     set((s) => ({ sessions: s.sessions.map((x) => (x.id === sessionId ? { ...x, lastMessagePreview: preview, lastActiveAt: new Date().toISOString() } : x)) }));
   },
@@ -569,6 +582,8 @@ export const useExm = create<ExmState>((set, get) => ({
     const p = evt.payload as Record<string, unknown>;
     // 审批不受当前会话限制：子会话（子个体）里的审批请求同样要在视图内可裁决
     if (evt.type === "approval.required") {
+      // 全局计数即时刷新（侧栏角标；不依赖轮询周期）
+      void get().refreshPendingApprovals();
       const prefs = loadNotifyPrefs();
       if (prefs.enabled && prefs.approval && document.visibilityState === "hidden" && typeof Notification !== "undefined" && Notification.permission === "granted") {
         fireNotification(
