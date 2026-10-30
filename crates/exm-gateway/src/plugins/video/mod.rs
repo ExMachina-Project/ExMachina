@@ -884,38 +884,58 @@ async fn bili_prime_buvid(ch: &Channel) {
         .insert(ch.id.clone(), (b3, b4, activated));
 }
 
+/// 桌面 Chrome 指纹常量（ExClimbWuzhi payload 内层；社区长期维护的默认值）
+const FINGERPRINT_JSON: &str = r##"{
+    "3064": 1,
+    "5062": "1707365865753",
+    "03bf": "https%3A%2F%2Fwww.bilibili.com%2F",
+    "39c8": "333.1007.fp.risk",
+    "34f1": "",
+    "d402": "",
+    "654a": "",
+    "6e7c": "1920x1080",
+    "3c43": {
+        "2673": 0, "5766": 24, "6527": 0, "7003": 1, "807e": 1,
+        "b8ce": "zh-CN", "16f5": true, "65d8": 8, "3b21": 1, "11cc": 5,
+        "7c98": "not available", "7c9e": "not available", "7cac": "not available",
+        "80c3": [1920, 1080], "d61f": [1920, 1040], "cf1a": 0, "fbb7": 3,
+        "51c3": 3, "0bd0": 4, "9ac1": "Win32", "6414": 1, "17da": 5, "5b52": 0,
+        "60ba": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "3c74": "124.0.0.0", "65f2": 1, "4aa6": 8, "4aa9": [120, 115], "7abd": true
+    },
+    "39c9": null,
+    "6feb": "AsUSROmqLmTcZ0ltZXRhYm9nb3V0ZQ==",
+    "6f9f": 1, "6fa1": "unknown", "6fa2": 0,
+    "697f": "Standard,QWERTY,EN",
+    "6ff8": 0, "6ffa": 0, "6fff": 0, "7000": 3,
+    "7001": "1.13.2", "7002": "1.13.2", "7003": 0, "7004": 0, "7005": 8,
+    "6cf2": "881B8DFEB2D896C4A0E3F3F6BF3D2D6BE1D3C88E7E3B0C15B6B84D7E5D8AED74",
+    "776d": "490a5fd6a5e8b2b8",
+    "8b4c": "", "a2b0": "", "a2b1": "", "8b6e": "", "8b6f": "",
+    "f7a8": 1, "f7a9": 0, "f7aa": 0, "d03e": "", "d03f": "",
+    "6e78": "4bd3bf45c0beb6f4c28a9b0ad9e6f7b56f85c47b6df4c15c615d9e914b4db2a",
+    "6e7d": "126f95fe5b4bd97db5f2985be136d075",
+    "6e7e": "not available",
+    "89c4": 0, "8a63": 0, "8a66": 0, "ce90": "", "ceac": "", "cead": "",
+    "e4dd": 9, "e4e0": "1.8.2", "e4e1": 0, "e4e2": 0, "e4e3": 3,
+    "f551": 4, "f552": 2, "f553": 1, "34a1": null,
+    "34a5": 0, "34ac": 0, "34e1": 0, "34e2": 1, "34e3": 0
+}"##;
+
 /// buvid3 指纹激活（ExClimbWuzhi）：Web 端登录前必经的设备指纹上报。
-/// payload 为固定浏览器指纹（Chrome/Linux 桌面形态），与 UA 一致。
+/// payload = 指纹对象的 JSON **字符串**（双重编码：外层 {"payload": "<json str>"}），
+/// 字段集取社区长期维护的默认值（桌面 Chrome 形态，与请求 UA 同源）。
 async fn activate_buvid(buvid3: &str) -> bool {
-    let payload = serde_json::json!({
-        "payload": {
-            "39c8": "333333",
-            "39c9": "3339999",
-            "39ca": "1",
-            "39cb": "1",
-            "39cc": "1",
-            "39cd": "1",
-            "39ce": "1",
-            "39cf": "1",
-            "39d0": "1",
-            "3a28": "1.0.0",
-            "3a29": "1.0.0",
-            "3a2a": "1.0.0",
-            "3a2b": "1.0.0",
-            "3a2c": "1.0.0",
-            "3a2d": "1.0.0",
-            "3a2e": "1.0.0",
-            // WebGL/WebGPU 渲染器串（真实显卡标识；Chrome/Linux 常见值）
-            "39c8x": "",
-            "3a2f": "",
-        }
-    });
+    // 指纹常量：从 JSON 文本解析（json! 宏嵌套深度超限；内容同社区默认值）
+    let fingerprint: Value = serde_json::from_str(FINGERPRINT_JSON).expect("指纹常量 JSON 解析");
+    // 双重编码：内层指纹对象 → JSON 字符串 → 外层 {"payload": "<str>"}
+    let body = serde_json::json!({ "payload": fingerprint.to_string() });
     let resp = http_client()
         .post("https://api.bilibili.com/x/internal/gaia-gateway/ExClimbWuzhi")
         .header(reqwest::header::USER_AGENT, UA)
         .header(reqwest::header::REFERER, BILI_REFERER)
         .header(reqwest::header::COOKIE, format!("buvid3={buvid3}"))
-        .json(&payload)
+        .json(&body)
         .send()
         .await;
     match resp {
