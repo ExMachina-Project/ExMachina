@@ -390,7 +390,12 @@ export function ChatView(): React.ReactElement {
     })();
   }, [sessionId, messages.length, running]);
 
-  const liveUnitEntries = Object.entries(liveParts).filter(([, v]) => v.length > 0);
+  // 单智能体模式：交互主体 = 该个体，过程（工具/思考）与正文同源——
+  // liveOrch 卡已聚合 thinking 与工具栏（runToolCalls），liveParts 若再建卡
+  // 就是同一个体被拆成两张分裂卡（identifier 一大一小写两张头像）。过滤掉。
+  const liveUnitEntries = Object.entries(liveParts).filter(
+    ([agent, v]) => v.length > 0 && !(target.mode === "single" && agent === target.id),
+  );
   const activeMeta = groups.find((g) => g.id === activeGroup);
   // 指挥体显示名（10）：智能体模式显示该智能体名；组模式显示「指挥体 [组名]」
   const orchLabel = target.mode === "single"
