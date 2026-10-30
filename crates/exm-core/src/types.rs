@@ -661,6 +661,9 @@ pub struct Session {
     pub last_message_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<String>,
+    /// 用户置顶（会话列表置顶分组；默认 false）
+    #[serde(default)]
+    pub pinned: bool,
     pub ledger: SessionLedger,
     pub created_at: String,
     pub updated_at: String,

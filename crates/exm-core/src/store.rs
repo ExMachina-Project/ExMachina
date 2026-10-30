@@ -60,6 +60,7 @@ impl Store {
             parent_upto: None,
             last_message_preview: None,
             last_active_at: None,
+            pinned: false,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -88,6 +89,7 @@ impl Store {
             parent_upto: None,
             last_message_preview: None,
             last_active_at: None,
+            pinned: false,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -96,13 +98,30 @@ impl Store {
         Ok(child)
     }
 
+    /// 会话置顶切换（会话列表置顶分组数据源）
+    pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> Result<()> {
+        match self.get_session(id)? {
+            Some(mut s) => {
+                s.pinned = pinned;
+                self.db.put("sessions", &s.id, &s)?;
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("会话不存在: {id}")),
+        }
+    }
+
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.db.get("sessions", id)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut list: Vec<Session> = self.db.list("sessions")?;
-        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        // 置顶优先，组内按活跃时间倒序（列表结构 = 置顶分组 + 时间分组）
+        list.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
         list.truncate(200);
         Ok(list)
     }

@@ -898,6 +898,7 @@ impl Core {
             parent_upto: Some(upto_turn),
             last_message_preview: None,
             last_active_at: None,
+            pinned: false, // 置顶不继承分支
             ledger: src.ledger.clone(),
             created_at: now.clone(),
             updated_at: now,
@@ -1235,6 +1236,11 @@ impl Core {
 
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
         self.store.delete_session(id)
+    }
+
+    /// 会话置顶切换（列表置顶分组数据源）
+    pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> anyhow::Result<()> {
+        self.store.toggle_session_pin(id, pinned)
     }
 
     pub fn create_session(&self, title: &str) -> anyhow::Result<Session> {

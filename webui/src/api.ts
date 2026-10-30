@@ -503,6 +503,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ title }),
     }),
+  pinSession: (id: string, pinned: boolean) =>
+    req<{ ok: boolean; pinned: boolean }>(`/sessions/${id}/pin`, {
+      method: "PUT",
+      body: JSON.stringify({ pinned }),
+    }),
   deleteSession: (id: string) => req<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   // 会话历史管控（组 9）：撤销 / 编辑重发 / 分支派生 / 归档与快照视图
   undoSession: (id: string, turn: number, restoreFiles = true) =>
