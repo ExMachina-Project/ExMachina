@@ -391,7 +391,7 @@ impl LocalRegistry {
             .replace("{{description}}", description)
     }
 
-    /// 基于模板创建子个体:agent.json + PROMPT.md 渲染占位符后经 upsert_agent 落盘。
+    /// 基于模板创建子个体:agent.json + AGENTS.md 渲染占位符后经 upsert_agent 落盘。
     /// name/description 缺省时取模板默认。
     pub fn create_agent_from_template(
         &self,
@@ -417,7 +417,12 @@ impl LocalRegistry {
         def.name = name;
         def.description = description.clone();
         def.when_to_call = description;
-        let prompt = std::fs::read_to_string(tdir.join("PROMPT.md"))
+        // 模板提示词：AGENTS.md 优先（新约定），回落 PROMPT.md（存量模板）
+        let prompt_path = {
+            let p = tdir.join("AGENTS.md");
+            if p.exists() { p } else { tdir.join("PROMPT.md") }
+        };
+        let prompt = std::fs::read_to_string(prompt_path)
             .ok()
             .map(|t| Self::render_template(&t, identifier, &def.name, &def.description));
         self.upsert_agent(gid, def, prompt)
@@ -612,7 +617,7 @@ impl LocalRegistry {
 
     fn singles_prompt_path(&self, prompt_file: &str) -> PathBuf {
         if prompt_file.contains('/') || prompt_file.contains('\\') {
-            // 新约定：智能体目录 entities/agents/<id>/PROMPT.md
+            // 新约定：智能体目录 entities/agents/<id>/AGENTS.md（旧 PROMPT.md 双名回落）
             self.singles_dir().join(prompt_file)
         } else {
             self.singles_dir().join("prompts").join(prompt_file)
@@ -624,20 +629,56 @@ impl LocalRegistry {
         self.singles_dir().join(id).join("agent.json")
     }
 
-    /// 读取智能体提示词
+    /// 读取智能体提示词（AGENTS.md 新约定；promptFile 旧名 PROMPT.md 时自动回落新名）
     pub fn load_single_prompt(&self, prompt_file: &str) -> anyhow::Result<String> {
-        std::fs::read_to_string(self.singles_prompt_path(prompt_file))
-            .with_context(|| format!("读取智能体提示词失败: {prompt_file}"))
+        let p = self.singles_prompt_path(prompt_file);
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            return Ok(text);
+        }
+        // 双名回落：旧名 → 新名（改名后用户未迁移目录时提示词不丢）
+        let alt = Self::alternate_prompt_name(prompt_file);
+        if alt != prompt_file {
+            if let Ok(text) = std::fs::read_to_string(self.singles_prompt_path(&alt)) {
+                return Ok(text);
+            }
+        }
+        Err(anyhow::anyhow!("读取智能体提示词失败: {prompt_file}"))
     }
 
-    /// 写入智能体提示词文件（PROMPT.md；与激活组状态无关）
-    pub fn write_single_prompt(&self, prompt_file: &str, content: &str) -> anyhow::Result<()> {
+    /// 提示词文件名双名映射：AGENTS.md ↔ PROMPT.md（其余名称原样返回）
+    fn alternate_prompt_name(prompt_file: &str) -> String {
+        if prompt_file.ends_with("AGENTS.md") {
+            prompt_file.replace("AGENTS.md", "PROMPT.md")
+        } else if prompt_file.ends_with("PROMPT.md") {
+            prompt_file.replace("PROMPT.md", "AGENTS.md")
+        } else {
+            prompt_file.to_string()
+        }
+    }
+
+    /// 写入智能体提示词文件（AGENTS.md；与激活组状态无关）。
+    /// 存量目录还挂着 PROMPT.md：保存即迁移——写 AGENTS.md、删旧名、更新 def.promptFile，
+    /// 保证下次读取/导出都指向新约定（避免双文件长期并存漂移）
+    pub fn write_single_prompt(&self, prompt_file: &str, content: &str) -> anyhow::Result<String> {
         let p = self.singles_prompt_path(prompt_file);
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&p, content)?;
-        Ok(())
+        // 旧名迁移：写的是 PROMPT.md 时补写 AGENTS.md 并清掉旧名
+        let final_name = if prompt_file.ends_with("PROMPT.md") {
+            let alt = Self::alternate_prompt_name(prompt_file);
+            let alt_path = self.singles_prompt_path(&alt);
+            if let Some(parent) = alt_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&alt_path, content)?;
+            let _ = std::fs::remove_file(&p);
+            alt
+        } else {
+            prompt_file.to_string()
+        };
+        Ok(final_name)
     }
 
     /// 新增/更新智能体（identifier 冲突即替换）
@@ -647,7 +688,8 @@ impl LocalRegistry {
             anyhow::bail!("name/description 不能为空");
         }
         if def.prompt_file.trim().is_empty() {
-            def.prompt_file = format!("{}/PROMPT.md", def.identifier);
+            // 新约定 AGENTS.md（对齐业界编码智能体惯例）；存量 PROMPT.md 继续按其 promptFile 读取
+            def.prompt_file = format!("{}/AGENTS.md", def.identifier);
         }
         def.domain = normalize_domain(&def.domain);
         let prompt_path = self.singles_prompt_path(&def.prompt_file);
@@ -783,7 +825,7 @@ impl LocalRegistry {
         self.singles_dir()
     }
 
-    /// 提示词路径解析：`promptFile` 含 `/` = 相对编成根的个体目录路径（新约定 `<id>/PROMPT.md`）；
+    /// 提示词路径解析：`promptFile` 含 `/` = 相对编成根的个体目录路径（新约定 `<id>/AGENTS.md`）；
     /// 否则兼容旧约定 `<编成根>/prompts/<file>`。
     fn prompt_fs_path(&self, prompt_file: &str) -> PathBuf {
         let groups = self.groups.read();
@@ -816,15 +858,33 @@ impl LocalRegistry {
             }
         }
         let p = self.prompt_fs_path(prompt_file);
-        std::fs::read_to_string(&p).with_context(|| format!("读取提示词失败: {}", p.display()))
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            return Ok(text);
+        }
+        // 双名回落：PROMPT.md ↔ AGENTS.md（改名迁移期两侧互认，目录未迁移提示词不丢）
+        let alt = Self::alternate_prompt_name(prompt_file);
+        if alt != prompt_file {
+            if let Ok(text) = std::fs::read_to_string(self.prompt_fs_path(&alt)) {
+                return Ok(text);
+            }
+        }
+        Err(anyhow::anyhow!("读取提示词失败: {}", p.display()))
     }
 
-    /// 组内提示词是否存在
+    /// 组内提示词是否存在（双名互认：AGENTS.md / PROMPT.md 任一存在即真）
     pub fn prompt_exists(&self, prompt_file: &str) -> bool {
-        if self.single_mode() {
-            return self.singles_prompt_path(prompt_file).exists();
+        let exists_at = |pf: &str| {
+            if self.single_mode() {
+                self.singles_prompt_path(pf).exists()
+            } else {
+                self.prompt_fs_path(pf).exists()
+            }
+        };
+        if exists_at(prompt_file) {
+            return true;
         }
-        self.prompt_fs_path(prompt_file).exists()
+        let alt = Self::alternate_prompt_name(prompt_file);
+        alt != prompt_file && exists_at(&alt)
     }
 
     /// 写入组内提示词文件（创建/更新个体时使用）
@@ -853,18 +913,33 @@ impl LocalRegistry {
     }
 
     /// 组作用域提示词写入
-    pub fn write_group_prompt(&self, gid: &str, prompt_file: &str, content: &str) -> anyhow::Result<()> {
+    /// 写入组内个体提示词。存量 PROMPT.md 保存即迁移：写 AGENTS.md、删旧名，
+    /// 返回最终文件名（调用方据此回写 def.promptFile）
+    pub fn write_group_prompt(&self, gid: &str, prompt_file: &str, content: &str) -> anyhow::Result<String> {
         let dir = self.group_dir(gid).context("组不存在")?;
-        let p = if prompt_file.contains('/') || prompt_file.contains('\\') {
-            dir.join(prompt_file)
-        } else {
-            dir.join("prompts").join(prompt_file)
+        let resolve = |pf: &str| {
+            if pf.contains('/') || pf.contains('\\') {
+                dir.join(pf)
+            } else {
+                dir.join("prompts").join(pf)
+            }
         };
+        let p = resolve(prompt_file);
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&p, content)?;
-        Ok(())
+        if prompt_file.ends_with("PROMPT.md") {
+            let alt = Self::alternate_prompt_name(prompt_file);
+            let alt_path = resolve(&alt);
+            if let Some(parent) = alt_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&alt_path, content)?;
+            let _ = std::fs::remove_file(&p);
+            return Ok(alt);
+        }
+        Ok(prompt_file.to_string())
     }
 
     pub fn load_playbooks(&self) -> anyhow::Result<Vec<crate::types::Playbook>> {
