@@ -125,6 +125,7 @@ export const en: Partial<Dict> = {
   "chat.noSessions": "No sessions yet",
   "chat.acquireTitle": "AWAITING DIRECTIVE",
   "chat.acquireDesc": "Type your first message below — the current target takes the job and breaks it down. Switch to a group target to let the orchestrator dispatch to sub-agents.",
+  "chat.acquireDescSingle": "Type your first message below — {name} takes the job and drives it end to end.",
   "chat.wsDown": "Realtime gateway channel lost, reconnecting…",
   "chat.thinking": "Thinking",
   "chat.approvalTitle": "Awaiting approval",
