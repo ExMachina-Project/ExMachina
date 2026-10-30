@@ -10,6 +10,7 @@ import { useTheme } from "../theme";
 import { useT, type TKey } from "../i18n/core";
 import { LANGS, useLang } from "../i18n/core";
 import { PageHeader } from "../components/PageHeader";
+import { MaskedPasswordInput } from "../components/MaskedInput";
 import { api, limitsStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
 import { loadNotifyPrefs, saveNotifyPrefs, type NotifyPrefs } from "../store";
 
@@ -222,7 +223,7 @@ export function SettingsView(): React.ReactElement {
   const t = useT();
   const [schema, setSchema] = useState<ConfigSchema | null>(null);
   const [values, setValues] = useState<Record<string, unknown>>({});
-  const [selected, setSelected] = useState<string>("runtime");
+  const [selected, setSelected] = useState<string>("ui");
   const [saving, setSaving] = useState(false);
   /** schema 载入态：未就绪时分类导航只剩「界面/版本更新」，面板空白，
    *  与「配置项不存在」难以区分；拉取失败同样静默塌缩且无从重试 */
@@ -307,7 +308,7 @@ export function SettingsView(): React.ReactElement {
         desc={t("settings.desc")}
       />
       <div className="settings2">
-        {/* 左侧分类导航：后端 schema 分组 + 本地「界面」偏好。
+        {/* 左侧分类导航：「界面」本地偏好置顶 + 后端 schema 分组 + 版本垫底。
             外层 cfg-nav 是等高卡片（与右侧面板 stretch 对齐）；
             内层 cfg-nav-scroll 承担 sticky 吸顶与自身滚动 */}
         <nav className="cfg-nav">
@@ -317,6 +318,14 @@ export function SettingsView(): React.ReactElement {
             Array.from({ length: 8 }, (_, i) => (
               <span key={`sk-${i}`} className="cfg-nav-item cfg-nav-skeleton" />
             ))}
+          {/* 界面（本地偏好）：置顶——最常调，后端分组排其后 */}
+          <button
+            className={`cfg-nav-item ${selected === "ui" ? "on" : ""}`}
+            onClick={() => setSelected("ui")}
+          >
+            <span className="cfg-nav-icon">{SECTIONS.ui.icon}</span>
+            <span>{t("sec.ui")}</span>
+          </button>
           {groups.map((g) => (
             <button
               key={g.key}
@@ -327,13 +336,6 @@ export function SettingsView(): React.ReactElement {
               <span>{SECTIONS[g.key] ? t(SECTIONS[g.key]!.titleKey) : g.label}</span>
             </button>
           ))}
-          <button
-            className={`cfg-nav-item ${selected === "ui" ? "on" : ""}`}
-            onClick={() => setSelected("ui")}
-          >
-            <span className="cfg-nav-icon">{SECTIONS.ui.icon}</span>
-            <span>{t("sec.ui")}</span>
-          </button>
           <button className={`cfg-nav-item ${selected === "version" ? "on" : ""}`} onClick={() => setSelected("version")}>
             <span className="cfg-nav-icon">{SECTIONS.version.icon}</span>
             <span>{t("sec.version")}</span>
@@ -395,7 +397,7 @@ export function SettingsView(): React.ReactElement {
           <>
             <header className="cfg-panel-head">
               <h3>{t(meta.titleKey)}</h3>
-              <p>{t(meta.descKey)}。{t("settings.hotTip")}</p>
+              <p>{t(meta.descKey)}</p>
             </header>
             {current.key === "limits" && <LimitsStatsCard />}
             <div className="cfg-list">
@@ -423,7 +425,7 @@ export function SettingsView(): React.ReactElement {
                     onChange={(v) => setField(f.key, v)}
                   />
                 ) : f.kind === "password" ? (
-                  <Input.Password
+                  <MaskedPasswordInput
                     style={{ width: 320 }}
                     value={String(value ?? f.default)}
                     onChange={(e) => setField(f.key, e.target.value)}
@@ -453,7 +455,6 @@ export function SettingsView(): React.ReactElement {
               <Button type="primary" loading={saving} onClick={save}>
                 {t("settings.save")}
               </Button>
-              <span className="dim">{t("settings.hotTip")}</span>
             </div>
           </>
         ) : (
