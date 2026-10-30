@@ -453,6 +453,7 @@ async fn get_config(State(st): State<AppState>) -> impl IntoResponse {
             "authKey": if cfg.security.auth_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "terminalTimeoutSecs": cfg.security.terminal_timeout_secs,
             "toolOutputSpillChars": cfg.security.tool_output_spill_chars,
+            "approvalWaitSecs": cfg.security.approval_wait_secs,
             "keySetupDismissed": cfg.security.key_setup_dismissed,
         },
         "automation": {
@@ -2098,8 +2099,12 @@ async fn ws_loop(mut socket: WebSocket, core: Arc<Core>, session_filter: Option<
             evt = rx.recv() => {
                 match evt {
                     Ok(e) => {
+                        // 审批事件绕过会话过滤直推：审批常发生在 spawn 子会话，用户停在
+                        // 主会话时若按过滤器丢弃，内联审批卡永不出现（只能去独立页面裁决，
+                        // 阻塞等待窗内错过即工具受阻）。审批是全局关注事件，须跨会话可见。
+                        let approval_evt = e.kind == "approval.required" || e.kind == "approval.resolved";
                         if let Some(sid) = &session_filter {
-                            if &e.session_id != sid {
+                            if &e.session_id != sid && !approval_evt {
                                 continue;
                             }
                         }
