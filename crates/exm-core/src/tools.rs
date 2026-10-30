@@ -551,9 +551,7 @@ const TERMINAL_ALLOW: &[AllowRule] = &[
     // 容器类（只读 + exec/run；高危子命令仍走审批）
     AllowRule {
         cmd: "docker",
-        subs: &[
-            "ps", "images", "inspect", "logs", "exec", "run", "version",
-        ],
+        subs: &["ps", "images", "inspect", "logs", "exec", "run", "version"],
     },
     // 数据库类（本地文件库；psql/mysql 走审批）
     AllowRule {
@@ -587,8 +585,13 @@ const TERMINAL_ALLOW: &[AllowRule] = &[
     },
 ];
 
-/// shell 连接符：白名单只放行单一命令，带连接符一律拒绝（防「白名单命令 && 危险命令」绕过）
-const SHELL_CHAIN_MARKS: &[&str] = &["&&", "||", ";", "|", "`", "$(", ">", "<", "&"];
+/// shell 连接符清单：分两类——
+/// · 链式分隔（| && || ;）：可安全放行，条件是**每一段**首命令都过白名单
+///   （危险命令藏在任何一段都会被拒，攻击面与单命令一致）
+/// · 逃逸/写入语义（` $( > < &）：白名单管不住（命令替换绕过解析、
+///   重定向写文件、后台执行），一律拒绝
+const SHELL_CHAIN_SEPARATORS: &[&str] = &["&&", "||", "|", ";"];
+const SHELL_ESCAPE_MARKS: &[&str] = &["`", "$(", ">", "<", "&"];
 
 /// 剥掉引号包裹的片段（引号内的 `>` `|` 等是普通字符，不应误判为连接符）
 fn strip_quoted(cmd: &str) -> String {
@@ -615,7 +618,78 @@ fn strip_quoted(cmd: &str) -> String {
 
 fn contains_shell_chain(cmd: &str) -> bool {
     let bare = strip_quoted(cmd);
-    SHELL_CHAIN_MARKS.iter().any(|m| bare.contains(m))
+    SHELL_ESCAPE_MARKS.iter().any(|m| bare.contains(m))
+}
+
+/// 链式命令分段（引号感知）：`a | b && c` → ["a", "b", "c"]。
+/// 空段（如 `a |` 收尾）不产出——由调用方按「非白名单段」拒绝。
+fn split_chain_segments(cmd: &str) -> Vec<String> {
+    let mut segs: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if let Some(q) = quote {
+            cur.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                quote = Some(ch);
+                cur.push(ch);
+            }
+            '|' if i + 1 < chars.len() && chars[i + 1] == '|' => {
+                if !cur.trim().is_empty() {
+                    segs.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+                i += 1; // 消耗第二个 |
+            }
+            '|' | '&' if i + 1 < chars.len() && chars[i + 1] == '&' => {
+                if !cur.trim().is_empty() {
+                    segs.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+                i += 1; // 消耗第二个 &
+            }
+            '|' | ';' => {
+                if !cur.trim().is_empty() {
+                    segs.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+            }
+            _ => cur.push(ch),
+        }
+        i += 1;
+    }
+    if !cur.trim().is_empty() {
+        segs.push(cur);
+    }
+    segs
+}
+
+/// 链式命令整体放行判定：每一段首命令（+子命令前缀）都过白名单才放行。
+/// 与单命令同攻击面——危险命令藏在任何一段都拒绝。
+fn chain_allowed(cmd: &str) -> bool {
+    // 链式分隔符（| && || ;）存在：逐段过白名单（每段首命令都过才放行，
+    // 危险命令藏在任何一段都拒绝——攻击面与单命令一致）
+    let bare = strip_quoted(cmd);
+    let has_chain_sep = SHELL_CHAIN_SEPARATORS.iter().any(|m| bare.contains(m));
+    if has_chain_sep {
+        return split_chain_segments(cmd)
+            .iter()
+            .all(|seg| terminal_allowed(seg));
+    }
+    terminal_allowed(cmd)
 }
 
 /// 白名单判定：首命令 + （有子命令约束时）子命令前缀
@@ -1314,14 +1388,22 @@ pub struct DynamicToolOutput {
 
 impl From<(bool, String)> for DynamicToolOutput {
     fn from(v: (bool, String)) -> Self {
-        Self { ok: v.0, text: v.1, images: Vec::new() }
+        Self {
+            ok: v.0,
+            text: v.1,
+            images: Vec::new(),
+        }
     }
 }
 
 /// 动态工具执行器（T3 内置插件注册）：接收 (agent_id, session_id, args)，
 /// 返回输出（文本 + 可选图像路径）。异步闭包由注册方构造（平台 API / 会话态访问）。
 pub type DynamicToolExec = std::sync::Arc<
-    dyn Fn(&str, &str, serde_json::Value) -> futures_util::future::BoxFuture<'static, DynamicToolOutput>
+    dyn Fn(
+            &str,
+            &str,
+            serde_json::Value,
+        ) -> futures_util::future::BoxFuture<'static, DynamicToolOutput>
         + Send
         + Sync,
 >;
@@ -1336,8 +1418,16 @@ where
         let fut = f(agent, session, args);
         Box::pin(async move {
             match fut.await {
-                Ok(text) => DynamicToolOutput { ok: true, text, images: Vec::new() },
-                Err(e) => DynamicToolOutput { ok: false, text: e.to_string(), images: Vec::new() },
+                Ok(text) => DynamicToolOutput {
+                    ok: true,
+                    text,
+                    images: Vec::new(),
+                },
+                Err(e) => DynamicToolOutput {
+                    ok: false,
+                    text: e.to_string(),
+                    images: Vec::new(),
+                },
             }
         })
     })
@@ -1353,8 +1443,16 @@ where
         let fut = f(agent, session, args);
         Box::pin(async move {
             match fut.await {
-                Ok((text, images)) => DynamicToolOutput { ok: true, text, images },
-                Err(e) => DynamicToolOutput { ok: false, text: e.to_string(), images: Vec::new() },
+                Ok((text, images)) => DynamicToolOutput {
+                    ok: true,
+                    text,
+                    images,
+                },
+                Err(e) => DynamicToolOutput {
+                    ok: false,
+                    text: e.to_string(),
+                    images: Vec::new(),
+                },
             }
         })
     })
@@ -1362,7 +1460,12 @@ where
 
 /// 子智能体派生执行器闭包：(主个体 id, 会话 id, 任务描述, 工具白名单) → 执行产出
 pub type SpawnExec = Arc<
-    dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+    dyn Fn(
+            &str,
+            &str,
+            &str,
+            Vec<ToolName>,
+        ) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
         + Send
         + Sync,
 >;
@@ -1418,17 +1521,13 @@ pub struct ToolGateway {
     /// 进程插件运行时工具面（T2：握手后发现，无法静态声明）。
     /// key = 插件 id；specs/执行转发到 provider（supervisor 持进程句柄）。
     /// 注册时机：spawn_process_plugin 拉起成功后（Core 回接）。
-    plugin_runtime_tools: parking_lot::RwLock<std::collections::BTreeMap<String, std::sync::Arc<dyn crate::plugin::ToolProvider>>>,
+    plugin_runtime_tools: parking_lot::RwLock<
+        std::collections::BTreeMap<String, std::sync::Arc<dyn crate::plugin::ToolProvider>>,
+    >,
     /// 动态工具执行器（T3 内置插件用：命名空间工具注册 schema + 自定义 async 执行面）。
     /// key = 工具全名；执行优先级：动态表 > plugin_tools/custom（可覆盖声明式同名）。
     dynamic_tools: parking_lot::RwLock<
-        std::collections::BTreeMap<
-            String,
-            (
-                crate::config::CustomTool,
-                DynamicToolExec,
-            ),
-        >,
+        std::collections::BTreeMap<String, (crate::config::CustomTool, DynamicToolExec)>,
     >,
     /// 会话级工具注入（视频观看会话等「按会话来源收窄」的插件工具）：
     /// key = session_id；schema 下发与执行都只对本会话生效，普通会话不可见。
@@ -1449,7 +1548,8 @@ pub struct ToolGateway {
 }
 
 /// computer 输入动作：在既有会话上执行一次鼠标/键盘操作
-type InputAction = Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>;
+type InputAction =
+    Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>;
 
 impl ToolGateway {
     pub fn new(
@@ -1560,7 +1660,11 @@ impl ToolGateway {
 
     /// 注册进程插件运行时工具面（T2：拉起握手成功后由 spawn_process_plugin 回接）。
     /// 幂等：同 id 重复注册覆盖（重启场景新 supervisor 顶旧）。
-    pub fn register_plugin_runtime_tools(&self, plugin_id: &str, provider: std::sync::Arc<dyn crate::plugin::ToolProvider>) {
+    pub fn register_plugin_runtime_tools(
+        &self,
+        plugin_id: &str,
+        provider: std::sync::Arc<dyn crate::plugin::ToolProvider>,
+    ) {
         self.plugin_runtime_tools
             .write()
             .insert(plugin_id.to_string(), provider);
@@ -1577,10 +1681,7 @@ impl ToolGateway {
     }
 
     /// 注入插件凭据解析面（Core 装配后回接：查 `plugins.credentials.<插件id>.<键>`）
-    pub fn set_plugin_credentials_resolver(
-        &self,
-        f: PluginCredResolver,
-    ) {
+    pub fn set_plugin_credentials_resolver(&self, f: PluginCredResolver) {
         *self.plugin_credentials.write() = Some(f);
     }
 
@@ -1608,9 +1709,7 @@ impl ToolGateway {
                         continue;
                     }
                     let resolver = self.plugin_credentials.read();
-                    let hit = resolver
-                        .as_ref()
-                        .and_then(|f| f(plugin_id, key));
+                    let hit = resolver.as_ref().and_then(|f| f(plugin_id, key));
                     match hit {
                         Some(v) => out.push_str(&v),
                         None => {
@@ -1633,11 +1732,7 @@ impl ToolGateway {
 
     /// 注册动态命名空间工具（T3 内置插件：schema + 自定义 async 执行面）。
     /// 名字须含 `<plugin>__<tool>` 命名空间；同名重复注册 = 覆盖（热更新用）。
-    pub fn register_dynamic_tool(
-        &self,
-        spec: crate::config::CustomTool,
-        exec: DynamicToolExec,
-    ) {
+    pub fn register_dynamic_tool(&self, spec: crate::config::CustomTool, exec: DynamicToolExec) {
         self.dynamic_tools
             .write()
             .insert(spec.name.clone(), (spec, exec));
@@ -1676,7 +1771,11 @@ impl ToolGateway {
     }
 
     /// 按会话查注入工具（执行面用）
-    fn session_tool(&self, session_id: &str, name: &str) -> Option<(crate::config::CustomTool, DynamicToolExec)> {
+    fn session_tool(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Option<(crate::config::CustomTool, DynamicToolExec)> {
         self.session_scoped_tools
             .read()
             .get(session_id)
@@ -2212,7 +2311,7 @@ impl ToolGateway {
         push(ToolName::Terminal, "在工作区内执行终端命令（白名单 + 审批闸门）。长任务用 background=true 启动后轮询 taskId", serde_json::json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "op=run 时必填；单一命令，不支持 && | ; 等连接符" },
+                "command": { "type": "string", "description": "op=run 时必填；支持 | && || ; 链式命令（每段须都在白名单）；` $( > < & 等逃逸/重定向符不支持" },
                 "op": { "type": "string", "enum": ["run", "poll", "kill", "list"], "description": "默认 run；list 列出本会话后台任务（无需 taskId）" },
                 "taskId": { "type": "string", "description": "op=poll/kill 时的后台任务 id" },
                 "background": { "type": "boolean", "description": "true = 后台执行并立即返回任务 id（适合构建/测试等长任务）" },
@@ -2574,8 +2673,7 @@ impl ToolGateway {
                 } else if tool == ToolName::ContextCompact {
                     // 实验性动态压缩：豁免 allowlist（能力面由 schema 下发门控控制——
                     // 未开实验开关时模型根本看不到该工具 schema，不会有调用进来）
-                    self.tool_context_compact(agent_id, session_id, args)
-                        .await
+                    self.tool_context_compact(agent_id, session_id, args).await
                 } else {
                     self.dispatch(agent_id, session_id, tool, args).await
                 }
@@ -2638,9 +2736,7 @@ impl ToolGateway {
                                 .plugin_runtime_tools
                                 .read()
                                 .values()
-                                .find(|p| {
-                                    p.tool_specs().iter().any(|c| c.name == name)
-                                })
+                                .find(|p| p.tool_specs().iter().any(|c| c.name == name))
                                 .cloned();
                             match provider {
                                 Some(p) => match p.call_tool(name, args) {
@@ -3600,7 +3696,10 @@ impl ToolGateway {
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase())
             .unwrap_or_default();
-        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") {
+        if matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+        ) {
             let meta = match std::fs::metadata(&p) {
                 Ok(m) => m,
                 Err(e) => return ToolResult::err(format!("读取失败: {e}")),
@@ -4150,10 +4249,10 @@ impl ToolGateway {
                         }
                         ToolResult::ok(format!(
                             "written: {}（{} 行 / {} 字符）",
-                        target.display(),
-                        content.lines().count(),
-                        content.chars().count()
-                    ))
+                            target.display(),
+                            content.lines().count(),
+                            content.chars().count()
+                        ))
                     }
                     Err(e) => ToolResult::err(e.to_string()),
                 }
@@ -4359,21 +4458,27 @@ impl ToolGateway {
                 }
                 // 单引号转义防注入（message 内容含引号即拒绝，简化白名单口径）
                 if msg.contains(['\'', '"', '\\', '`', '$']) {
-                    return ToolResult::err("message 含引号/反引号/美元符号/反斜杠，为防注入请调整提交信息");
+                    return ToolResult::err(
+                        "message 含引号/反引号/美元符号/反斜杠，为防注入请调整提交信息",
+                    );
                 }
                 format!("git commit -m '{msg}'")
             }
             "restore" => {
                 let path = s("pathSpec");
                 if path.is_empty() || path.starts_with('-') || contains_shell_chain(&path) {
-                    return ToolResult::err("restore 需要合法 pathSpec（非空、非选项前缀、无连接符）");
+                    return ToolResult::err(
+                        "restore 需要合法 pathSpec（非空、非选项前缀、无连接符）",
+                    );
                 }
                 format!("git restore -- {path}")
             }
             "stash-push" => {
                 let msg = s("message");
                 if msg.contains(['\'', '"', '\\', '`', '$']) {
-                    return ToolResult::err("message 含引号/反引号/美元符号/反斜杠，为防注入请调整说明");
+                    return ToolResult::err(
+                        "message 含引号/反引号/美元符号/反斜杠，为防注入请调整说明",
+                    );
                 }
                 if msg.is_empty() {
                     "git stash push".to_string()
@@ -4385,11 +4490,14 @@ impl ToolGateway {
             "checkout-b" => {
                 let b = s("branch");
                 if b.is_empty() || b.starts_with('-') || contains_shell_chain(&b) {
-                    return ToolResult::err("checkout-b 需要合法分支名（非空、非选项前缀、无连接符）");
+                    return ToolResult::err(
+                        "checkout-b 需要合法分支名（非空、非选项前缀、无连接符）",
+                    );
                 }
                 format!("git checkout -b {b}")
             }
-            "push" | "pull" | "fetch" | "clone" | "remote" | "reset" | "rebase" | "merge" | "cherry-pick" | "revert" => {
+            "push" | "pull" | "fetch" | "clone" | "remote" | "reset" | "rebase" | "merge"
+            | "cherry-pick" | "revert" => {
                 return ToolResult::err(format!(
                     "动作 {action} 不在 git 工具动作面（远程/重写类操作请用 terminal 工具走完整审批链）"
                 ));
@@ -4474,10 +4582,7 @@ impl ToolGateway {
 
     /// git 只读动作 → argv 数组（与 tool_git 内的命令文本构造一一对应；
     /// 数组化不经 shell，天然无注入面）。动态参数校验后混入。
-    fn git_readonly_argv(
-        action: &str,
-        args: &serde_json::Value,
-    ) -> Result<Vec<String>, String> {
+    fn git_readonly_argv(action: &str, args: &serde_json::Value) -> Result<Vec<String>, String> {
         let s = |k: &str| {
             args.get(k)
                 .and_then(|v| v.as_str())
@@ -4552,7 +4657,11 @@ impl ToolGateway {
         let Some(exec) = self.spawn_executor.read().clone() else {
             return ToolResult::err("spawn 执行器未装配（运行时未就绪）");
         };
-        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let task = args
+            .get("task")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if task.is_empty() {
             return ToolResult::err("task 不能为空：请提供自包含任务书（目标、范围、期望产出）");
         }
@@ -4630,48 +4739,47 @@ impl ToolGateway {
             );
             let task_owned = task.to_string();
             let sid_evt = spawn_id.clone();
-            let _handle = tokio::spawn(async move {
-                let _p = permit; // 许可随任务体存活，终结自动释放
-                let fut = exec(&agent_owned, &session, task_owned.as_str(), requested);
-                let (state, status, preview) = match tokio::time::timeout(
-                    std::time::Duration::from_secs(timeout),
-                    fut,
-                )
-                .await
-                {
-                    Ok(Ok(text)) => {
-                        let p: String = text.chars().take(160).collect();
-                        (SpawnBgState::Done(text), "done", p)
+            let _handle =
+                tokio::spawn(async move {
+                    let _p = permit; // 许可随任务体存活，终结自动释放
+                    let fut = exec(&agent_owned, &session, task_owned.as_str(), requested);
+                    let (state, status, preview) =
+                        match tokio::time::timeout(std::time::Duration::from_secs(timeout), fut)
+                            .await
+                        {
+                            Ok(Ok(text)) => {
+                                let p: String = text.chars().take(160).collect();
+                                (SpawnBgState::Done(text), "done", p)
+                            }
+                            Ok(Err(e)) => {
+                                let msg = e.to_string();
+                                (SpawnBgState::Failed(msg.clone()), "failed", msg)
+                            }
+                            Err(_) => (SpawnBgState::Timeout, "timeout", String::new()),
+                        };
+                    if let Some(t) = registry.lock().get(&sid_evt) {
+                        *t.state.write() = state;
                     }
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        (SpawnBgState::Failed(msg.clone()), "failed", msg)
-                    }
-                    Err(_) => (SpawnBgState::Timeout, "timeout", String::new()),
-                };
-                if let Some(t) = registry.lock().get(&sid_evt) {
-                    *t.state.write() = state;
-                }
-                let evt = CoreEvent {
-                    kind: "spawn.finished".into(),
-                    session_id: session,
-                    payload: serde_json::json!({
-                        "spawnId": sid_evt, "status": status, "background": true,
-                        "summaryPreview": preview,
-                    }),
-                };
-                let _ = events.send(evt.clone());
-                // 落 store：REST 事件 API / WebUI 刷新后可查（与 emit_and_persist 同口径）
-                let env = crate::types::Envelope::new(
-                    format!("session.{}.events", evt.session_id),
-                    "tools",
-                    "broadcast",
-                    "event",
-                    evt.session_id.clone(),
-                    serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
-                );
-                let _ = store.append_event(&env);
-            });
+                    let evt = CoreEvent {
+                        kind: "spawn.finished".into(),
+                        session_id: session,
+                        payload: serde_json::json!({
+                            "spawnId": sid_evt, "status": status, "background": true,
+                            "summaryPreview": preview,
+                        }),
+                    };
+                    let _ = events.send(evt.clone());
+                    // 落 store：REST 事件 API / WebUI 刷新后可查（与 emit_and_persist 同口径）
+                    let env = crate::types::Envelope::new(
+                        format!("session.{}.events", evt.session_id),
+                        "tools",
+                        "broadcast",
+                        "event",
+                        evt.session_id.clone(),
+                        serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
+                    );
+                    let _ = store.append_event(&env);
+                });
             return ToolResult::ok(format!(
                 "子任务已后台启动：spawnId={spawn_id}\n任务：{task_preview}\n用 spawn(op=\"status\", spawnId=\"{spawn_id}\") 查询结果；spawn(op=\"list\") 列全部。完成后下一轮上下文会自动提醒。"
             ));
@@ -4772,7 +4880,11 @@ impl ToolGateway {
     /// 工作台文件树（对话内 @ 文件提及与 e2e 用，spec: webui-code-workbench → chat-as-coding）：
     /// 相对工作区根的目录列表（.gitignore 过滤 + 深度/数量限制）。
     /// 与工具同一工作区边界（resolve_safe），越权路径拒绝。
-    pub fn workbench_tree(&self, rel: &str, depth_limit: usize) -> anyhow::Result<serde_json::Value> {
+    pub fn workbench_tree(
+        &self,
+        rel: &str,
+        depth_limit: usize,
+    ) -> anyhow::Result<serde_json::Value> {
         let root = self.effective_root();
         let start = if rel.trim().is_empty() || rel == "." {
             root.clone()
@@ -4782,7 +4894,15 @@ impl ToolGateway {
         let mut nodes = Vec::new();
         let mut count = 0usize;
         let max_entries = 2000usize;
-        walk_tree(&root, &start, 0, depth_limit, &mut nodes, &mut count, max_entries)?;
+        walk_tree(
+            &root,
+            &start,
+            0,
+            depth_limit,
+            &mut nodes,
+            &mut count,
+            max_entries,
+        )?;
         Ok(serde_json::json!({
             "root": rel,
             "count": nodes.len(),
@@ -4840,14 +4960,16 @@ impl ToolGateway {
         if cmd.is_empty() {
             return ToolResult::err("command 不能为空");
         }
-        // 单一命令约束：带 shell 连接符（&& | ; 重定向等）一律拒绝，防白名单绕过
+        // 逃逸/写入语义（` $( > < &）仍一律拒绝：命令替换绕过解析、重定向写文件、
+        // 后台执行，白名单管不住。链式分隔（| && || ;）改走逐段白名单
+        // （chain_allowed：每段首命令都过白名单才放行，攻击面与单命令一致）。
         if contains_shell_chain(&cmd) {
             return ToolResult::err(
-                "命令包含 shell 连接符（&& / | / ; / 重定向等），白名单只放行单一命令；请拆成多次调用。",
+                "命令包含命令替换 / 重定向 / 后台符（` $( > < &），白名单不放行；请去掉后重试或拆成多次调用。",
             );
         }
         let lowered = cmd.to_lowercase();
-        let whitelisted = terminal_allowed(&cmd);
+        let whitelisted = chain_allowed(&cmd);
         // 审批闸门（docs/10）：risky 拦高危命令，always 全拦；白名单前缀放行。
         // 拦截后运行时原地等待人工决定（security.approvalWaitSecs）：
         // 批准 → 系统代执行，输出直接回灌本工具结果，模型继续干活；拒绝/超时 → 受阻回流。
@@ -4858,7 +4980,7 @@ impl ToolGateway {
             // 等大量日常开发命令无路可走，agent 无法完成编码任务。
             if mode == "off" {
                 return ToolResult::err(format!(
-                    "命令不在白名单: {cmd}（白名单按「命令 + 子命令」匹配，且不支持连接符；\
+                    "命令不在白名单: {cmd}（白名单按「命令 + 子命令」逐段匹配——链式命令每段都须在白名单；\
                      可将 security.execApproval 设为 risky/always 走人工审批放行）"
                 ));
             }
@@ -5074,9 +5196,16 @@ impl ToolGateway {
                 let buf = t.buf.lock();
                 let chars: Vec<char> = buf.chars().collect();
                 let start = chars.len().saturating_sub(200);
-                chars[start..].iter().collect::<String>().replace('\n', " ⏎ ")
+                chars[start..]
+                    .iter()
+                    .collect::<String>()
+                    .replace('\n', " ⏎ ")
             };
-            let tail_disp = if tail.trim().is_empty() { "（暂无）".to_string() } else { tail };
+            let tail_disp = if tail.trim().is_empty() {
+                "（暂无）".to_string()
+            } else {
+                tail
+            };
             // taskId 必须在清单里——丢失 id 的模型靠它重新寻址 poll/kill
             out.push_str(&format!(
                 "{}. [taskId={id}] {} [{}]\n   输出尾：{}\n",
@@ -5097,7 +5226,9 @@ impl ToolGateway {
         }
         let guard = self.spawns_bg.lock();
         let Some(t) = guard.get(spawn_id) else {
-            return ToolResult::err(format!("后台子任务不存在: {spawn_id}（是否同步派生？同步结果直接在原调用返回）"));
+            return ToolResult::err(format!(
+                "后台子任务不存在: {spawn_id}（是否同步派生？同步结果直接在原调用返回）"
+            ));
         };
         if t.session != session_id {
             return ToolResult::err(format!("后台子任务不属于当前会话: {spawn_id}"));
@@ -5129,10 +5260,8 @@ impl ToolGateway {
     /// 终态条目顺带置已读（list 全量浏览即视为收讫）
     fn spawn_bg_list(&self, session_id: &str) -> ToolResult {
         let mut guard = self.spawns_bg.lock();
-        let mut rows: Vec<&SpawnBgTask> = guard
-            .values()
-            .filter(|t| t.session == session_id)
-            .collect();
+        let mut rows: Vec<&SpawnBgTask> =
+            guard.values().filter(|t| t.session == session_id).collect();
         if rows.is_empty() {
             return ToolResult::ok("当前会话无后台子任务。");
         }
@@ -6011,7 +6140,10 @@ fn walk_tree(
             (name, is_dir, size)
         })
         .collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    entries.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
     for (name, is_dir, size) in entries {
         if *count >= max_entries {
             return Ok(());
@@ -6033,7 +6165,15 @@ fn walk_tree(
             nodes.push(serde_json::json!({
                 "path": rel, "name": name, "type": "dir", "children": [],
             }));
-            walk_tree(root, &child, depth + 1, depth_limit, nodes, count, max_entries)?;
+            walk_tree(
+                root,
+                &child,
+                depth + 1,
+                depth_limit,
+                nodes,
+                count,
+                max_entries,
+            )?;
         } else {
             nodes.push(serde_json::json!({
                 "path": rel, "name": name, "type": "file", "size": size,
@@ -7028,7 +7168,10 @@ mod terminal_gate_tests {
         ToolGateway::copy_tree(&dir.join("src"), &dst).unwrap();
         assert!(dst.is_dir(), "已存在文件应被清空重建为目录");
         assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "A");
-        assert_eq!(std::fs::read_to_string(dst.join("nested/b.txt")).unwrap(), "B");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("nested/b.txt")).unwrap(),
+            "B"
+        );
         // 单文件路径
         let f = dir.join("one.log");
         std::fs::write(&f, "x").unwrap();
@@ -7056,16 +7199,18 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(r.ok, "删除应成功：{:?}", r.error);
-        assert!(r.output.contains("回收站"), "应说明回收站路径：{}", r.output);
+        assert!(
+            r.output.contains("回收站"),
+            "应说明回收站路径：{}",
+            r.output
+        );
         assert!(!dir.join("tmp.log").exists(), "原位应消失");
         // 回收站里可找到（按日期目录搜索）
         let trash_root = dir.join(".exmachina").join("trash");
-        let found = std::fs::read_dir(&trash_root)
-            .unwrap()
-            .any(|day| {
-                let day = day.unwrap().path();
-                day.join("tmp.log").exists()
-            });
+        let found = std::fs::read_dir(&trash_root).unwrap().any(|day| {
+            let day = day.unwrap().path();
+            day.join("tmp.log").exists()
+        });
         assert!(found, "回收站应含被删文件");
         // 不存在目标 → 报错
         let r = gw
@@ -7126,7 +7271,11 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(r2.ok);
-        assert!(r2.output.contains(".2"), "第二次删除应带序号：{}", r2.output);
+        assert!(
+            r2.output.contains(".2"),
+            "第二次删除应带序号：{}",
+            r2.output
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7185,7 +7334,10 @@ mod terminal_gate_tests {
         assert!(r.ok, "重命名应成功：{:?}", r.error);
         assert!(dir.join("new.txt").exists());
         assert!(!dir.join("old.txt").exists());
-        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "content-1");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "content-1"
+        );
         // 不覆盖：目标已存在拒绝
         std::fs::write(dir.join("other.txt"), "x").unwrap();
         let r = gw
@@ -7199,7 +7351,11 @@ mod terminal_gate_tests {
             .await;
         assert!(!r.ok, "覆盖应拒绝");
         assert!(r.error.unwrap_or_default().contains("已存在"));
-        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "content-1", "原内容不应被破坏");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "content-1",
+            "原内容不应被破坏"
+        );
         // 跨目录移动（父目录自动创建）
         let r = gw
             .execute(
@@ -7246,7 +7402,11 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(r.ok);
-        assert_eq!(crate::plan::list_items("s-fs-5").len(), 2, "rename 也应拦截");
+        assert_eq!(
+            crate::plan::list_items("s-fs-5").len(),
+            2,
+            "rename 也应拦截"
+        );
     }
 
     #[test]
@@ -7320,6 +7480,54 @@ mod terminal_gate_tests {
         assert!(!terminal_allowed("cargoSomething"));
     }
 
+    #[test]
+    fn 链式命令_逐段白名单() {
+        // 每段都过白名单：放行（agent 干活的基本形态：拉数据 | 解析）
+        for cmd in [
+            "curl -s \"https://x.com/a?b=1&c=2\" | python3 -c \"import sys,json;print(json.load(sys.stdin))\"",
+            "ls -la | grep src | head -5",
+            "cat a.txt && echo done",
+            "echo a; echo b || echo c",
+            "git status && git diff",
+            "cargo build --lib && cargo test --lib",
+        ] {
+            assert!(chain_allowed(cmd), "全段白名单应放行: {cmd}");
+        }
+        // 任一段非白名单：拒绝（危险命令藏在任何一段都不放行——攻击面与单命令一致）
+        for cmd in [
+            "curl -s x | python3 -c y | sudo rm -rf /",
+            "ls && vim",
+            "echo a; unknown-cmd",
+            "cat a || docker rmi nginx",
+            "git status && git push origin main",
+        ] {
+            assert!(!chain_allowed(cmd), "含非白名单段应拒绝: {cmd}");
+        }
+        // 逃逸/写入语义：链式放行不适用于这些符号（contains_shell_chain 拦截层）
+        for frag in ["`id`", "$(id)", "> out.txt", "< in.txt", "cmd &"] {
+            assert!(
+                contains_shell_chain(&format!("echo {frag}")),
+                "逃逸符应被拦截层识别: {frag}"
+            );
+        }
+        // 引号内的符号不是连接符（URL 带 & 不误判）
+        assert!(!contains_shell_chain("curl -s \"https://x.com/a?b=1&c=2\""));
+        // 引号内的管道不参与分段
+        assert!(chain_allowed("echo \"a | b\" | cat"));
+    }
+
+    #[test]
+    fn 链式分段_引号感知() {
+        let segs = split_chain_segments("curl -s url | python3 -c \"print(1 | 2)\" && echo ok");
+        assert_eq!(segs.len(), 3, "引号内管道不分段: {segs:?}");
+        assert!(segs[0].trim_start().starts_with("curl"));
+        assert!(segs[1].trim_start().starts_with("python3"));
+        assert_eq!(segs[2].trim(), "echo ok");
+        // 空段（收尾管道）：不产出、不 panic
+        let empty = split_chain_segments("echo a |");
+        assert_eq!(empty, vec!["echo a ".to_string()]);
+    }
+
     fn gw_with_approval(mode: &str, wait_secs: u64) -> ToolGateway {
         let dir = std::env::temp_dir().join(format!("exm-gate-{}", crate::types::new_id()));
         std::fs::create_dir_all(dir.join("data")).unwrap();
@@ -7340,7 +7548,13 @@ mod terminal_gate_tests {
         let gw = gw_with_approval("off", 0);
         // 未装配执行器时先到"未装配"错误（白名单校验在其之前）——装个空执行器测过滤
         let exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+            dyn Fn(
+                    &str,
+                    &str,
+                    &str,
+                    Vec<ToolName>,
+                )
+                    -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
                 + Send
                 + Sync,
         > = Arc::new(|_a, _s, _t, tools| {
@@ -7384,7 +7598,13 @@ mod terminal_gate_tests {
     async fn spawn工具_子任务超时终止() {
         let gw = gw_with_approval("off", 0);
         let exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+            dyn Fn(
+                    &str,
+                    &str,
+                    &str,
+                    Vec<ToolName>,
+                )
+                    -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
                 + Send
                 + Sync,
         > = Arc::new(|_, _, _, _| {
@@ -7404,10 +7624,7 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(!r.ok);
-        assert!(
-            r.error.unwrap_or_default().contains("超时"),
-            "应报超时说明"
-        );
+        assert!(r.error.unwrap_or_default().contains("超时"), "应报超时说明");
     }
 
     /// 并发上限：占满信号量后再派生 → 明确拒绝
@@ -7417,7 +7634,13 @@ mod terminal_gate_tests {
         // 此处改为验证「上限拒绝路径」——直接耗尽后触发。先并发占满（4 张许可）：
         let gw = Arc::new(gw_with_approval("off", 0));
         let exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+            dyn Fn(
+                    &str,
+                    &str,
+                    &str,
+                    Vec<ToolName>,
+                )
+                    -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
                 + Send
                 + Sync,
         > = Arc::new(|_, _, _, _| {
@@ -7461,7 +7684,6 @@ mod terminal_gate_tests {
             let _ = h.await;
         }
     }
-
 
     /// 计划模式：写操作拦截转计划条目，读操作放行
     #[tokio::test]
@@ -7508,7 +7730,13 @@ mod terminal_gate_tests {
         let store = Arc::new(Store::open(dir.join("data")).unwrap());
         let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let gw = Arc::new(ToolGateway::new(&dir, store, registry, events, SecurityConfig::default()));
+        let gw = Arc::new(ToolGateway::new(
+            &dir,
+            store,
+            registry,
+            events,
+            SecurityConfig::default(),
+        ));
         // 计划模式拦截 filesystem write
         crate::plan::set_plan_mode("plan-s2", true);
         let r = gw
@@ -7540,7 +7768,11 @@ mod terminal_gate_tests {
     fn git_test_repo(gw: &ToolGateway) -> PathBuf {
         let root = gw.effective_root();
         std::fs::create_dir_all(&root).unwrap();
-        std::process::Command::new("git").arg("init").current_dir(&root).output().expect("git init");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&root)
+            .output()
+            .expect("git init");
         std::process::Command::new("git")
             .args(["config", "user.email", "test@exm.local"])
             .current_dir(&root)
@@ -7580,7 +7812,11 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(r.ok, "status 只读应放行：{:?}", r.error);
-        assert!(r.output.contains("##"), "status 输出应含分支行：{}", r.output);
+        assert!(
+            r.output.contains("##"),
+            "status 输出应含分支行：{}",
+            r.output
+        );
     }
 
     /// 严格模式（risky + 立即超时）：写动作产生审批单而非执行
@@ -7789,7 +8025,10 @@ mod terminal_gate_tests {
             fn name(&self) -> &'static str {
                 "test-compacter"
             }
-            async fn chat(&self, _req: ChatRequest) -> anyhow::Result<crate::provider::ChatResponse> {
+            async fn chat(
+                &self,
+                _req: ChatRequest,
+            ) -> anyhow::Result<crate::provider::ChatResponse> {
                 Ok(crate::provider::ChatResponse {
                     content: "目标 X 已完成；结论 Y；未决 Z".into(),
                     reasoning: String::new(),
@@ -7809,11 +8048,7 @@ mod terminal_gate_tests {
 
         let gw = gw_with_approval("off", 0);
         // 造 6 条历史，keep=2 → 压 4 条
-        let sid = gw
-            .store
-            .create_session("压缩测试", "g1")
-            .unwrap()
-            .id;
+        let sid = gw.store.create_session("压缩测试", "g1").unwrap().id;
         for i in 0..6 {
             gw.store
                 .add_message(
@@ -7897,7 +8132,10 @@ mod terminal_gate_tests {
         gw.append_plugin_tools(vec![mk_custom("demo__ping", "https://example.com")]);
         let specs = gw.custom_specs_for("a1");
         let name = specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
-        assert!(name.contains(&"demo__ping".to_string()), "下发应含 demo__ping");
+        assert!(
+            name.contains(&"demo__ping".to_string()),
+            "下发应含 demo__ping"
+        );
     }
 
     /// 冲突面：插件工具与 config CustomTool 同名 → 先注册者胜（custom 优先，插件被拒）
@@ -7936,7 +8174,10 @@ mod terminal_gate_tests {
         // 不可达地址 → 返回错误但 ok=false 而非 panic；错误面含工具名
         assert!(!r.ok, "不可达地址应为失败结果: {:?}", r.output);
         let text = format!("{}{}", r.output, r.error.unwrap_or_default());
-        assert!(text.contains("demo__ping") || text.len() < 500, "错误面应含工具名或简洁");
+        assert!(
+            text.contains("demo__ping") || text.len() < 500,
+            "错误面应含工具名或简洁"
+        );
         // 不应泄露内部路径
         assert!(!text.contains("/home/"), "不应泄露内部路径");
     }
@@ -7963,7 +8204,10 @@ mod terminal_gate_tests {
         }
         fn call_tool(&self, name: &str, args: &serde_json::Value) -> anyhow::Result<String> {
             if name == "fakep__hello" {
-                Ok(format!("hello:{}", args.get("name").and_then(|v| v.as_str()).unwrap_or("?")))
+                Ok(format!(
+                    "hello:{}",
+                    args.get("name").and_then(|v| v.as_str()).unwrap_or("?")
+                ))
             } else {
                 anyhow::bail!("未知工具 {name}")
             }
@@ -7975,11 +8219,17 @@ mod terminal_gate_tests {
     async fn 进程插件工具_注册下发执行与摘除() {
         let gw = gw_with_approval("off", 0);
         // 注册前不可见
-        assert!(!gw.custom_specs_for("a1").iter().any(|s| s.name == "fakep__hello"));
+        assert!(!gw
+            .custom_specs_for("a1")
+            .iter()
+            .any(|s| s.name == "fakep__hello"));
         gw.register_plugin_runtime_tools("fakep", Arc::new(FakeProcessTools));
         // specs 可见（进程形态工具进入下发面）
         let specs = gw.custom_specs_for("a1");
-        assert!(specs.iter().any(|s| s.name == "fakep__hello"), "注册后应下发");
+        assert!(
+            specs.iter().any(|s| s.name == "fakep__hello"),
+            "注册后应下发"
+        );
         // 执行转发
         let sid = gw.store.create_session("s", "a1").unwrap().id;
         let r = gw
@@ -7992,14 +8242,25 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(r.ok, "执行应成功: {:?}", r.error);
-        assert!(r.output.contains("hello:巡检"), "输出应含 provider 回显: {}", r.output);
+        assert!(
+            r.output.contains("hello:巡检"),
+            "输出应含 provider 回显: {}",
+            r.output
+        );
         // 未知工具仍走原错误路径
-        let r2 = gw.execute_named("a1", &sid, &[], "fakep__nope", &serde_json::json!({})).await;
+        let r2 = gw
+            .execute_named("a1", &sid, &[], "fakep__nope", &serde_json::json!({}))
+            .await;
         assert!(!r2.ok);
         // 摘除后不可见
         gw.unregister_plugin_runtime_tools("fakep");
-        assert!(!gw.custom_specs_for("a1").iter().any(|s| s.name == "fakep__hello"));
-        let r3 = gw.execute_named("a1", &sid, &[], "fakep__hello", &serde_json::json!({})).await;
+        assert!(!gw
+            .custom_specs_for("a1")
+            .iter()
+            .any(|s| s.name == "fakep__hello"));
+        let r3 = gw
+            .execute_named("a1", &sid, &[], "fakep__hello", &serde_json::json!({}))
+            .await;
         assert!(!r3.ok, "摘除后执行应失败");
     }
 
@@ -8017,12 +8278,19 @@ mod terminal_gate_tests {
         // select 摘取数组 → 序列化字符串
         let r = shape_response(&shaped(None, Some("$.data.items"), body), body);
         assert!(r.ok, "{:?}", r.error);
-        assert!(r.output.contains("\"title\":\"a\""), "应含摘取内容: {}", r.output);
+        assert!(
+            r.output.contains("\"title\":\"a\""),
+            "应含摘取内容: {}",
+            r.output
+        );
         // select + maxChars 两级
         let long = format!("{{\"msg\":\"{}\"}}", "x".repeat(5000));
         let r = shape_response(&shaped(Some(100), Some("$.msg"), &long), &long);
         assert!(r.ok);
-        assert!(r.output.chars().count() <= 100 + "…（截断）".chars().count(), "应受 maxChars 限制");
+        assert!(
+            r.output.chars().count() <= 100 + "…（截断）".chars().count(),
+            "应受 maxChars 限制"
+        );
     }
 
     #[test]
@@ -8030,7 +8298,10 @@ mod terminal_gate_tests {
         let body = r#"{"data":1}"#;
         let r = shape_response(&shaped(None, Some("$.missing.path"), body), body);
         assert!(!r.ok, "路径不存在应失败");
-        assert!(r.error.unwrap_or_default().contains("$.missing.path"), "错误应含路径");
+        assert!(
+            r.error.unwrap_or_default().contains("$.missing.path"),
+            "错误应含路径"
+        );
     }
 
     #[test]
@@ -8047,13 +8318,20 @@ mod terminal_gate_tests {
         let long = "y".repeat(9000);
         let r = shape_response(&shaped(None, None, &long), &long);
         assert!(r.ok);
-        assert!(r.output.starts_with('y') && r.output.chars().count() <= 8000 + "…（截断）".chars().count());
+        assert!(
+            r.output.starts_with('y')
+                && r.output.chars().count() <= 8000 + "…（截断）".chars().count()
+        );
     }
 
     #[test]
     fn json_path_基本语法() {
-        let v: serde_json::Value = serde_json::from_str(r#"{"a":{"b":[{"c":1},{"c":2}],"d":"x"}}"#).unwrap();
-        assert_eq!(json_path(&v, "$.a.b[1].c").and_then(|x| x.as_i64()), Some(2));
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"a":{"b":[{"c":1},{"c":2}],"d":"x"}}"#).unwrap();
+        assert_eq!(
+            json_path(&v, "$.a.b[1].c").and_then(|x| x.as_i64()),
+            Some(2)
+        );
         assert_eq!(json_path(&v, "a.d").and_then(|x| x.as_str()), Some("x")); // 前导 $. 可省
         assert_eq!(json_path(&v, "$.a").map(|x| x.is_object()), Some(true));
         assert!(json_path(&v, "$.a.b[9]").is_none(), "数组越界");
@@ -8072,7 +8350,10 @@ mod terminal_gate_tests {
         }));
         // 缺键：调用被拒、错误含键名与指引、不发请求
         let mut t = mk_custom("demo__secure", "https://example.com/api");
-        t.headers.insert("Authorization".into(), "Bearer ${credentials.api_token}".into());
+        t.headers.insert(
+            "Authorization".into(),
+            "Bearer ${credentials.api_token}".into(),
+        );
         gw.append_plugin_tools(vec![t]);
         // 先不配置凭据（resolver 只认 demo.api_token——配置上后应通过；
         // 此处 resolver 已配置，验证注入路径：把 resolver 换成缺键版本再验拒绝）
@@ -8082,7 +8363,10 @@ mod terminal_gate_tests {
             .await;
         assert!(!r.ok, "缺键应拒绝");
         let err = r.error.unwrap_or_default();
-        assert!(err.contains("api_token") && err.contains("凭据未配置"), "错误应含键名与指引：{err}");
+        assert!(
+            err.contains("api_token") && err.contains("凭据未配置"),
+            "错误应含键名与指引：{err}"
+        );
     }
 
     #[test]
@@ -8112,7 +8396,8 @@ mod terminal_gate_tests {
         gw.set_plugin_credentials_resolver(Box::new(|pid, key| {
             (pid == "p" && key == "k1").then(|| "V".to_string())
         }));
-        let (out, missing) = gw.resolve_credential_vars("p", "Bearer ${credentials.k1} tail ${credentials.k2}");
+        let (out, missing) =
+            gw.resolve_credential_vars("p", "Bearer ${credentials.k1} tail ${credentials.k2}");
         assert_eq!(out, "Bearer V tail ${credentials.k2}");
         assert_eq!(missing, vec!["k2"]);
         // 非法键名原样保留（不视为变量）
@@ -8167,14 +8452,23 @@ mod session_tool_tests {
         let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
         let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let gw = ToolGateway::new(&dir, store, registry, events, crate::config::SecurityConfig::default());
+        let gw = ToolGateway::new(
+            &dir,
+            store,
+            registry,
+            events,
+            crate::config::SecurityConfig::default(),
+        );
 
         // 注入前：普通会话看不到
         assert!(gw.session_tool_specs("s-video").is_empty());
 
         // 注入 video__summary 到 s-video 会话
         let exec = dynamic_exec(|_a, _s, args| async move {
-            Ok(format!("看到了：{}", args.get("q").and_then(|v| v.as_str()).unwrap_or("?")))
+            Ok(format!(
+                "看到了：{}",
+                args.get("q").and_then(|v| v.as_str()).unwrap_or("?")
+            ))
         });
         gw.inject_session_tools("s-video", vec![(ct("video__summary"), exec)]);
 
