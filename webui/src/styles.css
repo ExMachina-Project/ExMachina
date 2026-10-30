@@ -247,7 +247,7 @@ input, textarea { caret-color: var(--accent); }
 *::-webkit-scrollbar-corner { background: transparent; }
 
 /* ============ 布局骨架 ============ */
-.app-shell { display: flex; height: 100vh; overflow: hidden; }
+.app-shell { display: flex; height: 100dvh; overflow: hidden; }
 
 .app-sider {
   width: 244px;
@@ -601,7 +601,7 @@ textarea.ant-input:focus,
 @keyframes state-live { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
 /* ============ 对话 ============ */
-.chat-shell { display: flex; flex-direction: row-reverse; gap: 18px; height: calc(100vh - 32px); max-width: 1258px; margin: 0 auto; }
+.chat-shell { display: flex; flex-direction: row-reverse; gap: 18px; height: calc(100dvh - 32px); max-width: 1258px; margin: 0 auto; }
 .chat-rail {
   box-sizing: border-box;
   width: 272px;
@@ -691,7 +691,7 @@ textarea.ant-input:focus,
 .ws-alert { margin-bottom: 8px; }
 /* 滚动容器：relative 是「回到底部」悬浮按钮的定位基准
  * （缺失时按钮会落到输入区上，压住发送键） */
-.chat-scroll { flex: 1; overflow-y: auto; padding-bottom: 8px; scroll-behavior: smooth; position: relative; }
+.chat-scroll { flex: 1; overflow-y: auto; padding-bottom: 8px; position: relative; }
 
 /* 左栏抽屉方案已废弃：竖屏改为「列表页 / 会话页」整页切换（见媒体查询） */
 
@@ -827,6 +827,11 @@ textarea.ant-input:focus,
   border: 0 !important;
   box-shadow: none !important;
 }
+/* iOS 聚焦缩放规避：触屏设备输入面字号提到 16px 阈值以上（Safari 聚焦 <16px 会整页缩放） */
+@media (hover: none) {
+  .chat-composer .composer-textarea.ant-input { font-size: 16px; }
+  .composer-bar .ant-btn { font-size: 14px; }
+}
 .composer-bar {
   display: flex;
   align-items: center;
@@ -931,7 +936,7 @@ textarea.ant-input:focus,
 /* 三账：三卡等高 + 任务账长文滚动约束（超长 prompt 会把卡片撑到数屏高） */
 .ledger-wrap { padding: 8px; }
 .ledger-wrap .ant-card { height: 100%; display: flex; flex-direction: column; }
-.ledger-wrap .ant-card .ant-card-body { flex: 1; min-height: 0; overflow-y: auto; max-height: calc(100vh - 260px); }
+.ledger-wrap .ant-card .ant-card-body { flex: 1; min-height: 0; overflow-y: auto; max-height: calc(100dvh - 260px); }
 .ledger-wrap p { margin: 6px 0; line-height: 1.7; }
 .ledger-wrap .ant-list { margin: 4px 0 10px; }
 .agents-group { margin-bottom: 16px; }
@@ -1398,7 +1403,7 @@ textarea.ant-input:focus,
 /* 设置页 v3：面板区独立滚动，左侧分区导航常驻（长表单滚动时导航不跟着滚走） */
 .settings2 { display: flex; gap: 22px; align-items: flex-start; }
 /* sticky top 对齐吸顶页头下缘（页头约 87px），避免导航首项被页头盖住 */
-.settings2 .cfg-nav { position: sticky; top: 96px; max-height: calc(100vh - 216px); overflow-y: auto; padding-bottom: 8px; }
+.settings2 .cfg-nav { position: sticky; top: 96px; max-height: calc(100dvh - 216px); overflow-y: auto; padding-bottom: 8px; }
 .cfg-nav {
   flex: none;
   width: 200px;
@@ -1490,7 +1495,7 @@ textarea.ant-input:focus,
 /* ============ 登录门 ============ */
 .login-wrap {
   position: relative;
-  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -2067,7 +2072,7 @@ textarea.ant-input:focus,
    ============================================================ */
 .code-shell {
   display: flex; gap: 14px;
-  height: calc(100vh - 32px);
+  height: calc(100dvh - 32px);
   max-width: 1500px; margin: 0 auto;
   min-height: 0;
 }
@@ -2186,7 +2191,7 @@ textarea.ant-input:focus,
 
 @media (max-width: 1100px) { .code-side { display: none; } }
 @media (max-width: 860px) {
-  .code-shell { flex-direction: column; height: calc(100vh - 66px); }
+  .code-shell { flex-direction: column; height: calc(100dvh - 66px); }
   .code-rail { width: 100%; max-height: 30vh; }
 }
 
@@ -2256,7 +2261,7 @@ textarea.ant-input:focus,
 .ant-modal { max-width: calc(100vw - 24px); padding-bottom: 16px; }
 .ant-modal .ant-modal-container,
 .ant-modal .ant-modal-content {
-  max-height: calc(100vh - 132px);
+  max-height: calc(100dvh - 132px);
   display: flex;
   flex-direction: column;
 }
@@ -2726,6 +2731,11 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   /* 控制条在 375px 级窄屏上只留必要读数：字符进度条让位给数字 */
   .console-bar .ascii-meter { display: none; }
   .console-bar { gap: 6px; font-size: 11px; }
+  /* 弹层全屏化（移动端窄弹层内容局促：antd 默认 520px 在 375px 屏溢出） */
+  .ant-modal { max-width: calc(100vw - 16px) !important; margin: 8px auto !important; }
+  .ant-modal .ant-modal-body { max-height: calc(100dvh - 160px); overflow-y: auto; }
+  /* 表格横向滚动容器兜底（有 wrap 的表会自然获得） */
+  .ant-table-wrapper { max-width: 100%; overflow-x: auto; }
 }
 
 /* 回到底部悬浮按钮 */
@@ -2821,8 +2831,8 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .tbar-seg.sys { border-right: none; border-left: 1px solid var(--line); }
 
 @media (min-width: 861px) {
-  .app-shell { height: calc(100vh - var(--tel-h)); }
-  .chat-shell, .code-shell { height: calc(100vh - var(--tel-h) - 32px); }
+  .app-shell { height: calc(100dvh - var(--tel-h)); }
+  .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h) - 32px); }
 }
 @media (max-width: 860px) {
   .telemetry-bar { display: none; }
