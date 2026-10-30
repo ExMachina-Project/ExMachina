@@ -219,6 +219,19 @@ function connectWs(get: () => ExmState): void {
       } catch {
         /* 补偿失败静默：下轮断连重连时再次补偿 */
       }
+      // 断连窗内产生的审批单补偿：pending 表全量对照（跨会话口径与直推/恢复一致）
+      try {
+        const live = await api.listApprovals("pending", 100);
+        if (gen !== wsGen || useExm.getState().sessionId !== sessionId || selectSeq !== compSeq) return;
+        useExm.setState((s) => ({
+          approvals: [
+            ...s.approvals,
+            ...live
+              .map((x) => ({ approvalId: x.id, agentId: x.agentId, command: x.command, sessionId: x.sessionId }))
+              .filter((c) => !s.approvals.some((a) => a.approvalId === c.approvalId)),
+          ],
+        }));
+      } catch { /* 审批补偿失败静默 */ }
     })();
   };
   ws.onclose = () => {
