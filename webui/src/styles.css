@@ -2922,7 +2922,12 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 
 @media (min-width: 861px) {
   .app-shell { height: calc(100dvh - var(--tel-h)); }
-  .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h) - 26px - 6px); }
+  /* 对话 / 编码工作台贴底：两者是面板形态（不是可滚动长页）。.app-content 的
+     18px 页底内边距会把面板从遥测条上顶起来，留一条缝；这里把它归零，
+     高度直接取外壳高度（视口 − 遥测条），面板底边正好落在遥测条上沿。 */
+  .app-content:has(.chat-shell),
+  .app-content:has(.code-shell) { padding-bottom: 0; }
+  .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h)); }
 }
 @media (max-width: 860px) {
   .telemetry-bar { display: none; }
