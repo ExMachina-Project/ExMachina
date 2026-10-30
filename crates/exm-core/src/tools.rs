@@ -5654,8 +5654,42 @@ impl ToolGateway {
         let text = text.trim().chars().take(max_chars).collect::<String>();
         if text.is_empty() {
             ToolResult::err("页面无可提取文本（可能是纯二进制或脚本渲染页）")
+        } else if let Some(hint) = self.video_platform_hint(url) {
+            ToolResult::ok(format!("{hint}\n\n{text}"))
         } else {
             ToolResult::ok(text)
+        }
+    }
+    /// 视频平台 URL 判定（web_fetch 引导提示用）
+    fn video_platform_of_url(url: &str) -> Option<&'static str> {
+        if url.contains("bilibili.com") || url.contains("b23.tv") {
+            Some("bilibili")
+        } else if url.contains("youtube.com") || url.contains("youtu.be") {
+            Some("youtube")
+        } else {
+            None
+        }
+    }
+
+    /// web_fetch 抓到视频平台 URL 时的引导提示：
+    /// · 有 video__act（视频通道已启用且工具已注册）→ 指路专用工具（看视频/发评论的正道）
+    /// · 没有 → 明确告知当前无法实际评论，禁止把评论文本写进回复冒充已发
+    fn video_platform_hint(&self, url: &str) -> Option<String> {
+        let platform = Self::video_platform_of_url(url)?;
+        let has_act = self.dynamic_tool_names().iter().any(|n| n == "video__act");
+        if has_act {
+            Some(format!(
+                "[提示] 这是{platform}视频页：web_fetch 只能取元信息。看视频/发评论请用 \
+                 video__* 工具组（video__summary/字幕/弹幕/评论/UP主，video__act 发评论），\
+                 走登录态与风控养护，评论才会真实上屏。"
+            ))
+        } else {
+            Some(format!(
+                "[提示] 这是{platform}视频页，且当前系统未启用{platform}通道——\
+                 没有可用的 video__* 工具。你可以继续用 web_fetch 了解视频信息，但\
+                 **无法实际发表评论**：请如实告知用户「当前无法评论（需在控制台启用 \
+                 {platform} 通道并配置凭据）」，不要把评论内容写进回复里冒充已发布。"
+            ))
         }
     }
 

@@ -332,7 +332,7 @@ pub struct PromptBody {
 }
 
 /// 智能体系统提示词保存（PUT /api/singles/:id/prompt）：热生效，下一轮对话即装载。
-/// 保存即迁移：存量 PROMPT.md 落盘为 AGENTS.md 并回写 def.promptFile（新约定）
+/// 保存即迁移：存量 AGENTS.md 落盘为 PROMPT.md 并回写 def.promptFile（正式名）
 pub async fn put_single_prompt(
     State(st): State<AppState>,
     Path(id): Path<String>,

@@ -200,7 +200,10 @@ async fn 端到端_开发任务_从对话到文件落盘() {
 
     // 6) 断言：编排层走了 规划 → 执行(带工具) → 收束
     assert!(plan_calls.load(Ordering::SeqCst) >= 1, "应有规划请求");
-    assert!(unit_tool_calls.load(Ordering::SeqCst) >= 1, "应有子个体工具调用请求");
+    assert!(
+        unit_tool_calls.load(Ordering::SeqCst) >= 1,
+        "应有子个体工具调用请求"
+    );
     assert!(converge_calls.load(Ordering::SeqCst) >= 1, "应有收束请求");
 
     // 7) 断言：下发的工具面包含 edit（修复的编成白名单在真实链路生效）

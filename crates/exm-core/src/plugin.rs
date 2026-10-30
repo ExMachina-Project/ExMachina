@@ -200,12 +200,7 @@ impl PluginManager {
         let m = provider.manifest().clone();
         let id = m.id.clone();
         let dir = self.plugins_dir.join(&id);
-        let enabled = self
-            .overrides
-            .read()
-            .get(&id)
-            .copied()
-            .unwrap_or(true); // config.plugins.state 未覆盖时缺省启用
+        let enabled = self.overrides.read().get(&id).copied().unwrap_or(true); // config.plugins.state 未覆盖时缺省启用
         let arc: Arc<dyn PluginProvider> = provider.into();
         if enabled {
             self.providers.write().insert(id.clone(), arc);
@@ -264,10 +259,7 @@ impl PluginManager {
     /// 全量装载：扫描 plugins/ 目录 + builtin 注册表，校验并登记。
     /// enabled_overrides 来自 config.plugins.state（false = 禁用；缺省 = 启用）。
     /// 单插件失败不阻塞整体（记录错误继续），返回（成功数, 拒绝数）。
-    pub fn load_all(
-        &self,
-        enabled_overrides: &BTreeMap<String, bool>,
-    ) -> (usize, usize) {
+    pub fn load_all(&self, enabled_overrides: &BTreeMap<String, bool>) -> (usize, usize) {
         let mut ok = 0usize;
         let mut rejected = 0usize;
         // 覆盖快照（late 注册读同一口径）
@@ -316,7 +308,10 @@ impl PluginManager {
         // plugins/ 目录扫描：builtin 已登记的跳过（上面已处理），其余按清单装载
         let dirs = list_plugin_dirs(&self.plugins_dir);
         for dir in dirs {
-            let id = dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let id = dir
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             if id.is_empty() || self.entries.read().contains_key(&id) {
                 continue;
             }
@@ -325,7 +320,10 @@ impl PluginManager {
                 self.entries.write().insert(
                     id.clone(),
                     PluginEntry {
-                        manifest: PluginManifest { id: id.clone(), ..Default::default() },
+                        manifest: PluginManifest {
+                            id: id.clone(),
+                            ..Default::default()
+                        },
                         form: "unknown".into(),
                         enabled: false,
                         dir: Some(dir.clone()),
@@ -335,13 +333,24 @@ impl PluginManager {
                 );
                 continue;
             };
-            let form = if m.is_process() { "process" } else { "declarative" };
+            let form = if m.is_process() {
+                "process"
+            } else {
+                "declarative"
+            };
             match validate(&m, &id, &self.host_version) {
                 Err(e) => {
                     rejected += 1;
                     self.entries.write().insert(
                         id.clone(),
-                        PluginEntry { manifest: m, form: form.into(), enabled: false, dir: Some(dir), error: Some(e), tools_snapshot: Vec::new() },
+                        PluginEntry {
+                            manifest: m,
+                            form: form.into(),
+                            enabled: false,
+                            dir: Some(dir),
+                            error: Some(e),
+                            tools_snapshot: Vec::new(),
+                        },
                     );
                 }
                 Ok(()) => {
@@ -349,7 +358,14 @@ impl PluginManager {
                     ok += 1;
                     self.entries.write().insert(
                         id.clone(),
-                        PluginEntry { manifest: m, form: form.into(), enabled, dir: Some(dir), error: None, tools_snapshot: Vec::new() },
+                        PluginEntry {
+                            manifest: m,
+                            form: form.into(),
+                            enabled,
+                            dir: Some(dir),
+                            error: None,
+                            tools_snapshot: Vec::new(),
+                        },
                     );
                 }
             }
@@ -417,7 +433,10 @@ impl PluginManager {
             self.entries.write().insert(
                 id.to_string(),
                 PluginEntry {
-                    manifest: PluginManifest { id: id.into(), ..Default::default() },
+                    manifest: PluginManifest {
+                        id: id.into(),
+                        ..Default::default()
+                    },
                     form: "unknown".into(),
                     enabled: false,
                     dir: Some(dir),
@@ -427,12 +446,23 @@ impl PluginManager {
             );
             return false;
         };
-        let form = if m.is_process() { "process" } else { "declarative" };
+        let form = if m.is_process() {
+            "process"
+        } else {
+            "declarative"
+        };
         match validate(&m, id, &self.host_version) {
             Err(e) => {
                 self.entries.write().insert(
                     id.to_string(),
-                    PluginEntry { manifest: m, form: form.into(), enabled: false, dir: Some(dir), error: Some(e), tools_snapshot: Vec::new() },
+                    PluginEntry {
+                        manifest: m,
+                        form: form.into(),
+                        enabled: false,
+                        dir: Some(dir),
+                        error: Some(e),
+                        tools_snapshot: Vec::new(),
+                    },
                 );
                 self.providers.write().remove(id);
                 false
@@ -441,7 +471,14 @@ impl PluginManager {
                 let enabled = self.overrides.read().get(id).copied().unwrap_or(true);
                 self.entries.write().insert(
                     id.to_string(),
-                    PluginEntry { manifest: m, form: form.into(), enabled, dir: Some(dir), error: None, tools_snapshot: Vec::new() },
+                    PluginEntry {
+                        manifest: m,
+                        form: form.into(),
+                        enabled,
+                        dir: Some(dir),
+                        error: None,
+                        tools_snapshot: Vec::new(),
+                    },
                 );
                 // 声明式能力即时生效：返回 true 后由调用方回接 declarative_tools 到 ToolGateway；
                 // process 形态的 provider 由进程桥握手后 set_provider
@@ -677,7 +714,11 @@ mod tests {
         write_plugin(&root, "alpha", manifest_json("alpha"));
         let mut pm = PluginManager::new(&root);
         pm.register_builtin(
-            PluginManifest { id: "alpha".into(), name: "内置".into(), ..Default::default() },
+            PluginManifest {
+                id: "alpha".into(),
+                name: "内置".into(),
+                ..Default::default()
+            },
             || None,
         );
         let (_, rej) = pm.load_all(&BTreeMap::new());
@@ -702,7 +743,11 @@ mod tests {
     #[test]
     fn 装载_版本不满足被拒() {
         let root = dir("ver");
-        write_plugin(&root, "eps", json!({ "id": "eps", "exmMin": "999.0.0", "resources": ["skill.json"] }));
+        write_plugin(
+            &root,
+            "eps",
+            json!({ "id": "eps", "exmMin": "999.0.0", "resources": ["skill.json"] }),
+        );
         let pm = PluginManager::new(&root);
         let (_, rej) = pm.load_all(&BTreeMap::new());
         assert_eq!(rej, 1);
@@ -721,7 +766,10 @@ mod tests {
         assert_eq!(tools[0].2.target, "https://example.com");
         assert_eq!(tools[0].1, "zeta__ping");
         assert_eq!(namespaced("zeta", "ping"), "zeta__ping");
-        assert_eq!(parse_namespaced("zeta__ping"), Some(("zeta".into(), "ping".into())));
+        assert_eq!(
+            parse_namespaced("zeta__ping"),
+            Some(("zeta".into(), "ping".into()))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

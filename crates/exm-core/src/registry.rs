@@ -66,7 +66,11 @@ impl AgentPatch {
         }
         if let Some(v) = self.model_hint.as_deref() {
             let t = v.trim();
-            def.model_hint = if t.is_empty() { None } else { Some(t.to_string()) };
+            def.model_hint = if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            };
         }
         if let Some(v) = &self.link {
             def.link = v.clone();
@@ -139,7 +143,10 @@ impl LocalRegistry {
         // 显示名迁移：内置默认组显示名统一为 default（历史安装落盘为「智能连结」）
         if default_meta.name == "智能连结" {
             default_meta.name = "default".into();
-            let _ = std::fs::write(&default_meta_path, serde_json::to_string_pretty(&default_meta)?);
+            let _ = std::fs::write(
+                &default_meta_path,
+                serde_json::to_string_pretty(&default_meta)?,
+            );
         }
         groups.insert(
             default_meta.id.clone(),
@@ -154,8 +161,9 @@ impl LocalRegistry {
                 if !gdir.is_dir() || !meta_path.exists() {
                     continue;
                 }
-                let meta: GroupMeta = serde_json::from_str(&std::fs::read_to_string(&meta_path)?)
-                    .with_context(|| format!("解析组元数据失败: {}", meta_path.display()))?;
+                let meta: GroupMeta =
+                    serde_json::from_str(&std::fs::read_to_string(&meta_path)?)
+                        .with_context(|| format!("解析组元数据失败: {}", meta_path.display()))?;
                 if !valid_id(&meta.id) {
                     anyhow::bail!("非法组 id: {}", meta.id);
                 }
@@ -208,22 +216,34 @@ impl LocalRegistry {
             }
         }
         *self.singles.write() = singles;
-        let active_single = std::fs::read_to_string(self.dir.join("active_single")).unwrap_or_default();
+        let active_single =
+            std::fs::read_to_string(self.dir.join("active_single")).unwrap_or_default();
         let active_single = active_single.trim();
-        *self.active_single.write() =
-            if active_single.is_empty() { None } else { Some(active_single.to_string()) };
+        *self.active_single.write() = if active_single.is_empty() {
+            None
+        } else {
+            Some(active_single.to_string())
+        };
 
         // 工作目录持久化：agents/active_workspace（干活的项目，智能体与智能体组通用）
-        let active_ws = std::fs::read_to_string(self.dir.join("active_workspace")).unwrap_or_default();
+        let active_ws =
+            std::fs::read_to_string(self.dir.join("active_workspace")).unwrap_or_default();
         let active_ws = active_ws.trim();
-        *self.active_workspace.write() =
-            if active_ws.is_empty() { None } else { Some(active_ws.to_string()) };
+        *self.active_workspace.write() = if active_ws.is_empty() {
+            None
+        } else {
+            Some(active_ws.to_string())
+        };
 
         // 激活组持久化：agents/active_group
         let active_file = self.dir.join("active_group");
         let saved = std::fs::read_to_string(&active_file).unwrap_or_default();
         let active = saved.trim().to_string();
-        let active = if groups.contains_key(&active) { active } else { "exmachina".to_string() };
+        let active = if groups.contains_key(&active) {
+            active
+        } else {
+            "exmachina".to_string()
+        };
 
         *self.groups.write() = groups;
         *self.active.write() = active;
@@ -264,7 +284,12 @@ impl LocalRegistry {
     // ---------------- 组管理 ----------------
 
     pub fn list_groups(&self) -> Vec<GroupMeta> {
-        let mut metas: Vec<GroupMeta> = self.groups.read().values().map(|g| g.meta.clone()).collect();
+        let mut metas: Vec<GroupMeta> = self
+            .groups
+            .read()
+            .values()
+            .map(|g| g.meta.clone())
+            .collect();
         metas.sort_by(|a, b| a.id.cmp(&b.id));
         metas
     }
@@ -297,7 +322,10 @@ impl LocalRegistry {
         let ws = ws.map(str::trim).filter(|s| !s.is_empty());
         if let Some(p) = ws {
             // 目录必须真实存在——工作目录是干活的项目，打到不存在的路径只会让工具静默失败
-            anyhow::ensure!(std::path::Path::new(p).is_dir(), "工作目录不存在或不是目录: {p}");
+            anyhow::ensure!(
+                std::path::Path::new(p).is_dir(),
+                "工作目录不存在或不是目录: {p}"
+            );
         }
         *self.active_workspace.write() = ws.map(str::to_string);
         match ws {
@@ -323,13 +351,16 @@ impl LocalRegistry {
                 return None;
             }
             let p = std::path::PathBuf::from(trimmed);
-            Some(if p.is_absolute() { p } else { global_root.join(p) })
+            Some(if p.is_absolute() {
+                p
+            } else {
+                global_root.join(p)
+            })
         };
         resolve(self.active_workspace())
             .or_else(|| resolve(self.active_group_meta().and_then(|m| m.workspace)))
             .unwrap_or_else(|| global_root.to_path_buf())
     }
-
 
     // ---------------- 编成模板（entities/templates/，用户与 agent 共用） ----------------
 
@@ -343,16 +374,18 @@ impl LocalRegistry {
         let mut out = Vec::new();
         for kind in ["unit", "group"] {
             let base = self.templates_dir().join(kind);
-            let Ok(entries) = std::fs::read_dir(&base) else { continue };
+            let Ok(entries) = std::fs::read_dir(&base) else {
+                continue;
+            };
             for e in entries.filter_map(|e| e.ok()) {
                 let tdir = e.path();
                 let meta_path = tdir.join("template.json");
                 if !tdir.is_dir() || !meta_path.is_file() {
                     continue;
                 }
-                if let Ok(info) =
-                    serde_json::from_str::<crate::types::TemplateInfo>(&std::fs::read_to_string(&meta_path).unwrap_or_default())
-                {
+                if let Ok(info) = serde_json::from_str::<crate::types::TemplateInfo>(
+                    &std::fs::read_to_string(&meta_path).unwrap_or_default(),
+                ) {
                     out.push(info);
                 }
             }
@@ -371,9 +404,9 @@ impl LocalRegistry {
             if !tdir.is_dir() || !meta_path.is_file() {
                 continue;
             }
-            if let Ok(info) =
-                serde_json::from_str::<crate::types::TemplateInfo>(&std::fs::read_to_string(&meta_path).unwrap_or_default())
-            {
+            if let Ok(info) = serde_json::from_str::<crate::types::TemplateInfo>(
+                &std::fs::read_to_string(&meta_path).unwrap_or_default(),
+            ) {
                 if info.id == template_id {
                     return Some(tdir);
                 }
@@ -391,7 +424,7 @@ impl LocalRegistry {
             .replace("{{description}}", description)
     }
 
-    /// 基于模板创建子个体:agent.json + AGENTS.md 渲染占位符后经 upsert_agent 落盘。
+    /// 基于模板创建子个体:agent.json + PROMPT.md 渲染占位符后经 upsert_agent 落盘。
     /// name/description 缺省时取模板默认。
     pub fn create_agent_from_template(
         &self,
@@ -406,21 +439,38 @@ impl LocalRegistry {
             .find_template_dir("unit", template_id)
             .with_context(|| format!("子个体模板不存在: {template_id}"))?;
         let meta_path = tdir.join("template.json");
-        let tmeta: crate::types::TemplateInfo = serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?;
-        let name = if name.trim().is_empty() { tmeta.name } else { name.trim().to_string() };
-        let description =
-            if description.trim().is_empty() { tmeta.description } else { description.trim().to_string() };
-        let raw = std::fs::read_to_string(tdir.join("agent.json")).context("模板缺少 agent.json")?;
-        let mut def: AgentDefinition =
-            serde_json::from_str(&Self::render_template(&raw, identifier, &name, &description))
-                .context("模板 agent.json 校验失败")?;
+        let tmeta: crate::types::TemplateInfo =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?;
+        let name = if name.trim().is_empty() {
+            tmeta.name
+        } else {
+            name.trim().to_string()
+        };
+        let description = if description.trim().is_empty() {
+            tmeta.description
+        } else {
+            description.trim().to_string()
+        };
+        let raw =
+            std::fs::read_to_string(tdir.join("agent.json")).context("模板缺少 agent.json")?;
+        let mut def: AgentDefinition = serde_json::from_str(&Self::render_template(
+            &raw,
+            identifier,
+            &name,
+            &description,
+        ))
+        .context("模板 agent.json 校验失败")?;
         def.name = name;
         def.description = description.clone();
         def.when_to_call = description;
-        // 模板提示词：AGENTS.md 优先（新约定），回落 PROMPT.md（存量模板）
+        // 模板提示词：PROMPT.md 优先（系统级提示词正式名），回落 AGENTS.md（项目级规则存量）
         let prompt_path = {
-            let p = tdir.join("AGENTS.md");
-            if p.exists() { p } else { tdir.join("PROMPT.md") }
+            let p = tdir.join("PROMPT.md");
+            if p.exists() {
+                p
+            } else {
+                tdir.join("AGENTS.md")
+            }
         };
         let prompt = std::fs::read_to_string(prompt_path)
             .ok()
@@ -441,14 +491,25 @@ impl LocalRegistry {
             .find_template_dir("group", template_id)
             .with_context(|| format!("组模板不存在: {template_id}"))?;
         let meta_path = tdir.join("template.json");
-        let tmeta: crate::types::TemplateInfo = serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?;
-        let name = if name.trim().is_empty() { tmeta.name } else { name.trim().to_string() };
-        let description =
-            if description.trim().is_empty() { tmeta.description } else { description.trim().to_string() };
+        let tmeta: crate::types::TemplateInfo =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?;
+        let name = if name.trim().is_empty() {
+            tmeta.name
+        } else {
+            name.trim().to_string()
+        };
+        let description = if description.trim().is_empty() {
+            tmeta.description
+        } else {
+            description.trim().to_string()
+        };
         let meta = self.create_group(id, &name, &description)?;
         if let Some(gdir) = self.group_dir(&meta.id) {
             if let Ok(soul) = std::fs::read_to_string(tdir.join("SOUL.md")) {
-                std::fs::write(gdir.join("SOUL.md"), Self::render_template(&soul, &meta.id, &name, &description))?;
+                std::fs::write(
+                    gdir.join("SOUL.md"),
+                    Self::render_template(&soul, &meta.id, &name, &description),
+                )?;
             }
         }
         Ok(meta)
@@ -486,7 +547,10 @@ impl LocalRegistry {
             builtin: false,
             created_at: crate::types::now_iso(),
         };
-        std::fs::write(gdir.join("group.json"), serde_json::to_string_pretty(&meta)?)?;
+        std::fs::write(
+            gdir.join("group.json"),
+            serde_json::to_string_pretty(&meta)?,
+        )?;
         groups.insert(gid.clone(), self.load_group(meta.clone(), gdir)?);
         Ok(meta)
     }
@@ -520,7 +584,8 @@ impl LocalRegistry {
     }
 
     pub fn get(&self, identifier: &str) -> Option<AgentDefinition> {
-        self.with_active(|g| g.defs.get(identifier).cloned()).flatten()
+        self.with_active(|g| g.defs.get(identifier).cloned())
+            .flatten()
     }
 
     /// 按能力检索：域、能力标签、名称或 identifier 命中（激活组）
@@ -532,7 +597,9 @@ impl LocalRegistry {
                     .values()
                     .filter(|d| {
                         d.domain.contains(cap)
-                            || d.capabilities.iter().any(|c| c.to_lowercase().contains(&needle))
+                            || d.capabilities
+                                .iter()
+                                .any(|c| c.to_lowercase().contains(&needle))
                             || d.name.contains(cap)
                             || d.identifier.to_lowercase().contains(&needle)
                     })
@@ -617,7 +684,7 @@ impl LocalRegistry {
 
     fn singles_prompt_path(&self, prompt_file: &str) -> PathBuf {
         if prompt_file.contains('/') || prompt_file.contains('\\') {
-            // 新约定：智能体目录 entities/agents/<id>/AGENTS.md（旧 PROMPT.md 双名回落）
+            // 智能体目录 entities/agents/<id>/PROMPT.md（AGENTS.md 双名回落）
             self.singles_dir().join(prompt_file)
         } else {
             self.singles_dir().join("prompts").join(prompt_file)
@@ -629,7 +696,7 @@ impl LocalRegistry {
         self.singles_dir().join(id).join("agent.json")
     }
 
-    /// 读取智能体提示词（AGENTS.md 新约定；promptFile 旧名 PROMPT.md 时自动回落新名）
+    /// 读取智能体提示词（PROMPT.md 正式名；promptFile 为 AGENTS.md 时自动回落新名）
     pub fn load_single_prompt(&self, prompt_file: &str) -> anyhow::Result<String> {
         let p = self.singles_prompt_path(prompt_file);
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -656,17 +723,17 @@ impl LocalRegistry {
         }
     }
 
-    /// 写入智能体提示词文件（AGENTS.md；与激活组状态无关）。
-    /// 存量目录还挂着 PROMPT.md：保存即迁移——写 AGENTS.md、删旧名、更新 def.promptFile，
-    /// 保证下次读取/导出都指向新约定（避免双文件长期并存漂移）
+    /// 写入智能体提示词文件（PROMPT.md；与激活组状态无关）。
+    /// 存量目录还挂着 AGENTS.md：保存即迁移——写 PROMPT.md、删旧名、更新 def.promptFile，
+    /// 保证下次读取/导出都指向正式名（避免双文件长期并存漂移）
     pub fn write_single_prompt(&self, prompt_file: &str, content: &str) -> anyhow::Result<String> {
         let p = self.singles_prompt_path(prompt_file);
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&p, content)?;
-        // 旧名迁移：写的是 PROMPT.md 时补写 AGENTS.md 并清掉旧名
-        let final_name = if prompt_file.ends_with("PROMPT.md") {
+        // 旧名迁移：写的是 AGENTS.md 时补写 PROMPT.md 并清掉旧名
+        let final_name = if prompt_file.ends_with("AGENTS.md") {
             let alt = Self::alternate_prompt_name(prompt_file);
             let alt_path = self.singles_prompt_path(&alt);
             if let Some(parent) = alt_path.parent() {
@@ -682,14 +749,18 @@ impl LocalRegistry {
     }
 
     /// 新增/更新智能体（identifier 冲突即替换）
-    pub fn upsert_single(&self, mut def: AgentDefinition, prompt: Option<String>) -> anyhow::Result<AgentDefinition> {
+    pub fn upsert_single(
+        &self,
+        mut def: AgentDefinition,
+        prompt: Option<String>,
+    ) -> anyhow::Result<AgentDefinition> {
         Self::validate_identifier(&def.identifier)?;
         if def.name.trim().is_empty() || def.description.trim().is_empty() {
             anyhow::bail!("name/description 不能为空");
         }
         if def.prompt_file.trim().is_empty() {
-            // 新约定 AGENTS.md（对齐业界编码智能体惯例）；存量 PROMPT.md 继续按其 promptFile 读取
-            def.prompt_file = format!("{}/AGENTS.md", def.identifier);
+            // 正式名 PROMPT.md（系统级提示词）；存量 AGENTS.md 继续按其 promptFile 读取
+            def.prompt_file = format!("{}/PROMPT.md", def.identifier);
         }
         def.domain = normalize_domain(&def.domain);
         let prompt_path = self.singles_prompt_path(&def.prompt_file);
@@ -715,7 +786,9 @@ impl LocalRegistry {
                 ),
             )?;
         }
-        self.singles.write().insert(def.identifier.clone(), def.clone());
+        self.singles
+            .write()
+            .insert(def.identifier.clone(), def.clone());
         let def_path = self.single_def_path(&def.identifier);
         std::fs::create_dir_all(def_path.parent().unwrap())?;
         std::fs::write(def_path, serde_json::to_string_pretty(&def)?)?;
@@ -756,7 +829,9 @@ impl LocalRegistry {
     /// 指定组的个体清单（供跨组查看组详情，不依赖激活组）
     pub fn agents_in_group(&self, gid: &str) -> Vec<AgentDefinition> {
         let groups = self.groups.read();
-        let Some(g) = groups.get(gid) else { return vec![] };
+        let Some(g) = groups.get(gid) else {
+            return vec![];
+        };
         let mut v: Vec<AgentDefinition> = g.defs.values().cloned().collect();
         v.sort_by(|a, b| a.identifier.cmp(&b.identifier));
         v
@@ -766,7 +841,10 @@ impl LocalRegistry {
         if self.single_mode() {
             return vec![]; // 智能体模式不派发子个体
         }
-        self.list().into_iter().filter(|d| matches!(d.tier, Tier::Unit)).collect()
+        self.list()
+            .into_iter()
+            .filter(|d| matches!(d.tier, Tier::Unit))
+            .collect()
     }
 
     /// 当前交互目标的主智能体：智能体模式 = 该智能体；否则 = 组内主智能体
@@ -787,7 +865,10 @@ impl LocalRegistry {
     pub fn arbiter(&self) -> Option<AgentDefinition> {
         let defs = self.list();
         let mut best: Option<(u8, AgentDefinition)> = None;
-        for d in defs.iter().filter(|d| !matches!(d.tier, Tier::Orchestrator)) {
+        for d in defs
+            .iter()
+            .filter(|d| !matches!(d.tier, Tier::Orchestrator))
+        {
             let score = if d.capabilities.iter().any(|c| c.contains("裁决")) {
                 3
             } else if d.capabilities.iter().any(|c| c.contains("决策")) {
@@ -810,7 +891,11 @@ impl LocalRegistry {
 
     /// 指定组的个体数
     pub fn group_agent_count(&self, gid: &str) -> usize {
-        self.groups.read().get(gid).map(|g| g.defs.len()).unwrap_or(0)
+        self.groups
+            .read()
+            .get(gid)
+            .map(|g| g.defs.len())
+            .unwrap_or(0)
     }
 
     // ---------------- 提示词 / Playbook / SOUL（激活组） ----------------
@@ -825,7 +910,7 @@ impl LocalRegistry {
         self.singles_dir()
     }
 
-    /// 提示词路径解析：`promptFile` 含 `/` = 相对编成根的个体目录路径（新约定 `<id>/AGENTS.md`）；
+    /// 提示词路径解析：`promptFile` 含 `/` = 相对编成根的个体目录路径（`<id>/PROMPT.md`）；
     /// 否则兼容旧约定 `<编成根>/prompts/<file>`。
     fn prompt_fs_path(&self, prompt_file: &str) -> PathBuf {
         let groups = self.groups.read();
@@ -915,7 +1000,12 @@ impl LocalRegistry {
     /// 组作用域提示词写入
     /// 写入组内个体提示词。存量 PROMPT.md 保存即迁移：写 AGENTS.md、删旧名，
     /// 返回最终文件名（调用方据此回写 def.promptFile）
-    pub fn write_group_prompt(&self, gid: &str, prompt_file: &str, content: &str) -> anyhow::Result<String> {
+    pub fn write_group_prompt(
+        &self,
+        gid: &str,
+        prompt_file: &str,
+        content: &str,
+    ) -> anyhow::Result<String> {
         let dir = self.group_dir(gid).context("组不存在")?;
         let resolve = |pf: &str| {
             if pf.contains('/') || pf.contains('\\') {
@@ -949,7 +1039,9 @@ impl LocalRegistry {
     /// 指定组的链路模板（组总览用，不依赖激活组）
     pub fn playbooks_in_group(&self, gid: &str) -> anyhow::Result<Vec<crate::types::Playbook>> {
         let groups = self.groups.read();
-        let Some(g) = groups.get(gid) else { return Ok(vec![]) };
+        let Some(g) = groups.get(gid) else {
+            return Ok(vec![]);
+        };
         let dir = g.dir.join("playbooks");
         if !dir.exists() {
             return Ok(vec![]);
@@ -974,12 +1066,19 @@ impl LocalRegistry {
 
     /// 技能全局目录：`skills/`，全体组共用（技能是动态加载的作业指令，不做组隔离）
     fn skills_dir(&self) -> Option<PathBuf> {
-        Some(self.dir.parent().unwrap_or(self.dir.as_path()).join("skills"))
+        Some(
+            self.dir
+                .parent()
+                .unwrap_or(self.dir.as_path())
+                .join("skills"),
+        )
     }
 
     /// 装载全局技能包（`skills/*.json`，热装载，全体组共用）
     pub fn load_skills(&self) -> anyhow::Result<Vec<crate::types::SkillDef>> {
-        let Some(dir) = self.skills_dir() else { return Ok(vec![]) };
+        let Some(dir) = self.skills_dir() else {
+            return Ok(vec![]);
+        };
         if !dir.exists() {
             return Ok(vec![]);
         }
@@ -1001,10 +1100,14 @@ impl LocalRegistry {
 
     /// 写入技能包到全局目录（id 校验同个体标识）
     pub fn write_skill(&self, skill: &crate::types::SkillDef) -> anyhow::Result<()> {
-        let Some(dir) = self.skills_dir() else { anyhow::bail!("无激活组") };
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组")
+        };
         let id = skill.id.trim();
         if id.is_empty()
-            || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             anyhow::bail!("非法技能 id: {id}（仅允许字母/数字/-/_）");
         }
@@ -1014,7 +1117,10 @@ impl LocalRegistry {
         std::fs::create_dir_all(&dir)?;
         let mut skill = skill.clone();
         skill.id = id.to_string();
-        std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string_pretty(&skill)?)?;
+        std::fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(&skill)?,
+        )?;
         Ok(())
     }
 
@@ -1029,7 +1135,9 @@ impl LocalRegistry {
     pub fn protocols_in_group(&self, gid: &str) -> anyhow::Result<Vec<crate::types::ProtocolDef>> {
         let dir = {
             let groups = self.groups.read();
-            let Some(g) = groups.get(gid) else { return Ok(vec![]) };
+            let Some(g) = groups.get(gid) else {
+                return Ok(vec![]);
+            };
             g.dir.join("protocol")
         };
         if !dir.exists() {
@@ -1102,9 +1210,18 @@ impl LocalRegistry {
             "bundle 格式不符（缺少 schema 标记）"
         );
         let ginfo = bundle.get("group").context("bundle 缺少 group 字段")?;
-        let name = ginfo.get("name").and_then(|v| v.as_str()).unwrap_or("导入组");
-        let description = ginfo.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let primary = ginfo.get("primary").and_then(|v| v.as_str()).map(String::from);
+        let name = ginfo
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("导入组");
+        let description = ginfo
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let primary = ginfo
+            .get("primary")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let meta = self.create_group(new_id, name, description)?;
         let agents = bundle
             .get("agents")
@@ -1113,8 +1230,8 @@ impl LocalRegistry {
         let prompts = bundle.get("prompts").and_then(|v| v.as_object());
         let mut first: Option<String> = None;
         for av in agents {
-            let def: AgentDefinition = serde_json::from_value(av.clone())
-                .context("个体定义解析失败")?;
+            let def: AgentDefinition =
+                serde_json::from_value(av.clone()).context("个体定义解析失败")?;
             if first.is_none() {
                 first = Some(def.identifier.clone());
             }
@@ -1124,13 +1241,15 @@ impl LocalRegistry {
                 .map(String::from);
             self.upsert_agent(&meta.id, def, prompt)?;
         }
-        let target = primary.filter(|p| {
-            self.group_agent_count(&meta.id) > 0
-                && self
-                    .agents_in_group(&meta.id)
-                    .iter()
-                    .any(|a| a.identifier == *p)
-        }).or(first);
+        let target = primary
+            .filter(|p| {
+                self.group_agent_count(&meta.id) > 0
+                    && self
+                        .agents_in_group(&meta.id)
+                        .iter()
+                        .any(|a| a.identifier == *p)
+            })
+            .or(first);
         if let Some(p) = target {
             let _ = self.set_primary(&meta.id, &p);
         }
@@ -1152,8 +1271,13 @@ impl LocalRegistry {
     }
 
     /// 读取个体的经验改进要点（激活组内）
-    pub fn load_adaptation(&self, identifier: &str) -> anyhow::Result<Option<crate::types::AgentAdaptation>> {
-        let Some(p) = self.adaptation_path(identifier) else { return Ok(None) };
+    pub fn load_adaptation(
+        &self,
+        identifier: &str,
+    ) -> anyhow::Result<Option<crate::types::AgentAdaptation>> {
+        let Some(p) = self.adaptation_path(identifier) else {
+            return Ok(None);
+        };
         if p.as_os_str().is_empty() || !p.exists() {
             return Ok(None);
         }
@@ -1195,7 +1319,9 @@ impl LocalRegistry {
     }
 
     pub fn reset_adaptation(&self, identifier: &str) -> anyhow::Result<bool> {
-        let Some(p) = self.adaptation_path(identifier) else { return Ok(false) };
+        let Some(p) = self.adaptation_path(identifier) else {
+            return Ok(false);
+        };
         if p.as_os_str().is_empty() || !p.exists() {
             return Ok(false);
         }
@@ -1204,7 +1330,9 @@ impl LocalRegistry {
     }
 
     pub fn remove_skill(&self, id: &str) -> anyhow::Result<bool> {
-        let Some(dir) = self.skills_dir() else { anyhow::bail!("无激活组") };
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组")
+        };
         let path = dir.join(format!("{id}.json"));
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -1310,7 +1438,11 @@ impl LocalRegistry {
         }
         let mut groups = self.groups.write();
         let g = groups.get_mut(gid).context("组不存在")?;
-        g.meta.workspace = if ws.is_empty() { None } else { Some(ws.to_string()) };
+        g.meta.workspace = if ws.is_empty() {
+            None
+        } else {
+            Some(ws.to_string())
+        };
         let meta_path = g.dir.join("group.json");
         std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
         Ok(())
@@ -1321,14 +1453,22 @@ impl LocalRegistry {
         let m = model.trim();
         let mut groups = self.groups.write();
         let g = groups.get_mut(gid).context("组不存在")?;
-        g.meta.model = if m.is_empty() { None } else { Some(m.to_string()) };
+        g.meta.model = if m.is_empty() {
+            None
+        } else {
+            Some(m.to_string())
+        };
         let meta_path = g.dir.join("group.json");
         std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
         Ok(())
     }
 
     /// 设置组级能力模型覆盖（每项空串 = 清除该项，跟随全局槽位；全空 = 整块收回）
-    pub fn set_group_capabilities(&self, gid: &str, caps: crate::types::GroupCapabilities) -> anyhow::Result<()> {
+    pub fn set_group_capabilities(
+        &self,
+        gid: &str,
+        caps: crate::types::GroupCapabilities,
+    ) -> anyhow::Result<()> {
         let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let caps = crate::types::GroupCapabilities {
             speech: norm(caps.speech),
@@ -1338,7 +1478,11 @@ impl LocalRegistry {
         };
         let mut groups = self.groups.write();
         let g = groups.get_mut(gid).context("组不存在")?;
-        g.meta.capabilities = if caps == crate::types::GroupCapabilities::default() { None } else { Some(caps) };
+        g.meta.capabilities = if caps == crate::types::GroupCapabilities::default() {
+            None
+        } else {
+            Some(caps)
+        };
         let meta_path = g.dir.join("group.json");
         std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
         Ok(())
@@ -1352,7 +1496,11 @@ impl LocalRegistry {
     /// 设置个体默认模型（智能体优先，其次跨组查找；空串清除 = 跟随所属组/全局）
     pub fn set_agent_model(&self, identifier: &str, model: &str) -> anyhow::Result<()> {
         let m = model.trim();
-        let hint = if m.is_empty() { None } else { Some(m.to_string()) };
+        let hint = if m.is_empty() {
+            None
+        } else {
+            Some(m.to_string())
+        };
         // 1) 智能体
         if self.singles.read().contains_key(identifier) {
             let mut singles = self.singles.write();
@@ -1372,11 +1520,7 @@ impl LocalRegistry {
                 g.defs.get(identifier).map(|def| {
                     let mut d = def.clone();
                     d.model_hint = hint.clone();
-                    (
-                        g.meta.id.clone(),
-                        Self::def_path_in(&g.dir, identifier),
-                        d,
-                    )
+                    (g.meta.id.clone(), Self::def_path_in(&g.dir, identifier), d)
                 })
             })
         };
@@ -1394,7 +1538,11 @@ impl LocalRegistry {
     /// 保护口径：内置组「定义受保护」指不得增删个体或整体替换定义（upsert_agent / remove_agent）；
     /// 本方法与 set_agent_model 同属受限字段编辑，仅放行 AgentPatch 声明的字段，
     /// identifier/tier/prompt_file 与提示词文件恒不可改，落盘回原定义文件。
-    pub fn update_agent(&self, identifier: &str, patch: &AgentPatch) -> anyhow::Result<AgentDefinition> {
+    pub fn update_agent(
+        &self,
+        identifier: &str,
+        patch: &AgentPatch,
+    ) -> anyhow::Result<AgentDefinition> {
         // 1) 智能体（entities/agents/<id>.json）
         if self.singles.read().contains_key(identifier) {
             let mut d = {
@@ -1409,7 +1557,9 @@ impl LocalRegistry {
             std::fs::create_dir_all(path.parent().unwrap())?;
             std::fs::write(&path, serde_json::to_string_pretty(&d)?)
                 .with_context(|| format!("写入个体定义失败: {}", path.display()))?;
-            self.singles.write().insert(identifier.to_string(), d.clone());
+            self.singles
+                .write()
+                .insert(identifier.to_string(), d.clone());
             return Ok(d);
         }
         // 2) 组内个体（跨组查找：管理页不依赖激活组；内置组同样放行受限编辑）
@@ -1694,7 +1844,9 @@ fn parse_protocol_doc(raw: &str) -> Result<Option<crate::types::ProtocolDef>, St
             closed = true;
             break;
         }
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim());
         match k {
             "id" => id = v.to_string(),
@@ -1759,7 +1911,9 @@ mod protocol_parse_tests {
 
     #[test]
     fn 无frontmatter跳过_坏frontmatter报错() {
-        assert!(parse_protocol_doc("# 普通文档\n无元数据").unwrap().is_none());
+        assert!(parse_protocol_doc("# 普通文档\n无元数据")
+            .unwrap()
+            .is_none());
         assert!(parse_protocol_doc("---\nname: 缺 id\n---\n正文").is_err());
         assert!(parse_protocol_doc("---\nid: x\nname: y\n正文未闭合").is_err());
     }

@@ -48,7 +48,9 @@ pub fn write(session_id: &str, items: Vec<(String, String)>) -> Vec<TodoItem> {
     if now_items.is_empty() {
         todos().lock().remove(session_id);
     } else {
-        todos().lock().insert(session_id.to_string(), now_items.clone());
+        todos()
+            .lock()
+            .insert(session_id.to_string(), now_items.clone());
     }
     now_items
 }
@@ -81,7 +83,10 @@ pub fn render(session_id: &str) -> Option<String> {
         out.push_str(&format!("- {mark} {}\n", t.content));
     }
     if items.len() > RENDER_CAP {
-        out.push_str(&format!("- …（另有 {} 条未展示）\n", items.len() - RENDER_CAP));
+        out.push_str(&format!(
+            "- …（另有 {} 条未展示）\n",
+            items.len() - RENDER_CAP
+        ));
     }
     if done == items.len() {
         out.push_str("\n清单已全部完成；如任务收尾请总结产出。\n");
@@ -123,9 +128,15 @@ mod tests {
     #[test]
     fn 状态归一_非法值落pending() {
         let sid = "todo-test-2";
-        write(sid, vec![("x".into(), "DONE".into()), ("y".into(), "".into())]);
+        write(
+            sid,
+            vec![("x".into(), "DONE".into()), ("y".into(), "".into())],
+        );
         let items = list_items(sid);
-        assert_eq!(items[0].status, "pending", "大写 DONE 应归一为 pending（只认小写）");
+        assert_eq!(
+            items[0].status, "pending",
+            "大写 DONE 应归一为 pending（只认小写）"
+        );
         assert_eq!(items[1].status, "pending");
     }
 
@@ -159,6 +170,10 @@ mod tests {
             .collect();
         write(sid, items);
         let r = render(sid).unwrap();
-        assert!(r.contains("另有 10 条未展示"), "超出 30 条应有截断提示：{}", r.lines().count());
+        assert!(
+            r.contains("另有 10 条未展示"),
+            "超出 30 条应有截断提示：{}",
+            r.lines().count()
+        );
     }
 }

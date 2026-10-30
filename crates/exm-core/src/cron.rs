@@ -78,7 +78,10 @@ impl CronStore {
     }
 
     pub fn record_run(&self, run: &CronRun) -> Result<()> {
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.runs_path())?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.runs_path())?;
         writeln!(f, "{}", serde_json::to_string(run)?)?;
         Ok(())
     }
@@ -128,7 +131,8 @@ pub fn job_due(job: &CronJob, now: DateTime<Utc>) -> bool {
 }
 
 /// 五段 cron 匹配：分(0-59) 时(0-23) 日(1-31) 月(1-12) 周(0-6，0=周日)
-pub fn cron_matches(expr: &str, now: DateTime<Utc>) -> bool {    let fields: Vec<&str> = expr.split_whitespace().collect();
+pub fn cron_matches(expr: &str, now: DateTime<Utc>) -> bool {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
     if fields.len() != 5 {
         return false;
     }
@@ -203,7 +207,10 @@ mod tests {
         assert!(!cron_matches("*/15 * * * *", at(2026, 9, 12, 10, 50)));
         assert!(cron_matches("0 9 * * 1-5", at(2026, 9, 14, 9, 0))); // 周一
         assert!(!cron_matches("0 9 * * 1-5", at(2026, 9, 13, 9, 0))); // 周日
-        assert!(cron_matches("5,25 8-18/2 1,15 * *", at(2026, 9, 15, 10, 25)));
+        assert!(cron_matches(
+            "5,25 8-18/2 1,15 * *",
+            at(2026, 9, 15, 10, 25)
+        ));
         assert!(!cron_matches("bad expr", at(2026, 9, 12, 10, 30)));
     }
 
@@ -218,7 +225,10 @@ mod tests {
         assert_eq!(next, at(2026, 10, 7, 11, 0));
         // 非法表达式 / 无命中
         assert!(next_run("bad expr", from, 10).is_none());
-        assert!(next_run("0 9 * * *", from, 10).is_none(), "上限内无命中返回 None");
+        assert!(
+            next_run("0 9 * * *", from, 10).is_none(),
+            "上限内无命中返回 None"
+        );
     }
 
     #[test]
@@ -258,7 +268,10 @@ mod tests {
         let mut every_min = ran.clone();
         every_min.cron = Some("* * * * *".into());
         assert!(job_due(&every_min, at(2026, 9, 13, 9, 1)));
-        assert!(!cron_matches(job.cron.as_deref().unwrap(), at(2026, 9, 13, 9, 1)));
+        assert!(!cron_matches(
+            job.cron.as_deref().unwrap(),
+            at(2026, 9, 13, 9, 1)
+        ));
 
         // 一次性任务：到期触发、停用后不触发
         let mut once = job.clone();

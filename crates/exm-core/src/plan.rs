@@ -41,7 +41,10 @@ pub fn is_write_tool(tool: ToolName, args: &serde_json::Value) -> bool {
         }
         ToolName::Computer => {
             // 截屏只读放行；输入类拦截
-            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("screenshot");
+            let op = args
+                .get("op")
+                .and_then(|v| v.as_str())
+                .unwrap_or("screenshot");
             op != "screenshot"
         }
         ToolName::Git => {

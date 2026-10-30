@@ -104,8 +104,12 @@ impl PluginProcess {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                let Some(id) = v.get("id").and_then(|i| i.as_u64()) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let Some(id) = v.get("id").and_then(|i| i.as_u64()) else {
+                    continue;
+                };
                 if let Some(tx) = pending.lock().await.remove(&id) {
                     let _ = tx.send(v);
                 }
@@ -113,7 +117,8 @@ impl PluginProcess {
             // 流结束：唤醒所有等待者（发错误响应）
             let mut ps = pending.lock().await;
             for (_, tx) in std::mem::take(&mut *ps) {
-                let _ = tx.send(json!({ "error": { "code": -32000, "message": "插件进程已退出" } }));
+                let _ =
+                    tx.send(json!({ "error": { "code": -32000, "message": "插件进程已退出" } }));
             }
         });
     }
@@ -173,7 +178,10 @@ impl PluginProcess {
         .await
         {
             Ok(Ok(resp)) if resp.get("result").is_some() => Ok(resp["result"].clone()),
-            Ok(Ok(resp)) => anyhow::bail!("握手返回错误：{}", resp["error"]["message"].as_str().unwrap_or("?")),
+            Ok(Ok(resp)) => anyhow::bail!(
+                "握手返回错误：{}",
+                resp["error"]["message"].as_str().unwrap_or("?")
+            ),
             Ok(Err(e)) => Err(e),
             Err(_) => anyhow::bail!("握手超时（{timeout_secs}s）"),
         }?;
@@ -267,7 +275,8 @@ impl PluginProcess {
             self.request(
                 "tools/call",
                 json!({ "name": name, "arguments": arguments }),
-            ),        )
+            ),
+        )
         .await
         .map_err(|_| anyhow::anyhow!("工具 {name} 调用超时（{timeout_secs}s）"))??;
         let Some(result) = resp.get("result") else {
@@ -282,7 +291,10 @@ impl PluginProcess {
             .cloned()
             .unwrap_or_default();
         Ok(PluginCallResult {
-            is_error: result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false),
+            is_error: result
+                .get("isError")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false),
             content,
         })
     }
@@ -315,7 +327,7 @@ impl PluginProcess {
 /// config.set/shutdown 全协议应答）
 #[cfg(test)]
 pub(crate) fn mock_script_pub() -> String {
-        r#"
+    r#"
 import sys, json, time
 for line in sys.stdin:
     line = line.strip()
@@ -436,7 +448,10 @@ mod tests {
         let mut hs = Vec::new();
         for i in 0..8 {
             let fut = p.tools_call("ping", json!({ "q": i }), 10);
-            hs.push((i, tokio::time::timeout(std::time::Duration::from_secs(15), fut)));
+            hs.push((
+                i,
+                tokio::time::timeout(std::time::Duration::from_secs(15), fut),
+            ));
         }
         for (i, h) in hs {
             let r = h.await.expect("不应整体超时").unwrap();
@@ -449,7 +464,9 @@ mod tests {
     #[tokio::test]
     async fn 桥_凭据下发不落盘() {
         let (p, dir) = mocked("cred").await;
-        p.config_set(json!({ "secret": "s3cr3t" }), 10).await.unwrap();
+        p.config_set(json!({ "secret": "s3cr3t" }), 10)
+            .await
+            .unwrap();
         // 进程侧仅内存：插件目录无残留文件
         let residue: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -467,7 +484,10 @@ mod tests {
         // 通知不等待响应：发出即返回（mock 对未知通知 continue 不响应，正合语义）
         p.watcher_tick(json!({ "tick": 1 })).await.unwrap();
         // 通知后 request 面仍健康
-        let r = p.tools_call("ping", json!({ "q": "after-notify" }), 10).await.unwrap();
+        let r = p
+            .tools_call("ping", json!({ "q": "after-notify" }), 10)
+            .await
+            .unwrap();
         assert_eq!(r.text(), "pong:after-notify");
         p.shutdown(3).await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -532,9 +552,7 @@ impl PluginSupervisor {
             max_concurrency: max_concurrency.max(1),
             state: parking_lot::RwLock::new(PluginState::Stopped),
             process: tokio::sync::Mutex::new(None),
-            semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
-                max_concurrency.max(1),
-            )),
+            semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency.max(1))),
             failures: parking_lot::Mutex::new(0),
             events: parking_lot::Mutex::new(Vec::new()),
             tools_snapshot: parking_lot::RwLock::new(Vec::new()),
@@ -613,12 +631,7 @@ impl PluginSupervisor {
     }
 
     async fn try_spawn_once(&self) -> anyhow::Result<std::sync::Arc<PluginProcess>> {
-        let p = PluginProcess::spawn(
-            self.plugin_dir.clone(),
-            &self.command,
-            &self.env,
-        )
-        .await?;
+        let p = PluginProcess::spawn(self.plugin_dir.clone(), &self.command, &self.env).await?;
         let p = std::sync::Arc::new(p);
         if let Err(e) = p.handshake(&self.plugin_id, self.handshake_secs).await {
             p.shutdown(2).await;
@@ -627,12 +640,29 @@ impl PluginSupervisor {
         // 握手成功后立刻发现工具面（失败视同启动失败）；快照存管理面
         let tools = p.tools_list(self.handshake_secs).await?;
         *self.tools_snapshot.write() = tools.clone();
-        self.log(format!("tools/list 快照：{} 个工具（{}）", tools.len(), tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ")));
+        self.log(format!(
+            "tools/list 快照：{} 个工具（{}）",
+            tools.len(),
+            tools
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         // 凭据下发（plugins.credentials.<id> 键值整体透传；脱敏日志——只记键名不记值）
         let creds = self.credentials.read().clone();
         if !creds.is_empty() {
-            match p.config_set(serde_json::to_value(&creds)?, self.call_timeout_secs.min(30)).await {
-                Ok(()) => self.log(format!("config/set 凭据已下发：{}", creds.keys().cloned().collect::<Vec<_>>().join(", "))),
+            match p
+                .config_set(
+                    serde_json::to_value(&creds)?,
+                    self.call_timeout_secs.min(30),
+                )
+                .await
+            {
+                Ok(()) => self.log(format!(
+                    "config/set 凭据已下发：{}",
+                    creds.keys().cloned().collect::<Vec<_>>().join(", ")
+                )),
                 Err(e) => self.log(format!("config/set 凭据下发失败：{e}")),
             }
         }
@@ -709,8 +739,9 @@ pub async fn shutdown_all(supervisors: &[std::sync::Arc<PluginSupervisor>]) {
 // 网关/安装流拉起的 process supervisor 统一登记：健康检查循环与管理端点
 // 按插件 id 找回句柄。宿主退出靠 kill_on_drop 兜底（优雅停用走显式 stop）。
 
-static PROCESS_REGISTRY: parking_lot::Mutex<std::collections::BTreeMap<String, std::sync::Arc<PluginSupervisor>>> =
-    parking_lot::Mutex::new(std::collections::BTreeMap::new());
+static PROCESS_REGISTRY: parking_lot::Mutex<
+    std::collections::BTreeMap<String, std::sync::Arc<PluginSupervisor>>,
+> = parking_lot::Mutex::new(std::collections::BTreeMap::new());
 
 /// 登记运行中的 process supervisor（重复登记覆盖——重启场景）
 pub fn register_process(id: &str, sup: std::sync::Arc<PluginSupervisor>) {
@@ -724,7 +755,11 @@ pub fn process_by_id(id: &str) -> Option<std::sync::Arc<PluginSupervisor>> {
 
 /// 全量注册表快照（健康检查循环批量驱动用）
 pub fn all_processes() -> Vec<(String, std::sync::Arc<PluginSupervisor>)> {
-    PROCESS_REGISTRY.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    PROCESS_REGISTRY
+        .lock()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// 摘除登记（插件禁用/卸载用）
@@ -795,7 +830,10 @@ impl ProcessPluginProvider {
     }
 
     /// 拉起进程并完成握手/工具发现（失败返回错误；成功后快照可供 tool_specs）。
-    pub async fn start(&mut self, credentials: Option<BTreeMap<String, String>>) -> anyhow::Result<()> {
+    pub async fn start(
+        &mut self,
+        credentials: Option<BTreeMap<String, String>>,
+    ) -> anyhow::Result<()> {
         if let Some(c) = credentials {
             self.supervisor.set_credentials(c);
         }
@@ -1024,7 +1062,10 @@ mod supervisor_tests {
         for i in 0..4 {
             let s2 = s.clone();
             hs.push(tokio::spawn(async move {
-                s2.call_tool("ping", json!({ "q": i })).await.unwrap().text()
+                s2.call_tool("ping", json!({ "q": i }))
+                    .await
+                    .unwrap()
+                    .text()
             }));
         }
         let mut outs: Vec<String> = Vec::new();
@@ -1065,7 +1106,13 @@ mod supervisor_tests {
         );
         // 重复登记覆盖（重启场景同 id 新实例）
         register_process(&test_id, s.clone());
-        assert_eq!(all_processes().iter().filter(|(id, _)| id == &test_id).count(), 1);
+        assert_eq!(
+            all_processes()
+                .iter()
+                .filter(|(id, _)| id == &test_id)
+                .count(),
+            1
+        );
         unregister_process(&test_id);
         assert!(process_by_id(&test_id).is_none(), "摘除后取不回");
         assert!(all_processes().iter().all(|(id, _)| id != &test_id));
@@ -1078,13 +1125,19 @@ mod supervisor_tests {
         let dir = PathBuf::from("/tmp/exm-fake-plugin");
         // 合法：data 目录内的相对路径
         let ok = sandbox_path(&dir, "p1", "cache/items.json").unwrap();
-        assert_eq!(ok, PathBuf::from("/tmp/exm-fake-plugin/data/cache/items.json"));
+        assert_eq!(
+            ok,
+            PathBuf::from("/tmp/exm-fake-plugin/data/cache/items.json")
+        );
         let ok2 = sandbox_path(&dir, "p1", "state.db").unwrap();
         assert!(ok2.ends_with("data/state.db"));
         // 越界拒绝
         assert!(sandbox_path(&dir, "p1", "").is_err(), "空路径");
         assert!(sandbox_path(&dir, "p1", "/etc/passwd").is_err(), "绝对路径");
-        assert!(sandbox_path(&dir, "p1", "C:\\windows\\system32").is_err(), "盘符绝对");
+        assert!(
+            sandbox_path(&dir, "p1", "C:\\windows\\system32").is_err(),
+            "盘符绝对"
+        );
         assert!(sandbox_path(&dir, "p1", "../secret").is_err(), ".. 穿越");
         assert!(sandbox_path(&dir, "p1", "a/../../etc").is_err(), "嵌套穿越");
         assert!(sandbox_path(&dir, "p1", "..\\..\\x").is_err(), "反斜杠穿越");
@@ -1094,7 +1147,8 @@ mod supervisor_tests {
 
     /// mock 脚本变体：initialize 响应带 serverInfo.exmMin
     fn mock_script_with_min(min: &str) -> String {
-        format!(r#"
+        format!(
+            r#"
 import sys, json
 for line in sys.stdin:
     line = line.strip()
@@ -1116,11 +1170,19 @@ for line in sys.stdin:
     else:
         continue
     sys.stdout.write(json.dumps(resp)+"\n"); sys.stdout.flush()
-"#)
+"#
+        )
     }
 
-    fn mock_sup_with_script(tag: &str, script: &str) -> (std::sync::Arc<PluginSupervisor>, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("exm-sup3-{tag}-{}-{}", std::process::id(), crate::types::new_id()));
+    fn mock_sup_with_script(
+        tag: &str,
+        script: &str,
+    ) -> (std::sync::Arc<PluginSupervisor>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "exm-sup3-{tag}-{}-{}",
+            std::process::id(),
+            crate::types::new_id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("mock.py"), script).unwrap();
@@ -1168,11 +1230,17 @@ for line in sys.stdin:
         s.start().await.unwrap();
         let r = s.call_tool("who", json!({})).await.unwrap();
         // mock 脚本 who 工具读内存态凭据（合规：不落盘）；secret 键回读
-        assert_eq!(r.text(), "cred=无", "mock 的 who 读的是 cred.txt（落盘反面教材）——内存态口径无文件，返回无");
+        assert_eq!(
+            r.text(),
+            "cred=无",
+            "mock 的 who 读的是 cred.txt（落盘反面教材）——内存态口径无文件，返回无"
+        );
         // 日志脱敏：治理事件只记键名
         let events = s.events();
         assert!(
-            events.iter().any(|e| e.contains("secret") && !e.contains("s3cr3t-value")),
+            events
+                .iter()
+                .any(|e| e.contains("secret") && !e.contains("s3cr3t-value")),
             "事件日志应记键名不记值：{events:?}"
         );
         s.stop().await;
