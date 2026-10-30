@@ -917,10 +917,10 @@ fn act_gates() -> &'static Mutex<std::collections::HashMap<String, Arc<ActGate>>
 }
 
 /// video__shots：B 站官方 videoshot 雪碧图抽帧——视觉模态直看画面。
-/// 雪碧图 = 每 10s 一帧的网格 JPG（img_x_len × img_y_len 张/图，多图按序铺满全片）。
-/// 流程：videoshot API 拿索引 → 按目标时间定位帧 → 下载所在雪碧图 → 裁出该帧
-/// → 存 .exmachina/video_shots/（png）→ 路径随 images 回灌视觉模型。
-/// 帧采样策略：count 帧均匀铺开（startSec 起到片尾），间隔 = max(10s, 剩余时长/count)。
+/// 雪碧图 = 网格 JPG（img_x_len × img_y_len 帧/图，多图各 100 帧按序铺满全片）。
+/// 帧时间表在 index 数组（画面变化自适应间隔，非匀速）——按目标时间查表定位帧。
+/// 流程：videoshot?index=1 拿索引 → 均匀采样目标时间 → 查表映射帧号 →
+/// 下载所在雪碧图 → 裁出该帧 → 存 .exmachina/video_shots/（png）→ 路径随 images 回灌。
 async fn tool_shots(
     core: &Arc<Core>,
     ch: &Channel,
@@ -945,7 +945,7 @@ async fn tool_shots(
     if duration == 0 {
         anyhow::bail!("无法获取视频时长（视频不存在或已下架？）");
     }
-    // 雪碧图索引
+    // 雪碧图索引（index=1 带帧时间表：index[n] = 第 n 帧截取秒，自适应间隔）
     let vs = bili_get(ch, &format!("https://api.bilibili.com/x/player/videoshot?bvid={video_id}&index=1")).await?;
     api_ok(&vs)?;
     let data = vs.get("data").cloned().unwrap_or(Value::Null);
@@ -957,21 +957,39 @@ async fn tool_shots(
     if images.is_empty() {
         return Ok((format!("该视频无画面抽帧数据（{video_id}，可能未生成预览）"), vec![]));
     }
-    let x_len = data.get("img_x_len").and_then(as_u64).unwrap_or(10) as u32; // 每行帧数
-    let y_len = data.get("img_y_len").and_then(as_u64).unwrap_or(10) as u32; // 每列帧数
+    let x_len = data.get("img_x_len").and_then(as_u64).unwrap_or(10).max(1) as u32; // 每行帧数
     let fw = data.get("img_x_size").and_then(as_u64).unwrap_or(480) as u32;  // 单帧宽
     let fh = data.get("img_y_size").and_then(as_u64).unwrap_or(270) as u32;  // 单帧高
-    let per_sheet = (x_len * y_len).max(1); // 每张雪碧图帧数
-    let interval = data.get("img_x_len").and_then(as_u64).unwrap_or(10); // 帧间隔秒（img_x_len 复用字段：10s）
+    let per_sheet = (x_len * data.get("img_y_len").and_then(as_u64).unwrap_or(10).max(1) as u32).max(1);
+    // 帧时间表（秒，升序；index[0]=0 恒置，有效帧从 1 起）
+    let index: Vec<u64> = data
+        .get("index")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_u64()).collect())
+        .unwrap_or_default();
 
-    // 采样时间点：startSec（缺省 0）到片尾，均匀取 count 帧
+    // 时间 → 帧号（0-based：max{i : index[i] <= t}，即截取时刻不超过 t 的最后一帧）。
+    // index 缺失（极少数视频）回退匀速假设：帧数 = 雪碧图容量 × 总时长估。
+    let time_to_shot = |t: u64| -> usize {
+        if index.len() >= 2 {
+            let mut f = 0usize;
+            for (i, &sec) in index.iter().enumerate().skip(1) {
+                if sec <= t { f = i; } else { break; }
+            }
+            f.min(index.len().saturating_sub(1))
+        } else {
+            // 匀速回退：帧率按 index 缺省（每 10s 一帧是常见值，容错估计）
+            (t / 10) as usize
+        }
+    };
+
+    // 采样：startSec（缺省 0）到片尾均匀取 count 个时间点
     let start = start_sec.unwrap_or(0).min(duration.saturating_sub(1));
     let span = duration.saturating_sub(start).max(1);
-    let step = ((span as f64 / count as f64).ceil() as u64).max(interval);
-    let mut times: Vec<u64> = (0..count as u64)
+    let step = ((span as f64 / count as f64).ceil() as u64).max(1);
+    let times: Vec<u64> = (0..count as u64)
         .map(|i| (start + i * step).min(duration.saturating_sub(1)))
         .collect();
-    times.dedup();
 
     let dir = core.config().workspace_root.join(".exmachina").join("video_shots");
     std::fs::create_dir_all(&dir)?;
@@ -979,10 +997,13 @@ async fn tool_shots(
     let mut sheet_cache: std::collections::HashMap<usize, Option<image::DynamicImage>> =
         std::collections::HashMap::new();
     let mut saved: Vec<(u64, String)> = Vec::new();
+    let mut saved_frames: Vec<usize> = Vec::new();
     for &t in &times {
-        let frame_idx = (t / interval.max(1).max(1)) as usize; // 全局帧号（10s/帧）
-        let sheet_idx = frame_idx / per_sheet as usize;
-        let in_sheet = frame_idx % per_sheet as usize;
+        let shot = time_to_shot(t); // 0-based 全局帧号
+        // 部分视频（官方 PV 等）预览只覆盖前段：目标时间超出时钳到末帧。
+        // 钳制会让多个采样点映射同一帧——同帧只存一张，避免重复图回灌。
+        let sheet_idx = shot / per_sheet as usize;
+        let in_sheet = (shot % per_sheet as usize) as u32;
         let Some(url) = images.get(sheet_idx) else { continue };
         let sheet = match sheet_cache.get(&sheet_idx) {
             Some(Some(img)) => img.clone(),
@@ -1006,18 +1027,23 @@ async fn tool_shots(
                 }
             }
         };
-        // 裁出目标帧（网格内行列）
-        let col = (in_sheet as u32) % x_len;
-        let row = (in_sheet as u32) / x_len;
+        // 裁出目标帧（网格内行列：col = in_sheet % x_len，row = in_sheet / x_len）
+        let col = in_sheet % x_len;
+        let row = in_sheet / x_len;
         let (sw, sh) = sheet.dimensions();
         let x = (col * fw).min(sw.saturating_sub(fw));
         let y = (row * fh).min(sh.saturating_sub(fh));
         let frame = sheet.crop_imm(x, y, fw.min(sw), fh.min(sh));
+        // 同帧去重（截断预览的钳制重复）：跳过已保存的帧号
+        if saved_frames.contains(&shot) {
+            continue;
+        }
         let name = format!("shot-{}-{}s.png", video_id, t);
         let path = dir.join(&name);
         if frame.save(&path).is_err() {
             continue;
         }
+        saved_frames.push(shot);
         saved.push((t, format!(".exmachina/video_shots/{name}")));
     }
     if saved.is_empty() {
