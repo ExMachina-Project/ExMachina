@@ -38,6 +38,8 @@ interface WsEvent {
 
 interface ExmState {
   sessions: Session[];
+  /** 未读计数（会话 id → 条数；切走后该会话的新末条计入） */
+  unreadCounts: Record<string, number>;
   sessionId: string | null;
   messages: ChatMessage[];
   graph: TaskGraph | null;
@@ -97,6 +99,10 @@ interface ExmState {
   refreshPendingApprovals: () => Promise<void>;
   /** 新消息落会话列表时刷新该会话的末条预览（chat-ergonomics） */
   updateSessionPreview: (sessionId: string, preview: string) => void;
+  /** 会话置顶切换（乐观更新 + 服务端落库） */
+  toggleSessionPin: (sessionId: string, pinned: boolean) => Promise<void>;
+  /** 清会话未读（进入会话时） */
+  clearUnread: (sessionId: string) => void;
   saveConfig: (body: Record<string, unknown>) => Promise<void>;
   decideApproval: (id: string, approve: boolean) => Promise<void>;
   handleEvent: (evt: WsEvent) => void;
@@ -312,6 +318,7 @@ if (typeof window !== "undefined") {
 
 export const useExm = create<ExmState>((set, get) => ({
   sessions: [],
+  unreadCounts: {},
   sessionsLoaded: false,
   sessionId: null,
   messages: [],
@@ -435,6 +442,7 @@ export const useExm = create<ExmState>((set, get) => ({
       api.getSession(id),
     ]);
     if (seq !== selectSeq) return;
+    get().clearUnread(id);
     set({
       sessionId: id,
       messages,
@@ -625,7 +633,33 @@ export const useExm = create<ExmState>((set, get) => ({
     }
   },
   updateSessionPreview: (sessionId, preview) => {
+    const cur = get().sessionId;
+    // 未读计数：非当前会话收到新末条（后台回复/通道消息）→ 未读 +1（当前会话即时已读）
+    if (cur !== sessionId) {
+      const n = (get().unreadCounts[sessionId] ?? 0) + 1;
+      set((s) => ({ unreadCounts: { ...s.unreadCounts, [sessionId]: n } }));
+    }
     set((s) => ({ sessions: s.sessions.map((x) => (x.id === sessionId ? { ...x, lastMessagePreview: preview, lastActiveAt: new Date().toISOString() } : x)) }));
+  },
+  /** 进入会话即清未读（切走再切回重新计数） */
+  clearUnread: (sessionId) => {
+    if (get().unreadCounts[sessionId]) {
+      set((s) => {
+        const next = { ...s.unreadCounts };
+        delete next[sessionId];
+        return { unreadCounts: next };
+      });
+    }
+  },
+  /** 会话置顶切换：乐观更新 + 服务端落库（失败回滚） */
+  toggleSessionPin: async (sessionId, pinned) => {
+    const prev = get().sessions;
+    set({ sessions: prev.map((x) => (x.id === sessionId ? { ...x, pinned } : x)) });
+    try {
+      await api.pinSession(sessionId, pinned);
+    } catch {
+      set({ sessions: prev });
+    }
   },
 
   handleEvent: (evt) => {

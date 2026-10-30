@@ -274,6 +274,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
             "/api/sessions/:id/title",
             axum::routing::put(rename_session),
         )
+        .route("/api/sessions/:id/pin", axum::routing::put(pin_session))
         // 会话历史管控（组 9）：撤销 / 编辑重发 / 分支派生 / 归档与快照视图
         .route("/api/sessions/:id/undo", post(session_undo))
         .route("/api/sessions/:id/edit", post(session_edit))
@@ -1213,6 +1214,27 @@ async fn rename_session(
     }
     match st.core.store.update_session_title(&id, &title) {
         Ok(_) => Json(json!({ "ok": true, "title": title })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PinSessionBody {
+    pinned: bool,
+}
+
+/// 会话置顶切换（PUT /api/sessions/:id/pin）
+async fn pin_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<PinSessionBody>,
+) -> impl IntoResponse {
+    match st.core.toggle_session_pin(&id, b.pinned) {
+        Ok(_) => Json(json!({ "ok": true, "pinned": b.pinned })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),

@@ -1824,6 +1824,23 @@ textarea.ant-input:focus,
 }
 /* 选中行标题用「浅色主题压暗档」：白底上 4.3:1 差一口气，小字须 ≥4.5:1 */
 .session-row.active .session-title { color: var(--accent-strong, var(--accent)); }
+/* 置顶标识：标题区右侧小图钉（不占行高，跟随 title 排布） */
+/* 未读圆点：accent 底白字，绝对定位于行内右上（不挤标题布局） */
+.session-unread {
+  position: absolute; top: 4px; right: 4px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent); color: #fff;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  line-height: 16px; text-align: center;
+  pointer-events: none;
+}
+.session-pin {
+  order: 3; flex: none; align-self: center;
+  font-size: 10px; color: var(--muted-dim);
+  margin-left: 2px;
+}
+.session-row.active .session-pin { color: var(--accent); }
 .session-sub {
   display: block; font-size: 11px; color: var(--muted);
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

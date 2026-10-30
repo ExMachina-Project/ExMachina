@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { api, type LlmProfile } from "../api";
 import { agentIdEn } from "../models";
@@ -149,6 +149,7 @@ export function ChatView(): React.ReactElement {
     timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
+    toggleSessionPin, unreadCounts,
     refreshAgents,
     loadGroups,
     sessionsLoaded,
@@ -468,30 +469,41 @@ export function ChatView(): React.ReactElement {
         .filter((s) =>
           sessionKind === "all" ? true : sessionKind === "channel" ? s.title.startsWith("channel:") : !s.title.startsWith("channel:"),
         )
-        .filter((s) => !sessionFilter || s.title.toLowerCase().includes(sessionFilter.toLowerCase())),
+        .filter(
+          (s) =>
+            !sessionFilter ||
+            s.title.toLowerCase().includes(sessionFilter.toLowerCase()) ||
+            (s.lastMessagePreview ?? "").toLowerCase().includes(sessionFilter.toLowerCase()),
+        ),
     [sessions, sessionKind, sessionFilter],
   );
 
-  /** 按活跃时间分组：今天 / 昨天 / 更早（移动端列表页的段落结构） */
+  /** 分组：置顶 / 今天 / 昨天 / 更早（置顶常驻列表头，不受时间分组沉底影响） */
   const sessionGroups = useMemo(() => {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const startOfYesterday = new Date(startOfToday);
     startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-    const buckets: { key: "today" | "yesterday" | "earlier"; labelKey: string; items: typeof sessions }[] = [
+    type Bucket = { key: string; labelKey: string; items: typeof sessions };
+    const buckets: Bucket[] = [
+      { key: "pinned", labelKey: "chat.groupPinned", items: [] },
       { key: "today", labelKey: "chat.groupToday", items: [] },
       { key: "yesterday", labelKey: "chat.groupYesterday", items: [] },
       { key: "earlier", labelKey: "chat.groupEarlier", items: [] },
     ];
     for (const s of visibleSessions) {
+      if (s.pinned) {
+        buckets[0].items.push(s);
+        continue;
+      }
       const ts = new Date(s.lastActiveAt ?? s.updatedAt ?? s.createdAt).getTime();
       const bucket = Number.isNaN(ts)
-        ? buckets[2]
+        ? buckets[3]
         : ts >= startOfToday.getTime()
-          ? buckets[0]
+          ? buckets[1]
           : ts >= startOfYesterday.getTime()
-            ? buckets[1]
-            : buckets[2];
+            ? buckets[2]
+            : buckets[3];
       bucket.items.push(s);
     }
     return buckets.filter((b) => b.items.length > 0);
@@ -711,6 +723,12 @@ export function ChatView(): React.ReactElement {
                     }}
                   >
                     <span className="session-bar" />
+                    {/* 未读圆点：切走期间该会话有新末条（后台回复/通道消息） */}
+                    {(unreadCounts[s.id] ?? 0) > 0 && (
+                      <span className="session-unread" aria-label={`${unreadCounts[s.id]} ${t("chat.unread")}`}>
+                        {unreadCounts[s.id] > 9 ? "9+" : unreadCounts[s.id]}
+                      </span>
+                    )}
                     {/* 头像承载「会话类型」而非组名首字母：副标题已经写了组名，
                      * 首字母与之一一对应（整组同字母）＝零信息；类型恰好是列表里可筛的维度。 */}
                     {(() => {
@@ -731,10 +749,16 @@ export function ChatView(): React.ReactElement {
                                   ? s.title.replace(/^sub:[^:]+:/, "")
                                   : s.title}
                             </span>
+                            {/* 副标题 = 末条消息预览（比组名信息量大：组几乎全列表同名）；
+                                预览缺省回落组名（新会话还没有消息） */}
                             <span className="session-sub">
-                              {isSub ? `@${subAgent} · ${t("chat.subSession")}` : groupNameOf(s.groupId)}
+                              {isSub && !s.lastMessagePreview
+                                ? `@${subAgent} · ${t("chat.subSession")}`
+                                : s.lastMessagePreview || groupNameOf(s.groupId)}
                             </span>
                           </span>
+                          {/* 置顶标识：标题右侧小图钉（与「⋮」菜单的 pin 开关呼应） */}
+                          {s.pinned && <PushpinOutlined className="session-pin" aria-label={t("chat.groupPinned")} />}
                         </>
                       );
                     })()}
@@ -746,6 +770,11 @@ export function ChatView(): React.ReactElement {
                           items: [
                             { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
                             { key: "rename", icon: <EditOutlined />, label: t("common.rename") },
+                            {
+                              key: "pin",
+                              icon: <PushpinOutlined />,
+                              label: s.pinned ? t("chat.unpin") : t("chat.pin"),
+                            },
                             { type: "divider" },
                             { key: "delete", icon: <CloseOutlined />, label: t("chat.delete"), danger: true },
                           ],
@@ -753,6 +782,7 @@ export function ChatView(): React.ReactElement {
                             domEvent.stopPropagation();
                             if (key === "export") void exportSession(s.id, s.title);
                             else if (key === "rename") setRenaming({ id: s.id, title: s.title });
+                            else if (key === "pin") void toggleSessionPin(s.id, !s.pinned);
                             else {
                               modal.confirm({
                                 title: t("chat.deleteConfirm"),
