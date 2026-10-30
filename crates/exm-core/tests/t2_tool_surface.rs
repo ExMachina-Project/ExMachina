@@ -62,13 +62,20 @@ async fn 进程插件工具_下发面含命名空间工具() {
 
     // 拉起 + 注册（复刻网关 spawn_all 的装配序列）
     let dir_p = pm.get("t2p").unwrap().dir.clone().unwrap();
-    exm_core::plugin::bridge::spawn_process_plugin(&pm, &pm.get("t2p").unwrap().manifest, &dir_p, None)
-        .await
-        .unwrap();
+    exm_core::plugin::bridge::spawn_process_plugin(
+        &pm,
+        &pm.get("t2p").unwrap().manifest,
+        &dir_p,
+        None,
+    )
+    .await
+    .unwrap();
     // 网关侧回接（同 plugin_admin::attach_process_tools）
     if let Some(p) = pm.provider_of("t2p") {
         if let Some(tp) = p.tool_provider() {
-            core.orchestrator().tools.register_plugin_runtime_tools("t2p", tp);
+            core.orchestrator()
+                .tools
+                .register_plugin_runtime_tools("t2p", tp);
         }
     }
 

@@ -101,9 +101,7 @@ pub async fn ensure_compacted(
     session_id: &str,
     params: CompactParams,
 ) -> Compacted {
-    let msgs: Vec<ChatMessage> = store
-        .list_messages(session_id, 500)
-        .unwrap_or_default();
+    let msgs: Vec<ChatMessage> = store.list_messages(session_id, 500).unwrap_or_default();
     if msgs.len() <= params.trigger {
         return Compacted {
             summary: None,
@@ -134,9 +132,8 @@ pub async fn ensure_compacted(
         .map(|m| transcript_line(m))
         .collect::<Vec<_>>()
         .join("\n");
-    let user = format!(
-        "已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。"
-    );
+    let user =
+        format!("已有摘要：\n{prev_summary}\n\n新增对话：\n{transcript}\n\n输出合并后的新摘要。");
     let req = ChatRequest::new(
         model.to_string(),
         vec![Wire::system(COMPACTER_SYSTEM), Wire::user(user)],
@@ -181,9 +178,7 @@ pub async fn compact_now(
     keep: usize,
     note: &str,
 ) -> Option<(String, usize)> {
-    let msgs: Vec<ChatMessage> = store
-        .list_messages(session_id, 500)
-        .unwrap_or_default();
+    let msgs: Vec<ChatMessage> = store.list_messages(session_id, 500).unwrap_or_default();
     // keep 至少 2 条：正在进行的轮次（用户输入 + 尚未落地的回复）不能被压走
     let keep = keep.max(2);
     if msgs.len() <= keep {
@@ -331,8 +326,17 @@ mod tests {
     async fn 未超阈值_不压缩_返回全量原文() {
         let (store, sid) = test_store_with(5);
         let provider: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
-        let c = ensure_compacted(&store, &provider, "m", &sid, CompactParams { trigger: 10, keep: 5 })
-            .await;
+        let c = ensure_compacted(
+            &store,
+            &provider,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+            },
+        )
+        .await;
         assert!(c.summary.is_none());
         assert!(c.recent.contains("消息0"));
         assert!(c.recent.contains("消息4"));
@@ -342,8 +346,17 @@ mod tests {
     async fn 超阈值_触发压缩_摘要持久化() {
         let (store, sid) = test_store_with(30);
         let provider: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
-        let c = ensure_compacted(&store, &provider, "m", &sid, CompactParams { trigger: 10, keep: 5 })
-            .await;
+        let c = ensure_compacted(
+            &store,
+            &provider,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+            },
+        )
+        .await;
         // 摘要来自替身固定返回
         assert_eq!(c.summary.as_deref(), Some("合并摘要：目标与结论"));
         // 最近窗口保留原文（尾部 5 条），窗口外消息不出现
@@ -351,10 +364,7 @@ mod tests {
         assert!(!c.recent.contains("消息0"));
         // 摘要已持久化到会话
         let s = store.get_session(&sid).unwrap().unwrap();
-        assert_eq!(
-            s.rolling_summary.as_deref(),
-            Some("合并摘要：目标与结论")
-        );
+        assert_eq!(s.rolling_summary.as_deref(), Some("合并摘要：目标与结论"));
         assert_eq!(s.summary_upto, Some(25));
     }
 
@@ -363,7 +373,17 @@ mod tests {
         let (store, sid) = test_store_with(30);
         // 先用成功替身建立旧摘要
         let ok: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
-        ensure_compacted(&store, &ok, "m", &sid, CompactParams { trigger: 10, keep: 5 }).await;
+        ensure_compacted(
+            &store,
+            &ok,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+            },
+        )
+        .await;
         // 再追加消息后用失败替身压缩：应沿用旧摘要
         store
             .add_message(
@@ -374,8 +394,17 @@ mod tests {
             )
             .unwrap();
         let fail: Arc<dyn LlmProvider> = Arc::new(FailCompacter);
-        let c = ensure_compacted(&store, &fail, "m", &sid, CompactParams { trigger: 10, keep: 5 })
-            .await;
+        let c = ensure_compacted(
+            &store,
+            &fail,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+            },
+        )
+        .await;
         assert_eq!(c.summary.as_deref(), Some("合并摘要：目标与结论"));
         // 最近窗口仍包含最新消息原文
         assert!(c.recent.contains("追加消息"));

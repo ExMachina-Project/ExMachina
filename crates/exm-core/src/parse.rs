@@ -87,7 +87,11 @@ pub fn parse_plan(text: &str) -> Result<OrchestratorPlan, String> {
     }
 
     if matches!(plan.route_level, crate::types::RouteLevel::L0) {
-        let ok = plan.final_answer.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+        let ok = plan
+            .final_answer
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         if !ok {
             return Err("L0 直达计划必须给出非空 finalAnswer".into());
         }
@@ -102,6 +106,9 @@ pub fn as_tool_call(v: &serde_json::Value) -> Option<(crate::types::ToolName, se
     let obj = v.as_object()?;
     let tool = obj.get("tool")?.as_str()?;
     let name = crate::types::ToolName::parse(tool)?;
-    let args = obj.get("args").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
+    let args = obj
+        .get("args")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
     Some((name, args))
 }

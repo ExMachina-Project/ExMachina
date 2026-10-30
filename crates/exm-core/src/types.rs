@@ -1174,7 +1174,9 @@ pub struct CronRun {
 /// 入参 = 审批单内 JSON 载荷（channel/videoId/text/replyTo），返回执行结果文本。
 /// 网关侧注入（video 插件装配时），Core 不直接依赖平台 API。
 pub type VideoActExecutor = std::sync::Arc<
-    dyn Fn(String) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync,
+    dyn Fn(String) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + Sync,
 >;
 
 /// 终端命令审批单：命令被闸门拦截后挂起，等待用户批准后由系统代执行

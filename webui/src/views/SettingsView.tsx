@@ -302,11 +302,7 @@ export function SettingsView(): React.ReactElement {
 
   return (
     <div className="pane-wrap">
-      <PageHeader
-        en="CONFIG"
-        title={t("settings.title")}
-        desc={t("settings.desc")}
-      />
+      <PageHeader en="CONFIG" title={t("settings.title")} />
       <div className="settings2">
         {/* 左侧分类导航：「界面」本地偏好置顶 + 后端 schema 分组 + 版本垫底。
             外层 cfg-nav 是等高卡片（与右侧面板 stretch 对齐）；

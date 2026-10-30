@@ -27,7 +27,12 @@ fn find_link<'a>(cfg: &'a ExmConfig, link_id: &str) -> Result<&'a LinkTarget> {
 }
 
 /// 派发入口：按连结体类型路由
-pub async fn execute_link(cfg: &ExmConfig, link_id: &str, objective: &str, acceptance: &[String]) -> Result<(String, String)> {
+pub async fn execute_link(
+    cfg: &ExmConfig,
+    link_id: &str,
+    objective: &str,
+    acceptance: &[String],
+) -> Result<(String, String)> {
     let link = find_link(cfg, link_id)?;
     let prompt = build_prompt(objective, acceptance);
     match link.kind.as_str() {
@@ -59,7 +64,9 @@ pub async fn probe_link(cfg: &ExmConfig, link_id: &str) -> Result<String> {
             match r.status().as_u16() {
                 200..=299 => Ok(String::new()),
                 401 | 403 => anyhow::bail!("鉴权失败：请检查访问密钥（X-Auth-Key）"),
-                404 => anyhow::bail!("网关可达但 /api/version 不存在：对端不是 EXMACHINA 网关或版本过旧"),
+                404 => anyhow::bail!(
+                    "网关可达但 /api/version 不存在：对端不是 EXMACHINA 网关或版本过旧"
+                ),
                 code => anyhow::bail!("对端返回 HTTP {code}"),
             }
         }
@@ -96,13 +103,24 @@ fn build_prompt(objective: &str, acceptance: &[String]) -> String {
     if acceptance.is_empty() {
         objective.to_string()
     } else {
-        format!("{objective}\n\n验收标准：\n{}", acceptance.iter().map(|a| format!("- {a}")).collect::<Vec<_>>().join("\n"))
+        format!(
+            "{objective}\n\n验收标准：\n{}",
+            acceptance
+                .iter()
+                .map(|a| format!("- {a}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
     }
 }
 
 // ---------------------------------------------------------------- exmachina（远程网关）
 
-async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) -> Result<(String, String)> {
+async fn execute_exmachina(
+    _cfg: &ExmConfig,
+    link: &LinkTarget,
+    prompt: &str,
+) -> Result<(String, String)> {
     let base = link.endpoint.trim_end_matches('/');
     if base.is_empty() {
         anyhow::bail!("连结体 {} 未配置网关地址", link.id);
@@ -170,7 +188,10 @@ async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) ->
         .await?;
     if r.status().as_u16() >= 400 {
         let body = r.text().await.unwrap_or_default();
-        anyhow::bail!("对端拒绝对话: {}", body.chars().take(200).collect::<String>());
+        anyhow::bail!(
+            "对端拒绝对话: {}",
+            body.chars().take(200).collect::<String>()
+        );
     }
 
     // 3) 轮询等待新回复（对端收束后会有新 orchestrator 消息）
@@ -200,7 +221,9 @@ async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) ->
             }
         };
         poll_failures = 0;
-        let Some(list) = msgs.as_array() else { continue };
+        let Some(list) = msgs.as_array() else {
+            continue;
+        };
         let fresh = messages_after(list, cursor.as_deref());
         // 无新增：继续等
         if fresh.is_empty() {
@@ -214,7 +237,10 @@ async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) ->
         // 对端执行失败早退：chat 是 202 异步受理，spawn 失败只经 WS 广播 run.error、
         // 不落 orchestrator 消息——识别 system 警告（含失败标记）直接带错返回，不再干等超时
         if let Some(err) = failure_text_since(since) {
-            anyhow::bail!("对端执行失败: {}", err.chars().take(300).collect::<String>());
+            anyhow::bail!(
+                "对端执行失败: {}",
+                err.chars().take(300).collect::<String>()
+            );
         }
         // 取锚后最后一条 orchestrator 陈述文本
         if let Some(text) = orchestrator_reply_since(since) {
@@ -229,7 +255,9 @@ async fn execute_exmachina(_cfg: &ExmConfig, link: &LinkTarget, prompt: &str) ->
 /// 尾部窗口内定位增量：返回游标（已见末条 id）之后的消息。
 /// 游标已在窗口外（被滚没）时返回整个窗口——宁可重取不可漏取。
 fn messages_after(list: &[serde_json::Value], cursor: Option<&str>) -> Vec<serde_json::Value> {
-    let Some(cursor) = cursor else { return list.to_vec() };
+    let Some(cursor) = cursor else {
+        return list.to_vec();
+    };
     match list.iter().position(|m| m["id"].as_str() == Some(cursor)) {
         Some(idx) => list[idx + 1..].to_vec(),
         None => list.to_vec(),
@@ -244,7 +272,12 @@ fn anchor_of_echo(fresh: &[serde_json::Value], prompt: &str) -> Option<usize> {
         m["role"] == serde_json::json!("user")
             && m["statements"]
                 .as_array()
-                .map(|sts| sts.iter().filter_map(|s| s["text"].as_str()).collect::<Vec<_>>().join(" "))
+                .map(|sts| {
+                    sts.iter()
+                        .filter_map(|s| s["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
                 .map(|t| t.contains(prompt))
                 .unwrap_or(false)
     })
@@ -256,11 +289,16 @@ fn failure_text_since(since: &[serde_json::Value]) -> Option<String> {
         .iter()
         .filter(|m| m["role"] == serde_json::json!("system"))
         .filter_map(|m| {
-            m["statements"]
-                .as_array()
-                .map(|sts| sts.iter().filter_map(|s| s["text"].as_str()).collect::<Vec<_>>().join(" "))
+            m["statements"].as_array().map(|sts| {
+                sts.iter()
+                    .filter_map(|s| s["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
         })
-        .find(|text| text.contains("失败") || text.contains("错误") || text.to_lowercase().contains("error"))
+        .find(|text| {
+            text.contains("失败") || text.contains("错误") || text.to_lowercase().contains("error")
+        })
 }
 
 /// 锚后最后一条 orchestrator 陈述的合并文本
@@ -282,7 +320,11 @@ fn orchestrator_reply_since(since: &[serde_json::Value]) -> Option<String> {
 
 fn cli_command(link: &LinkTarget) -> Vec<String> {
     if !link.command.trim().is_empty() {
-        return link.command.split_whitespace().map(|s| s.to_string()).collect();
+        return link
+            .command
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
     }
     match link.kind.as_str() {
         // 交互式 CLI 的非交互形态：提示词作为位置参数
@@ -314,7 +356,11 @@ async fn execute_cli(link: &LinkTarget, prompt: &str) -> Result<(String, String)
     .with_context(|| format!("启动 CLI 智能体失败: {program}"))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("CLI 智能体退出码 {:?}: {}", output.status.code(), err.chars().take(200).collect::<String>());
+        anyhow::bail!(
+            "CLI 智能体退出码 {:?}: {}",
+            output.status.code(),
+            err.chars().take(200).collect::<String>()
+        );
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     if text.trim().is_empty() {
@@ -343,9 +389,17 @@ mod tests {
         let cmd = "cmd /c echo";
         #[cfg(not(windows))]
         let cmd = "echo";
-        let link = LinkTarget { id: "cli-1".into(), name: "回显连结".into(), kind: "custom".into(), command: cmd.into(), ..Default::default() };
+        let link = LinkTarget {
+            id: "cli-1".into(),
+            name: "回显连结".into(),
+            kind: "custom".into(),
+            command: cmd.into(),
+            ..Default::default()
+        };
         let cfg = cfg_with(vec![link.clone()]);
-        let (summary, output) = execute_link(&cfg, "cli-1", "hello nexus", &[]).await.unwrap();
+        let (summary, output) = execute_link(&cfg, "cli-1", "hello nexus", &[])
+            .await
+            .unwrap();
         assert!(output.contains("hello nexus"), "{output}");
         assert!(!summary.is_empty());
     }
@@ -356,7 +410,13 @@ mod tests {
         let cmd = "cmd /c exit 3";
         #[cfg(not(windows))]
         let cmd = "sh -c \"exit 3\"";
-        let link = LinkTarget { id: "cli-bad".into(), name: "失败连结".into(), kind: "custom".into(), command: cmd.into(), ..Default::default() };
+        let link = LinkTarget {
+            id: "cli-bad".into(),
+            name: "失败连结".into(),
+            kind: "custom".into(),
+            command: cmd.into(),
+            ..Default::default()
+        };
         let cfg = cfg_with(vec![link]);
         let r = execute_link(&cfg, "cli-bad", "x", &[]).await;
         assert!(r.is_err());
@@ -364,7 +424,14 @@ mod tests {
 
     #[test]
     fn 连结体不存在或未启用() {
-        let cfg = cfg_with(vec![LinkTarget { id: "off".into(), name: "停用".into(), kind: "custom".into(), command: "echo".into(), enabled: false, ..Default::default() }]);
+        let cfg = cfg_with(vec![LinkTarget {
+            id: "off".into(),
+            name: "停用".into(),
+            kind: "custom".into(),
+            command: "echo".into(),
+            enabled: false,
+            ..Default::default()
+        }]);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let r = rt.block_on(execute_link(&cfg, "off", "x", &[]));
         assert!(r.is_err());
@@ -377,7 +444,8 @@ mod tests {
     fn 轮询游标_尾部窗口定位增量() {
         // 窗口滚满后 len 恒定（200 条），按游标仍能取出游标之后的新消息
         let mk = |id: &str, role: &str| serde_json::json!({ "id": id, "role": role, "statements": [{ "tag": "报告", "text": format!("msg-{id}") }] });
-        let window: Vec<serde_json::Value> = (0..200).map(|i| mk(&format!("m{i}"), "user")).collect();
+        let window: Vec<serde_json::Value> =
+            (0..200).map(|i| mk(&format!("m{i}"), "user")).collect();
         // 游标在窗口内：只取其后
         let fresh = messages_after(&window, Some("m198"));
         assert_eq!(fresh.len(), 1);
@@ -394,9 +462,7 @@ mod tests {
     /// 旧任务的回复混在窗口里，锚之前的一律当旧账——防「上次结论错当本次产出」
     #[test]
     fn 轮询认领_锚定本轮user回显() {
-        let mk = |id: &str, role: &str, text: &str| {
-            serde_json::json!({ "id": id, "role": role, "statements": [{ "tag": "报告", "text": text }] })
-        };
+        let mk = |id: &str, role: &str, text: &str| serde_json::json!({ "id": id, "role": role, "statements": [{ "tag": "报告", "text": text }] });
         // 旧账（上一轮提问 + 回复）+ 本轮回显 + system 警告 + 新回复
         let fresh = vec![
             mk("m1", "user", "旧目标"),
@@ -411,10 +477,16 @@ mod tests {
         assert_eq!(failure_text_since(since).as_deref(), Some("警告：上游错误"));
 
         // 本轮回显未落库（窗口里只有上一轮的旧账）：无锚点 → 不认领任何旧结论
-        let stale_window = vec![mk("m1", "user", "旧目标"), mk("m2", "orchestrator", "旧结论")];
+        let stale_window = vec![
+            mk("m1", "user", "旧目标"),
+            mk("m2", "orchestrator", "旧结论"),
+        ];
         assert!(anchor_of_echo(&stale_window, "新目标").is_none());
         // 回显是旧账的另一轮目标：同样不为本轮建立锚点
-        assert!(anchor_of_echo(&stale_window, "旧目标").is_some(), "匹配旧目标时锚点存在（语义自检）");
+        assert!(
+            anchor_of_echo(&stale_window, "旧目标").is_some(),
+            "匹配旧目标时锚点存在（语义自检）"
+        );
     }
 
     #[tokio::test]
@@ -423,11 +495,23 @@ mod tests {
         let cmd = "cmd /c echo";
         #[cfg(not(windows))]
         let cmd = "echo";
-        let link = LinkTarget { id: "p1".into(), name: "探测".into(), kind: "custom".into(), command: cmd.into(), ..Default::default() };
+        let link = LinkTarget {
+            id: "p1".into(),
+            name: "探测".into(),
+            kind: "custom".into(),
+            command: cmd.into(),
+            ..Default::default()
+        };
         let cfg = cfg_with(vec![link]);
         assert!(probe_link(&cfg, "p1").await.is_ok());
         // 命令不存在：带人话诊断失败
-        let bad = LinkTarget { id: "p2".into(), name: "不存在".into(), kind: "custom".into(), command: "no-such-cli-xyz".into(), ..Default::default() };
+        let bad = LinkTarget {
+            id: "p2".into(),
+            name: "不存在".into(),
+            kind: "custom".into(),
+            command: "no-such-cli-xyz".into(),
+            ..Default::default()
+        };
         let cfg2 = cfg_with(vec![bad]);
         let err = probe_link(&cfg2, "p2").await.unwrap_err().to_string();
         assert!(err.contains("不在 PATH"), "{err}");
@@ -435,7 +519,12 @@ mod tests {
 
     #[tokio::test]
     async fn probe_exmachina_未配地址报错() {
-        let link = LinkTarget { id: "p3".into(), name: "网关".into(), kind: "exmachina".into(), ..Default::default() };
+        let link = LinkTarget {
+            id: "p3".into(),
+            name: "网关".into(),
+            kind: "exmachina".into(),
+            ..Default::default()
+        };
         let cfg = cfg_with(vec![link]);
         let err = probe_link(&cfg, "p3").await.unwrap_err().to_string();
         assert!(err.contains("网关地址"), "{err}");

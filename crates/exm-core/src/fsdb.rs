@@ -28,7 +28,10 @@ impl FsDb {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        Ok(FsDb { root, lock: Mutex::new(()) })
+        Ok(FsDb {
+            root,
+            lock: Mutex::new(()),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -42,7 +45,9 @@ impl FsDb {
     }
 
     fn doc_path(&self, collection: &str, id: &str) -> Result<PathBuf> {
-        Ok(self.coll_dir(collection)?.join(format!("{}.json", sanitize(id))))
+        Ok(self
+            .coll_dir(collection)?
+            .join(format!("{}.json", sanitize(id))))
     }
 
     // ---------------- 文档读写 ----------------
@@ -50,16 +55,17 @@ impl FsDb {
     pub fn put<T: Serialize>(&self, collection: &str, id: &str, value: &T) -> Result<()> {
         let path = self.doc_path(collection, id)?;
         let data = serde_json::to_vec_pretty(value)?;
-        atomic_write(&path, &data)
-            .with_context(|| format!("写入失败: {}", path.display()))
+        atomic_write(&path, &data).with_context(|| format!("写入失败: {}", path.display()))
     }
 
     pub fn get<T: DeserializeOwned>(&self, collection: &str, id: &str) -> Result<Option<T>> {
         let path = self.doc_path(collection, id)?;
         match std::fs::read(&path) {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
-                format!("解析失败: {}", path.display())
-            })?)),
+            Ok(bytes) => {
+                Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+                    format!("解析失败: {}", path.display())
+                })?))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -108,10 +114,15 @@ impl FsDb {
 
     pub fn append_line<T: Serialize>(&self, collection: &str, key: &str, value: &T) -> Result<()> {
         use std::io::Write;
-        let path = self.coll_dir(collection)?.join(format!("{}.jsonl", sanitize(key)));
+        let path = self
+            .coll_dir(collection)?
+            .join(format!("{}.jsonl", sanitize(key)));
         let mut line = serde_json::to_vec(value)?;
         line.push(b'\n');
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         f.write_all(&line)?;
         Ok(())
     }
@@ -123,7 +134,9 @@ impl FsDb {
         key: &str,
         tail: usize,
     ) -> Result<Vec<T>> {
-        let path = self.coll_dir(collection)?.join(format!("{}.jsonl", sanitize(key)));
+        let path = self
+            .coll_dir(collection)?
+            .join(format!("{}.jsonl", sanitize(key)));
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
@@ -152,7 +165,9 @@ impl FsDb {
         key: &str,
         items: &[T],
     ) -> Result<()> {
-        let path = self.coll_dir(collection)?.join(format!("{}.jsonl", sanitize(key)));
+        let path = self
+            .coll_dir(collection)?
+            .join(format!("{}.jsonl", sanitize(key)));
         let mut buf = Vec::new();
         for it in items {
             buf.extend_from_slice(&serde_json::to_vec(it)?);
@@ -238,7 +253,11 @@ impl FsDb {
     pub fn clear_buckets(&self, collection: &str) -> Result<()> {
         let dir = self.coll_dir(collection)?;
         for e in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
-            if e.path().file_name().map(|n| n.to_string_lossy().starts_with("bucket-")).unwrap_or(false) {
+            if e.path()
+                .file_name()
+                .map(|n| n.to_string_lossy().starts_with("bucket-"))
+                .unwrap_or(false)
+            {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -250,7 +269,11 @@ impl FsDb {
         let dir = self.coll_dir(collection)?;
         let mut total = 0;
         for e in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
-            let name = e.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = e
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if !name.starts_with("bucket-") {
                 continue;
             }
@@ -293,13 +316,15 @@ mod tests {
     fn 文档读写与追加日志() {
         let dir = std::env::temp_dir().join(format!("fsdb-{}", uuid::Uuid::new_v4()));
         let db = FsDb::open(&dir).unwrap();
-        db.put("sessions", "s1", &serde_json::json!({"id":"s1","n":1})).unwrap();
+        db.put("sessions", "s1", &serde_json::json!({"id":"s1","n":1}))
+            .unwrap();
         let got: Option<serde_json::Value> = db.get("sessions", "s1").unwrap();
         assert_eq!(got.unwrap()["n"], 1);
         assert_eq!(db.list::<serde_json::Value>("sessions").unwrap().len(), 1);
 
         for i in 0..5 {
-            db.append_line("events", "s1", &serde_json::json!({"i": i})).unwrap();
+            db.append_line("events", "s1", &serde_json::json!({"i": i}))
+                .unwrap();
         }
         let tail: Vec<serde_json::Value> = db.read_lines("events", "s1", 2).unwrap();
         assert_eq!(tail.len(), 2);
@@ -309,11 +334,15 @@ mod tests {
             m.entry(key.to_string()).or_default().push("e1".into());
         })
         .unwrap();
-        let m: std::collections::HashMap<String, Vec<String>> = db.read_bucket_map("terms", "记忆").unwrap();
+        let m: std::collections::HashMap<String, Vec<String>> =
+            db.read_bucket_map("terms", "记忆").unwrap();
         assert_eq!(m["记忆"], vec!["e1".to_string()]);
 
         db.delete("sessions", "s1").unwrap();
-        assert!(db.get::<serde_json::Value>("sessions", "s1").unwrap().is_none());
+        assert!(db
+            .get::<serde_json::Value>("sessions", "s1")
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -44,12 +44,11 @@ fn gateway(dir: &std::path::PathBuf, sandbox_net: bool) -> ToolGateway {
 fn tiny_png(path: &std::path::Path) {
     // 1x1 黑色像素 PNG 的完整字节（67 字节，合法文件）
     let bytes: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49,
-        0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
-        0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44,
-        0x41, 0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D,
-        0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
-        0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
     std::fs::write(path, bytes).unwrap();
 }
@@ -162,7 +161,10 @@ async fn grep_上下文行_块输出() {
     assert!(r.ok, "grep 应成功：{:?}", r.error);
     let out = r.output;
     // 两块：2±2 与 9±2，块间以 — 分隔
-    assert!(out.contains("a.txt:2:> line2 target"), "命中行标注 >：{out}");
+    assert!(
+        out.contains("a.txt:2:> line2 target"),
+        "命中行标注 >：{out}"
+    );
     assert!(out.contains("a.txt:1:  line1"), "上下文行带行号：{out}");
     assert!(out.contains("—"), "多块间应有分隔符：{out}");
     assert!(out.contains("a.txt:9:> line9 target"));
@@ -177,8 +179,16 @@ async fn grep_上下文行_块输出() {
         )
         .await;
     assert!(r2.ok);
-    assert!(!r2.output.contains("—"), "默认无上下文不应有块分隔：{}", r2.output);
-    assert!(r2.output.contains("a.txt:2:line2 target"), "默认单行格式不变：{}", r2.output);
+    assert!(
+        !r2.output.contains("—"),
+        "默认无上下文不应有块分隔：{}",
+        r2.output
+    );
+    assert!(
+        r2.output.contains("a.txt:2:line2 target"),
+        "默认单行格式不变：{}",
+        r2.output
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -197,7 +207,11 @@ async fn read_图像_副产物回灌() {
         .await;
     assert!(r.ok, "read 图像应成功：{:?}", r.error);
     assert!(!r.images.is_empty(), "images 应携带路径供回灌");
-    assert!(r.output.contains("图像文件"), "应返回图像摘要：{}", r.output);
+    assert!(
+        r.output.contains("图像文件"),
+        "应返回图像摘要：{}",
+        r.output
+    );
     // data URL 回灌链路
     let url = gw.read_image_data_url(&r.images[0]);
     assert!(url.is_some(), "图像路径应能转 data URL");
@@ -247,7 +261,11 @@ async fn 后台任务_list_跨轮次寻址() {
         )
         .await;
     assert!(rb.ok);
-    assert!(rb.output.contains("无后台任务"), "会话隔离：B 不应看到 A 的任务：{}", rb.output);
+    assert!(
+        rb.output.contains("无后台任务"),
+        "会话隔离：B 不应看到 A 的任务：{}",
+        rb.output
+    );
     // 会话 A 的 list：可寻址
     let ra = gw
         .execute(
@@ -259,9 +277,21 @@ async fn 后台任务_list_跨轮次寻址() {
         )
         .await;
     assert!(ra.ok);
-    assert!(ra.output.contains(&task_id[..8]), "list 应含 taskId：{}", ra.output);
-    assert!(ra.output.contains("sleep 30"), "list 应含命令：{}", ra.output);
-    assert!(ra.output.contains("运行中") || ra.output.contains("已"), "list 应含状态：{}", ra.output);
+    assert!(
+        ra.output.contains(&task_id[..8]),
+        "list 应含 taskId：{}",
+        ra.output
+    );
+    assert!(
+        ra.output.contains("sleep 30"),
+        "list 应含命令：{}",
+        ra.output
+    );
+    assert!(
+        ra.output.contains("运行中") || ra.output.contains("已"),
+        "list 应含状态：{}",
+        ra.output
+    );
     // kill 清理
     let _ = gw
         .execute(

@@ -112,7 +112,10 @@ async fn todo_写入查询与事件() {
         )
         .await;
     assert!(r.ok);
-    assert!(exm_core::todo::render("ses-todo").is_none(), "清空后不再注入");
+    assert!(
+        exm_core::todo::render("ses-todo").is_none(),
+        "清空后不再注入"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -124,7 +127,10 @@ async fn todo_编码个体工具面含todo() {
         let def: AgentDefinition =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let keys: Vec<&str> = def.tools.iter().map(|t| t.key()).collect();
-        assert!(keys.contains(&"todo"), "{id} 工具面应含 todo（现有 {keys:?}）");
+        assert!(
+            keys.contains(&"todo"),
+            "{id} 工具面应含 todo（现有 {keys:?}）"
+        );
     }
 }
 
@@ -164,9 +170,16 @@ async fn spawn_后台派生_立即返回并回收() {
         .await;
     assert!(r.ok);
     assert!(r.output.contains("已完成"), "应为终态：{}", r.output);
-    assert!(r.output.contains("调研 A 方案"), "应含结果全文：{}", r.output);
+    assert!(
+        r.output.contains("调研 A 方案"),
+        "应含结果全文：{}",
+        r.output
+    );
     // 已读后不再提醒
-    assert!(gw.spawn_pending_note("ses-sp").is_none(), "已读终态不应再提醒");
+    assert!(
+        gw.spawn_pending_note("ses-sp").is_none(),
+        "已读终态不应再提醒"
+    );
     // list 可见
     let r = gw
         .execute(
@@ -177,7 +190,11 @@ async fn spawn_后台派生_立即返回并回收() {
             &serde_json::json!({ "op": "list" }),
         )
         .await;
-    assert!(r.output.contains(&spawn_id[..10]), "list 应含子任务：{}", r.output);
+    assert!(
+        r.output.contains(&spawn_id[..10]),
+        "list 应含子任务：{}",
+        r.output
+    );
     // 会话隔离：另一会话不可见
     let r = gw
         .execute(
@@ -188,7 +205,11 @@ async fn spawn_后台派生_立即返回并回收() {
             &serde_json::json!({ "op": "list" }),
         )
         .await;
-    assert!(r.output.contains("无后台子任务"), "跨会话应隔离：{}", r.output);
+    assert!(
+        r.output.contains("无后台子任务"),
+        "跨会话应隔离：{}",
+        r.output
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -200,8 +221,7 @@ async fn spawn_后台超时终态与未读提醒() {
         Box::pin(async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             Ok("不应到达".to_string())
-        })
-            as futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+        }) as futures_util::future::BoxFuture<'static, anyhow::Result<String>>
     };
     gw.set_spawn_executor(std::sync::Arc::new(f));
     let r = gw

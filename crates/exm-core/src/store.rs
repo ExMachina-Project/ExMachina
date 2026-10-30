@@ -787,17 +787,33 @@ mod store_tests {
     #[test]
     fn 审计_写入与跨文件过滤读回() {
         let store = test_store();
-        let _ = store.audit_tool("machina", "fs.read", &serde_json::json!({"path": "/a"}), "ok", 3);
-        let _ = store.audit_tool("webui", "editor.save", &serde_json::json!({"path": "/b"}), "ok", 1);
+        let _ = store.audit_tool(
+            "machina",
+            "fs.read",
+            &serde_json::json!({"path": "/a"}),
+            "ok",
+            3,
+        );
+        let _ = store.audit_tool(
+            "webui",
+            "editor.save",
+            &serde_json::json!({"path": "/b"}),
+            "ok",
+            1,
+        );
         // 全量（跨 agent 文件合并）
         let all = store.list_tool_audit_filtered(None, None, 100).unwrap();
         assert_eq!(all.len(), 2, "两个 agent 的审计都要能读回");
         // agent 过滤
-        let machina = store.list_tool_audit_filtered(Some("machina"), None, 100).unwrap();
+        let machina = store
+            .list_tool_audit_filtered(Some("machina"), None, 100)
+            .unwrap();
         assert_eq!(machina.len(), 1);
         assert_eq!(machina[0]["agentId"], "machina");
         // tool 模糊过滤（大小写不敏感）
-        let hit = store.list_tool_audit_filtered(None, Some("EDITOR"), 100).unwrap();
+        let hit = store
+            .list_tool_audit_filtered(None, Some("EDITOR"), 100)
+            .unwrap();
         assert_eq!(hit.len(), 1, "tool 过滤大小写不敏感");
         assert_eq!(hit[0]["tool"], "editor.save");
     }
