@@ -29,6 +29,7 @@ import { CharStream } from "./components/CharStream";
 import { DataStream } from "./components/DataStream";
 import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
+import { OrbitRings } from "./components/OrbitRings";
 import { TelemetryBar } from "./components/TelemetryBar";
 /* 视图懒加载（React.lazy + 动态 import）：按视图切分 chunk，首屏只拉 shell + 当前视图，
  * 其余视图在导航到时才加载（vendor 三方库另行在 vite.config.ts 的 manualChunks 分组缓存） */
@@ -129,6 +130,15 @@ export default function App(): React.ReactElement {
   const config = useExm((s) => s.config);
   const wsConnected = useExm((s) => s.wsConnected);
   const init = useExm((s) => s.init);
+  const pendingApprovals = useExm((s) => s.pendingApprovals);
+  const refreshPendingApprovals = useExm((s) => s.refreshPendingApprovals);
+  // 审批待办轮询（60s 兜底）：WS 丢事件/页面刷新后角标仍可恢复——
+  // 审批等待窗内（approvalWaitSecs）错过提示 = 工具受阻，必须有可靠提醒面
+  useEffect(() => {
+    void refreshPendingApprovals();
+    const h = setInterval(() => void refreshPendingApprovals(), 60000);
+    return () => clearInterval(h);
+  }, [refreshPendingApprovals]);
   const accent = useTheme((s) => s.accent);
   const setAccent = useTheme((s) => s.setAccent);
   const preset = useTheme((s) => s.preset);
@@ -207,6 +217,7 @@ export default function App(): React.ReactElement {
   if (gate === "checking") {
     return (
       <div className="login-wrap">
+        <OrbitRings />
         <DataStream side="left" />
         <DataStream side="right" />
         <div className="login-core">
@@ -274,6 +285,9 @@ export default function App(): React.ReactElement {
             label: (
               <>
                 <span>{t(it.labelKey)}</span> <span className="label-en">[{it.en}]</span>
+                {it.key === "approvals" && pendingApprovals > 0 && (
+                  <span className="nav-badge" title={`${pendingApprovals}`}>{pendingApprovals > 99 ? "99+" : pendingApprovals}</span>
+                )}
               </>
             ),
           }))}

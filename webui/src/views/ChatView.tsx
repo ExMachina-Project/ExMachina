@@ -21,6 +21,7 @@ import { UsageBar } from "../components/UsageBar";
 import { ProcessSteps } from "../components/ProcessSteps";
 import { TimelineTag } from "../components/TimelineTag";
 import { SkeletonList } from "../components/SkeletonList";
+import { OrbitRings } from "../components/OrbitRings";
 import { TurnOps } from "../components/HistoryOps";
 import { Emblem } from "../components/Emblem";
 import type { ChatMessage } from "../types";
@@ -378,6 +379,13 @@ export function ChatView(): React.ReactElement {
     if (!stickRef.current) return;
     bottomRef.current?.scrollIntoView({ behavior: "auto" });
   }, [messages, liveOrch, liveParts, runToolCalls, timeline]);
+  // 审批卡到达：强制拉到卡位（审批是阻塞等待，时效性强——
+  // 用户上翻回看时也该被打断，错过 = 工具在等待窗内一直挂着）
+  useEffect(() => {
+    if (approvals.length === 0) return;
+    stickRef.current = true;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [approvals.length]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -820,35 +828,6 @@ export function ChatView(): React.ReactElement {
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} style={{ marginLeft: "auto" }} />
         </div>
         {!wsConnected && <Alert type="warning" message={t("chat.wsDown")} showIcon className="ws-alert app-banner" />}
-        {/* 内联审批：命令被拦截时在消息流中直接裁决——批准后输出回灌，模型继续干活 */}
-        {approvals.map((a) => (
-          <Card key={a.approvalId} size="small" className="approval-card">
-            <div className="approval-head">
-              <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
-              <span className="approval-agent mono">{a.agentId}</span>
-            </div>
-            <pre className="approval-cmd">{a.command}</pre>
-            <div className="approval-ops">
-              <Button
-                type="primary"
-                size="small"
-                icon={<CheckOutlined />}
-                onClick={() => void decideApproval(a.approvalId, true)}
-              >
-                {t("chat.approvalApprove")}
-              </Button>
-              <Button size="small" danger onClick={() => void decideApproval(a.approvalId, false)}>
-                {t("chat.approvalDeny")}
-              </Button>
-              {a.sessionId && a.sessionId !== sessionId && (
-                <Button size="small" type="link" onClick={() => void selectSession(a.sessionId!)}>
-                  {t("chat.openSubSession")}
-                </Button>
-              )}
-              <span className="approval-hint">{t("chat.approvalHint")}</span>
-            </div>
-          </Card>
-        ))}
         {/* 计划模式（spec plan-mode：WebUI 跨端审批呈现）——模式开关 + 计划卡片 */}
         <div className="plan-mode-bar">
           <Segmented
@@ -934,6 +913,7 @@ export function ChatView(): React.ReactElement {
           {renderMessages.length === 0 && !running && (
             <div className="chat-acquire">
               <span className="capture-frame chat-acquire-figure">
+                <OrbitRings />
                 <Emblem size={224} />
               </span>
               <div className="chat-acquire-title">{t("chat.acquireTitle")}</div>
@@ -1035,6 +1015,37 @@ export function ChatView(): React.ReactElement {
               <pre className="live-pre">{liveOrch}</pre>
             </Card>
           )}
+          {/* 内联审批：渲染在消息流内（live 区之后、贴底锚之前）——
+              审批到达时随消息流滚动进视线；原先渲染在 chat-scroll 外的静态区，
+              流式输出期间用户盯着底部，上方的卡根本看不到（审批交互不可见 bug） */}
+          {approvals.map((a) => (
+            <Card key={a.approvalId} size="small" className="approval-card">
+              <div className="approval-head">
+                <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
+                <span className="approval-agent mono">{a.agentId}</span>
+              </div>
+              <pre className="approval-cmd">{a.command}</pre>
+              <div className="approval-ops">
+                <Button
+                  type="primary"
+                  size="small"
+                  icon={<CheckOutlined />}
+                  onClick={() => void decideApproval(a.approvalId, true)}
+                >
+                  {t("chat.approvalApprove")}
+                </Button>
+                <Button size="small" danger onClick={() => void decideApproval(a.approvalId, false)}>
+                  {t("chat.approvalDeny")}
+                </Button>
+                {a.sessionId && a.sessionId !== sessionId && (
+                  <Button size="small" type="link" onClick={() => void selectSession(a.sessionId!)}>
+                    {t("chat.openSubSession")}
+                  </Button>
+                )}
+                <span className="approval-hint">{t("chat.approvalHint")}</span>
+              </div>
+            </Card>
+          ))}
           {showBottomBtn && (
             <button
               className="scroll-bottom-btn"
