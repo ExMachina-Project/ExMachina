@@ -2,7 +2,6 @@
    EXMACHINA · 控制台主题系统（DESIGN TOKENS）
    ------------------------------------------------------------
    三套主题预设（html[data-theme]）+ 五套强调色（JS 内联 --accent）。
-   · midnight  精炼暗色（默认）—— 蓝调中性、圆角、柔和阴影
    · minimal   极简浅色 —— 近白底、锌灰阶，主流极简主义
    · graphite  极简暗色 —— 中性石墨灰，无蓝调
 
@@ -130,44 +129,6 @@
 .bar-fill.rank-3 { background: var(--rank-3); }
 .bar-fill.rank-4 { background: var(--rank-4); }
 .bar-fill.accent { background: var(--accent); }
-
-/* ============ 主题：精炼暗色（默认）============ */
-/* 品牌对齐（spec: ui-visual-language）：色值对齐 GitHub profile 资产五张 SVG——
-   黑底 #0B0D10 + 亮白内容 #F2F5F9 主角；灰阶梯度 rank 系；紫仅点缀 */
-:root[data-theme="midnight"] {
-  --bg: #0b0d10;
-  --bg-panel: #0b0d10;
-  --bg-raise: #161b22;
-  --bg-sunken: #060709;
-  --line: #20262f;
-  --line-strong: #2b3140;
-  /* 亮白主角：主文本/标题/数字与主填充一律 #F2F5F9（资产基调） */
-  --text: #f2f5f9;
-  --text-hi: #f2f5f9;
-  --muted: #9aa3b0;
-  /* 次级读数色：需在面板底色上达 WCAG AA 4.5:1（#79839a = 4.93/5.18/4.58） */
-  --muted-dim: #79839a;
-  /* 灰阶梯度（资产 language 图按序分级）：占比/排序呈现依次取色 */
-  --rank-1: #f2f5f9;
-  --rank-2: #aeb7c4;
-  --rank-3: #7c8695;
-  --rank-4: #59626f;
-  --hover: rgba(255, 255, 255, 0.045);
-  --hover-strong: rgba(255, 255, 255, 0.085);
-  --overlay: rgba(6, 7, 9, 0.68);
-  --code-bg: #0c0e13;
-  --scroll-thumb: #2b3140;
-  --green: #34d399;
-  --red: #f87171;
-  --amber: #fbbf24;
-  --blue: #7c8cff;
-  /* 品牌点缀（spec: ui-visual-language）：亮紫变体 + 光晕层（双层状态点外圈） */
-  --accent-bright: #a9b4ff;
-  --accent-halo: rgba(124, 140, 255, 0.16);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.42);
-  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.55);
-}
 
 /* ============ 主题：极简浅色 ============ */
 :root[data-theme="minimal"] {
@@ -1480,14 +1441,24 @@ textarea.ant-input:focus,
 .plain-table tbody tr:hover { background: var(--hover); }
 
 /* 设置页 v3：面板区独立滚动，左侧分区导航常驻（长表单滚动时导航不跟着滚走） */
-.settings2 { display: flex; gap: 22px; align-items: stretch; }
+.settings2 {
+  display: flex;
+  gap: 22px;
+  align-items: stretch;
+  /* 短页占满视口（扣页头约 90px + 底 padding 26px）：内容不足一屏时不再悬空留白；
+     长页由内容自然撑高，不受此约束 */
+  min-height: calc(100dvh - 120px);
+}
 .cfg-nav {
   flex: none;
   width: 200px;
   display: flex;
   flex-direction: column;
   /* 与右侧 cfg-panel 同款卡片语汇：stretch 对齐随内容区等高占满——
-     此前是裸按钮列，条目少时悬在半空与右侧面板视觉不齐 */
+     此前是裸按钮列，条目少时悬在半空与右侧面板视觉不齐。
+     视口封顶：长页面下卡片不随内容拉出数屏高的空壳（内层 sticky 保持条目可视），
+     短页面下配合 settings2 的 min-height 与右侧面板等高占满 */
+  max-height: calc(100dvh - 120px);
   border: 1px solid var(--line);
   background: var(--bg-panel);
   border-radius: var(--r-lg);
@@ -1502,7 +1473,8 @@ textarea.ant-input:focus,
   flex-direction: column;
   gap: 3px;
   padding: 10px 8px;
-  max-height: calc(100dvh - 216px);
+  /* 吸顶位 96px + 底部余量 24px：与外层卡片 max-height(100dvh-120px) 减 padding 协调 */
+  max-height: calc(100dvh - 120px);
   overflow-y: auto;
 }
 .cfg-nav-item {
@@ -2859,8 +2831,8 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 }
 
 @media (max-width: 860px) {
-  .settings2 { flex-direction: column; gap: 12px; align-items: stretch; }
-  .cfg-nav { width: 100%; }
+  .settings2 { flex-direction: column; gap: 12px; align-items: stretch; min-height: 0; }
+  .cfg-nav { width: 100%; max-height: none; }
   .cfg-nav-scroll { flex-direction: row; overflow-x: auto; gap: 4px; padding: 6px 8px; position: static; max-height: none; }
   .cfg-nav-item { white-space: nowrap; padding: 6px 10px; }
   /* 宽表横滚：滚动容器取 wrapper（.ant-table 本身带 min-width，
