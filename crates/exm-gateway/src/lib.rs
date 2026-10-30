@@ -1655,7 +1655,15 @@ async fn put_agent_prompt(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "提示词不能为空" }))).into_response();
     }
     match st.core.registry().write_group_prompt(&gid, &def.prompt_file, &b.prompt) {
-        Ok(_) => Json(json!({ "ok": true, "identifier": identifier })).into_response(),
+        Ok(final_name) => {
+            // 旧名 → 新名：def 回写（读/导出/语言变体解析都走 promptFile）
+            if final_name != def.prompt_file {
+                let mut updated = def.clone();
+                updated.prompt_file = final_name.clone();
+                let _ = st.core.registry().upsert_agent(&gid, updated, None);
+            }
+            Json(json!({ "ok": true, "identifier": identifier, "promptFile": final_name })).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }

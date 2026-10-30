@@ -258,7 +258,8 @@ pub struct PromptBody {
     pub prompt: String,
 }
 
-/// 智能体系统提示词保存（PUT /api/singles/:id/prompt）：热生效，下一轮对话即装载
+/// 智能体系统提示词保存（PUT /api/singles/:id/prompt）：热生效，下一轮对话即装载。
+/// 保存即迁移：存量 PROMPT.md 落盘为 AGENTS.md 并回写 def.promptFile（新约定）
 pub async fn put_single_prompt(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -271,7 +272,15 @@ pub async fn put_single_prompt(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "提示词不能为空" }))).into_response();
     }
     match st.core.registry().write_single_prompt(&def.prompt_file, &b.prompt) {
-        Ok(_) => Json(json!({ "ok": true, "identifier": id })).into_response(),
+        Ok(final_name) => {
+            // 旧名 → 新名：def 回写（读/导出/语言变体解析都走 promptFile）
+            if final_name != def.prompt_file {
+                let mut updated = def.clone();
+                updated.prompt_file = final_name.clone();
+                let _ = st.core.registry().upsert_single(updated, None);
+            }
+            Json(json!({ "ok": true, "identifier": id, "promptFile": final_name })).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }
