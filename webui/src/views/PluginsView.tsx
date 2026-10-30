@@ -19,15 +19,17 @@ import {
 import { CloudDownloadOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { api, type PluginDetail, type PluginSummary } from "../api";
 import { PageHeader } from "../components/PageHeader";
+import { MaskedPasswordInput } from "../components/MaskedInput";
 import { useT } from "../i18n/core";
 
 /** 形态 → 标签色 */
-const FORM_COLOR: Record<string, string> = {
-  builtin: "blue",
+// 表单类别 → 资产灰阶语汇：仅 process（可执行体）保留品牌紫点缀，其余中性
+const FORM_COLOR: Record<string, string | undefined> = {
+  builtin: undefined,
   process: "purple",
-  declarative: "cyan",
-  virtual: "default",
-  unknown: "default",
+  declarative: undefined,
+  virtual: undefined,
+  unknown: undefined,
 };
 
 const FORM_LABEL: Record<string, string> = {
@@ -40,10 +42,11 @@ const FORM_LABEL: Record<string, string> = {
 
 /** 索引状态 → 文案/色 */
 /** 索引状态 → i18n key / 色 */
+// 索引状态 → 文案/色：状态语义色仅留 green（可装）/red（不兼容）两个真状态，其余中性
 const INDEX_STATUS: Record<string, { key: string; color?: string }> = {
-  available: { key: "plugins.catalog.available", color: "green" },
-  installed: { key: "plugins.catalog.installed", color: "blue" },
-  updatable: { key: "plugins.catalog.updatable", color: "orange" },
+  available: { key: "plugins.catalog.available", color: undefined },
+  installed: { key: "plugins.catalog.installed", color: undefined },
+  updatable: { key: "plugins.catalog.updatable", color: "processing" },
   incompatible: { key: "plugins.catalog.incompatible", color: "red" },
 };
 
@@ -507,7 +510,7 @@ export function PluginsView(): React.ReactElement {
                         {f.label}
                         {f.sensitive ? t("plugins.credentials.sensitive") : ""}
                       </Typography.Text>
-                      <Input.Password
+                      <MaskedPasswordInput
                         value={credForm[f.key] ?? ""}
                         placeholder={f.sensitive ? t("plugins.credentials.phSensitive") : ""}
                         onChange={(e) => setCredForm({ ...credForm, [f.key]: e.target.value })}

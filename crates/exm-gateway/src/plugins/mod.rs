@@ -7,8 +7,8 @@
 //! 其余内置通道（telegram/napcat/qqbot/discord/slack/matrix）保留静态注册
 //! （lib.rs 启动序列直呼 spawn_supervisor），不强制走插件面——统一边界渐进收敛。
 
-pub mod video;
 pub mod rss;
+pub mod video;
 
 use crate::plugin_admin::attach_process_tools;
 
@@ -134,7 +134,8 @@ pub fn spawn_all(core: Arc<Core>) {
     {
         let pm2 = pm.clone();
         let core2 = core.clone();
-        tokio::spawn(async move {            for e in pm2.list() {
+        tokio::spawn(async move {
+            for e in pm2.list() {
                 if e.form != "process" || !e.enabled || e.error.is_some() {
                     continue;
                 }
@@ -145,16 +146,15 @@ pub fn spawn_all(core: Arc<Core>) {
                     .credentials
                     .get(&e.manifest.id)
                     .cloned();
-                let r = exm_core::plugin::bridge::spawn_process_plugin(
-                    &pm2,
-                    &e.manifest,
-                    &dir,
-                    creds,
-                )
-                .await;
+                let r =
+                    exm_core::plugin::bridge::spawn_process_plugin(&pm2, &e.manifest, &dir, creds)
+                        .await;
                 match r {
                     Ok(_) => {
-                        eprintln!("[plugins] 进程插件 {} 已拉起（握手协商通过）", e.manifest.id);
+                        eprintln!(
+                            "[plugins] 进程插件 {} 已拉起（握手协商通过）",
+                            e.manifest.id
+                        );
                         // T2 工具面回接：握手发现的工具并入会话工具网关（specs + 执行）
                         attach_process_tools(&core2, &pm2, &e.manifest.id);
                     }
@@ -188,12 +188,18 @@ pub fn spawn_all(core: Arc<Core>) {
                     let ok = sup.health_check().await;
                     if !ok {
                         // false = 未运行或重启失败（Backoff 重试中 / Error 待人工干预）
-                        let err =
-                            format!("进程异常（状态 {:?}；退避重试中或需人工重新启用）", sup.state());
+                        let err = format!(
+                            "进程异常（状态 {:?}；退避重试中或需人工重新启用）",
+                            sup.state()
+                        );
                         pm4.record_error(&id, Some(err));
                     } else {
                         // 恢复：error 清除 + 快照重取（进程已换新）
-                        let names = sup.tools_snapshot().iter().map(|t| t.name.clone()).collect();
+                        let names = sup
+                            .tools_snapshot()
+                            .iter()
+                            .map(|t| t.name.clone())
+                            .collect();
                         pm4.set_tools_snapshot(&id, names);
                         pm4.record_error(&id, None);
                     }

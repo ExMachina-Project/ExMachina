@@ -376,6 +376,8 @@ export interface Channel {
   config?: Record<string, string>;
   /** 会话白名单（Telegram chat id / QQ openid / OneBot 群号或 QQ 号；空 = 不限） */
   allowedChats?: string[];
+  /** 管理者账号：外部用户 ID 清单，判权视同 admin（免配对绑定） */
+  admins?: string[];
   /** 群聊唤醒门控逐通道覆盖：true = 群内仅提及/回复触发；缺省 = 跟随全局默认 */
   groupGate?: boolean;
   /** 能力边界：chat = 仅聊天；tools = 可调工具；computer = 电脑操控（缺省） */
@@ -791,12 +793,13 @@ export const api = {
     token?: string;
     enabled?: boolean;
     allowedChats?: string[];
+    admins?: string[];
     groupGate?: boolean;
     capability?: "chat" | "tools" | "computer";
     memoryIsolation?: boolean;
     config?: Record<string, string>;
   }) => req<Channel>("/channels", { method: "POST", body: JSON.stringify(body) }),
-  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; groupGate?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
+  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
     req<Channel>(`/channels/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
 

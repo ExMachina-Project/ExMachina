@@ -18,14 +18,17 @@ pub fn routes() -> Router<AppState> {
             "/api/plugins/:id",
             get(get_plugin).put(put_enabled).delete(delete_plugin),
         )
-        .route("/api/plugins/:id/credentials", get(get_credentials).put(put_credentials))
+        .route(
+            "/api/plugins/:id/credentials",
+            get(get_credentials).put(put_credentials),
+        )
         .route("/api/plugins/install", post(post_install))
         .route("/api/plugins/:id/update", post(post_update))
         .route("/api/plugins/index", get(get_index))
 }
 
 /// 凭据掩码（插件凭据区一律敏感口径——无论清单是否标记）
-const CRED_MASK: &str = "********";
+const CRED_MASK: &str = crate::llm_admin::KEY_MASK;
 
 /// GET /api/plugins/:id/credentials：凭据区回显（值一律掩码，键名可见）
 pub async fn get_credentials(
@@ -43,7 +46,11 @@ pub async fn get_credentials(
         .map(|m| {
             m.iter()
                 .map(|(k, v)| {
-                    let masked_v = if v.is_empty() { String::new() } else { CRED_MASK.into() };
+                    let masked_v = if v.is_empty() {
+                        String::new()
+                    } else {
+                        CRED_MASK.into()
+                    };
                     (k.clone(), Value::String(masked_v))
                 })
                 .collect()
@@ -138,7 +145,10 @@ pub async fn list_plugins(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 /// GET /api/plugins/:id：详情（清单 + 健康）
-pub async fn get_plugin(State(st): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
+pub async fn get_plugin(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
     let pm = st.core.plugins();
     let Some(e) = pm.get(&id) else {
         return err_not_found(&id).into_response();
@@ -183,7 +193,11 @@ fn tool_surface_registered(st: &AppState, id: &str, snapshot: &[String]) -> bool
     if snapshot.is_empty() {
         return false;
     }
-    let specs = st.core.orchestrator().tools.custom_specs_for("orchestrator");
+    let specs = st
+        .core
+        .orchestrator()
+        .tools
+        .custom_specs_for("orchestrator");
     snapshot
         .iter()
         .any(|n| specs.iter().any(|s| s.name == format!("{id}__{n}")))
@@ -227,7 +241,10 @@ pub async fn put_enabled(
 }
 
 /// DELETE /api/plugins/:id：卸载（builtin/virtual 拒绝；目录插件删 plugins/<id>/）
-pub async fn delete_plugin(State(st): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
+pub async fn delete_plugin(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
     let pm = st.core.plugins();
     let Some(e) = pm.get(&id) else {
         return err_not_found(&id).into_response();
@@ -291,14 +308,22 @@ pub async fn post_install(
     State(st): State<AppState>,
     Json(b): Json<Value>,
 ) -> axum::response::Response {
-    let Some(source) = b.get("source").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(source) = b
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "body 需为 { \"source\": \"<索引id或URL>\", \"overwrite\"?: bool }" })),
         )
             .into_response();
     };
-    let overwrite = b.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+    let overwrite = b
+        .get("overwrite")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     // 来源解析：URL/本地包直判；索引 id 查索引（与 CLI resolve_source 同口径）
     let src = if source.contains("://")
         || source.ends_with(".git")
@@ -308,9 +333,9 @@ pub async fn post_install(
         exm_core::plugin::install::parse_source_url(source)
     } else {
         let cfg = st.core.config();
-        match exm_core::plugin::install::fetch_index(&exm_core::plugin::install::effective_index_url(
-            &cfg.plugins.index_url,
-        ))
+        match exm_core::plugin::install::fetch_index(
+            &exm_core::plugin::install::effective_index_url(&cfg.plugins.index_url),
+        )
         .await
         {
             Ok(entries) => {
@@ -373,7 +398,8 @@ fn install_error_status(msg: &str) -> StatusCode {
     } else if msg.contains("需要宿主") {
         // 412 而非 422：422 会被 axum serde 拒绝改写中间件重写
         StatusCode::PRECONDITION_FAILED
-    } else if msg.contains("拉取失败") || msg.contains("克隆失败") || msg.contains("下载失败") {
+    } else if msg.contains("拉取失败") || msg.contains("克隆失败") || msg.contains("下载失败")
+    {
         StatusCode::BAD_GATEWAY
     } else {
         StatusCode::BAD_REQUEST
@@ -381,7 +407,10 @@ fn install_error_status(msg: &str) -> StatusCode {
 }
 
 /// POST /api/plugins/:id/update：按 installation 来源记录更新（已是最新返回 updated=false）
-pub async fn post_update(State(st): State<AppState>, Path(id): Path<String>) -> axum::response::Response {
+pub async fn post_update(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
     match st.core.plugin_update(&id).await {
         Ok((updated, msg)) => {
             if updated {
@@ -400,9 +429,9 @@ pub async fn post_update(State(st): State<AppState>, Path(id): Path<String>) -> 
 pub async fn get_index(State(st): State<AppState>) -> axum::response::Response {
     let cfg = st.core.config();
     let host = exm_core::plugin::host_version_pub();
-    let entries = match exm_core::plugin::install::fetch_index(&exm_core::plugin::install::effective_index_url(
-        &cfg.plugins.index_url,
-    ))
+    let entries = match exm_core::plugin::install::fetch_index(
+        &exm_core::plugin::install::effective_index_url(&cfg.plugins.index_url),
+    )
     .await
     {
         Ok(v) => v,
@@ -482,7 +511,9 @@ pub(crate) fn attach_process_tools(
     };
     match p.tool_provider() {
         Some(tp) => {
-            core.orchestrator().tools.register_plugin_runtime_tools(id, tp);
+            core.orchestrator()
+                .tools
+                .register_plugin_runtime_tools(id, tp);
             eprintln!("[plugins] {id} 工具面已并入会话工具网关");
         }
         None => eprintln!("[plugins] {id} 工具面回接失败：provider 无 tool_provider"),
@@ -524,7 +555,8 @@ mod tests {
     use tower::ServiceExt;
 
     fn app() -> Router {
-        let dir = std::env::temp_dir().join(format!("exm-plugin-admin-{}", exm_core::types::new_id()));
+        let dir =
+            std::env::temp_dir().join(format!("exm-plugin-admin-{}", exm_core::types::new_id()));
         std::fs::create_dir_all(dir.join("plugins/hello")).unwrap();
         std::fs::write(
             dir.join("plugins/hello/plugin.json"),
@@ -544,11 +576,18 @@ mod tests {
         let app = app();
         let r = app
             .clone()
-            .oneshot(Request::builder().uri("/api/plugins").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         let ids: Vec<&str> = v["plugins"]
             .as_array()
@@ -560,15 +599,24 @@ mod tests {
         assert!(ids.contains(&"hello"), "列表应含目录插件 hello：{ids:?}");
 
         let r = app
-            .oneshot(Request::builder().uri("/api/plugins/video").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/video")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["form"], "builtin");
         assert_eq!(v["health"], "ok");
-        assert!(v["manifest"]["channel"]["kinds"].to_string().contains("bilibili"));
+        assert!(v["manifest"]["channel"]["kinds"]
+            .to_string()
+            .contains("bilibili"));
     }
 
     #[tokio::test]
@@ -589,10 +637,17 @@ mod tests {
         assert_eq!(r.status(), 200);
         // 再查详情确认 disabled
         let r = app
-            .oneshot(Request::builder().uri("/api/plugins/hello").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/hello")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["enabled"], false);
     }
@@ -660,12 +715,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["credentials"]["api_token"], CRED_MASK, "值必须掩码");
         assert_eq!(v["credentials"]["other"], CRED_MASK);
         assert_eq!(v["configured"], true);
-        assert!(!body.is_empty() && !String::from_utf8_lossy(&body).contains("sk-secret-123"), "明文不得出现");
+        assert!(
+            !body.is_empty() && !String::from_utf8_lossy(&body).contains("sk-secret-123"),
+            "明文不得出现"
+        );
         // 掩码回传 + 空值删除：api_token 保持、other 删除
         let r = app
             .clone()
@@ -692,10 +752,15 @@ mod tests {
             )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v["credentials"].get("other").is_none(), "空值应删除键");
-        assert_eq!(v["credentials"]["api_token"], CRED_MASK, "掩码回传不覆盖真值");
+        assert_eq!(
+            v["credentials"]["api_token"], CRED_MASK,
+            "掩码回传不覆盖真值"
+        );
         // 详情含凭据配置标记
         let r = app
             .clone()
@@ -707,7 +772,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["credentialsConfigured"], true);
     }
@@ -715,7 +782,8 @@ mod tests {
     /// 凭据持久化往返：apply_config 落盘后重载仍在（掩码口径不变）
     #[tokio::test]
     async fn 端点_插件凭据持久化() {
-        let dir = std::env::temp_dir().join(format!("exm-plugin-cred-{}", exm_core::types::new_id()));
+        let dir =
+            std::env::temp_dir().join(format!("exm-plugin-cred-{}", exm_core::types::new_id()));
         std::fs::create_dir_all(dir.join("plugins/hello")).unwrap();
         std::fs::write(
             dir.join("plugins/hello/plugin.json"),
@@ -737,7 +805,12 @@ mod tests {
         // 重载：凭据区仍在（持久化生效）
         let core2 = exm_core::Core::with_config(exm_core::config::ExmConfig::load(&dir)).unwrap();
         assert_eq!(
-            core2.config().plugins.credentials.get("hello").and_then(|m| m.get("k").map(String::as_str)),
+            core2
+                .config()
+                .plugins
+                .credentials
+                .get("hello")
+                .and_then(|m| m.get("k").map(String::as_str)),
             Some("v1"),
             "凭据应持久化"
         );
@@ -748,7 +821,8 @@ mod tests {
     #[tokio::test]
     async fn 端点_安装更新卸载往返() {
         // 准备 v1/v2 两个包 + 本地索引文件
-        let dir = std::env::temp_dir().join(format!("exm-plugin-flow-{}", exm_core::types::new_id()));
+        let dir =
+            std::env::temp_dir().join(format!("exm-plugin-flow-{}", exm_core::types::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mk_pkg = |tag: &str, ver: &str| -> std::path::PathBuf {
             let src = dir.join(format!("{tag}/src/pkg"));
@@ -796,23 +870,34 @@ mod tests {
                     .method("POST")
                     .uri("/api/plugins/install")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({ "source": v1.to_string_lossy() }).to_string()))
+                    .body(Body::from(
+                        json!({ "source": v1.to_string_lossy() }).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(r.status(), 200, "安装应成功");
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["id"], "inst");
         assert_eq!(v["version"], "0.1.0");
         // 详情：installation 记录在
         let r = app
             .clone()
-            .oneshot(Request::builder().uri("/api/plugins/inst").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/inst")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["installation"]["kind"], "targz");
 
@@ -824,7 +909,9 @@ mod tests {
                     .method("POST")
                     .uri("/api/plugins/install")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({ "source": v1.to_string_lossy() }).to_string()))
+                    .body(Body::from(
+                        json!({ "source": v1.to_string_lossy() }).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -834,13 +921,25 @@ mod tests {
         // ③ 索引端点：inst 显示 updatable（索引 v0.2.0 > 本地 v0.1.0）
         let r = app
             .clone()
-            .oneshot(Request::builder().uri("/api/plugins/index").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/index")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
-        let entry = v["entries"].as_array().unwrap().iter().find(|e| e["id"] == "inst").unwrap();
+        let entry = v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "inst")
+            .unwrap();
         assert_eq!(entry["status"], "updatable");
 
         // ④ 更新（索引来源安装记录 → 改指 v2 后 update 走索引）
@@ -850,7 +949,10 @@ mod tests {
                 "inst".into(),
                 exm_core::config::PluginInstallation {
                     kind: "targz".into(),
-                    url: index.to_string_lossy().to_string().replace("index.json", "v2.tgz"),
+                    url: index
+                        .to_string_lossy()
+                        .to_string()
+                        .replace("index.json", "v2.tgz"),
                     ..Default::default()
                 },
             );
@@ -868,16 +970,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["updated"], true, "应更新：{v}");
         // 更新后版本
         let r = app
             .clone()
-            .oneshot(Request::builder().uri("/api/plugins/inst").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/inst")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["version"], "0.2.0");
 

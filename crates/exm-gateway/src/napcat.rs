@@ -7,16 +7,18 @@
 //! 避免长运行期间无法应答 WS 层 Ping 被服务端断开。
 
 use crate::channel_util::{builtin_command, first_seen, media_placeholder};
-use crate::platform::{admit, report_status, spawn_reply, GateDecision, Channel, ChannelRun, InboundCtx, MediaItem};
+use crate::platform::{
+    admit, report_status, spawn_reply, Channel, ChannelRun, GateDecision, InboundCtx, MediaItem,
+};
 use exm_core::Core;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message;
 
 struct Conn {
     handle: JoinHandle<()>,
@@ -30,7 +32,11 @@ fn conns() -> &'static Mutex<HashMap<String, Conn>> {
 }
 
 fn fingerprint(ch: &Channel) -> String {
-    format!("{}|{}", ch.cfg("url").unwrap_or_default(), ch.cfg("token").unwrap_or_default())
+    format!(
+        "{}|{}",
+        ch.cfg("url").unwrap_or_default(),
+        ch.cfg("token").unwrap_or_default()
+    )
 }
 
 pub fn spawn_supervisor(core: Arc<Core>) {
@@ -51,11 +57,9 @@ async fn reconcile(core: &Arc<Core>) {
     let mut guards = conns().lock().unwrap();
     let stale: Vec<String> = guards
         .iter()
-        .filter(|(id, c)| {
-            match desired.iter().find(|d| &d.id == *id) {
-                Some(d) => c.fingerprint != fingerprint(d) || c.handle.is_finished(),
-                None => true,
-            }
+        .filter(|(id, c)| match desired.iter().find(|d| &d.id == *id) {
+            Some(d) => c.fingerprint != fingerprint(d) || c.handle.is_finished(),
+            None => true,
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -72,7 +76,13 @@ async fn reconcile(core: &Arc<Core>) {
         let ch_task = ch.clone();
         let fp = fingerprint(ch);
         let handle = tokio::spawn(async move { connect_loop(core, ch_task).await });
-        guards.insert(ch.id.clone(), Conn { handle, fingerprint: fp });
+        guards.insert(
+            ch.id.clone(),
+            Conn {
+                handle,
+                fingerprint: fp,
+            },
+        );
     }
 }
 
@@ -89,10 +99,8 @@ async fn connect_loop(core: Arc<Core>, ch: Channel) {
         let request = match url.clone().into_client_request() {
             Ok(mut req) => {
                 if !token.is_empty() {
-                    req.headers_mut().insert(
-                        "Authorization",
-                        format!("Bearer {token}").parse().unwrap(),
-                    );
+                    req.headers_mut()
+                        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
                 }
                 req.headers_mut()
                     .insert("X-Client-Role", "ExMachina-Gateway".parse().unwrap());
@@ -164,13 +172,26 @@ async fn connect_loop(core: Arc<Core>, ch: Channel) {
     }
 }
 
-async fn on_text(core: &Arc<Core>, ch: &Channel, tx: &mpsc::UnboundedSender<serde_json::Value>, s: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return };
+async fn on_text(
+    core: &Arc<Core>,
+    ch: &Channel,
+    tx: &mpsc::UnboundedSender<serde_json::Value>,
+    s: &str,
+) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
+        return;
+    };
     // API 回包（带 echo 的响应）：自检回包打日志，其余忽略
     if let Some(echo) = v.get("echo").and_then(|x| x.as_str()) {
         if echo == "exm-login" {
-            let nick = v.pointer("/data/nickname").and_then(|x| x.as_str()).unwrap_or("?");
-            let uid = v.pointer("/data/user_id").and_then(|x| x.as_i64()).unwrap_or(0);
+            let nick = v
+                .pointer("/data/nickname")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?");
+            let uid = v
+                .pointer("/data/user_id")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0);
             println!("[napcat:{}] 机器人已连结：{nick}（{uid}）", ch.id);
             report_status(&ch.id, "ok", format!("机器人 {nick}（{uid}）"));
         }
@@ -187,7 +208,10 @@ async fn on_text(core: &Arc<Core>, ch: &Channel, tx: &mpsc::UnboundedSender<serd
         return;
     }
     // 消息去重：OneBot 实现断线重连可能重放最近事件，按 message_id 首见放行
-    let msg_id = v.get("message_id").map(|x| x.to_string()).unwrap_or_default();
+    let msg_id = v
+        .get("message_id")
+        .map(|x| x.to_string())
+        .unwrap_or_default();
     if !first_seen(&format!("napcat:{}", ch.id), &msg_id) {
         return;
     }
@@ -203,9 +227,14 @@ async fn on_text(core: &Arc<Core>, ch: &Channel, tx: &mpsc::UnboundedSender<serd
         return;
     }
     // 会话白名单：非空时仅放行清单内的群号 / QQ 号
-    let peer = group_id.map(|g| g.to_string()).or(user_id.map(|u| u.to_string()));
+    let peer = group_id
+        .map(|g| g.to_string())
+        .or(user_id.map(|u| u.to_string()));
     if !ch.allowed_chats.is_empty() {
-        let ok = peer.as_deref().map(|p| ch.allowed_chats.iter().any(|a| a == p)).unwrap_or(false);
+        let ok = peer
+            .as_deref()
+            .map(|p| ch.allowed_chats.iter().any(|a| a == p))
+            .unwrap_or(false);
         if !ok {
             eprintln!("[napcat:{}] {peer:?} 不在白名单，已忽略", ch.id);
             return;
@@ -216,7 +245,8 @@ async fn on_text(core: &Arc<Core>, ch: &Channel, tx: &mpsc::UnboundedSender<serd
     let tx = tx.clone();
     let raw = v.clone();
     tokio::spawn(async move {
-        let Some(external_id) = napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await else {
+        let Some(external_id) = napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
+        else {
             return; // 闸门拦截（忽略 / 已回复）
         };
         // 入站媒体（组 6.4）：下载或本地 file:// 复制 → 注入（段清单已在闸门前盘好）；
@@ -225,22 +255,40 @@ async fn on_text(core: &Arc<Core>, ch: &Channel, tx: &mpsc::UnboundedSender<serd
         let mut saved: Vec<(String, String, String)> = Vec::new();
         let mut transcript_note = String::new();
         for (kind, src) in media {
-            let name = format!("napcat-{}.{}", exm_core::types::now_ms(), if kind == "image" { "png" } else if kind == "voice" { "ogg" } else { "bin" });
+            let name = format!(
+                "napcat-{}.{}",
+                exm_core::types::now_ms(),
+                if kind == "image" {
+                    "png"
+                } else if kind == "voice" {
+                    "ogg"
+                } else {
+                    "bin"
+                }
+            );
             let bytes = if let Some(local) = src.strip_prefix("file://") {
                 std::fs::read(local).ok()
             } else {
                 crate::platform::download_bytes(&src).await
             };
             if let Some(b) = bytes {
-                if let Some(p) = crate::platform::save_inbound_media(&core, &ch, &name, b.clone()).await {
+                if let Some(p) =
+                    crate::platform::save_inbound_media(&core, &ch, &name, b.clone()).await
+                {
                     saved.push((kind.clone(), p, name.clone()));
                 }
                 if kind == "voice" {
-                    transcript_note.push_str(&crate::channel_util::voice_transcript_note(&core, b, &name).await);
+                    transcript_note.push_str(
+                        &crate::channel_util::voice_transcript_note(&core, b, &name).await,
+                    );
                 }
             }
         }
-        let text = if transcript_note.is_empty() { text } else { format!("{text}{transcript_note}") };
+        let text = if transcript_note.is_empty() {
+            text
+        } else {
+            format!("{text}{transcript_note}")
+        };
         // 内置命令（/new /status）：闸门放行后、进入会话执行前拦截
         // 会话键与 handle_message 同口径：群号优先，私聊为用户 id
         let peer = group_id
@@ -261,7 +309,17 @@ async fn on_text(core: &Arc<Core>, ch: &Channel, tx: &mpsc::UnboundedSender<serd
             let _ = tx.send(action);
             return;
         }
-        handle_message(&core, &ch, &tx, group_id, user_id, &external_id, saved, &text).await;
+        handle_message(
+            &core,
+            &ch,
+            &tx,
+            group_id,
+            user_id,
+            &external_id,
+            saved,
+            &text,
+        )
+        .await;
     });
 }
 
@@ -281,9 +339,19 @@ fn collect_media(m: &serde_json::Value) -> Vec<(String, String)> {
             "record" | "voice" => "voice",
             _ => continue,
         };
-        let url = seg.pointer("/data/url").and_then(|x| x.as_str()).unwrap_or("");
-        let file = seg.pointer("/data/file").and_then(|x| x.as_str()).unwrap_or("");
-        let src = if !url.is_empty() { url.to_string() } else { file.to_string() };
+        let url = seg
+            .pointer("/data/url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let file = seg
+            .pointer("/data/file")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let src = if !url.is_empty() {
+            url.to_string()
+        } else {
+            file.to_string()
+        };
         if src.is_empty() {
             continue;
         }
@@ -304,7 +372,10 @@ async fn napcat_gate(
 ) -> Option<String> {
     let is_group = group_id.is_some();
     // 提及归一化：原始消息含 @ 段（CQ:at）即视为提及（QQ 群内 @ 机器人是主语义）
-    let raw_text = raw.get("message").map(|m| m.to_string()).unwrap_or_default();
+    let raw_text = raw
+        .get("message")
+        .map(|m| m.to_string())
+        .unwrap_or_default();
     let mentioned = raw_text.contains("CQ:at");
     let external_id = user_id.map(|u| u.to_string()).unwrap_or_default();
     // 会话键（与 ChannelRun::begin 同口径）：群号优先，私聊为用户 id
@@ -312,7 +383,14 @@ async fn napcat_gate(
         .map(|g| g.to_string())
         .or_else(|| user_id.map(|u| u.to_string()))
         .unwrap_or_default();
-    let ctx = InboundCtx { text, external_id: &external_id, display_name: &external_id, is_group, mentioned, chat_key: &peer };
+    let ctx = InboundCtx {
+        text,
+        external_id: &external_id,
+        display_name: &external_id,
+        is_group,
+        mentioned,
+        chat_key: &peer,
+    };
     match admit(core, ch, &ctx).await {
         GateDecision::Allow => Some(external_id),
         GateDecision::Ignore => None,
@@ -381,14 +459,28 @@ async fn handle_message(
     text: &str,
 ) {
     // 会话键：群聊优先，无群号走私聊
-    let peer = group_id.map(|g| g.to_string()).or(user_id.map(|u| u.to_string())).unwrap_or_default();
+    let peer = group_id
+        .map(|g| g.to_string())
+        .or(user_id.map(|u| u.to_string()))
+        .unwrap_or_default();
     let Some((run, rx)) = ChannelRun::begin(core, ch, &peer).await else {
         return;
     };
-    core.stamp_session_origin(&run.session_id, external_id, core.identity_of(&ch.id, external_id).map(|i| i.id).unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id)).as_str());
+    core.stamp_session_origin(
+        &run.session_id,
+        external_id,
+        core.identity_of(&ch.id, external_id)
+            .map(|i| i.id)
+            .unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id))
+            .as_str(),
+    );
     // 入站媒体注入（组 6.4）：图片进多模态暂存，文件附路径说明
     let note = crate::platform::stage_inbound_media(core, &run.session_id, &media);
-    let text = if note.is_empty() { text.to_string() } else { format!("{text}{note}") };
+    let text = if note.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}{note}")
+    };
     let tx = tx.clone();
     let media_tx = tx.clone();
     let reply = spawn_reply(
@@ -424,14 +516,19 @@ async fn handle_message(
                     return false;
                 };
                 use base64::Engine as _;
-                let data = format!("base64://{}", base64::engine::general_purpose::STANDARD.encode(bytes));
+                let data = format!(
+                    "base64://{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                );
                 let name = item
                     .path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "media".into());
                 let seg = match seg_type {
-                    "file" => serde_json::json!({ "type": "file", "data": { "file": data, "name": name } }),
+                    "file" => {
+                        serde_json::json!({ "type": "file", "data": { "file": data, "name": name } })
+                    }
                     _ => serde_json::json!({ "type": seg_type, "data": { "file": data } }),
                 };
                 let _ = mime;
@@ -495,8 +592,16 @@ mod tests {
         ]);
         let media = collect_media(&m);
         assert_eq!(media.len(), 2, "缺来源的 file 段与 at 段不收：{media:?}");
-        assert_eq!(media[0], ("image".to_string(), "https://x/a.png".to_string()), "url 优先");
-        assert_eq!(media[1], ("voice".to_string(), "file:///tmp/b.mp3".to_string()), "record 归一为 voice");
+        assert_eq!(
+            media[0],
+            ("image".to_string(), "https://x/a.png".to_string()),
+            "url 优先"
+        );
+        assert_eq!(
+            media[1],
+            ("voice".to_string(), "file:///tmp/b.mp3".to_string()),
+            "record 归一为 voice"
+        );
         // CQ 码字符串形态：无结构化段 → 空（不至于误采）
         assert!(collect_media(&json!("[CQ:image,url=x]")).is_empty());
     }

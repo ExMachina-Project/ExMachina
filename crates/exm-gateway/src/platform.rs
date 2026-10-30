@@ -890,10 +890,7 @@ pub async fn workbench_file(
 }
 
 /// 计划清单（GET /api/sessions/:id/plan）：当前条目 + 模式位
-pub async fn plan_list(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn plan_list(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let items = st.core.plan_list(&id);
     Json(json!({
         "sessionId": id,
@@ -956,7 +953,9 @@ pub async fn plan_decide(
         }
         other => (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("未知 action：{other}（支持 approve/reject/setMode）") })),
+            Json(
+                json!({ "error": format!("未知 action：{other}（支持 approve/reject/setMode）") }),
+            ),
         )
             .into_response(),
     }
@@ -1039,6 +1038,10 @@ pub struct Channel {
     /// 会话白名单：允许交互的会话键（Telegram chat id / QQ openid / OneBot 群号或 QQ 号；空 = 不限）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_chats: Vec<String>,
+    /// 管理者账号：外部用户 ID 清单（QQ 号 / Telegram user id 等），命中即视同 admin 角色——
+    /// 免配对绑定即拥有管理者判权（与绑定身份的 admin 角色同权并集）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admins: Vec<String>,
     /// 账号备注（同平台多账号时区分用途）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -1175,7 +1178,10 @@ pub(crate) fn target_exists(core: &exm_core::Core, target: &str) -> bool {
     if let Some(id) = single {
         return core.registry().single(&id).is_some();
     }
-    group.as_deref().map(|g| core.group_meta(g).is_some()).unwrap_or(true)
+    group
+        .as_deref()
+        .map(|g| core.group_meta(g).is_some())
+        .unwrap_or(true)
 }
 
 // ---------------------------------------------------------------- 出站能力矩阵与回复整形（组 6）
@@ -1507,8 +1513,15 @@ pub(crate) async fn admit(
         return GateDecision::Ignore;
     }
 
-    // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引
-    if identity_cfg.identity_required && core.identity_of(&ch.id, ctx.external_id).is_none() {
+    // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引。管理者账号清单命中豁免——
+    // 按外部用户 ID 跨通道匹配（人在任一通道的管理者清单即凭证；判权跟人走，
+    // 用户可能在此通道说话、经别的通道执行动作，故不限于本通道清单）
+    if identity_cfg.identity_required
+        && core.identity_of(&ch.id, ctx.external_id).is_none()
+        && !load_channels(core)
+            .iter()
+            .any(|c| c.admins.iter().any(|a| a.trim() == ctx.external_id))
+    {
         return GateDecision::Deny(
             "【报告】未绑定身份：请在控制台「通道身份」页签发配对码，然后在此发送 /pair <配对码> 完成绑定。".into(),
         );
@@ -1666,7 +1679,11 @@ impl ChannelRun {
             // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
             // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
             "plan.pending" => {
-                let count = evt.payload.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let count = evt
+                    .payload
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let items = self.core.plan_list(&self.session_id);
                 let mut lines = vec![format!("📋 计划待审批（{count} 条）：")];
                 for (i, it) in items.iter().take(8).enumerate() {
@@ -1680,8 +1697,16 @@ impl ChannelRun {
                 Some(lines.join("\n").chars().take(max_chars).collect())
             }
             "plan.applied" => {
-                let ok = evt.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                let target = evt.payload.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                let ok = evt
+                    .payload
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let target = evt
+                    .payload
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 Some(format!(
                     "{} 计划条目已执行：{target}",
                     if ok { "✅" } else { "❌" }
@@ -1719,13 +1744,14 @@ impl ChannelRun {
                         let fail_n = rs.len() - ok_n;
                         self.core.emit_run_error(
                             &self.session_id,
-                            &format!(
-                                "【报告】计划已批准并回放：{ok_n} 条成功，{fail_n} 条失败。"
-                            ),
+                            &format!("【报告】计划已批准并回放：{ok_n} 条成功，{fail_n} 条失败。"),
                         );
                     }
                     Err(e) => {
-                        self.core.emit_run_error(&self.session_id, &format!("【警告】计划回放失败：{e}"));
+                        self.core.emit_run_error(
+                            &self.session_id,
+                            &format!("【警告】计划回放失败：{e}"),
+                        );
                     }
                 }
             } else {
@@ -1784,7 +1810,11 @@ impl Drop for GroupRestore {
 }
 
 /// 还原到之前的交互上下文（组 + 单智能体快照）
-pub(crate) fn restore_context(core: &exm_core::Core, prev_group: &str, prev_single: &Option<String>) {
+pub(crate) fn restore_context(
+    core: &exm_core::Core,
+    prev_group: &str,
+    prev_single: &Option<String>,
+) {
     if let Some(id) = prev_single {
         let _ = core.registry().set_active_single(Some(id));
     } else {
@@ -2081,7 +2111,6 @@ pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
     }
 }
 
-
 // ---------------------------------------------------------------- 通道 CRUD（脱敏回显）
 
 /// 平台 config 中的敏感键（掩码回显；更新时掩码值 = 沿用旧值）。
@@ -2113,7 +2142,8 @@ fn is_sensitive_config_key(kind: &str, key: &str, core: &exm_core::Core) -> bool
         .filter_map(|p| p.channel_provider())
         .any(|cp| {
             cp.kinds().iter().any(|k| k == kind)
-                && cp.credential_fields()
+                && cp
+                    .credential_fields()
                     .iter()
                     .any(|f| f.sensitive && f.key == key)
         })
@@ -2176,6 +2206,9 @@ pub struct ChannelBody {
     /// 会话白名单（空 = 不限）
     #[serde(default)]
     pub allowed_chats: Option<Vec<String>>,
+    /// 管理者账号（外部用户 ID 清单；判权视同 admin）
+    #[serde(default)]
+    pub admins: Option<Vec<String>>,
     #[serde(default)]
     pub account: Option<String>,
     #[serde(default)]
@@ -2225,11 +2258,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "telegram"
-        && b.token
-            .as_deref()
-            .is_none_or(|t| t.trim().is_empty())
-    {
+    if platform == "telegram" && b.token.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "telegram 通道需要 bot token" })),
@@ -2245,9 +2274,7 @@ pub async fn create_channel(
     // 新平台必填项：qqbot 需要 appId + appSecret；napcat 需要 WS 地址
     if platform == "qqbot"
         && (config.get("appId").is_none_or(|v| v.trim().is_empty())
-            || config
-                .get("appSecret")
-                .is_none_or(|v| v.trim().is_empty()))
+            || config.get("appSecret").is_none_or(|v| v.trim().is_empty()))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -2264,9 +2291,7 @@ pub async fn create_channel(
     }
     // discord / slack / matrix 的顶层 token 均为必填（bot token 或 access token）
     if matches!(platform.as_str(), "discord" | "slack" | "matrix")
-        && b.token
-            .as_deref()
-            .is_none_or(|t| t.trim().is_empty())
+        && b.token.as_deref().is_none_or(|t| t.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -2281,11 +2306,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "matrix"
-        && config
-            .get("homeserver")
-            .is_none_or(|v| v.trim().is_empty())
-    {
+    if platform == "matrix" && config.get("homeserver").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "matrix 通道需要 config.homeserver（如 https://matrix.org）" })),
@@ -2338,7 +2359,9 @@ pub async fn create_channel(
         if !target_exists(&st.core, g) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "绑定的智能体或组不存在（智能体写 single:<id>，组写组 id）" })),
+                Json(
+                    json!({ "error": "绑定的智能体或组不存在（智能体写 single:<id>，组写组 id）" }),
+                ),
             )
                 .into_response();
         }
@@ -2353,6 +2376,7 @@ pub async fn create_channel(
         enabled: b.enabled.unwrap_or(true),
         group: b.group.clone().filter(|s| !s.trim().is_empty()),
         allowed_chats: b.allowed_chats.clone().unwrap_or_default(),
+        admins: b.admins.clone().unwrap_or_default(),
         account: b.account.clone().filter(|s| !s.trim().is_empty()),
         secret: b.secret.filter(|s| !s.trim().is_empty()),
         reply_webhook: b.reply_webhook.filter(|s| !s.trim().is_empty()),
@@ -2421,6 +2445,10 @@ pub async fn update_channel(
     }
     if let Some(v) = &b.allowed_chats {
         ch.allowed_chats = v.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
+    }
+    // 管理者账号：整表替换（空 = 清空；条目为外部用户 ID）
+    if let Some(v) = &b.admins {
+        ch.admins = v.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
     }
     if let Some(v) = &b.account {
         ch.account = if v.trim().is_empty() {
@@ -2744,6 +2772,7 @@ mod identity_gate_tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -2833,6 +2862,39 @@ mod identity_gate_tests {
         match admit(&core, &ch, &ctx("帮我做事", "u9", false, false)).await {
             GateDecision::Allow => {}
             _ => panic!("已绑定应放行"),
+        }
+    }
+
+    /// 管理者账号清单：身份管控开启时，清单命中的外部用户免 /pair 绑定直接放行。
+    /// 判权跨通道匹配（人在任一通道的管理者清单即凭证）——清单落在另一通道上同样生效
+    #[tokio::test]
+    async fn 身份管控_管理者清单豁免() {
+        let core = test_core();
+        let mut cfg = (*core.config()).clone();
+        cfg.identity.identity_required = true;
+        core.apply_config(cfg).unwrap();
+        let ch = chan(None);
+        // 管理者清单挂在另一个通道（napcat）上：判权跟人走，不跟执行通道走
+        let holder = Channel {
+            id: "nap-main".into(),
+            kind: "napcat".into(),
+            enabled: true,
+            admins: vec!["10086".into(), " 2515681159 ".into()],
+            ..chan(None)
+        };
+        save_channels(&core, &[ch.clone(), holder]).unwrap();
+        // 清单命中（含空白容差）：放行，不要求绑定
+        for uid in ["10086", "2515681159"] {
+            match admit(&core, &ch, &ctx("帮我做事", uid, false, false)).await {
+                GateDecision::Allow => {}
+                GateDecision::Ignore => panic!("管理员 {uid} 应豁免放行，却被忽略"),
+                GateDecision::Deny(m) => panic!("管理员 {uid} 应豁免放行，却被拒绝：{m}"),
+            }
+        }
+        // 清单未命中且未绑定：仍拒绝（给配对指引）
+        match admit(&core, &ch, &ctx("帮我做事", "u9", false, false)).await {
+            GateDecision::Deny(msg) => assert!(msg.contains("/pair"), "拒绝应含配对指引: {msg}"),
+            _ => panic!("非管理员未绑定应拒绝"),
         }
     }
 
@@ -3201,7 +3263,7 @@ mod cron_notify_tests {
 
 #[cfg(test)]
 mod plan_endpoint_tests {
-    
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // oneshot
@@ -3347,7 +3409,9 @@ mod plan_endpoint_tests {
             "树应含 src/main.rs：{v}"
         );
         assert!(
-            !nodes.iter().any(|n| n["path"].as_str().unwrap_or("").starts_with(".git")),
+            !nodes
+                .iter()
+                .any(|n| n["path"].as_str().unwrap_or("").starts_with(".git")),
             "不应含 .git"
         );
         // 读文件（分页）
@@ -3435,6 +3499,7 @@ mod channel_boundary_tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -3605,6 +3670,7 @@ mod plugin_secret_mask_tests {
                 enabled: true,
                 group: None,
                 allowed_chats: vec![],
+                admins: vec![],
                 account: None,
                 secret: None,
                 token: None,

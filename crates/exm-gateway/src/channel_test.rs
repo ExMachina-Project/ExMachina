@@ -269,7 +269,6 @@ pub async fn test_channel(State(st): State<AppState>, Path(id): Path<String>) ->
     .into_response()
 }
 
-
 // ---------------------------------------------------------------- 测试
 
 #[cfg(test)]
@@ -283,6 +282,7 @@ mod tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,

@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut port: u16 = std::env::var("EXM_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(4173);
+    let mut port: u16 = std::env::var("EXM_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4173);
     let mut host: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {

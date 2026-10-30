@@ -168,7 +168,11 @@ impl Settings {
                     .unwrap_or_else(|| "admin".into())
                     .trim()
                     .to_lowercase();
-                if v == "member" { "member".into() } else { "admin".into() }
+                if v == "member" {
+                    "member".into()
+                } else {
+                    "admin".into()
+                }
             },
             max_comment_chars: cfg_u64(ch, "maxCommentChars", 120).clamp(20, 800) as usize,
             source: ch.cfg("source").unwrap_or_else(|| "popular".into()),
@@ -404,10 +408,15 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
         let s = Settings::from_channel(ch);
         let mut state_probe = VideoState::load(core, &ch.id);
         state_probe.reset_day();
-        tools::register_act_gate(&sid, tools::ActGate::from_settings(&s, state_probe.actions_today));
+        tools::register_act_gate(
+            &sid,
+            tools::ActGate::from_settings(&s, state_probe.actions_today),
+        );
     }
     let injections = tools::build_injections(core, ch);
-    core.orchestrator().tools.inject_session_tools(&sid, injections);
+    core.orchestrator()
+        .tools
+        .inject_session_tools(&sid, injections);
     // 步数预算（防失控深挖）：通道面 maxWatchSteps 覆盖会话（默认 8）
     core.orchestrator()
         .tools
@@ -436,7 +445,9 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
         }
     };
     // 自主探索多轮工具调用需更长收束窗口：600s（原单轮投喂 300s）
-    let timed_out = tokio::time::timeout(Duration::from_secs(600), wait).await.is_err();
+    let timed_out = tokio::time::timeout(Duration::from_secs(600), wait)
+        .await
+        .is_err();
     if timed_out {
         // 超时中止：ChannelRun::run 内部的组还原 guard 会随 Drop 执行
         task.abort();
@@ -453,7 +464,10 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
     let st = tools::session_state(&sid);
     let (skipped, acted_notes) = {
         let mut g = st.lock().unwrap();
-        (std::mem::take(&mut g.skipped), std::mem::take(&mut g.acted_notes))
+        (
+            std::mem::take(&mut g.skipped),
+            std::mem::take(&mut g.acted_notes),
+        )
     };
     tools::drop_act_gate(&sid);
     tools::drop_session(&sid);
@@ -462,7 +476,12 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
     if out.trim().is_empty() {
         anyhow::bail!("智能体没有产出收束文本");
     }
-    Ok(WatchOutcome { text: out, acted, skipped, acted_notes })
+    Ok(WatchOutcome {
+        text: out,
+        acted,
+        skipped,
+        acted_notes,
+    })
 }
 
 /// 观看轮次任务框架（新 build_prompt）：只给候选清单 + 工具用法 + 产出要求，
@@ -485,7 +504,9 @@ fn build_prompt(s: &Settings, candidates: &[VideoItem]) -> String {
         _ => "视频平台",
     };
     let interact = if s.comment || s.reply {
-        let mut parts: Vec<String> = vec!["可以互动：经 video__act 发表评论或回复（回复目标必须是本会话已见的评论 id）。".into()];
+        let mut parts: Vec<String> = vec![
+            "可以互动：经 video__act 发表评论或回复（回复目标必须是本会话已见的评论 id）。".into(),
+        ];
         if s.dry_run {
             parts.push("注意：通道处于 dry-run 模式，act 只记录拟发内容，不会真正发出。".into());
         }
@@ -496,12 +517,18 @@ fn build_prompt(s: &Settings, candidates: &[VideoItem]) -> String {
     let interest = if s.interests.trim().is_empty() {
         String::new()
     } else {
-        format!("\n内容倾向参考（软偏好，不是硬约束）：{}\n", s.interests.trim())
+        format!(
+            "\n内容倾向参考（软偏好，不是硬约束）：{}\n",
+            s.interests.trim()
+        )
     };
     let style = if s.comment_style.trim().is_empty() {
         String::new()
     } else {
-        format!("\n评论风格提示（与人设冲突时以人设为准）：{}\n", s.comment_style.trim())
+        format!(
+            "\n评论风格提示（与人设冲突时以人设为准）：{}\n",
+            s.comment_style.trim()
+        )
     };
     let budget = format!(
         "\n预算提示：本轮工具调用步数上限 {} 步，达限后系统会要求你直接收束——材料够用就好，不必穷尽。\n",
@@ -597,9 +624,6 @@ struct VideoItem {
     views: u64,
 }
 
-
-
-
 fn video_key(v: &VideoItem) -> String {
     format!("{}:{}", v.platform, v.id)
 }
@@ -630,7 +654,9 @@ async fn fetch_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<Vide
                 // 游标轮换：每轮用不同的倾向词搜索，避免反复搜同一个词刷到同一批
                 let term = search_terms[interest_cursor(ch, &search_terms)].clone();
                 if let Ok(mut hits) = bili_search(ch, &term, s).await {
-                    hits.retain(|v| matches_keywords(v, &interest_terms) || matches_keywords(v, &search_terms));
+                    hits.retain(|v| {
+                        matches_keywords(v, &interest_terms) || matches_keywords(v, &search_terms)
+                    });
                     if !hits.is_empty() {
                         items = hits; // 倾向搜索命中优先，热门流丢弃（本轮不混排，倾向即选择）
                     }
@@ -669,11 +695,35 @@ fn interest_cursor(ch: &Channel, terms: &[String]) -> usize {
 /// 例：「优先二创其次是技术类」→ ["二创", "技术类"]；「只查看AI相关内容」→ ["AI"]。
 fn interest_search_terms(interests: &str) -> Vec<String> {
     const PREFIX_FILLERS: &[&str] = &[
-        "只查看", "只看", "优先看", "优先", "偏向", "偏爱", "喜欢看", "喜欢", "偏好", "多看",
-        "少看", "不要看", "不看", "避免看", "避免", "查看",
+        "只查看",
+        "只看",
+        "优先看",
+        "优先",
+        "偏向",
+        "偏爱",
+        "喜欢看",
+        "喜欢",
+        "偏好",
+        "多看",
+        "少看",
+        "不要看",
+        "不看",
+        "避免看",
+        "避免",
+        "查看",
     ];
     const JOINERS: &[&str] = &[
-        "相关", "其次是", "其次", "类型", "类的", "类", "为主", "以及", "还有", "都行", "的",
+        "相关",
+        "其次是",
+        "其次",
+        "类型",
+        "类的",
+        "类",
+        "为主",
+        "以及",
+        "还有",
+        "都行",
+        "的",
     ];
     let mut out = Vec::new();
     for seg in split_list(Some(interests)) {
@@ -712,7 +762,9 @@ fn interest_search_terms(interests: &str) -> Vec<String> {
             const GENERIC: &[&str] = &["内容", "视频", "东西", "玩意"];
             if core.chars().count() > 1
                 && !GENERIC.contains(&core)
-                && !out.iter().any(|o: &String| o.contains(core) || core.contains(o.as_str()))
+                && !out
+                    .iter()
+                    .any(|o: &String| o.contains(core) || core.contains(o.as_str()))
             {
                 out.push(core.to_string());
             }
@@ -740,8 +792,6 @@ async fn search_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<Vid
         _ => Ok(Vec::new()),
     }
 }
-
-
 
 async fn post_comment(
     ch: &Channel,
@@ -813,7 +863,8 @@ fn bili_cookie(ch: &Channel) -> String {
 }
 
 /// 通道级 buvid 缓存（共享单例）：(buvid3, Option<buvid4>)
-type BuvidCache = std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>, bool)>>;
+type BuvidCache =
+    std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>, bool)>>;
 fn buvid_cache() -> &'static BuvidCache {
     static CACHE: OnceLock<BuvidCache> = OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -1026,7 +1077,6 @@ async fn bili_popular(ch: &Channel, limit: usize) -> anyhow::Result<Vec<VideoIte
                     .unwrap_or("")
                     .to_string(),
                 views: x.pointer("/stat/view").and_then(as_u64).unwrap_or(0),
-
             })
         })
         .collect())
@@ -1080,13 +1130,10 @@ async fn bili_search(ch: &Channel, keyword: &str, _s: &Settings) -> anyhow::Resu
                 ),
                 author: strip_html(x.get("author").and_then(|v| v.as_str()).unwrap_or("")),
                 views: x.get("play").and_then(as_u64).unwrap_or(0),
-
             })
         })
         .collect())
 }
-
-
 
 async fn bili_post_comment(
     ch: &Channel,
@@ -1161,9 +1208,7 @@ async fn bili_post_comment(
 async fn bili_comment_visible(ch: &Channel, aid: u64, uid: &str) -> anyhow::Result<bool> {
     let body = bili_get(
         ch,
-        &format!(
-            "https://api.bilibili.com/x/v2/reply?pn=1&ps=20&oid={aid}&type=1&sort=2"
-        ),
+        &format!("https://api.bilibili.com/x/v2/reply?pn=1&ps=20&oid={aid}&type=1&sort=2"),
     )
     .await?;
     let replies = body
@@ -1274,11 +1319,16 @@ pub(crate) async fn bili_qr_poll(qrcode_key: &str) -> anyhow::Result<Result<Bili
             (k.trim() == name && !v.is_empty()).then(|| v.to_string())
         })
     };
-    let sessdata = pick("SESSDATA").ok_or_else(|| anyhow::anyhow!("登录成功但响应缺 SESSDATA Cookie"))?;
-    let bili_jct = pick("bili_jct").ok_or_else(|| anyhow::anyhow!("登录成功但响应缺 bili_jct Cookie"))?;
+    let sessdata =
+        pick("SESSDATA").ok_or_else(|| anyhow::anyhow!("登录成功但响应缺 SESSDATA Cookie"))?;
+    let bili_jct =
+        pick("bili_jct").ok_or_else(|| anyhow::anyhow!("登录成功但响应缺 bili_jct Cookie"))?;
     let dede_user_id = pick("DedeUserID").unwrap_or_default();
     // 用新 Cookie 查一次 nav 拿用户名，顺带校验登录态真的可用
-    let mut cookie_parts = vec![format!("SESSDATA={sessdata}"), format!("bili_jct={bili_jct}")];
+    let mut cookie_parts = vec![
+        format!("SESSDATA={sessdata}"),
+        format!("bili_jct={bili_jct}"),
+    ];
     if !dede_user_id.is_empty() {
         cookie_parts.push(format!("DedeUserID={dede_user_id}"));
     }
@@ -1294,7 +1344,10 @@ pub(crate) async fn bili_qr_poll(qrcode_key: &str) -> anyhow::Result<Result<Bili
         .await
         .map_err(|e| anyhow::anyhow!("nav 响应不是 JSON：{e}"))?;
     if nav.get("code").and_then(|c| c.as_i64()) != Some(0)
-        || !nav.pointer("/data/isLogin").and_then(|v| v.as_bool()).unwrap_or(false)
+        || !nav
+            .pointer("/data/isLogin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     {
         anyhow::bail!("扫码成功但登录态校验未通过：{}", api_message(&nav));
     }
@@ -1303,7 +1356,12 @@ pub(crate) async fn bili_qr_poll(qrcode_key: &str) -> anyhow::Result<Result<Bili
         .and_then(|v| v.as_str())
         .unwrap_or("bilibili")
         .to_string();
-    Ok(Ok(BiliQrLogin { sessdata, bili_jct, dede_user_id, uname }))
+    Ok(Ok(BiliQrLogin {
+        sessdata,
+        bili_jct,
+        dede_user_id,
+        uname,
+    }))
 }
 
 pub(crate) async fn probe_bilibili(ch: &Channel) -> Result<String, ProbeError> {
@@ -1457,7 +1515,6 @@ fn yt_item(x: &Value) -> Option<VideoItem> {
     })
 }
 
-
 async fn yt_post_comment(
     ch: &Channel,
     item: &VideoItem,
@@ -1562,7 +1619,6 @@ fn as_u64(v: &Value) -> Option<u64> {
         .or_else(|| v.as_f64().map(|f| f as u64))
 }
 
-
 /// B 站搜索标题/简介里带 `<em class="keyword">` 高亮标签，展示前去掉标签保留文字。
 fn strip_html(s: &str) -> String {
     let mut out = String::new();
@@ -1604,6 +1660,7 @@ mod tests {
             enabled,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -1622,7 +1679,11 @@ mod tests {
 
         // 初始：无通道 → 无全局工具
         tools::reconcile_ondemand(&core);
-        assert!(core.orchestrator().tools.dynamic_tool("video__summary").is_none());
+        assert!(core
+            .orchestrator()
+            .tools
+            .dynamic_tool("video__summary")
+            .is_none());
 
         // 启用 → 注册（含 act）
         crate::platform::save_channels(&core, &[mk(true)]).unwrap();
@@ -1640,7 +1701,11 @@ mod tests {
         // 停用 → 注销回收
         crate::platform::save_channels(&core, &[mk(false)]).unwrap();
         tools::reconcile_ondemand(&core);
-        assert!(core.orchestrator().tools.dynamic_tool("video__summary").is_none());
+        assert!(core
+            .orchestrator()
+            .tools
+            .dynamic_tool("video__summary")
+            .is_none());
     }
 
     #[test]
@@ -1653,7 +1718,9 @@ mod tests {
         let core = exm_core::Core::with_config(cfg).expect("创建 Core 失败");
 
         // 管理者配对码：兑换即落 admin
-        let admin_code = core.issue_pairing_code_role("管理员", None, 600, "admin").unwrap();
+        let admin_code = core
+            .issue_pairing_code_role("管理员", None, 600, "admin")
+            .unwrap();
         let idn = core
             .redeem_pairing(&admin_code.code, "tg-main", "u1", "张三", "member")
             .unwrap();
@@ -1678,7 +1745,9 @@ mod tests {
             role: String::new(),
         };
         core.save_pairing_code(&legacy).unwrap();
-        let idn3 = core.redeem_pairing("legacy001", "tg-main", "u3", "王五", "member").unwrap();
+        let idn3 = core
+            .redeem_pairing("legacy001", "tg-main", "u3", "王五", "member")
+            .unwrap();
         assert_eq!(idn3.role, "member");
     }
 
@@ -1690,6 +1759,7 @@ mod tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -1718,6 +1788,7 @@ mod tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -1762,6 +1833,7 @@ mod tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -1864,7 +1936,10 @@ mod watch_loop_tests {
     fn 跳过理由_会话状态与收束文本() {
         let sid = "skip-test";
         let st = tools::session_state(sid);
-        st.lock().unwrap().skipped.push("候选均不感兴趣：题材重复".into());
+        st.lock()
+            .unwrap()
+            .skipped
+            .push("候选均不感兴趣：题材重复".into());
         let skipped = st.lock().unwrap().skipped.clone();
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("题材重复"));
@@ -1896,6 +1971,7 @@ mod tick_smoke_tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -1925,6 +2001,7 @@ mod tick_smoke_tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,

@@ -10,8 +10,13 @@
 //! 断线优先 Resume(op6，补发漏掉的事件)；op9 Invalid Session 回退重新 Identify。
 //! 监督循环每 5 秒对账：新增账号拉起会话，删除/停用/token 变更的账号回收任务。
 
-use crate::channel_util::{builtin_command, classify_attachment, first_seen, media_placeholder, voice_transcript_note};
-use crate::platform::{admit, caps, report_status, spawn_reply, GateDecision, Channel, ChannelRun, InboundCtx, MediaItem};
+use crate::channel_util::{
+    builtin_command, classify_attachment, first_seen, media_placeholder, voice_transcript_note,
+};
+use crate::platform::{
+    admit, caps, report_status, spawn_reply, Channel, ChannelRun, GateDecision, InboundCtx,
+    MediaItem,
+};
 use exm_core::Core;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
@@ -20,8 +25,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 
 const API: &str = "https://discord.com/api/v10";
 /// GUILDS(1<<0) | GUILD_MESSAGES(1<<9) | DIRECT_MESSAGES(1<<12) | MESSAGE_CONTENT(1<<15)
@@ -59,7 +64,10 @@ async fn reconcile(core: &Arc<Core>) {
         .filter(|c| {
             c.kind == "discord"
                 && c.enabled
-                && c.token.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                && c.token
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false)
         })
         .collect();
 
@@ -85,19 +93,33 @@ async fn reconcile(core: &Arc<Core>) {
         let ch_task = ch.clone();
         let fp = fingerprint(ch);
         let handle = tokio::spawn(async move { session_loop(core, ch_task).await });
-        guards.insert(ch.id.clone(), Sess { handle, fingerprint: fp });
+        guards.insert(
+            ch.id.clone(),
+            Sess {
+                handle,
+                fingerprint: fp,
+            },
+        );
     }
 }
 
 async fn session_loop(core: Arc<Core>, ch: Channel) {
     let token = ch.token.clone().unwrap_or_default();
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(30)).build() else {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    else {
         eprintln!("[discord:{}] HTTP 客户端构建失败", ch.id);
         return;
     };
     let auth = format!("Bot {token}");
     // 自检：token 有效性 + 机器人身份
-    match client.get(format!("{API}/users/@me")).header("Authorization", &auth).send().await {
+    match client
+        .get(format!("{API}/users/@me"))
+        .header("Authorization", &auth)
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => {
             if let Ok(v) = r.json::<Value>().await {
                 let name = v.get("username").and_then(|x| x.as_str()).unwrap_or("?");
@@ -120,11 +142,16 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
     // (session_id, seq)：断线优先 Resume 补发
     let mut session: Option<(String, i64)> = None;
     let mut bot_id = String::new(); // READY 时捕获本 bot 用户 id（提及归一化用）
-    // 断线退避：连续失败按 3→6→12…（封顶 300s）指数递增；连结成功（READY/RESUMED）即复位。
-    // 否则 token 失效或网关维护期间会每 3 秒重连一次。
+                                    // 断线退避：连续失败按 3→6→12…（封顶 300s）指数递增；连结成功（READY/RESUMED）即复位。
+                                    // 否则 token 失效或网关维护期间会每 3 秒重连一次。
     let mut fail_streak: u32 = 0;
     loop {
-        let gw = match client.get(format!("{API}/gateway/bot")).header("Authorization", &auth).send().await {
+        let gw = match client
+            .get(format!("{API}/gateway/bot"))
+            .header("Authorization", &auth)
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => match r.json::<Value>().await {
                 Ok(v) => v.get("url").and_then(|u| u.as_str()).map(|u| u.to_string()),
                 _ => None,
@@ -175,7 +202,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
 
         // 鉴权：有 session 走 Resume 补发，否则 Identify
         let auth_msg = match &session {
-            Some((sid, seq)) => json!({ "op": 6, "d": { "token": token, "session_id": sid, "seq": seq } }),
+            Some((sid, seq)) => {
+                json!({ "op": 6, "d": { "token": token, "session_id": sid, "seq": seq } })
+            }
             None => json!({
                 "op": 2,
                 "d": {
@@ -189,7 +218,11 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                 }
             }),
         };
-        if write.send(Message::text(auth_msg.to_string())).await.is_err() {
+        if write
+            .send(Message::text(auth_msg.to_string()))
+            .await
+            .is_err()
+        {
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -352,7 +385,10 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
 
 /// MESSAGE_CREATE → (频道 id, 正文)。机器人自己的消息一律忽略。
 fn parse_message(d: &Value) -> Option<(String, String)> {
-    if d.pointer("/author/bot").and_then(|x| x.as_bool()).unwrap_or(false) {
+    if d.pointer("/author/bot")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
     let channel_id = d.get("channel_id").and_then(|x| x.as_str())?.to_string();
@@ -367,11 +403,15 @@ fn parse_attachments(d: &Value) -> Vec<(String, String, String)> {
     if let Some(list) = d.get("attachments").and_then(|x| x.as_array()) {
         for a in list {
             let url = a.get("url").and_then(|x| x.as_str()).unwrap_or("");
-            let name = a.get("filename").and_then(|x| x.as_str()).unwrap_or("attachment.bin");
+            let name = a
+                .get("filename")
+                .and_then(|x| x.as_str())
+                .unwrap_or("attachment.bin");
             if url.is_empty() {
                 continue;
             }
-            let kind = classify_attachment(a.get("content_type").and_then(|x| x.as_str()).unwrap_or(""));
+            let kind =
+                classify_attachment(a.get("content_type").and_then(|x| x.as_str()).unwrap_or(""));
             out.push((kind.to_string(), url.to_string(), name.to_string()));
         }
     }
@@ -419,13 +459,26 @@ async fn handle_message(
             .send()
             .await;
     }
-    let Some((run, rx)) = ChannelRun::begin(core, ch, channel_id).await else { return };
+    let Some((run, rx)) = ChannelRun::begin(core, ch, channel_id).await else {
+        return;
+    };
     // 会话来源登记：与其他适配器同口径（绑定身份用 id，未绑定回退通道主体键）——
     // 曾登记成 role 且缺省空串，导致 token 配额等按来源计的治理对该通道失明
-    core.stamp_session_origin(&run.session_id, external_id, core.identity_of(&ch.id, external_id).map(|i| i.id).unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id)).as_str());
+    core.stamp_session_origin(
+        &run.session_id,
+        external_id,
+        core.identity_of(&ch.id, external_id)
+            .map(|i| i.id)
+            .unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id))
+            .as_str(),
+    );
     // 入站媒体注入（组 6.4）：图片进多模态暂存，文件附路径说明
     let note = crate::platform::stage_inbound_media(core, &run.session_id, &media);
-    let text = if note.is_empty() { text.to_string() } else { format!("{text}{note}") };
+    let text = if note.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}{note}")
+    };
     let client2 = client.clone();
     let token2 = token.to_string();
     let cid = channel_id.to_string();
@@ -471,7 +524,10 @@ async fn dc_send_media(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "media".into());
     let form = reqwest::multipart::Form::new()
-        .text("payload_json", json!({ "content": item.caption }).to_string())
+        .text(
+            "payload_json",
+            json!({ "content": item.caption }).to_string(),
+        )
         .part(
             "files[0]",
             reqwest::multipart::Part::bytes(bytes).file_name(name),
@@ -487,7 +543,8 @@ async fn dc_send_media(
         .unwrap_or(false)
 }
 
-async fn send_message(client: &reqwest::Client, token: &str, channel_id: &str, text: &str) {    if token.trim().is_empty() {
+async fn send_message(client: &reqwest::Client, token: &str, channel_id: &str, text: &str) {
+    if token.trim().is_empty() {
         return;
     }
     match client
@@ -519,7 +576,8 @@ mod tests {
     fn 消息解析_机器人自消息忽略() {
         let bot = json!({ "author": { "bot": true, "id": "9" }, "channel_id": "C1", "content": "我自己说的" });
         assert!(parse_message(&bot).is_none(), "bot 消息一律忽略");
-        let human = json!({ "author": { "id": "1" }, "channel_id": "C1", "content": "<@99> 部署一下" });
+        let human =
+            json!({ "author": { "id": "1" }, "channel_id": "C1", "content": "<@99> 部署一下" });
         let (cid, text) = parse_message(&human).expect("人类消息应解析");
         assert_eq!(cid, "C1");
         assert_eq!(text, "部署一下");
@@ -528,7 +586,11 @@ mod tests {
     /// 提及剥离：成员与角色两种片段都剥；未闭合不吞正文
     #[test]
     fn 提及剥离_成员与角色片段() {
-        assert_eq!(strip_mentions("<@123> <@&456> 上线检查"), "上线检查", "剥完应收敛首尾空白");
+        assert_eq!(
+            strip_mentions("<@123> <@&456> 上线检查"),
+            "上线检查",
+            "剥完应收敛首尾空白"
+        );
         assert_eq!(strip_mentions("纯文本"), "纯文本");
         assert_eq!(strip_mentions("未闭合<@123"), "未闭合<@123");
     }
@@ -545,15 +607,26 @@ mod tests {
         });
         let atts = parse_attachments(&d);
         assert_eq!(atts.len(), 2, "缺 url 的条目不收：{atts:?}");
-        assert_eq!(atts[0], ("image".to_string(), "https://cdn/1.png".to_string(), "shot.png".to_string()));
+        assert_eq!(
+            atts[0],
+            (
+                "image".to_string(),
+                "https://cdn/1.png".to_string(),
+                "shot.png".to_string()
+            )
+        );
         assert_eq!(atts[1].0, "file", "非图片 content_type 归文件");
         // 无附件字段（纯文本消息）
         assert!(parse_attachments(&json!({ "content": "hi" })).is_empty());
         // content_type 缺失时保守归文件
-        let no_type = parse_attachments(&json!({ "attachments": [{ "filename": "x.bin", "url": "https://cdn/3" }] }));
+        let no_type = parse_attachments(
+            &json!({ "attachments": [{ "filename": "x.bin", "url": "https://cdn/3" }] }),
+        );
         assert_eq!(no_type[0].0, "file");
         // 音频附件（Discord 按住说话即 audio/ogg 形态）归 voice：触发占位计「语音」与转写
-        let voice = parse_attachments(&json!({ "attachments": [{ "filename": "msg.ogg", "content_type": "audio/ogg", "url": "https://cdn/4.ogg" }] }));
+        let voice = parse_attachments(
+            &json!({ "attachments": [{ "filename": "msg.ogg", "content_type": "audio/ogg", "url": "https://cdn/4.ogg" }] }),
+        );
         assert_eq!(voice[0].0, "voice", "音频附件应归 voice");
     }
 }

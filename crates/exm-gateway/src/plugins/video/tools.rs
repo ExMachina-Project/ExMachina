@@ -33,8 +33,9 @@ pub(crate) struct WatchSession {
 
 /// 全局会话表（session_id → 观看状态；进程生命周期）
 fn watch_sessions() -> &'static Mutex<std::collections::HashMap<String, Arc<Mutex<WatchSession>>>> {
-    static S: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Arc<Mutex<WatchSession>>>>> =
-        std::sync::OnceLock::new();
+    static S: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, Arc<Mutex<WatchSession>>>>,
+    > = std::sync::OnceLock::new();
     S.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -87,7 +88,10 @@ fn is_bare_id(s: &str) -> bool {
         return !num.is_empty() && num.chars().all(|c| c.is_ascii_digit());
     }
     // YouTube videoId：恰 11 位、字母数字-_、非 URL
-    s.len() == 11 && !s.contains('/') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    s.len() == 11
+        && !s.contains('/')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// 从 B 站 URL 抽取 BV 号（bilibili.com/video/BV…；容忍查询串/锚点）
@@ -96,17 +100,23 @@ fn extract_bili_from_url(url: &str) -> Option<String> {
     let re = RE.get_or_init(|| {
         regex::Regex::new(r"(?:bilibili\.com|b23\.tv)/video/(BV[0-9A-Za-z]{8,})").unwrap()
     });
-    re.captures(url).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+    re.captures(url)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 /// 从 YouTube URL 抽取 videoId（watch?v= / youtu.be/ / shorts/ / live/）
 fn extract_yt_from_url(url: &str) -> Option<String> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r#"(?:youtube\.com/(?:watch\?v=|shorts/|live/)|youtu\.be/)([0-9A-Za-z_-]{11})"#)
-            .unwrap()
+        regex::Regex::new(
+            r#"(?:youtube\.com/(?:watch\?v=|shorts/|live/)|youtu\.be/)([0-9A-Za-z_-]{11})"#,
+        )
+        .unwrap()
     });
-    re.captures(url).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+    re.captures(url)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 /// b23.tv 短链一层重定向展开（GET 跟随一次 Location；失败返回 None 原样透传）
@@ -294,7 +304,8 @@ fn ondemand_fp() -> &'static Mutex<Option<OndemandFp>> {
 /// 与 reconcile() 同周期调用（10s 内收敛）。
 pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
     // 各平台取首个启用通道（与 push_channel_text 取 first 同口径）
-    let mut by_kind: std::collections::BTreeMap<String, Channel> = std::collections::BTreeMap::new();
+    let mut by_kind: std::collections::BTreeMap<String, Channel> =
+        std::collections::BTreeMap::new();
     for ch in platform::load_channels(core) {
         if ch.enabled && super::is_video_platform(&ch.kind) && !by_kind.contains_key(&ch.kind) {
             by_kind.insert(ch.kind.clone(), ch);
@@ -314,8 +325,14 @@ pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
     let gateway = core.orchestrator().tools.clone();
     // 先全部注销（通道全停时清面；平台消失时回收该平台工具）
     for name in [
-        "video__summary", "video__subtitle", "video__danmaku", "video__comments",
-        "video__uploader", "video__related", "video__search", "video__act",
+        "video__summary",
+        "video__subtitle",
+        "video__danmaku",
+        "video__comments",
+        "video__uploader",
+        "video__related",
+        "video__search",
+        "video__act",
     ] {
         gateway.unregister_dynamic_tool(name);
     }
@@ -388,7 +405,8 @@ async fn dispatch_tool(
     args: Value,
 ) -> anyhow::Result<(String, Vec<String>)> {
     // videoId 归一收口：所有吃 videoId 的工具统一过 resolve（裸号/长链/短链 → 归一 id）
-    let vid = |k: &str| -> Option<String> { args.get(k).and_then(|v| v.as_str()).map(str::to_string) };
+    let vid =
+        |k: &str| -> Option<String> { args.get(k).and_then(|v| v.as_str()).map(str::to_string) };
     match name {
         "video__summary" => {
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
@@ -396,33 +414,73 @@ async fn dispatch_tool(
         }
         "video__subtitle" => {
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_subtitle(ch, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1)).await.map(|s| (s, vec![]))
+            tool_subtitle(
+                ch,
+                id,
+                args.get("page").and_then(|p| p.as_u64()).unwrap_or(1),
+            )
+            .await
+            .map(|s| (s, vec![]))
         }
         "video__danmaku" => {
             if ch.kind != "bilibili" {
-                return Ok(("该平台无弹幕数据（YouTube 不提供弹幕；请用评论/字幕了解观众反应）".into(), vec![]));
+                return Ok((
+                    "该平台无弹幕数据（YouTube 不提供弹幕；请用评论/字幕了解观众反应）".into(),
+                    vec![],
+                ));
             }
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_danmaku(ch, id, args.get("segment").and_then(|s| s.as_u64()).map(|s| s as i64)).await.map(|s| (s, vec![]))
+            tool_danmaku(
+                ch,
+                id,
+                args.get("segment")
+                    .and_then(|s| s.as_u64())
+                    .map(|s| s as i64),
+            )
+            .await
+            .map(|s| (s, vec![]))
         }
         "video__comments" => {
-            let sort = args.get("sort").and_then(|s| s.as_str()).unwrap_or("hot").to_string();
+            let sort = args
+                .get("sort")
+                .and_then(|s| s.as_str())
+                .unwrap_or("hot")
+                .to_string();
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_comments(ch, st, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1), &sort).await.map(|s| (s, vec![]))
+            tool_comments(
+                ch,
+                st,
+                id,
+                args.get("page").and_then(|p| p.as_u64()).unwrap_or(1),
+                &sort,
+            )
+            .await
+            .map(|s| (s, vec![]))
         }
-        "video__uploader" => tool_uploader(ch, vid("uploaderId").unwrap_or_default()).await.map(|s| (s, vec![])),
+        "video__uploader" => tool_uploader(ch, vid("uploaderId").unwrap_or_default())
+            .await
+            .map(|s| (s, vec![])),
         "video__related" => {
             if ch.kind != "bilibili" {
-                return Ok(("该平台工具暂不提供（YouTube 相关推荐请用 video__search）".into(), vec![]));
+                return Ok((
+                    "该平台工具暂不提供（YouTube 相关推荐请用 video__search）".into(),
+                    vec![],
+                ));
             }
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
             tool_related(ch, id).await.map(|s| (s, vec![]))
         }
-        "video__search" => tool_search(ch, vid("query").unwrap_or_default()).await.map(|s| (s, vec![])),
+        "video__search" => tool_search(ch, vid("query").unwrap_or_default())
+            .await
+            .map(|s| (s, vec![])),
         "video__shots" => {
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
             let start = args.get("startSec").and_then(|v| v.as_u64());
-            let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(4).clamp(1, 8);
+            let count = args
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(4)
+                .clamp(1, 8);
             tool_shots(core, ch, &id, start, count as usize).await
         }
         "video__act" => {
@@ -431,7 +489,9 @@ async fn dispatch_tool(
             if let Some(obj) = a.as_object_mut() {
                 obj.insert("videoId".into(), serde_json::Value::String(id));
             }
-            tool_act(core, ch, st, session, a).await.map(|s| (s, vec![]))
+            tool_act(core, ch, st, session, a)
+                .await
+                .map(|s| (s, vec![]))
         }
         other => anyhow::bail!("未知视频工具：{other}"),
     }
@@ -440,7 +500,11 @@ async fn dispatch_tool(
 // ---------------------------------------------------------------- 工具实现
 
 fn placeholder(v: &str) -> String {
-    if v.trim().is_empty() { "（未知）".into() } else { v.to_string() }
+    if v.trim().is_empty() {
+        "（未知）".into()
+    } else {
+        v.to_string()
+    }
 }
 
 /// video__summary：双平台元信息
@@ -450,7 +514,11 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
     }
     match ch.kind.as_str() {
         "bilibili" => {
-            let body = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+            let body = bili_get(
+                ch,
+                &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+            )
+            .await?;
             api_ok(&body)?;
             let d = body.get("data").cloned().unwrap_or(Value::Null);
             let dur = d.get("duration").and_then(as_u64).unwrap_or(0);
@@ -471,11 +539,15 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
         }
         "youtube" => {
             let key = yt_key(ch)?;
-            let body = yt_get("videos", &[
-                ("part", "snippet,statistics,contentDetails".into()),
-                ("id", video_id.clone()),
-                ("key", key),
-            ]).await?;
+            let body = yt_get(
+                "videos",
+                &[
+                    ("part", "snippet,statistics,contentDetails".into()),
+                    ("id", video_id.clone()),
+                    ("key", key),
+                ],
+            )
+            .await?;
             let item = body.pointer("/items/0").cloned().unwrap_or(Value::Null);
             if item.is_null() {
                 anyhow::bail!("YouTube 未找到视频：{video_id}");
@@ -509,28 +581,60 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
     }
     match ch.kind.as_str() {
         "bilibili" => {
-            let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+            let view = bili_get(
+                ch,
+                &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+            )
+            .await?;
             api_ok(&view)?;
             let d = view.get("data").cloned().unwrap_or(Value::Null);
-            let cid = d.pointer("/pages/0/cid").and_then(as_u64).or_else(|| d.get("cid").and_then(as_u64)).unwrap_or(0);
+            let cid = d
+                .pointer("/pages/0/cid")
+                .and_then(as_u64)
+                .or_else(|| d.get("cid").and_then(as_u64))
+                .unwrap_or(0);
             if cid == 0 {
                 anyhow::bail!("无法取得字幕轨 cid");
             }
-            let player = bili_get(ch, &format!("https://api.bilibili.com/x/player/v2?bvid={video_id}&cid={cid}")).await?;
-            let subs = player.pointer("/data/subtitle/subtitles").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-            let url = subs.iter()
-                .find(|s| s.get("lan").and_then(|l| l.as_str()).map(|l| l.contains("zh")).unwrap_or(false))
+            let player = bili_get(
+                ch,
+                &format!("https://api.bilibili.com/x/player/v2?bvid={video_id}&cid={cid}"),
+            )
+            .await?;
+            let subs = player
+                .pointer("/data/subtitle/subtitles")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let url = subs
+                .iter()
+                .find(|s| {
+                    s.get("lan")
+                        .and_then(|l| l.as_str())
+                        .map(|l| l.contains("zh"))
+                        .unwrap_or(false)
+                })
                 .or_else(|| subs.first())
                 .and_then(|s| s.get("subtitle_url").and_then(|u| u.as_str()));
             let Some(mut url) = url.map(str::to_string) else {
                 return Ok("该视频无字幕（B站无 CC 字幕且无 AI 字幕）。请用 video__danmaku / video__comments 了解内容与观众反应".into());
             };
-            if url.starts_with("//") { url = format!("https:{url}"); }
-            let doc = http_client().get(&url).send().await
+            if url.starts_with("//") {
+                url = format!("https:{url}");
+            }
+            let doc = http_client()
+                .get(&url)
+                .send()
+                .await
                 .map_err(|e| anyhow::anyhow!("字幕下载失败：{e}"))?
-                .json::<Value>().await
+                .json::<Value>()
+                .await
                 .map_err(|e| anyhow::anyhow!("字幕解析失败：{e}"))?;
-            let lines = doc.get("body").and_then(|b| b.as_array()).cloned().unwrap_or_default();
+            let lines = doc
+                .get("body")
+                .and_then(|b| b.as_array())
+                .cloned()
+                .unwrap_or_default();
             if lines.is_empty() {
                 return Ok("该视频无字幕（字幕轨为空）".into());
             }
@@ -539,17 +643,43 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
         "youtube" => {
             // captions.list 需 OAuth；用 API Key 能列轨，正文多数需权限——失败时明确降级说明
             let key = yt_key(ch)?;
-            let body = yt_get("captions", &[("part", "snippet".into()), ("videoId", video_id.clone()), ("key", key)]).await?;
-            let items = body.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let body = yt_get(
+                "captions",
+                &[
+                    ("part", "snippet".into()),
+                    ("videoId", video_id.clone()),
+                    ("key", key),
+                ],
+            )
+            .await?;
+            let items = body
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             if items.is_empty() {
                 return Ok("该视频无字幕（YouTube 无 caption 轨）。请用 video__summary 的简介与 video__comments 了解内容".into());
             }
-            let track = items.iter()
-                .find(|t| t.pointer("/snippet/language").and_then(|l| l.as_str()).map(|l| l.starts_with("zh")).unwrap_or(false))
+            let track = items
+                .iter()
+                .find(|t| {
+                    t.pointer("/snippet/language")
+                        .and_then(|l| l.as_str())
+                        .map(|l| l.starts_with("zh"))
+                        .unwrap_or(false)
+                })
                 .or_else(|| items.first());
-            let Some(track) = track else { return Ok("该视频无字幕".into()); };
-            let lang = track.pointer("/snippet/language").and_then(|l| l.as_str()).unwrap_or("?");
-            let name = track.pointer("/snippet/name").and_then(|l| l.as_str()).unwrap_or("");
+            let Some(track) = track else {
+                return Ok("该视频无字幕".into());
+            };
+            let lang = track
+                .pointer("/snippet/language")
+                .and_then(|l| l.as_str())
+                .unwrap_or("?");
+            let name = track
+                .pointer("/snippet/name")
+                .and_then(|l| l.as_str())
+                .unwrap_or("");
             Ok(format!(
                 "该视频有字幕轨（{lang} {name}），但正文下载需视频所有者授权（OAuth caption download）。\n建议：简介 + 评论区（video__comments）已足够形成观感；如需逐句内容可结合弹幕（若为B站）"
             ))
@@ -561,7 +691,9 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
 fn format_subtitle_pages(lines: &[Value], page: usize) -> anyhow::Result<String> {
     let total_pages = lines.len().div_ceil(SUBTITLE_PAGE_LINES);
     if page > total_pages {
-        return Ok(format!("没有更多字幕（共 {total_pages} 页，当前请求第 {page} 页）"));
+        return Ok(format!(
+            "没有更多字幕（共 {total_pages} 页，当前请求第 {page} 页）"
+        ));
     }
     let start = (page - 1) * SUBTITLE_PAGE_LINES;
     let end = std::cmp::min(start + SUBTITLE_PAGE_LINES, lines.len());
@@ -574,7 +706,10 @@ fn format_subtitle_pages(lines: &[Value], page: usize) -> anyhow::Result<String>
         out.push_str(&format!("[{mm:02}:{ss:02}] {text}\n"));
     }
     let nav = if page < total_pages {
-        format!("\n（第 {page}/{total_pages} 页；下一页传 page={}）", page + 1)
+        format!(
+            "\n（第 {page}/{total_pages} 页；下一页传 page={}）",
+            page + 1
+        )
     } else {
         format!("\n（第 {page}/{total_pages} 页；已到末页）")
     };
@@ -582,35 +717,61 @@ fn format_subtitle_pages(lines: &[Value], page: usize) -> anyhow::Result<String>
 }
 
 /// video__danmaku：B站弹幕 protobuf 接口（分段抽样）
-async fn tool_danmaku(ch: &Channel, video_id: String, segment: Option<i64>) -> anyhow::Result<String> {
-    let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+async fn tool_danmaku(
+    ch: &Channel,
+    video_id: String,
+    segment: Option<i64>,
+) -> anyhow::Result<String> {
+    let view = bili_get(
+        ch,
+        &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+    )
+    .await?;
     api_ok(&view)?;
     let d = view.get("data").cloned().unwrap_or(Value::Null);
     let aid = d.get("aid").and_then(as_u64).unwrap_or(0);
-    let cid = d.pointer("/pages/0/cid").and_then(as_u64).or_else(|| d.get("cid").and_then(as_u64)).unwrap_or(0);
+    let cid = d
+        .pointer("/pages/0/cid")
+        .and_then(as_u64)
+        .or_else(|| d.get("cid").and_then(as_u64))
+        .unwrap_or(0);
     if aid == 0 || cid == 0 {
         anyhow::bail!("无法定位弹幕轨（aid/cid 缺失）");
     }
     let duration = d.get("duration").and_then(as_u64).unwrap_or(0);
     let total_segs = std::cmp::max(1, duration.div_ceil(360) as i64); // 每段 6 分钟
-    // 请求段：指定段或全部前 6 段（全片概览）
+                                                                      // 请求段：指定段或全部前 6 段（全片概览）
     let segs: Vec<i64> = match segment {
         Some(s) if (0..total_segs).contains(&s) => vec![s],
         Some(s) => {
-            return Ok(format!("分段序号越界（请求段 {s}；该视频共 {total_segs} 段，有效 0..{}）", total_segs - 1))
+            return Ok(format!(
+                "分段序号越界（请求段 {s}；该视频共 {total_segs} 段，有效 0..{}）",
+                total_segs - 1
+            ))
         }
         None => (0..std::cmp::min(6, total_segs)).collect(),
     };
     let mut out = String::new();
     for seg in segs {
         // protobuf 弹幕：SegSoC 接口（非官方稳定 API；失败降级为结构化错误）
-        let url = format!("https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid={aid}&segment_index={}", seg + 1);
-        let resp = bili_request(ch, http_client().get(&url)).send().await
+        let url = format!(
+            "https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid={aid}&segment_index={}",
+            seg + 1
+        );
+        let resp = bili_request(ch, http_client().get(&url))
+            .send()
+            .await
             .map_err(|e| anyhow::anyhow!("弹幕请求失败（段 {seg}）：{e}"))?;
         if !resp.status().is_success() {
-            anyhow::bail!("弹幕接口 HTTP {}（段 {seg}）；可改用评论/字幕继续", resp.status());
+            anyhow::bail!(
+                "弹幕接口 HTTP {}（段 {seg}）；可改用评论/字幕继续",
+                resp.status()
+            );
         }
-        let bytes = resp.bytes().await.map_err(|e| anyhow::anyhow!("弹幕读取失败：{e}"))?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| anyhow::anyhow!("弹幕读取失败：{e}"))?;
         let dans = parse_danmaku(&bytes);
         if dans.is_empty() {
             if segment.is_some() {
@@ -619,7 +780,13 @@ async fn tool_danmaku(ch: &Channel, video_id: String, segment: Option<i64>) -> a
             continue;
         }
         let t0 = seg * 360;
-        out.push_str(&format!("—— 时间段 {}:{} 至 {}:{} ——\n", t0 / 60, t0 % 60, (t0 + 360) / 60, (t0 + 360) % 60));
+        out.push_str(&format!(
+            "—— 时间段 {}:{} 至 {}:{} ——\n",
+            t0 / 60,
+            t0 % 60,
+            (t0 + 360) / 60,
+            (t0 + 360) % 60
+        ));
         // 抽样：按密度取前 25 条（弹幕流内高密度时刻天然靠前出现），限量防刷屏
         for (ts, text) in dans.iter().take(25) {
             let mm = (t0 + ts / 1000) / 60;
@@ -631,7 +798,11 @@ async fn tool_danmaku(ch: &Channel, video_id: String, segment: Option<i64>) -> a
         return Ok("该视频（所请求分段）无弹幕数据".into());
     }
     if segment.is_none() {
-        out.push_str(&format!("\n（全片概览：前 {} 段抽样；指定段传 segment 0..{} 深入）", std::cmp::min(6, total_segs), total_segs - 1));
+        out.push_str(&format!(
+            "\n（全片概览：前 {} 段抽样；指定段传 segment 0..{} 深入）",
+            std::cmp::min(6, total_segs),
+            total_segs - 1
+        ));
     }
     Ok(out)
 }
@@ -643,7 +814,10 @@ fn parse_danmaku(bytes: &[u8]) -> Vec<(i64, String)> {
     let mut i = 0usize;
     while i < bytes.len() {
         // 每条弹幕 = 长度前缀（varint）+ DanmakuElem 消息体
-        let (len, adv) = match read_varint(&bytes[i..]) { Some(v) => v, None => break };
+        let (len, adv) = match read_varint(&bytes[i..]) {
+            Some(v) => v,
+            None => break,
+        };
         i += adv;
         let end = std::cmp::min(i + len as usize, bytes.len());
         if let Some((ts, text)) = parse_danmaku_elem(&bytes[i..end]) {
@@ -666,13 +840,22 @@ fn parse_danmaku_elem(msg: &[u8]) -> Option<(i64, String)> {
         let field = (tag >> 3) as u8;
         let wire = (tag & 0x7) as u8;
         match wire {
-            0 => { let (v, a) = read_varint(&msg[i..])?; i += a; if field == 2 { ts = v as i64; } }
+            0 => {
+                let (v, a) = read_varint(&msg[i..])?;
+                i += a;
+                if field == 2 {
+                    ts = v as i64;
+                }
+            }
             2 => {
-                let (l, a) = read_varint(&msg[i..])?; i += a;
+                let (l, a) = read_varint(&msg[i..])?;
+                i += a;
                 let end = std::cmp::min(i + l as usize, msg.len());
                 if field == 6 || field == 7 || field == 9 {
                     if let Ok(s) = std::str::from_utf8(&msg[i..end]) {
-                        if field == 6 && text.is_empty() { text = s.to_string(); }
+                        if field == 6 && text.is_empty() {
+                            text = s.to_string();
+                        }
                     }
                 }
                 i = end;
@@ -682,7 +865,11 @@ fn parse_danmaku_elem(msg: &[u8]) -> Option<(i64, String)> {
             _ => return None,
         }
     }
-    if text.is_empty() { None } else { Some((ts, text)) }
+    if text.is_empty() {
+        None
+    } else {
+        Some((ts, text))
+    }
 }
 
 fn read_varint(b: &[u8]) -> Option<(u64, usize)> {
@@ -690,9 +877,13 @@ fn read_varint(b: &[u8]) -> Option<(u64, usize)> {
     let mut shift = 0u32;
     for (idx, byte) in b.iter().enumerate() {
         v |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 { return Some((v, idx + 1)); }
+        if byte & 0x80 == 0 {
+            return Some((v, idx + 1));
+        }
         shift += 7;
-        if shift > 63 { return None; }
+        if shift > 63 {
+            return None;
+        }
     }
     None
 }
@@ -710,13 +901,21 @@ async fn tool_comments(
     if video_id.trim().is_empty() {
         anyhow::bail!("缺少 videoId");
     }
-    if page == 0 { anyhow::bail!("page 从 1 起"); }
+    if page == 0 {
+        anyhow::bail!("page 从 1 起");
+    }
     match ch.kind.as_str() {
         "bilibili" => {
-            let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+            let view = bili_get(
+                ch,
+                &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+            )
+            .await?;
             api_ok(&view)?;
             let aid = view.pointer("/data/aid").and_then(as_u64).unwrap_or(0);
-            if aid == 0 { anyhow::bail!("无法定位评论区（aid 缺失）"); }
+            if aid == 0 {
+                anyhow::bail!("无法定位评论区（aid 缺失）");
+            }
             let sort_code = if sort == "time" { 0 } else { 2 };
             let body = bili_get(ch, &format!(
                 "https://api.bilibili.com/x/v2/reply?type=1&oid={aid}&pn={page}&ps={COMMENTS_PAGE}&sort={sort_code}"
@@ -724,38 +923,70 @@ async fn tool_comments(
             api_ok(&body)?;
             let page_info = body.pointer("/data/page").cloned().unwrap_or(Value::Null);
             let total = page_info.get("count").and_then(as_u64).unwrap_or(0);
-            let replies = body.pointer("/data/replies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let replies = body
+                .pointer("/data/replies")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             if replies.is_empty() {
                 return Ok(format!("没有更多评论（第 {page} 页为空；共 {total} 条）"));
             }
             let mut st_lock = st.lock().unwrap();
             let mut out = format!("评论区（第 {page} 页，热度排序）共 {total} 条：\n");
             for r in &replies {
-                let id = r.get("rpid").and_then(as_u64).map(|v| v.to_string()).unwrap_or_default();
-                let author = r.pointer("/member/uname").and_then(|v| v.as_str()).unwrap_or("匿名");
-                let text = r.pointer("/content/message").and_then(|v| v.as_str()).unwrap_or("");
+                let id = r
+                    .get("rpid")
+                    .and_then(as_u64)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                let author = r
+                    .pointer("/member/uname")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("匿名");
+                let text = r
+                    .pointer("/content/message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let likes = r.get("like").and_then(as_u64).unwrap_or(0);
                 let rcount = r.get("rcount").and_then(as_u64).unwrap_or(0);
                 st_lock.seen_comments.insert(id.clone());
-                out.push_str(&format!("- [{likes}赞 {rcount}回复] {author}（id={id}）：{}\n", text.replace('\n', " ")));
+                out.push_str(&format!(
+                    "- [{likes}赞 {rcount}回复] {author}（id={id}）：{}\n",
+                    text.replace('\n', " ")
+                ));
             }
-            out.push_str(&format!("\n（翻下一页传 page={}；回复某条用 video__act 的 reply.commentId）", page + 1));
+            out.push_str(&format!(
+                "\n（翻下一页传 page={}；回复某条用 video__act 的 reply.commentId）",
+                page + 1
+            ));
             Ok(out)
         }
         "youtube" => {
             let key = yt_key(ch)?;
-            let order = if sort == "time" { "time".to_string() } else { "relevance".to_string() };
+            let order = if sort == "time" {
+                "time".to_string()
+            } else {
+                "relevance".to_string()
+            };
             // 翻页经 pageToken 链：为免维护 token 链复杂度，用 maxResults 拉大窗口 + 内存分页
             let want = (page * COMMENTS_PAGE as u64).to_string();
-            let body = yt_get("commentThreads", &[
-                ("part", "snippet".into()),
-                ("videoId", video_id.clone()),
-                ("maxResults", want),
-                ("order", order),
-                ("textFormat", "plainText".into()),
-                ("key", key),
-            ]).await?;
-            let items = body.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let body = yt_get(
+                "commentThreads",
+                &[
+                    ("part", "snippet".into()),
+                    ("videoId", video_id.clone()),
+                    ("maxResults", want),
+                    ("order", order),
+                    ("textFormat", "plainText".into()),
+                    ("key", key),
+                ],
+            )
+            .await?;
+            let items = body
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             let start = ((page - 1) * COMMENTS_PAGE as u64) as usize;
             if start >= items.len() {
                 return Ok(format!("没有更多评论（第 {page} 页为空）"));
@@ -764,14 +995,31 @@ async fn tool_comments(
             let mut st_lock = st.lock().unwrap();
             let mut out = format!("评论区（第 {page} 页）：\n");
             for x in &window {
-                let Some(sn) = x.pointer("/snippet/topLevelComment") else { continue };
+                let Some(sn) = x.pointer("/snippet/topLevelComment") else {
+                    continue;
+                };
                 let id = sn.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let author = sn.pointer("/snippet/authorDisplayName").and_then(|v| v.as_str()).unwrap_or("匿名");
-                let text = sn.pointer("/snippet/textDisplay").and_then(|v| v.as_str()).unwrap_or("");
-                let likes = sn.pointer("/snippet/likeCount").and_then(as_u64).unwrap_or(0);
-                let rcount = x.pointer("/snippet/totalReplyCount").and_then(as_u64).unwrap_or(0);
+                let author = sn
+                    .pointer("/snippet/authorDisplayName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("匿名");
+                let text = sn
+                    .pointer("/snippet/textDisplay")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let likes = sn
+                    .pointer("/snippet/likeCount")
+                    .and_then(as_u64)
+                    .unwrap_or(0);
+                let rcount = x
+                    .pointer("/snippet/totalReplyCount")
+                    .and_then(as_u64)
+                    .unwrap_or(0);
                 st_lock.seen_comments.insert(id.to_string());
-                out.push_str(&format!("- [{likes}赞 {rcount}回复] {author}（id={id}）：{}\n", text.replace('\n', " ")));
+                out.push_str(&format!(
+                    "- [{likes}赞 {rcount}回复] {author}（id={id}）：{}\n",
+                    text.replace('\n', " ")
+                ));
             }
             out.push_str(&format!("\n（翻下一页传 page={}）", page + 1));
             Ok(out)
@@ -787,46 +1035,104 @@ async fn tool_uploader(ch: &Channel, uploader_id: String) -> anyhow::Result<Stri
     }
     match ch.kind.as_str() {
         "bilibili" => {
-            let card = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/card?mid={uploader_id}")).await?;
+            let card = bili_get(
+                ch,
+                &format!("https://api.bilibili.com/x/web-interface/card?mid={uploader_id}"),
+            )
+            .await?;
             api_ok(&card)?;
             let d = card.get("data").cloned().unwrap_or(Value::Null);
-            let name = d.pointer("/card/name").and_then(|v| v.as_str()).unwrap_or("（未知）");
-            let sign = d.pointer("/card/sign").and_then(|v| v.as_str()).unwrap_or("（无签名）");
+            let name = d
+                .pointer("/card/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("（未知）");
+            let sign = d
+                .pointer("/card/sign")
+                .and_then(|v| v.as_str())
+                .unwrap_or("（无签名）");
             let fans = d.pointer("/follower").and_then(as_u64).unwrap_or(0);
-            let videos = d.pointer("/archive").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let mut out = format!("UP主：{name}\n粉丝：{fans}\n签名：{sign}\n\n近期投稿（{}）：\n", videos.len());
+            let videos = d
+                .pointer("/archive")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut out = format!(
+                "UP主：{name}\n粉丝：{fans}\n签名：{sign}\n\n近期投稿（{}）：\n",
+                videos.len()
+            );
             for v in videos.iter().take(8) {
-                let t = v.get("title").and_then(|v| v.as_str()).unwrap_or("（无题）");
+                let t = v
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("（无题）");
                 let play = v.get("play").and_then(as_u64).unwrap_or(0);
                 let created = v.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
-                let dt = chrono::DateTime::from_timestamp(created, 0).map(|x| x.format("%Y-%m-%d").to_string()).unwrap_or_default();
+                let dt = chrono::DateTime::from_timestamp(created, 0)
+                    .map(|x| x.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default();
                 out.push_str(&format!("- {t}（{play}播放 {dt}）\n"));
             }
             Ok(out)
         }
         "youtube" => {
             let key = yt_key(ch)?;
-            let ch_body = yt_get("channels", &[("part", "snippet,statistics".into()), ("id", uploader_id.clone()), ("key", key.clone())]).await?;
+            let ch_body = yt_get(
+                "channels",
+                &[
+                    ("part", "snippet,statistics".into()),
+                    ("id", uploader_id.clone()),
+                    ("key", key.clone()),
+                ],
+            )
+            .await?;
             let c = ch_body.pointer("/items/0").cloned().unwrap_or(Value::Null);
-            if c.is_null() { anyhow::bail!("未找到频道：{uploader_id}"); }
-            let name = c.pointer("/snippet/title").and_then(|v| v.as_str()).unwrap_or("（未知）");
-            let desc = c.pointer("/snippet/description").and_then(|v| v.as_str()).unwrap_or("（无简介）");
-            let subs = c.pointer("/statistics/subscriberCount").and_then(as_u64).unwrap_or(0);
+            if c.is_null() {
+                anyhow::bail!("未找到频道：{uploader_id}");
+            }
+            let name = c
+                .pointer("/snippet/title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("（未知）");
+            let desc = c
+                .pointer("/snippet/description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("（无简介）");
+            let subs = c
+                .pointer("/statistics/subscriberCount")
+                .and_then(as_u64)
+                .unwrap_or(0);
             // 近期投稿：search by channelId（date 序）
-            let uploads = yt_get("search", &[
-                ("part", "snippet".into()),
-                ("channelId", uploader_id.clone()),
-                ("order", "date".into()),
-                ("type", "video".into()),
-                ("maxResults", "8".into()),
-                ("key", key),
-            ]).await?;
-            let items = uploads.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let uploads = yt_get(
+                "search",
+                &[
+                    ("part", "snippet".into()),
+                    ("channelId", uploader_id.clone()),
+                    ("order", "date".into()),
+                    ("type", "video".into()),
+                    ("maxResults", "8".into()),
+                    ("key", key),
+                ],
+            )
+            .await?;
+            let items = uploads
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             let mut out = format!("频道：{name}\n订阅：{subs}\n简介：{desc}\n\n近期投稿：\n");
             for x in items.iter().take(8) {
-                let t = x.pointer("/snippet/title").and_then(|v| v.as_str()).unwrap_or("（无题）");
-                let dt = x.pointer("/snippet/publishedAt").and_then(|v| v.as_str()).unwrap_or("");
-                let vid = x.pointer("/id/videoId").and_then(|v| v.as_str()).unwrap_or("");
+                let t = x
+                    .pointer("/snippet/title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("（无题）");
+                let dt = x
+                    .pointer("/snippet/publishedAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let vid = x
+                    .pointer("/id/videoId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 out.push_str(&format!("- {t}（{dt} id={vid}）\n"));
             }
             Ok(out)
@@ -837,19 +1143,41 @@ async fn tool_uploader(ch: &Channel, uploader_id: String) -> anyhow::Result<Stri
 
 /// video__related：B站相关视频
 async fn tool_related(ch: &Channel, video_id: String) -> anyhow::Result<String> {
-    let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+    let view = bili_get(
+        ch,
+        &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+    )
+    .await?;
     api_ok(&view)?;
     let aid = view.pointer("/data/aid").and_then(as_u64).unwrap_or(0);
-    if aid == 0 { anyhow::bail!("无法定位相关视频（aid 缺失）"); }
-    let rel = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/archive/related?aid={aid}")).await?;
+    if aid == 0 {
+        anyhow::bail!("无法定位相关视频（aid 缺失）");
+    }
+    let rel = bili_get(
+        ch,
+        &format!("https://api.bilibili.com/x/web-interface/archive/related?aid={aid}"),
+    )
+    .await?;
     api_ok(&rel)?;
-    let list = rel.get("data").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    if list.is_empty() { return Ok("无相关视频推荐".into()); }
+    let list = rel
+        .get("data")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if list.is_empty() {
+        return Ok("无相关视频推荐".into());
+    }
     let mut out = format!("相关/推荐视频（{}）：\n", list.len().min(10));
     for x in list.iter().take(10) {
         let bv = x.get("bvid").and_then(|v| v.as_str()).unwrap_or("?");
-        let t = x.get("title").and_then(|v| v.as_str()).unwrap_or("（无题）");
-        let owner = x.pointer("/owner/name").and_then(|v| v.as_str()).unwrap_or("?");
+        let t = x
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("（无题）");
+        let owner = x
+            .pointer("/owner/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         let play = x.pointer("/stat/view").and_then(as_u64).unwrap_or(0);
         out.push_str(&format!("- {t}｜{owner}｜{play}播放（id={bv}）\n"));
     }
@@ -868,7 +1196,9 @@ async fn tool_search(ch: &Channel, query: String) -> anyhow::Result<String> {
         other => anyhow::bail!("不支持的平台：{other}"),
     };
     if items.is_empty() {
-        return Ok(format!("搜索「{query}」无结果（可能被风控或无匹配；可换词重试）"));
+        return Ok(format!(
+            "搜索「{query}」无结果（可能被风控或无匹配；可换词重试）"
+        ));
     }
     let mut out = format!("搜索「{query}」结果（{}）：\n", items.len().min(10));
     for v in items.iter().take(10) {
@@ -931,7 +1261,8 @@ async fn tool_shots(
     use image::GenericImageView;
     if ch.kind != "bilibili" {
         return Ok((
-            "该平台无画面抽帧（YouTube 无雪碧图 API；请用 summary/subtitle/comments 了解内容）".into(),
+            "该平台无画面抽帧（YouTube 无雪碧图 API；请用 summary/subtitle/comments 了解内容）"
+                .into(),
             vec![],
         ));
     }
@@ -939,28 +1270,44 @@ async fn tool_shots(
         anyhow::bail!("缺少 videoId");
     }
     // 视频时长（帧采样铺满全片需要）
-    let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+    let view = bili_get(
+        ch,
+        &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+    )
+    .await?;
     api_ok(&view)?;
     let duration = view.pointer("/data/duration").and_then(as_u64).unwrap_or(0);
     if duration == 0 {
         anyhow::bail!("无法获取视频时长（视频不存在或已下架？）");
     }
     // 雪碧图索引（index=1 带帧时间表：index[n] = 第 n 帧截取秒，自适应间隔）
-    let vs = bili_get(ch, &format!("https://api.bilibili.com/x/player/videoshot?bvid={video_id}&index=1")).await?;
+    let vs = bili_get(
+        ch,
+        &format!("https://api.bilibili.com/x/player/videoshot?bvid={video_id}&index=1"),
+    )
+    .await?;
     api_ok(&vs)?;
     let data = vs.get("data").cloned().unwrap_or(Value::Null);
     let images: Vec<String> = data
         .get("image")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if images.is_empty() {
-        return Ok((format!("该视频无画面抽帧数据（{video_id}，可能未生成预览）"), vec![]));
+        return Ok((
+            format!("该视频无画面抽帧数据（{video_id}，可能未生成预览）"),
+            vec![],
+        ));
     }
     let x_len = data.get("img_x_len").and_then(as_u64).unwrap_or(10).max(1) as u32; // 每行帧数
-    let fw = data.get("img_x_size").and_then(as_u64).unwrap_or(480) as u32;  // 单帧宽
-    let fh = data.get("img_y_size").and_then(as_u64).unwrap_or(270) as u32;  // 单帧高
-    let per_sheet = (x_len * data.get("img_y_len").and_then(as_u64).unwrap_or(10).max(1) as u32).max(1);
+    let fw = data.get("img_x_size").and_then(as_u64).unwrap_or(480) as u32; // 单帧宽
+    let fh = data.get("img_y_size").and_then(as_u64).unwrap_or(270) as u32; // 单帧高
+    let per_sheet =
+        (x_len * data.get("img_y_len").and_then(as_u64).unwrap_or(10).max(1) as u32).max(1);
     // 帧时间表（秒，升序；index[0]=0 恒置，有效帧从 1 起）
     let index: Vec<u64> = data
         .get("index")
@@ -974,7 +1321,11 @@ async fn tool_shots(
         if index.len() >= 2 {
             let mut f = 0usize;
             for (i, &sec) in index.iter().enumerate().skip(1) {
-                if sec <= t { f = i; } else { break; }
+                if sec <= t {
+                    f = i;
+                } else {
+                    break;
+                }
             }
             f.min(index.len().saturating_sub(1))
         } else {
@@ -991,7 +1342,11 @@ async fn tool_shots(
         .map(|i| (start + i * step).min(duration.saturating_sub(1)))
         .collect();
 
-    let dir = core.config().workspace_root.join(".exmachina").join("video_shots");
+    let dir = core
+        .config()
+        .workspace_root
+        .join(".exmachina")
+        .join("video_shots");
     std::fs::create_dir_all(&dir)?;
     // 雪碧图缓存（同图多帧只下载一次）
     let mut sheet_cache: std::collections::HashMap<usize, Option<image::DynamicImage>> =
@@ -1000,15 +1355,21 @@ async fn tool_shots(
     let mut saved_frames: Vec<usize> = Vec::new();
     for &t in &times {
         let shot = time_to_shot(t); // 0-based 全局帧号
-        // 部分视频（官方 PV 等）预览只覆盖前段：目标时间超出时钳到末帧。
-        // 钳制会让多个采样点映射同一帧——同帧只存一张，避免重复图回灌。
+                                    // 部分视频（官方 PV 等）预览只覆盖前段：目标时间超出时钳到末帧。
+                                    // 钳制会让多个采样点映射同一帧——同帧只存一张，避免重复图回灌。
         let sheet_idx = shot / per_sheet as usize;
         let in_sheet = (shot % per_sheet as usize) as u32;
-        let Some(url) = images.get(sheet_idx) else { continue };
+        let Some(url) = images.get(sheet_idx) else {
+            continue;
+        };
         let sheet = match sheet_cache.get(&sheet_idx) {
             Some(Some(img)) => img.clone(),
             _ => {
-                let u = if url.starts_with("//") { format!("https:{url}") } else { url.clone() };
+                let u = if url.starts_with("//") {
+                    format!("https:{url}")
+                } else {
+                    url.clone()
+                };
                 let bytes = http_client()
                     .get(&u)
                     .header(reqwest::header::USER_AGENT, UA)
@@ -1047,7 +1408,10 @@ async fn tool_shots(
         saved.push((t, format!(".exmachina/video_shots/{name}")));
     }
     if saved.is_empty() {
-        return Ok((format!("画面抽帧失败（雪碧图下载或裁切均未产出；{video_id}）"), vec![]));
+        return Ok((
+            format!("画面抽帧失败（雪碧图下载或裁切均未产出；{video_id}）"),
+            vec![],
+        ));
     }
     let list = saved
         .iter()
@@ -1069,7 +1433,10 @@ fn fmt_mmss(sec: u64) -> String {
 }
 
 pub(crate) fn register_act_gate(session_id: &str, gate: ActGate) {
-    act_gates().lock().unwrap().insert(session_id.to_string(), Arc::new(gate));
+    act_gates()
+        .lock()
+        .unwrap()
+        .insert(session_id.to_string(), Arc::new(gate));
 }
 
 pub(crate) fn drop_act_gate(session_id: &str) {
@@ -1114,18 +1481,28 @@ async fn build_ondemand_gate(
         Arc::new(ActGate::from_settings(&s, state_probe.actions_today))
     };
     // 会话来源：无 origin = 控制台会话（全权）；有 origin 按角色判
-    let Some((origin_user, origin_role)) =
-        core.store.get_session_origin(session).ok().flatten()
+    let Some((origin_user, origin_role)) = core.store.get_session_origin(session).ok().flatten()
     else {
         return Ok(GateOutcome::Granted(gate()));
     };
+    // 管理者账号清单：按会话来源的外部用户 ID 跨通道匹配——
+    // 用户在**任一**通道的管理者清单命中即视同 admin（免配对绑定）。
+    // 点播请求常跨通道发起（如在 QQ 里点播 B 站评论），判权跟「人」走不跟执行通道走；
+    // 与绑定身份的 admin 角色同权并集。
+    if !origin_user.trim().is_empty() {
+        let uid = origin_user.trim().to_string();
+        let hit = crate::platform::load_channels(core)
+            .iter()
+            .any(|c| c.admins.iter().any(|a| a.trim() == uid));
+        if hit {
+            return Ok(GateOutcome::Granted(gate()));
+        }
+    }
     // origin_role 形态：绑定身份 = identity id（"ch:xxx" 前缀的 UserIdentity.id）
     // 未绑定的原始标注 = "ch:<channel>:<external_id>"——区分靠查询身份表
     let _ = origin_user;
     // 兼容旧标注：原始形态以 ch: 开头且不是绑定身份 id 的都视为未绑定
-    let is_bound = core
-        .identity_of_id(&origin_role)
-        .is_some();
+    let is_bound = core.identity_of_id(&origin_role).is_some();
     if !is_bound {
         return Ok(GateOutcome::Denied(
             "已拒绝：当前用户未绑定通道身份，不能让智能体代发评论。请在控制台「通道身份」页签发配对码，然后发送 /pair <配对码> 完成绑定（观看视频不受影响）".into(),
@@ -1155,9 +1532,7 @@ fn sync_ondemand_quota(core: &Arc<Core>, ch: &Channel, session: &str, gate: &Act
     }
     let mut state = super::VideoState::load(core, &ch.id);
     state.reset_day();
-    let today = gate
-        .actions_today
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let today = gate.actions_today.load(std::sync::atomic::Ordering::SeqCst);
     state.actions_today = state.actions_today.max(today);
     state.save(core, &ch.id);
 }
@@ -1169,7 +1544,12 @@ async fn tool_act(
     session: &str,
     args: Value,
 ) -> anyhow::Result<String> {
-    let video_id = args.get("videoId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let video_id = args
+        .get("videoId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if video_id.is_empty() {
         anyhow::bail!("缺少 videoId");
     }
@@ -1183,9 +1563,24 @@ async fn tool_act(
             GateOutcome::Denied(reason) => return Ok(reason),
         },
     };
-    let comment_text = args.get("comment").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let reply_text = args.get("replyText").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let reply_target = args.get("replyTo").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let comment_text = args
+        .get("comment")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let reply_text = args
+        .get("replyText")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let reply_target = args
+        .get("replyTo")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     // 构造动作（comment 或 reply 二选一）
     let (kind, raw_text, target): (&str, String, Option<String>) = if !reply_text.is_empty() {
@@ -1211,7 +1606,10 @@ async fn tool_act(
     // 闸门 2：内容清洗（字数上限 + markdown/指令痕迹去除）
     let text = clean_comment(&raw_text, gate.max_comment_chars);
     if text.trim().is_empty() {
-        return Ok(format!("已拒绝：清洗后文本为空（原文 {} 字）", raw_text.chars().count()));
+        return Ok(format!(
+            "已拒绝：清洗后文本为空（原文 {} 字）",
+            raw_text.chars().count()
+        ));
     }
 
     // 闸门 3：每日配额
@@ -1234,15 +1632,24 @@ async fn tool_act(
         views: 0,
     };
     if ch.kind == "bilibili" {
-        let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+        let view = bili_get(
+            ch,
+            &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+        )
+        .await?;
         api_ok(&view)?;
         item.aid = view.pointer("/data/aid").and_then(as_u64);
-        item.title = view.pointer("/data/title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        item.title = view
+            .pointer("/data/title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
     }
 
     // 闸门 4：dry-run 分流（不落平台）
     if gate.dry_run {
-        gate.actions_today.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gate.actions_today
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         sync_ondemand_quota(core, ch, session, &gate);
         st.lock().unwrap().acted += 1;
         return Ok(format!(
@@ -1256,8 +1663,19 @@ async fn tool_act(
 
     // 闸门 5：审批模式（always = 产审批单，批准代发/拒绝跳过；off = 直接发）
     if gate.approval == "always" {
-        return create_act_approval(core, ch, session, st, &gate, kind, &text, target.as_ref(), &item, &video_id)
-            .await;
+        return create_act_approval(
+            core,
+            ch,
+            session,
+            st,
+            &gate,
+            kind,
+            &text,
+            target.as_ref(),
+            &item,
+            &video_id,
+        )
+        .await;
     }
 
     // 闸门 6：B站 buvid 指纹养护（发前自动补齐）
@@ -1267,29 +1685,51 @@ async fn tool_act(
 
     // 执行
     post_comment(ch, &item, &text, target.as_deref()).await?;
-    gate.actions_today.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    gate.actions_today
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     sync_ondemand_quota(core, ch, session, &gate);
     {
         let mut s = st.lock().unwrap();
         s.acted += 1;
-        s.acted_notes.push(format!("{kind}：{}", text.chars().take(60).collect::<String>()));
+        s.acted_notes.push(format!(
+            "{kind}：{}",
+            text.chars().take(60).collect::<String>()
+        ));
     }
-    Ok(format!("{kind}已发送：{}（视频 {}）", text.chars().take(60).collect::<String>(), video_id))
+    Ok(format!(
+        "{kind}已发送：{}（视频 {}）",
+        text.chars().take(60).collect::<String>(),
+        video_id
+    ))
 }
 
 /// 审批分流的代发执行入口（Core::approval_decide 的 [video] 回调）：
 /// 载荷 = { channelId, videoId, text, replyTo }；buvid 养护后直接发。
 pub(crate) async fn execute_act_payload(core: &Arc<Core>, payload: &str) -> anyhow::Result<String> {
-    let v: Value = serde_json::from_str(payload)
-        .map_err(|e| anyhow::anyhow!("视频审批载荷解析失败：{e}"))?;
+    let v: Value =
+        serde_json::from_str(payload).map_err(|e| anyhow::anyhow!("视频审批载荷解析失败：{e}"))?;
     let channels = platform::load_channels(core);
-    let channel_id = v.get("channelId").and_then(|x| x.as_str()).unwrap_or_default();
+    let channel_id = v
+        .get("channelId")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default();
     let Some(ch) = channels.iter().find(|c| c.id == channel_id) else {
         anyhow::bail!("通道不存在：{channel_id}");
     };
-    let video_id = v.get("videoId").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-    let reply_to = v.get("replyTo").and_then(|x| x.as_str()).map(str::to_string);
+    let video_id = v
+        .get("videoId")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let text = v
+        .get("text")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let reply_to = v
+        .get("replyTo")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
     let mut item = VideoItem {
         platform: ch.kind.clone(),
         id: video_id.clone(),
@@ -1300,13 +1740,20 @@ pub(crate) async fn execute_act_payload(core: &Arc<Core>, payload: &str) -> anyh
         views: 0,
     };
     if ch.kind == "bilibili" {
-        let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+        let view = bili_get(
+            ch,
+            &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
+        )
+        .await?;
         api_ok(&view)?;
         item.aid = view.pointer("/data/aid").and_then(as_u64);
         bili_prime_buvid(ch).await;
     }
     post_comment(ch, &item, &text, reply_to.as_deref()).await?;
-    Ok(format!("已代发（审批通过）：{}", text.chars().take(60).collect::<String>()))
+    Ok(format!(
+        "已代发（审批通过）：{}",
+        text.chars().take(60).collect::<String>()
+    ))
 }
 
 /// 产审批单并等待裁决（approval=always 分流）：
@@ -1369,7 +1816,8 @@ async fn create_act_approval(
         };
         match latest.status.as_str() {
             "executed" => {
-                gate.actions_today.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                gate.actions_today
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 st.lock().unwrap().acted += 1;
                 return Ok(format!(
                     "{kind}已被用户批准并代发：{}",
@@ -1451,11 +1899,7 @@ mod tests {
         let a = resolve_video_id(&st, "BV1xx411c7mD").await;
         let b = resolve_video_id(&st, "BV1xx411c7mD").await;
         assert_eq!(a, b);
-        assert_eq!(
-            st.lock().unwrap().resolved_ids.len(),
-            1,
-            "同输入只解析一次"
-        );
+        assert_eq!(st.lock().unwrap().resolved_ids.len(), 1, "同输入只解析一次");
         drop_session("test-resolve-cache");
     }
 
@@ -1469,6 +1913,7 @@ mod tests {
                 enabled: true,
                 group: None,
                 allowed_chats: vec![],
+                admins: vec![],
                 account: None,
                 secret: None,
                 reply_webhook: None,
@@ -1499,7 +1944,10 @@ mod tests {
         assert!(p1.contains("第0句") && p1.contains("第119句"));
         assert!(p1.contains("page=2"), "应提示下一页：{p1}");
         let p3 = format_subtitle_pages(&lines, 3).unwrap();
-        assert!(p3.contains("已到末页"), "第 3 页（300/120=2.5→3 页）末页：{p3}");
+        assert!(
+            p3.contains("已到末页"),
+            "第 3 页（300/120=2.5→3 页）末页：{p3}"
+        );
         let over = format_subtitle_pages(&lines, 4).unwrap();
         assert!(over.contains("没有更多"));
     }
@@ -1513,7 +1961,12 @@ mod tests {
             loop {
                 let b = (v & 0x7f) as u8;
                 v >>= 7;
-                if v == 0 { msg.push(b); break; } else { msg.push(b | 0x80); }
+                if v == 0 {
+                    msg.push(b);
+                    break;
+                } else {
+                    msg.push(b | 0x80);
+                }
             }
             let tb = text.as_bytes();
             let mut l = tb.len() as u64;
@@ -1521,7 +1974,12 @@ mod tests {
             loop {
                 let b = (l & 0x7f) as u8;
                 l >>= 7;
-                if l == 0 { len_bytes.push(b); break; } else { len_bytes.push(b | 0x80); }
+                if l == 0 {
+                    len_bytes.push(b);
+                    break;
+                } else {
+                    len_bytes.push(b | 0x80);
+                }
             }
             msg.push(0x32); // field 6, wire 2
             msg.extend_from_slice(&len_bytes);
@@ -1532,7 +1990,12 @@ mod tests {
             loop {
                 let b = (n & 0x7f) as u8;
                 n >>= 7;
-                if n == 0 { out.push(b); break; } else { out.push(b | 0x80); }
+                if n == 0 {
+                    out.push(b);
+                    break;
+                } else {
+                    out.push(b | 0x80);
+                }
             }
             out.extend_from_slice(&msg);
             out
@@ -1552,7 +2015,10 @@ mod tests {
         assert_eq!(bili.len(), 8, "B站 8 工具（含 shots 画面抽帧）：{bili:?}");
         assert!(bili.iter().any(|t| t.name == "video__danmaku"));
         assert!(bili.iter().any(|t| t.name == "video__related"));
-        assert!(bili.iter().any(|t| t.name == "video__shots"), "B站应有画面抽帧（视觉直看）");
+        assert!(
+            bili.iter().any(|t| t.name == "video__shots"),
+            "B站应有画面抽帧（视觉直看）"
+        );
 
         let yt = watch_tool_specs("youtube");
         assert_eq!(yt.len(), 5, "YouTube 5 工具（无 danmaku/related）：{yt:?}");
@@ -1585,6 +2051,7 @@ mod tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             token: None,
@@ -1598,7 +2065,9 @@ mod tests {
                 ("reply".to_string(), "true".to_string()),
                 ("dryRun".to_string(), "true".to_string()),
                 ("apiKey".to_string(), "test".to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         let settings = Settings::from_channel(&ch);
         assert!(settings.comment && settings.dry_run);
@@ -1663,6 +2132,7 @@ mod tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             token: None,
@@ -1674,7 +2144,9 @@ mod tests {
             config: [
                 ("comment".to_string(), "false".to_string()),
                 ("dryRun".to_string(), "true".to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         let settings = Settings::from_channel(&ch);
         register_act_gate("s2", ActGate::from_settings(&settings, 0));
@@ -1718,6 +2190,7 @@ mod act_approval_tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -1766,8 +2239,14 @@ mod act_approval_tests {
         // 审批单已落库且 pending
         let pending = core.approval_list(Some("pending"), 10).unwrap();
         assert_eq!(pending.len(), 1, "应有一张待审批单");
-        assert!(pending[0].command.starts_with("[video]"), "审批单应带 [video] 前缀");
-        assert!(pending[0].command.contains("审批模式下的拟发评论"), "审批单含拟发文本");
+        assert!(
+            pending[0].command.starts_with("[video]"),
+            "审批单应带 [video] 前缀"
+        );
+        assert!(
+            pending[0].command.contains("审批模式下的拟发评论"),
+            "审批单含拟发文本"
+        );
         drop_act_gate("s-apr");
         drop_session("s-apr");
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
