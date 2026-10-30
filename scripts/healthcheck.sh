@@ -50,7 +50,7 @@ SID=$(curl -s -X POST "$BASE/api/sessions" -H "X-Auth-Key: $KEY" \
   | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
 if [ -n "$SID" ]; then
   PASS=$((PASS + 1)); echo "  ok  会话创建 $SID"
-  check "POST /api/sessions/$SID/chat（受理）" 202 "$(req POST "sessions/$SID/chat" '{"text":"巡检：只回正常"}')"
+  check "POST /api/sessions/$SID/chat（受理）" 202 "$(req POST "sessions/$SID/chat" '{"text":"巡检健康检查：请直接回复「正常」两个字。不要调用任何工具，不要执行任何命令——本项只验证聊天链路往返。"}')"
   # 异步受理：轮询消息面确认 orchestrator 已回（最多 ~60s）
   REPLY=""
   for _ in $(seq 1 20); do
