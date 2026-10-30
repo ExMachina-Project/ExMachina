@@ -172,7 +172,12 @@ pub struct SearchConfig {
 
 impl Default for SearchConfig {
     fn default() -> Self {
-        SearchConfig { provider: String::new(), endpoint: String::new(), api_key: String::new(), max_results: 5 }
+        SearchConfig {
+            provider: String::new(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            max_results: 5,
+        }
     }
 }
 
@@ -325,7 +330,8 @@ impl CustomTool {
             && n.len() <= 48
             && !n.contains(':')
             && n.starts_with(|c: char| c.is_ascii_alphabetic())
-            && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }
 
     /// 归一化类型：http（默认）| shell
@@ -383,7 +389,8 @@ impl Default for AutomationConfig {
         AutomationConfig {
             heartbeat_enabled: false,
             heartbeat_interval_minutes: 30,
-            heartbeat_prompt: "系统心跳巡检：检查未决任务、受阻节点与风险账，无事项则简短报告正常。".into(),
+            heartbeat_prompt:
+                "系统心跳巡检：检查未决任务、受阻节点与风险账，无事项则简短报告正常。".into(),
             heartbeat_agent: None,
             auto_adapt: true,
             unit_max_steps: 16,
@@ -407,7 +414,11 @@ impl Default for FileWatchConfig {
         FileWatchConfig {
             enabled: false,
             debounce_ms: 1000,
-            exclude: vec![".exmachina/".into(), "target/".into(), "node_modules/".into()],
+            exclude: vec![
+                ".exmachina/".into(),
+                "target/".into(),
+                "node_modules/".into(),
+            ],
         }
     }
 }
@@ -443,7 +454,11 @@ pub struct IdentityConfig {
 
 impl Default for IdentityConfig {
     fn default() -> Self {
-        IdentityConfig { pairing_ttl_secs: 600, identity_required: false, group_gate_default: true }
+        IdentityConfig {
+            pairing_ttl_secs: 600,
+            identity_required: false,
+            group_gate_default: true,
+        }
     }
 }
 
@@ -495,7 +510,6 @@ pub struct ExperimentsConfig {
     #[serde(default)]
     pub group_shared_context: bool,
 }
-
 
 // ---------------------------------------------------------------- 插件系统（plugins/ 目录）
 
@@ -611,7 +625,9 @@ impl PluginManifest {
         !id.is_empty()
             && id.len() <= 48
             && id.starts_with(|c: char| c.is_ascii_alphabetic())
-            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     }
 
     /// 至少声明一类能力（tools/channel/watch/resources 任一非空）
@@ -626,7 +642,10 @@ impl PluginManifest {
 
     /// 是否进程形态（声明了 process 且给了可执行命令）
     pub fn is_process(&self) -> bool {
-        self.process.as_ref().map(|p| !p.command.is_empty()).unwrap_or(false)
+        self.process
+            .as_ref()
+            .map(|p| !p.command.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -725,7 +744,15 @@ fn link_enabled() -> bool {
 
 impl Default for LinkTarget {
     fn default() -> Self {
-        LinkTarget { id: String::new(), name: String::new(), kind: "exmachina".into(), endpoint: String::new(), api_key: String::new(), command: String::new(), enabled: true }
+        LinkTarget {
+            id: String::new(),
+            name: String::new(),
+            kind: "exmachina".into(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            command: String::new(),
+            enabled: true,
+        }
     }
 }
 
@@ -749,7 +776,10 @@ pub struct NotifyConfig {
 
 impl Default for NotifyConfig {
     fn default() -> Self {
-        NotifyConfig { enabled: true, max_chars: 500 }
+        NotifyConfig {
+            enabled: true,
+            max_chars: 500,
+        }
     }
 }
 
@@ -937,9 +967,19 @@ impl LlmProfileFile {
     fn into_profile(self, fallback_model: &str) -> LlmProfile {
         let model = if !self.model.trim().is_empty() {
             self.model.trim().to_string()
-        } else if let Some(m) = self.orch_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .orch_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
-        } else if let Some(m) = self.unit_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .unit_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
         } else {
             fallback_model.to_string()
@@ -983,9 +1023,19 @@ impl LlmConfigFile {
     fn into_config(self) -> LlmConfig {
         let model = if !self.model.trim().is_empty() {
             self.model.trim().to_string()
-        } else if let Some(m) = self.orch_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .orch_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
-        } else if let Some(m) = self.unit_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .unit_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
         } else {
             String::new()
@@ -1102,8 +1152,16 @@ impl Default for InstallManifest {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             config_version: CONFIG_VERSION,
             profile: "quick".into(),
-            channels: InstallChannels { cli: true, gateway: true, gateway_port: 4173, webui: true },
-            features: InstallFeatures { memory: true, tools: true },
+            channels: InstallChannels {
+                cli: true,
+                gateway: true,
+                gateway_port: 4173,
+                webui: true,
+            },
+            features: InstallFeatures {
+                memory: true,
+                tools: true,
+            },
             notes: vec![],
         }
     }
@@ -1113,7 +1171,10 @@ impl Default for InstallManifest {
 /// 产品运行时**不存在**"无密钥自动降级"这一类行为——未配置模型即明确报错并引导配置。
 pub fn mock_enabled_from_env() -> bool {
     matches!(
-        std::env::var("EXM_LLM_MOCK").unwrap_or_default().to_lowercase().as_str(),
+        std::env::var("EXM_LLM_MOCK")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
         "1" | "true" | "yes" | "on"
     )
 }
@@ -1180,14 +1241,20 @@ impl ExmConfig {
             key_setup_dismissed: file_sec.key_setup_dismissed.unwrap_or(false),
         };
         let automation = AutomationConfig {
-            heartbeat_enabled: file_auto.heartbeat_enabled
+            heartbeat_enabled: file_auto
+                .heartbeat_enabled
                 .unwrap_or_else(|| AutomationConfig::default().heartbeat_enabled),
-            heartbeat_interval_minutes: file_auto.heartbeat_interval_minutes
+            heartbeat_interval_minutes: file_auto
+                .heartbeat_interval_minutes
                 .unwrap_or_else(|| AutomationConfig::default().heartbeat_interval_minutes),
-            heartbeat_prompt: file_auto.heartbeat_prompt
+            heartbeat_prompt: file_auto
+                .heartbeat_prompt
                 .clone()
                 .unwrap_or_else(|| AutomationConfig::default().heartbeat_prompt),
-            heartbeat_agent: file_auto.heartbeat_agent.clone().filter(|s| !s.trim().is_empty()),
+            heartbeat_agent: file_auto
+                .heartbeat_agent
+                .clone()
+                .filter(|s| !s.trim().is_empty()),
             auto_adapt: file_auto
                 .auto_adapt
                 .unwrap_or_else(|| AutomationConfig::default().auto_adapt),
@@ -1197,7 +1264,11 @@ impl ExmConfig {
         };
 
         let mut llm = LlmConfig {
-            base_url: env_or("EXM_LLM_BASE_URL", &file_llm.base_url, "https://api.openai.com/v1"),
+            base_url: env_or(
+                "EXM_LLM_BASE_URL",
+                &file_llm.base_url,
+                "https://api.openai.com/v1",
+            ),
             api_key: env_or("EXM_LLM_API_KEY", &file_llm.api_key, ""),
             api_keys: Vec::new(),
             api_format: String::new(),
@@ -1212,7 +1283,10 @@ impl ExmConfig {
             .into_iter()
             .map(|p| p.into_profile(&llm.model))
             .collect();
-        let active_profile = file.active_profile.clone().unwrap_or_else(|| "default".into());
+        let active_profile = file
+            .active_profile
+            .clone()
+            .unwrap_or_else(|| "default".into());
         if llm_profiles.is_empty() {
             llm_profiles.push(LlmProfile {
                 id: "default".into(),
@@ -1229,7 +1303,11 @@ impl ExmConfig {
         if !llm_profiles.iter().any(|p| p.id == active_profile) {
             if let Some(first) = llm_profiles.first() {
                 llm = LlmConfig {
-                    base_url: env_or("EXM_LLM_BASE_URL", &first.base_url, "https://api.openai.com/v1"),
+                    base_url: env_or(
+                        "EXM_LLM_BASE_URL",
+                        &first.base_url,
+                        "https://api.openai.com/v1",
+                    ),
                     api_key: env_or("EXM_LLM_API_KEY", &first.api_key, ""),
                     api_keys: Vec::new(),
                     api_format: String::new(),
@@ -1237,7 +1315,12 @@ impl ExmConfig {
                 };
             }
         } else if let Some(p) = llm_profiles.iter().find(|p| p.id == active_profile) {
-            let mut keys: Vec<String> = p.api_keys.clone().into_iter().filter(|k| !k.trim().is_empty()).collect();
+            let mut keys: Vec<String> = p
+                .api_keys
+                .clone()
+                .into_iter()
+                .filter(|k| !k.trim().is_empty())
+                .collect();
             if keys.is_empty() && !p.api_key.trim().is_empty() {
                 keys.push(p.api_key.clone());
             }
@@ -1305,7 +1388,8 @@ impl ExmConfig {
             tools: {
                 let mut t = file.tools.clone().unwrap_or_default();
                 // 声明式工具的合法性兜底：名字不合法或 target 为空的条目直接丢弃（不承诺坏配置）
-                t.custom.retain(|c| c.valid() && !c.target.trim().is_empty());
+                t.custom
+                    .retain(|c| c.valid() && !c.target.trim().is_empty());
                 t
             },
             llm_profiles,
@@ -1461,7 +1545,10 @@ fn migrate_file(mut file: ConfigFile, path: &Path) -> ConfigFile {
         }
         if file.identity.is_none() {
             let gate_on = version == 0;
-            file.identity = Some(IdentityConfig { group_gate_default: gate_on, ..IdentityConfig::default() });
+            file.identity = Some(IdentityConfig {
+                group_gate_default: gate_on,
+                ..IdentityConfig::default()
+            });
         }
         if file.limits.is_none() {
             file.limits = Some(LimitsConfig::default());
@@ -1812,7 +1899,10 @@ mod config_tests {
         assert_eq!(cfg.config_version, CONFIG_VERSION);
         assert!(cfg.identity.group_gate_default, "新装门控应默认开");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
-        assert!(!cfg.identity.identity_required, "身份管控默认关（白名单即全权）");
+        assert!(
+            !cfg.identity.identity_required,
+            "身份管控默认关（白名单即全权）"
+        );
         assert!(!cfg.triggers.file_watch.enabled, "文件监听默认关");
         assert_eq!(cfg.triggers.file_watch.exclude.len(), 3, "默认排除清单");
         assert!(!cfg.limits.enabled, "限流默认关");
@@ -1865,7 +1955,11 @@ mod config_tests {
         let groups = schema["groups"].as_array().unwrap();
         let keys: Vec<&str> = groups.iter().filter_map(|g| g["key"].as_str()).collect();
         for expected in ["identity", "limits", "triggers", "mcpServe", "notify"] {
-            assert!(keys.contains(&expected), "config_schema 缺少组 {}", expected);
+            assert!(
+                keys.contains(&expected),
+                "config_schema 缺少组 {}",
+                expected
+            );
         }
         assert_eq!(schema["configVersion"], CONFIG_VERSION);
     }
@@ -1876,9 +1970,17 @@ mod config_tests {
     fn 半衰期配置_非法值回落默认() {
         assert_eq!(sanitize_half_life_days(None), 30.0, "未配置取默认");
         assert_eq!(sanitize_half_life_days(Some(7.0)), 7.0, "合法值透传");
-        assert_eq!(sanitize_half_life_days(Some(0.1)), 0.1, "小于 1 天也是合法正数（decay 内部另有下限）");
+        assert_eq!(
+            sanitize_half_life_days(Some(0.1)),
+            0.1,
+            "小于 1 天也是合法正数（decay 内部另有下限）"
+        );
         for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(sanitize_half_life_days(Some(bad)), 30.0, "非法值 {bad} 应回落默认 30 天");
+            assert_eq!(
+                sanitize_half_life_days(Some(bad)),
+                30.0,
+                "非法值 {bad} 应回落默认 30 天"
+            );
         }
     }
 }

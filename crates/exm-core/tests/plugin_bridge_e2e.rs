@@ -63,7 +63,11 @@ unsafe fn libc_kill(_pid: u32) -> bool {
 }
 
 fn read_pid(dir: &PathBuf) -> Option<u32> {
-    std::fs::read_to_string(dir.join("pid")).ok()?.trim().parse().ok()
+    std::fs::read_to_string(dir.join("pid"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// 场景①：全链路——拉起 → 握手 → tools/list → tools/call 往返
@@ -81,7 +85,10 @@ async fn 场景1_进程插件全链路往返() {
     );
     s.start().await.expect("启动握手");
     assert_eq!(s.state(), PluginState::Running);
-    let r = s.call_tool("echo", serde_json::json!({ "q": "桥" })).await.unwrap();
+    let r = s
+        .call_tool("echo", serde_json::json!({ "q": "桥" }))
+        .await
+        .unwrap();
     assert_eq!(r.text(), "echo:桥");
     s.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -151,7 +158,10 @@ async fn 场景3_杀进程自动恢复() {
     };
     assert_ne!(pid1, pid2, "重启应产生新进程");
     // 恢复后调用面健康
-    let r = s.call_tool("echo", serde_json::json!({ "q": "after-kill" })).await.unwrap();
+    let r = s
+        .call_tool("echo", serde_json::json!({ "q": "after-kill" }))
+        .await
+        .unwrap();
     assert_eq!(r.text(), "echo:after-kill");
     s.stop().await;
     let _ = std::fs::remove_dir_all(&dir);

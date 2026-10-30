@@ -35,7 +35,10 @@ pub fn resolve_max_steps(agent_override: Option<usize>, scope: ToolScope, global
         ToolScope::Chat => (global / 2).max(1),
         _ => global,
     };
-    agent_override.filter(|v| *v > 0).unwrap_or(scope_pref).max(1)
+    agent_override
+        .filter(|v| *v > 0)
+        .unwrap_or(scope_pref)
+        .max(1)
 }
 
 /// 子个体执行器：持 Provider / 工具网关 / 注册表（注册表只读共享）
@@ -333,7 +336,8 @@ impl AgentRuntime {
     /// `trace` = 过程数据归集键（单聊与用量同键）。
     // 会话执行的全部上下文逐项透传，收拢参数会造一个只用一次的中间结构
     #[allow(clippy::too_many_arguments)]
-    pub async fn chat_execute<F>(        &self,
+    pub async fn chat_execute<F>(
+        &self,
         def: &AgentDefinition,
         system_prompt: String,
         history: Vec<ChatMessage>,
@@ -375,7 +379,9 @@ impl AgentRuntime {
             .tools
             .session_step_budget(session_id)
             .map(|v| v.max(1))
-            .unwrap_or_else(|| resolve_max_steps(def.max_steps, scope, self.tools.chat_max_steps()));
+            .unwrap_or_else(|| {
+                resolve_max_steps(def.max_steps, scope, self.tools.chat_max_steps())
+            });
         // 步数耗尽时回显已完成的工具调用清单（便于归因）
         let mut done_tools: Vec<String> = Vec::new();
         let mut usage_prompt: u64 = 0;
@@ -1298,12 +1304,26 @@ mod soft_landing_tests {
         .unwrap();
         let prompts_dir = reg_dir.join("groups").join("exmachina").join("prompts");
         std::fs::create_dir_all(&prompts_dir).unwrap();
-        std::fs::write(prompts_dir.join("watch-agent.md"), "# 观众代理\n你是观众代理。").unwrap();
+        std::fs::write(
+            prompts_dir.join("watch-agent.md"),
+            "# 观众代理\n你是观众代理。",
+        )
+        .unwrap();
         let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
-        let store = Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let store =
+            Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
         let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
-        let tools = Arc::new(ToolGateway::new(&base, store, registry.clone(), events, SecurityConfig::default()));
-        (AgentRuntime::new(registry, provider, tools, "test-model"), base)
+        let tools = Arc::new(ToolGateway::new(
+            &base,
+            store,
+            registry.clone(),
+            events,
+            SecurityConfig::default(),
+        ));
+        (
+            AgentRuntime::new(registry, provider, tools, "test-model"),
+            base,
+        )
     }
 
     fn watch_def() -> AgentDefinition {
@@ -1318,7 +1338,9 @@ mod soft_landing_tests {
     /// 步数耗尽软着陆：注入收束提示后智能体产出结论（不硬截断）
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 步数耗尽_软着陆产出结论() {
-        let provider = Arc::new(ToolLoopProvider { calls: AtomicUsize::new(0) });
+        let provider = Arc::new(ToolLoopProvider {
+            calls: AtomicUsize::new(0),
+        });
         let (rt, base) = base_rig(provider.clone());
         let def = watch_def();
         // 会话步数预算 = 2（模拟通道面 maxWatchSteps）
@@ -1341,7 +1363,10 @@ mod soft_landing_tests {
             .await
             .expect("软着陆应收束成功");
         assert!(out.contains("最终结论"), "应收束提示产出结论：{out}");
-        assert!(provider.calls.load(Ordering::SeqCst) >= 2, "工具调用至少走了预算步数");
+        assert!(
+            provider.calls.load(Ordering::SeqCst) >= 2,
+            "工具调用至少走了预算步数"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
