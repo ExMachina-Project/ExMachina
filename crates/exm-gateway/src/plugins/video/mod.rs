@@ -834,40 +834,54 @@ fn buvid_cached(ch: &Channel) -> Option<(String, Option<String>)> {
 /// 到 gaia-gateway/ExClimbWuzhi。缓存值三元组：(buvid3, buvid4, activated)。
 async fn bili_prime_buvid(ch: &Channel) {
     let cache = buvid_cache();
-    let need = !cache.lock().expect("buvid cache lock").contains_key(&ch.id);
+    // 未激活的缓存条目要重试（激活失败常见于网络抖动；指纹一日内有效，成功后不再重跑）
+    let need = match cache.lock().expect("buvid cache lock").get(&ch.id) {
+        None => true,
+        Some((_, _, activated)) => !activated,
+    };
     if !need {
         return;
     }
-    let resp = match http_client()
-        .get("https://www.bilibili.com/")
-        .header(reqwest::header::USER_AGENT, UA)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    let mut buvid3 = None;
-    let mut buvid4 = None;
-    for cv in resp.headers().get_all(reqwest::header::SET_COOKIE) {
-        if let Ok(s) = cv.to_str() {
-            for pair in s.split(';') {
-                let pair = pair.trim();
-                if let Some(v) = pair.strip_prefix("buvid3=") {
-                    buvid3 = Some(v.to_string());
-                } else if let Some(v) = pair.strip_prefix("buvid4=") {
-                    buvid4 = Some(v.to_string());
+    let cached = buvid_cached(ch);
+    // 有缓存 buvid 时无需再抓首页（只补激活）；无缓存才匿名访问首页领新指纹
+    let (b3, b4) = match cached {
+        Some(c) => c,
+        None => {
+            let resp = match http_client()
+                .get("https://www.bilibili.com/")
+                .header(reqwest::header::USER_AGENT, UA)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            let mut buvid3 = None;
+            let mut buvid4 = None;
+            for cv in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+                if let Ok(s) = cv.to_str() {
+                    for pair in s.split(';') {
+                        let pair = pair.trim();
+                        if let Some(v) = pair.strip_prefix("buvid3=") {
+                            buvid3 = Some(v.to_string());
+                        } else if let Some(v) = pair.strip_prefix("buvid4=") {
+                            buvid4 = Some(v.to_string());
+                        }
+                    }
                 }
             }
+            match buvid3 {
+                Some(b3) => (b3, buvid4),
+                None => return,
+            }
         }
-    }
-    let Some(b3) = buvid3 else { return };
+    };
     // 指纹激活（失败不阻断：激活态随缓存记录，下次 prime 重试）
     let activated = activate_buvid(&b3).await;
     cache
         .lock()
         .expect("buvid cache lock")
-        .insert(ch.id.clone(), (b3, buvid4, activated));
+        .insert(ch.id.clone(), (b3, b4, activated));
 }
 
 /// buvid3 指纹激活（ExClimbWuzhi）：Web 端登录前必经的设备指纹上报。
