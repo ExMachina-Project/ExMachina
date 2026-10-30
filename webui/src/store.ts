@@ -439,6 +439,35 @@ export const useExm = create<ExmState>((set, get) => ({
         }
       }
     }).catch(() => { /* 回放失败不阻断进会话 */ });
+    // 内联审批恢复：approvals 只由 WS 事件维护，刷新/换页后清空——
+    // 从事件流尾部扫 approval.required（该会话归属），对照 approvals API 的
+    // pending 集（approval.resolved 不一定先于 required 落流）过滤出仍待决的卡
+    void api.sessionEvents(id, 200).then(async (evts) => {
+      if (get().sessionId !== id) return;
+      const pending: { id: string; agent: string; cmd: string }[] = [];
+      for (let i = evts.length - 1; i >= 0; i--) {
+        const p = evts[i].payload as { type?: string; payload?: Record<string, unknown> } | undefined;
+        if (p?.type === "approval.required") {
+          const d = (p.payload ?? {}) as Record<string, unknown>;
+          pending.push({
+            id: String(d.approvalId ?? ""),
+            agent: String(d.agentId ?? ""),
+            cmd: String(d.command ?? ""),
+          });
+        }
+      }
+      if (pending.length === 0) return;
+      try {
+        const live = await api.listApprovals("pending", 100);
+        const liveIds = new Set(live.map((x) => x.id));
+        const cards = pending
+          .filter((x) => liveIds.has(x.id))
+          .map((x) => ({ approvalId: x.id, agentId: x.agent, command: x.cmd, sessionId: id }));
+        if (cards.length > 0 && get().sessionId === id) {
+          set({ approvals: [...get().approvals, ...cards.filter((c) => !get().approvals.some((a) => a.approvalId === c.approvalId))] });
+        }
+      } catch { /* API 不可用则跳过恢复 */ }
+    }).catch(() => { /* 回放失败不阻断进会话 */ });
     connectWs(get);
   },
 
