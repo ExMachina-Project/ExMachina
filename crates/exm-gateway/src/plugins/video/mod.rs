@@ -813,7 +813,7 @@ fn bili_cookie(ch: &Channel) -> String {
 }
 
 /// 通道级 buvid 缓存（共享单例）：(buvid3, Option<buvid4>)
-type BuvidCache = std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>;
+type BuvidCache = std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>, bool)>>;
 fn buvid_cache() -> &'static BuvidCache {
     static CACHE: OnceLock<BuvidCache> = OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -821,12 +821,20 @@ fn buvid_cache() -> &'static BuvidCache {
 
 /// 读取缓存的 buvid（无则 None——发评论前应先 bili_prime_buvid）
 fn buvid_cached(ch: &Channel) -> Option<(String, Option<String>)> {
-    buvid_cache().lock().expect("buvid cache lock").get(&ch.id).cloned()
+    buvid_cache()
+        .lock()
+        .expect("buvid cache lock")
+        .get(&ch.id)
+        .map(|(b3, b4, _)| (b3.clone(), b4.clone()))
 }
 
-/// 异步获取并缓存 buvid（观看轮次开始时调用一次；匿名访问首页即下发）
+/// 异步获取并缓存 buvid（观看轮次开始时调用一次；匿名访问首页即下发）。
+/// 2024+ 风控：buvid3 必须「激活」后才有发评论资格（未激活 = code:0 但评论进
+/// 自查不上屏，或直接 -352 风控）。激活 = 带 buvid3 cookie POST 指纹 payload
+/// 到 gaia-gateway/ExClimbWuzhi。缓存值三元组：(buvid3, buvid4, activated)。
 async fn bili_prime_buvid(ch: &Channel) {
-    let need = !buvid_cache().lock().expect("buvid cache lock").contains_key(&ch.id);
+    let cache = buvid_cache();
+    let need = !cache.lock().expect("buvid cache lock").contains_key(&ch.id);
     if !need {
         return;
     }
@@ -853,11 +861,52 @@ async fn bili_prime_buvid(ch: &Channel) {
             }
         }
     }
-    if let Some(b3) = buvid3 {
-        buvid_cache()
-            .lock()
-            .expect("buvid cache lock")
-            .insert(ch.id.clone(), (b3, buvid4));
+    let Some(b3) = buvid3 else { return };
+    // 指纹激活（失败不阻断：激活态随缓存记录，下次 prime 重试）
+    let activated = activate_buvid(&b3).await;
+    cache
+        .lock()
+        .expect("buvid cache lock")
+        .insert(ch.id.clone(), (b3, buvid4, activated));
+}
+
+/// buvid3 指纹激活（ExClimbWuzhi）：Web 端登录前必经的设备指纹上报。
+/// payload 为固定浏览器指纹（Chrome/Linux 桌面形态），与 UA 一致。
+async fn activate_buvid(buvid3: &str) -> bool {
+    let payload = serde_json::json!({
+        "payload": {
+            "39c8": "333333",
+            "39c9": "3339999",
+            "39ca": "1",
+            "39cb": "1",
+            "39cc": "1",
+            "39cd": "1",
+            "39ce": "1",
+            "39cf": "1",
+            "39d0": "1",
+            "3a28": "1.0.0",
+            "3a29": "1.0.0",
+            "3a2a": "1.0.0",
+            "3a2b": "1.0.0",
+            "3a2c": "1.0.0",
+            "3a2d": "1.0.0",
+            "3a2e": "1.0.0",
+            // WebGL/WebGPU 渲染器串（真实显卡标识；Chrome/Linux 常见值）
+            "39c8x": "",
+            "3a2f": "",
+        }
+    });
+    let resp = http_client()
+        .post("https://api.bilibili.com/x/internal/gaia-gateway/ExClimbWuzhi")
+        .header(reqwest::header::USER_AGENT, UA)
+        .header(reqwest::header::REFERER, BILI_REFERER)
+        .header(reqwest::header::COOKIE, format!("buvid3={buvid3}"))
+        .json(&payload)
+        .send()
+        .await;
+    match resp {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
     }
 }
 
