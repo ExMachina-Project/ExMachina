@@ -98,6 +98,8 @@ export interface Session {
   updatedAt: string;
   lastMessagePreview?: string;
   lastActiveAt?: string;
+  /** 用户置顶（列表置顶分组） */
+  pinned?: boolean;
 }
 
 export type TaskStatus =
