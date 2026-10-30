@@ -274,13 +274,13 @@ pub(crate) fn watch_tool_specs(kind: &str) -> Vec<CustomTool> {
 pub(crate) fn act_tool_spec() -> CustomTool {
     spec(
         "video__act",
-        "互动动作：发表评论或回复（回复目标必须是本会话已见评论）。受每日配额/字数清洗/dry-run/审批闸门约束",
+        "互动动作：发表评论或回复（回复目标必须是本会话已见评论）。评论须像真人的随手短评：一句一个具体点，无套话无排比无总结升华，延续你自己的说话方式；受每日配额/字数清洗/dry-run/审批闸门约束",
         json!({
             "type": "object",
             "properties": {
                 "videoId": { "type": "string", "description": "视频标识" },
-                "comment": { "type": "string", "description": "评论文本（对视频直接评论；与 replyText 二选一）" },
-                "replyText": { "type": "string", "description": "回复文本（与 comment 二选一，需同时给 replyTo）" },
+                "comment": { "type": "string", "description": "评论文本（对视频直接评论；与 replyText 二选一）。写法：短、具体、口语化——说一个真实的点（画面/台词/细节），不要面面俱到，不要「总的来说」类套话，不要排比与感叹号轰炸，纯文本无 Markdown" },
+                "replyText": { "type": "string", "description": "回复文本（与 comment 二选一，需同时给 replyTo）。写法同 comment：短、具体、像聊天" },
                 "replyTo": { "type": "string", "description": "回复目标评论 id（须为本会话已见评论的 id）" }
             },
             "required": ["videoId"]
@@ -1603,12 +1603,27 @@ async fn tool_act(
         anyhow::bail!("需提供 comment（评论）或 replyText+replyTo（回复），不能都为空");
     };
 
-    // 闸门 2：内容清洗（字数上限 + markdown/指令痕迹去除）
+    // 闸门 2：内容清洗（字数上限 + markdown/指令痕迹去除）。
+    // 超长/AI 味套话不静默截断——回给模型明确反馈，下一轮自我修正
     let text = clean_comment(&raw_text, gate.max_comment_chars);
     if text.trim().is_empty() {
         return Ok(format!(
             "已拒绝：清洗后文本为空（原文 {} 字）",
             raw_text.chars().count()
+        ));
+    }
+    if raw_text.chars().count() > gate.max_comment_chars {
+        return Ok(format!(
+            "已拒绝：评论 {} 字，超过 {} 字上限。不是截断是重写：挑一个最想说的点，\
+             一两句话说完（像随手打的短评），重新调用",
+            raw_text.chars().count(),
+            gate.max_comment_chars
+        ));
+    }
+    if let Some(cliche) = detect_cliche(&text) {
+        return Ok(format!(
+            "已拒绝：评论含套话「{cliche}」，AI 味太重。删掉套话与总结腔，\
+             直接说那个具体的点（画面/台词/细节），重新调用"
         ));
     }
 
