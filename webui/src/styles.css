@@ -637,10 +637,9 @@ textarea.ant-input:focus,
 @keyframes state-live { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
 /* ============ 对话 ============ */
-/* 高度 32px 扣减 = 滚动容器纵向 padding（顶 0 + 底 26px）+ 呼吸余量，随容器 padding 走 */
-/* box-sizing 必填：全局无 * 重置，content-box 会让 padding-top 叠加在 calc 高度之外，
-   实际占位超出可用空间 → .app-content 出现多余滚动条（桌面端对话页多余滚动根因） */
-.chat-shell { display: flex; flex-direction: row-reverse; gap: 18px; height: calc(100dvh - 26px - 6px); max-width: 1258px; margin: 0 auto; padding-top: 18px; box-sizing: border-box; }
+/* 上下对称呼吸：padding 10px 计入 border-box 高度（精确满高，不触发外层滚动）。
+   高度公式不留额外扣减——任何 -Npx 都会在底部多出一条 N 像素的不对称缝（实测教训）。 */
+.chat-shell { display: flex; flex-direction: row-reverse; gap: 18px; height: calc(100dvh - 26px); max-width: 1258px; margin: 0 auto; padding: 10px 0; box-sizing: border-box; }
 .chat-rail {
   box-sizing: border-box;
   width: 272px;
