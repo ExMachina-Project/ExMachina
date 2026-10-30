@@ -505,7 +505,17 @@ fn build_prompt(s: &Settings, candidates: &[VideoItem]) -> String {
     };
     let interact = if s.comment || s.reply {
         let mut parts: Vec<String> = vec![
-            "可以互动：经 video__act 发表评论或回复（回复目标必须是本会话已见的评论 id）。".into(),
+            format!(
+                "可以互动：经 video__act 发表评论或回复（回复目标必须是本会话已见的评论 id）。\
+                 评论写作规范（硬要求，违反会被系统拒绝）：\
+                 \n- 长度：{} 字以内——像真人随手打的短评，不是小作文。宁可一句话点到，不要面面俱到\
+                 \n- 语气：用你自己的说话方式（人设优先）；像跟朋友聊天，不像在写读后感\
+                 \n- 禁止 AI 腔：不写「总的来说/不得不说/真的太…了」这类套话，不排比，不总结升华，\
+                 不堆表情符号，不用感叹号轰炸。一条评论只说一个具体的点：某个画面、某句台词、某个细节反应\
+                 \n- B 站评论不支持 Markdown，纯文本即可\
+                 \n- 写不出真诚的评论就只看不说——强行硬夸比沉默更假\n",
+                s.max_comment_chars
+            ),
         ];
         if s.dry_run {
             parts.push("注意：通道处于 dry-run 模式，act 只记录拟发内容，不会真正发出。".into());
@@ -542,7 +552,7 @@ fn build_prompt(s: &Settings, candidates: &[VideoItem]) -> String {
 - 观感：用你自己的话讲这个视频讲了什么、你的看法（不要复述元信息）\n\
 - 互动：{interact}\n\
 - 不感兴趣可以都跳过——直接说明理由即可，不强制观看\n\
-风格保持你自己的说话方式，不要套模板腔。"
+你是谁就怎么说话：评论、观感全部延续你的人设与口癖（它们优先于本提示的通用措辞）。"
     )
 }
 
@@ -574,6 +584,41 @@ fn clean_text(raw: &str, max: usize) -> String {
     } else {
         out
     }
+}
+
+/// AI 味套话检测：命中返回首处套话（用于拒绝反馈，让模型重写而非静默修剪）。
+/// 清单为高频「总结升华 / 强调轰炸 / 感叹套话」模式——真人短评几乎不用这些起手。
+fn detect_cliche(text: &str) -> Option<&str> {
+    const CLICHES: &[&str] = &[
+        "总的来说",
+        "总而言之",
+        "综上",
+        "不得不说",
+        "真的是太",
+        "真的太",
+        "简直了",
+        "太震撼",
+        "太感动",
+        "泪目",
+        "破防了",
+        "yyds",
+        "绝绝子",
+        "强烈推荐",
+        "值得一看",
+        "受益匪浅",
+        "收获满满",
+        "干货满满",
+        "希望大家都",
+        "让我们",
+        "期待下一",
+        "下期再见",
+        "首先",
+        "其次",
+        "最后",
+        "一方面",
+        "另一方面",
+    ];
+    CLICHES.iter().find(|c| text.contains(**c)).copied()
 }
 
 /// 评论清洗：在 clean_text 基础上剥离 Markdown/装饰符号。
@@ -1896,6 +1941,69 @@ mod interest_tests {
         println!("提取结果: {terms:?}");
         assert!(!terms.is_empty());
         assert!(terms.iter().any(|t| t.contains("AI")));
+    }
+}
+
+#[cfg(test)]
+mod comment_quality_tests {
+    use super::*;
+
+    /// AI 味套话检测：命中清单返回首处，干净短评不误报
+    #[test]
+    fn 套话检测_命中与误报() {
+        assert_eq!(detect_cliche("总的来说这个视频不错"), Some("总的来说"));
+        assert_eq!(detect_cliche("不得不说 UP 主真的用心了"), Some("不得不说"));
+        assert_eq!(detect_cliche("首先…其次…最后…"), Some("首先"));
+        assert_eq!(detect_cliche("太感动了，泪目"), Some("太感动"));
+        // 真人短评形态：具体、口语、无套话
+        assert_eq!(detect_cliche("3 分 20 秒那个转场直接给我看愣了"), None);
+        assert_eq!(detect_cliche("这就是我不敢养猫的原因"), None);
+        assert_eq!(
+            detect_cliche("最后"),
+            Some("最后"),
+            "「最后」单独出现也命中（总结腔起手）"
+        );
+    }
+
+    /// 观看提示注入评论规范：字数预算 + 反 AI 味负面清单 + 人设优先
+    #[test]
+    fn 观看提示_评论规范注入() {
+        let s = Settings {
+            comment: true,
+            reply: false,
+            max_comment_chars: 80,
+            ..Settings::from_channel(&Channel {
+                id: "bili-q".into(),
+                kind: "bilibili".into(),
+                enabled: true,
+                group: None,
+                allowed_chats: vec![],
+                admins: vec![],
+                account: None,
+                secret: None,
+                reply_webhook: None,
+                token: None,
+                config: Default::default(),
+                group_gate: None,
+                capability: "computer".into(),
+                memory_isolation: false,
+                created_at: String::new(),
+            })
+        };
+        let item = VideoItem {
+            platform: "bilibili".into(),
+            id: "BV1".into(),
+            aid: None,
+            title: "测试视频".into(),
+            description: String::new(),
+            author: "up".into(),
+            views: 0,
+        };
+        let prompt = build_prompt(&s, &[item]);
+        assert!(prompt.contains("80 字以内"), "字数预算应注入：{prompt}");
+        assert!(prompt.contains("禁止 AI 腔"), "反 AI 味清单应注入");
+        assert!(prompt.contains("人设优先"), "人设优先应注入");
+        assert!(prompt.contains("你是谁就怎么说话"), "人设延续声明应注入");
     }
 }
 
