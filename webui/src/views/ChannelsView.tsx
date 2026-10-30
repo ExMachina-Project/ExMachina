@@ -590,6 +590,7 @@ export function ChannelsView(): React.ReactElement {
           size="small"
           rowKey="id"
           pagination={false}
+          scroll={{ x: "max-content" }}
           dataSource={channels}
           locale={{ emptyText: <BrandEmpty description={t("channels.empty")} className="pane-empty" /> }}
           columns={[
@@ -644,6 +645,11 @@ export function ChannelsView(): React.ReactElement {
               width: 110,
               render: (_, c) => {
                 const st = testResult[c.id];
+                const testText = st
+                  ? st.ok
+                    ? st.identity || t("channels.testOkShort")
+                    : t("channels.testCat." + st.category, { msg: (st.message ?? "").slice(0, 60) })
+                  : "";
                 return (
                   <Space size={4} direction="vertical">
                     <Button
@@ -655,17 +661,24 @@ export function ChannelsView(): React.ReactElement {
                           .then((r) => {
                             setTestResult((m) => ({ ...m, [c.id]: r }));
                             if (r.ok) message.success(t("channels.testOk", { id: r.identity ?? "" }));
-                            else message.warning(t("channels.testFailC", { cat: r.category ?? "", msg: r.message ?? r.error ?? "" }));
+                            else message.warning(t("channels.testFailC", { cat: r.category ?? "", msg: (r.message ?? r.error ?? "").slice(0, 80) }));
                           })
-                          .catch((e) => message.error(t("channels.testFailC", { cat: "", msg: String(e).slice(0, 120) })));
+                          .catch((e) => message.error(t("channels.testFailC", { cat: "", msg: String(e).slice(0, 80) })));
                       }}
                     >
                       {t("channels.testBtn")}
                     </Button>
                     {st && (
-                      <Tag color={st.ok ? undefined : st.category === "auth" ? "error" : st.category === "missing" ? "warning" : undefined}>
-                        {st.ok ? st.identity || t("channels.testOkShort") : t("channels.testCat." + st.category, { msg: (st.message ?? "").slice(0, 60) })}
-                      </Tag>
+                      /* 长错误文案限宽省略 + Tooltip 全文：antd Tag 不换行会撑破列宽，
+                         连接类报错（IO error: Connection refused 等）曾把表格挤出视口 */
+                      <Tooltip title={testText}>
+                        <Tag
+                          color={st.ok ? undefined : st.category === "auth" ? "error" : st.category === "missing" ? "warning" : undefined}
+                          style={{ maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginInlineEnd: 0 }}
+                        >
+                          {testText}
+                        </Tag>
+                      </Tooltip>
                     )}
                   </Space>
                 );
