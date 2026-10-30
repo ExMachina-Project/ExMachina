@@ -177,6 +177,8 @@ function firstMainSession(list: Session[]): Session | undefined {
 let ws: WebSocket | null = null;
 /** 连接代际号：每次 connectWs 递增。旧代际残留的 onclose/定时器一律失效，根治 A→B→A 快速切换的闭包竞态 */
 let wsGen = 0;
+/** 会话选择代际号：每次 selectSession 递增。快速切换时旧响应乱序到达不得覆盖新状态 */
+let selectSeq = 0;
 /** 连续失败退避（2s → 5s → 10s → 30s 封顶）：成功 open 即归零 */
 let wsBackoff = 0;
 /** 心跳看门狗：超过该时长未收到任何帧（含协议 Pong）即判死重连 */
@@ -202,10 +204,11 @@ function connectWs(get: () => ExmState): void {
     get().setWs(true);
     if (!reconnected) return;
     // 断连补偿：重拉消息与任务图恢复丢失事件；图无在途节点则解除 running 卡死
+    const compSeq = selectSeq; // 补偿期间的选择切换同样不得被旧快照覆盖
     void (async () => {
       try {
         const [messages, graph] = await Promise.all([api.messages(sessionId), api.graph(sessionId)]);
-        if (gen !== wsGen || useExm.getState().sessionId !== sessionId) return;
+        if (gen !== wsGen || useExm.getState().sessionId !== sessionId || selectSeq !== compSeq) return;
         const pending = (graph?.nodes ?? []).some((n) =>
           ["running", "dispatched", "syncing"].includes(String((n as { status?: string }).status ?? "")),
         );
@@ -381,11 +384,16 @@ export const useExm = create<ExmState>((set, get) => ({
   },
 
   selectSession: async (id) => {
+    // 代际守卫：快速切会话时旧请求的响应可能晚于新请求到达（网络乱序），
+    // 旧快照整体覆盖会抹掉新状态（切页面后回复消失 bug 的一半根因）。
+    // 每次选择递增序号，只有最新请求的响应才允许落盘。
+    const seq = ++selectSeq;
     const [messages, graph, session] = await Promise.all([
       api.messages(id),
       api.graph(id),
       api.getSession(id),
     ]);
+    if (seq !== selectSeq) return;
     set({
       sessionId: id,
       messages,
@@ -465,11 +473,19 @@ export const useExm = create<ExmState>((set, get) => ({
     try {
       await api.chat(id, text, images, sendMode ?? undefined);
     } finally {
-      // 草稿已发出：清除（chat-ergonomics）
+      // 草稿已发出：清除（chat-ergonomics）。
+      // 修 bug：历史版本逐会话存 exm.draft.<id>，现行复合存 exm.drafts JSON——
+      // 此前只 removeItem 旧键而复合键未清，切视图重挂载后草稿初始化把
+      // 已发送文本读回输入框。两处都清（旧键兜底 + 复合键同步）。
+      const sid = id;
+      set((s) => {
+        const drafts = { ...s.drafts, [sid]: "" };
+        try { sessionStorage.setItem("exm.drafts", JSON.stringify(drafts)); } catch { /* 隐私模式忽略 */ }
+        return { drafts };
+      });
       try {
-        sessionStorage.removeItem(draftKey(id));
+        sessionStorage.removeItem(draftKey(sid));
       } catch { /* 隐私模式忽略 */ }
-      set((s) => ({ drafts: { ...s.drafts, [id]: "" } }));
     }
     get().updateSessionPreview(id, label);
   },
@@ -718,10 +734,12 @@ export const useExm = create<ExmState>((set, get) => ({
         delete parts[agent];
         set({ liveParts: parts });
         const sid2 = evt.sessionId;
+        // 回填代际守卫（同 run.finished）：回拉期间的选择切换不得被旧快照覆盖
+        const refilSeq2 = selectSeq;
         void (async () => {
           try {
             const msgs = await api.messages(sid2);
-            if (useExm.getState().sessionId === sid2) useExm.setState({ messages: msgs });
+            if (useExm.getState().sessionId === sid2 && selectSeq === refilSeq2) useExm.setState({ messages: msgs });
           } catch {
             /* 回拉失败静默：刷新/切会话时自然补齐 */
           }
@@ -829,7 +847,9 @@ export const useExm = create<ExmState>((set, get) => ({
         }
         const statements = (p.statements ?? []) as Statement[];
         const id = get().sessionId!;
-        // 工具轨迹与思维链随最终消息留存（收起栏可随时展开回看，不再「突然消失」）
+        // 权威回填代际：回拉期间若用户切走（selectSession 落了新会话），不得覆盖。
+        // 比较选择代际：回拉发起时的序号仍是最新 → 没有更新的选择发生 → 安全落盘。
+        const refilSeq = selectSeq;
         const toolCalls = get().runToolCalls;
         const thinking = get().liveThinking;
         set({
@@ -858,7 +878,9 @@ export const useExm = create<ExmState>((set, get) => ({
         void (async () => {
           try {
             const msgs = await api.messages(id);
-            if (useExm.getState().sessionId === id) useExm.setState({ messages: msgs });
+            // 双守卫：会话号一致 + 选择代际未变（回拉期间切走又切回的乱序覆盖）。
+            // 服务端快照含最终消息，覆盖是安全的；只在「已发生更新的选择」时让位。
+            if (useExm.getState().sessionId === id && selectSeq === refilSeq) useExm.setState({ messages: msgs });
           } catch {
             /* 回拉失败静默：保留本地乐观消息 */
           }
