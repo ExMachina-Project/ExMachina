@@ -27,6 +27,8 @@ chrono.workspace = true
 reqwest.workspace = true
 # video 插件 videoId 归一解析（链接形态抽取）
 regex = "1"
+# video__shots 雪碧图帧裁切（复用 exm-core 同版本 image，编译缓存共享）
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # RSS 阅读插件（plugins/rss）：RSS2/Atom 解析
 quick-xml.workspace = true
 # 平台适配器 WS 客户端（napcat 正向 WS / qqbot 官方网关 wss）
