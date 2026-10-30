@@ -1480,15 +1480,30 @@ textarea.ant-input:focus,
 .plain-table tbody tr:hover { background: var(--hover); }
 
 /* 设置页 v3：面板区独立滚动，左侧分区导航常驻（长表单滚动时导航不跟着滚走） */
-.settings2 { display: flex; gap: 22px; align-items: flex-start; }
-/* sticky top 对齐吸顶页头下缘（页头约 87px），避免导航首项被页头盖住 */
-.settings2 .cfg-nav { position: sticky; top: 96px; max-height: calc(100dvh - 216px); overflow-y: auto; padding-bottom: 8px; }
+.settings2 { display: flex; gap: 22px; align-items: stretch; }
 .cfg-nav {
   flex: none;
   width: 200px;
   display: flex;
   flex-direction: column;
+  /* 与右侧 cfg-panel 同款卡片语汇：stretch 对齐随内容区等高占满——
+     此前是裸按钮列，条目少时悬在半空与右侧面板视觉不齐 */
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+/* 内层滚动区：sticky 吸顶（对齐吸顶页头下缘，页头约 87px）+ 自身滚动。
+   sticky 放外层会破坏 flex stretch 等高，故拆两层 */
+.cfg-nav-scroll {
+  position: sticky;
+  top: 96px;
+  display: flex;
+  flex-direction: column;
   gap: 3px;
+  padding: 10px 8px;
+  max-height: calc(100dvh - 216px);
+  overflow-y: auto;
 }
 .cfg-nav-item {
   display: flex;
@@ -2844,8 +2859,9 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 }
 
 @media (max-width: 860px) {
-  .settings2 { flex-direction: column; gap: 12px; }
-  .cfg-nav { width: 100%; flex-direction: row; overflow-x: auto; gap: 4px; padding-bottom: 6px; }
+  .settings2 { flex-direction: column; gap: 12px; align-items: stretch; }
+  .cfg-nav { width: 100%; }
+  .cfg-nav-scroll { flex-direction: row; overflow-x: auto; gap: 4px; padding: 6px 8px; position: static; max-height: none; }
   .cfg-nav-item { white-space: nowrap; padding: 6px 10px; }
   /* 宽表横滚：滚动容器取 wrapper（.ant-table 本身带 min-width，
      放在 .ant-table-content 上滚不动，只会把页面撑破 200px+） */

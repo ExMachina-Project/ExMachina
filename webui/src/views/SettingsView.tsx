@@ -307,8 +307,11 @@ export function SettingsView(): React.ReactElement {
         desc={t("settings.desc")}
       />
       <div className="settings2">
-        {/* 左侧分类导航：后端 schema 分组 + 本地「界面」偏好 */}
+        {/* 左侧分类导航：后端 schema 分组 + 本地「界面」偏好。
+            外层 cfg-nav 是等高卡片（与右侧面板 stretch 对齐）；
+            内层 cfg-nav-scroll 承担 sticky 吸顶与自身滚动 */}
         <nav className="cfg-nav">
+        <div className="cfg-nav-scroll">
           {/* 载入中：分类列表尚不可知，给骨架而非空白（空导航会被当成「配置项没了」） */}
           {schemaLoading && !schemaErr &&
             Array.from({ length: 8 }, (_, i) => (
@@ -335,6 +338,7 @@ export function SettingsView(): React.ReactElement {
             <span className="cfg-nav-icon">{SECTIONS.version.icon}</span>
             <span>{t("sec.version")}</span>
           </button>
+        </div>
         </nav>
         {/* 右侧面板：仅当前分类 */}
         <section className="cfg-panel">
