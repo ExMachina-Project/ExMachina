@@ -25,7 +25,11 @@ pub enum InstallSource {
     /// tar.gz 包（URL 或本地路径）
     TarGz { url: String },
     /// git 仓库（可带子目录与 ref）
-    Git { url: String, subdir: String, r#ref: String },
+    Git {
+        url: String,
+        subdir: String,
+        r#ref: String,
+    },
 }
 
 impl InstallSource {
@@ -56,7 +60,9 @@ pub fn installation_to_source(inst: &PluginInstallation) -> InstallSource {
             subdir: inst.subdir.clone(),
             r#ref: inst.r#ref.clone(),
         },
-        _ => InstallSource::TarGz { url: inst.url.clone() },
+        _ => InstallSource::TarGz {
+            url: inst.url.clone(),
+        },
     }
 }
 
@@ -76,20 +82,26 @@ pub fn parse_source_url(url: &str) -> InstallSource {
         if let Some(pos) = u.find(host) {
             let after = &u[pos + host.len()..];
             // 形如 /<owner>/<repo>（可带 /tree/<ref>/...）才算仓库页；/raw/ /releases/download/ 是文件
-            if after.starts_with('/') && !u.contains("/raw/") && !u.contains("/releases/download/") {
+            if after.starts_with('/') && !u.contains("/raw/") && !u.contains("/releases/download/")
+            {
                 let path = after.trim_start_matches('/');
                 let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
                 if segs.len() >= 2 && (segs.len() == 2 || segs[2] == "tree" || segs[2] == "blob") {
-                    let (r#ref, subdir) = if segs.len() >= 4 && (segs[2] == "tree" || segs[2] == "blob") {
-                        // /owner/repo/tree/<ref>/<subdir...>
-                        let r = segs[3].to_string();
-                        let sub = segs[4..].join("/");
-                        (r, sub)
-                    } else {
-                        (String::new(), String::new())
-                    };
+                    let (r#ref, subdir) =
+                        if segs.len() >= 4 && (segs[2] == "tree" || segs[2] == "blob") {
+                            // /owner/repo/tree/<ref>/<subdir...>
+                            let r = segs[3].to_string();
+                            let sub = segs[4..].join("/");
+                            (r, sub)
+                        } else {
+                            (String::new(), String::new())
+                        };
                     let clean = format!("https://{}/{}/{}", host, segs[0], segs[1]);
-                    return InstallSource::Git { url: clean, subdir, r#ref };
+                    return InstallSource::Git {
+                        url: clean,
+                        subdir,
+                        r#ref,
+                    };
                 }
             }
         }
@@ -143,11 +155,7 @@ pub fn unpack_targz(
             ));
         }
         // 符号链接不保留（插件面不需要；防逃逸）
-        let is_link = entry
-            .link_name()
-            .ok()
-            .flatten()
-            .is_some();
+        let is_link = entry.link_name().ok().flatten().is_some();
         let ft = header.entry_type();
         if is_link || (ft.is_symlink()) {
             continue;
@@ -181,10 +189,13 @@ pub fn unpack_targz(
                 use std::os::unix::fs::OpenOptionsExt;
                 opts.mode(0o755);
             }
-            let mut f = opts.open(&out_path).map_err(|e| format!("写出文件失败：{e}"))?;
+            let mut f = opts
+                .open(&out_path)
+                .map_err(|e| format!("写出文件失败：{e}"))?;
             std::io::copy(&mut entry, &mut f).map_err(|e| format!("写出文件失败：{e}"))?;
         } else {
-            let mut f = std::fs::File::create(&out_path).map_err(|e| format!("写出文件失败：{e}"))?;
+            let mut f =
+                std::fs::File::create(&out_path).map_err(|e| format!("写出文件失败：{e}"))?;
             std::io::copy(&mut entry, &mut f).map_err(|e| format!("写出文件失败：{e}"))?;
             #[cfg(unix)]
             {
@@ -216,7 +227,9 @@ pub fn locate_plugin_root(staging: &Path) -> Result<PathBuf, String> {
     match hits.len() {
         1 => Ok(hits.remove(0)),
         0 => Err("包内未找到 plugin.json（包根与一级子目录均无清单）".into()),
-        n => Err(format!("包内发现 {n} 个 plugin.json（根/唯一子目录口径只允许一个）")),
+        n => Err(format!(
+            "包内发现 {n} 个 plugin.json（根/唯一子目录口径只允许一个）"
+        )),
     }
 }
 
@@ -224,7 +237,10 @@ fn subdirs_one_level(dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// 校验插件根清单（复用装载校验路径）并返回 (manifest, 主命令 keep_exec 清单)。
@@ -261,9 +277,7 @@ pub fn place_plugin(
     let dest = plugins_dir.join(&id);
     if dest.exists() {
         if !overwrite {
-            return Err(format!(
-                "插件 {id} 已安装（如需替换请用更新/覆盖安装）"
-            ));
+            return Err(format!("插件 {id} 已安装（如需替换请用更新/覆盖安装）"));
         }
         // 覆盖安装 = 更新语义：保留 data/（调用方 update_plugin 处理；直接覆盖场景先移除）
         let backup = dest.with_extension("old");
@@ -344,18 +358,17 @@ pub async fn fetch_targz(url: &str, tmp: &Path) -> Result<(), String> {
         .await
         .map_err(|e| format!("读取包内容失败：{e}"))?;
     if bytes.len() as u64 > MAX_TOTAL_BYTES {
-        return Err(format!("包超过总上限（{}MB）", MAX_TOTAL_BYTES / 1024 / 1024));
+        return Err(format!(
+            "包超过总上限（{}MB）",
+            MAX_TOTAL_BYTES / 1024 / 1024
+        ));
     }
     std::fs::write(tmp, &bytes).map_err(|e| format!("写临时包失败：{e}"))?;
     Ok(())
 }
 
 /// git 浅克隆到目录（需要 git 可执行；`.git` 在克隆目录但不随迁——place 只搬子树内容）
-pub async fn git_shallow_clone(
-    url: &str,
-    r#ref: &str,
-    dest: &Path,
-) -> Result<(), String> {
+pub async fn git_shallow_clone(url: &str, r#ref: &str, dest: &Path) -> Result<(), String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("clone").arg("--depth").arg("1");
     if !r#ref.trim().is_empty() {
@@ -369,7 +382,10 @@ pub async fn git_shallow_clone(
     if !out.status.success() {
         return Err(format!(
             "git 克隆失败：{}",
-            String::from_utf8_lossy(&out.stderr).chars().take(500).collect::<String>()
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(500)
+                .collect::<String>()
         ));
     }
     Ok(())
@@ -586,7 +602,11 @@ pub async fn update_from_source(
             std::fs::rename(safe.join("data"), dest.join("data")).map_err(|e| e.to_string())?;
         }
         pm.load_one(&id);
-        Ok(InstallOutcome { id, version: m.version.clone(), updated: true })
+        Ok(InstallOutcome {
+            id,
+            version: m.version.clone(),
+            updated: true,
+        })
     }
     .await;
     let _ = std::fs::remove_dir_all(&staging_area);
@@ -642,7 +662,9 @@ impl IndexEntry {
                 subdir: self.source.subdir.clone().unwrap_or_default(),
                 r#ref: self.source.r#ref.clone().unwrap_or_default(),
             },
-            _ => InstallSource::TarGz { url: self.source.url.clone() },
+            _ => InstallSource::TarGz {
+                url: self.source.url.clone(),
+            },
         }
     }
 }
@@ -741,20 +763,21 @@ pub fn compare_index(
     entries
         .iter()
         .map(|e| {
-            let status = if !e.exm_min.trim().is_empty() && !super::version_ok(&e.exm_min, host_version) {
-                IndexStatus::Incompatible(e.exm_min.clone())
-            } else {
-                match installed(&e.id) {
-                    Some((local_v, _)) => {
-                        if super::version_newer(&e.version, &local_v) {
-                            IndexStatus::Updatable(local_v, e.version.clone())
-                        } else {
-                            IndexStatus::Installed(local_v)
+            let status =
+                if !e.exm_min.trim().is_empty() && !super::version_ok(&e.exm_min, host_version) {
+                    IndexStatus::Incompatible(e.exm_min.clone())
+                } else {
+                    match installed(&e.id) {
+                        Some((local_v, _)) => {
+                            if super::version_newer(&e.version, &local_v) {
+                                IndexStatus::Updatable(local_v, e.version.clone())
+                            } else {
+                                IndexStatus::Installed(local_v)
+                            }
                         }
+                        None => IndexStatus::Available,
                     }
-                    None => IndexStatus::Available,
-                }
-            };
+                };
             (e.clone(), status)
         })
         .collect()
@@ -764,7 +787,7 @@ pub fn compare_index(
 mod tests {
     use super::*;
 
-    fn make_pkg(dir: &Path, entries: &[( &str, &str )]) -> PathBuf {
+    fn make_pkg(dir: &Path, entries: &[(&str, &str)]) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let src = dir.join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -785,7 +808,8 @@ mod tests {
             if e.path().is_dir() {
                 tar.append_dir_all(name, e.path()).unwrap();
             } else {
-                tar.append_file(name, &mut std::fs::File::open(e.path()).unwrap()).unwrap();
+                tar.append_file(name, &mut std::fs::File::open(e.path()).unwrap())
+                    .unwrap();
             }
         }
         tar.into_inner().unwrap().finish().unwrap();
@@ -804,10 +828,7 @@ mod tests {
     #[test]
     fn 解包_合法包定位与校验() {
         let d = tmp("ok");
-        let tgz = make_pkg(&d, &[
-            ("pkg/plugin.json", MANIFEST),
-            ("pkg/extra.txt", "x"),
-        ]);
+        let tgz = make_pkg(&d, &[("pkg/plugin.json", MANIFEST), ("pkg/extra.txt", "x")]);
         let out = d.join("unpacked");
         std::fs::create_dir_all(&out).unwrap();
         let files = unpack_targz(&tgz, &out, &[]).unwrap();
@@ -826,14 +847,17 @@ mod tests {
         // ——攻击包无法经正规工具构造；解包侧的防线（entry.path 校验）保留为纵深防御。
         // 此处验证：正常相对路径不误伤 + `./` 前缀条目合法解包。
         let d = tmp("traversal");
-        let tgz = make_pkg(&d, &[
-            ("pkg/plugin.json", MANIFEST),
-            ("pkg/normal.txt", "ok"),
-        ]);
+        let tgz = make_pkg(
+            &d,
+            &[("pkg/plugin.json", MANIFEST), ("pkg/normal.txt", "ok")],
+        );
         let out = d.join("unpacked");
         std::fs::create_dir_all(&out).unwrap();
         let files = unpack_targz(&tgz, &out, &[]).unwrap();
-        assert!(files.iter().any(|f| f.ends_with("normal.txt")), "正常条目应解包：{files:?}");
+        assert!(
+            files.iter().any(|f| f.ends_with("normal.txt")),
+            "正常条目应解包：{files:?}"
+        );
         // 构造侧拒绝 ..（防线证据）
         let tgz2 = d.join("evil2.tgz");
         let f2 = std::fs::File::create(&tgz2).unwrap();
@@ -844,8 +868,12 @@ mod tests {
         h2.set_mode(0o644);
         h2.set_cksum();
         assert!(
-            t2.append_data(&mut h2, "../evil.txt", std::io::Cursor::new(b"evil".to_vec()))
-                .is_err(),
+            t2.append_data(
+                &mut h2,
+                "../evil.txt",
+                std::io::Cursor::new(b"evil".to_vec())
+            )
+            .is_err(),
             "tar 构造面应拒绝 .. 路径"
         );
         let _ = std::fs::remove_dir_all(&d);
@@ -863,7 +891,8 @@ mod tests {
         header.set_size(MAX_MEMBER_BYTES + 1);
         header.set_mode(0o644);
         header.set_cksum();
-        tar.append_data(&mut header, "pkg/big.bin", std::io::empty()).unwrap();
+        tar.append_data(&mut header, "pkg/big.bin", std::io::empty())
+            .unwrap();
         tar.into_inner().unwrap().finish().unwrap();
         let out = d.join("unpacked");
         std::fs::create_dir_all(&out).unwrap();
@@ -876,10 +905,10 @@ mod tests {
     fn 解包_多清单包拒绝() {
         let d = tmp("multi");
         // 包根平级两个子目录各含清单（包根无清单 → 一级子目录口径发现 2 个 → 拒绝）
-        let tgz = make_pkg(&d, &[
-            ("a/plugin.json", MANIFEST),
-            ("b/plugin.json", MANIFEST),
-        ]);
+        let tgz = make_pkg(
+            &d,
+            &[("a/plugin.json", MANIFEST), ("b/plugin.json", MANIFEST)],
+        );
         let out = d.join("unpacked");
         std::fs::create_dir_all(&out).unwrap();
         unpack_targz(&tgz, &out, &[]).unwrap();
@@ -898,8 +927,13 @@ mod tests {
         std::fs::write(src.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
         std::fs::write(src.join("helper.py"), "print(1)\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(src.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::set_permissions(src.join("helper.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(src.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::set_permissions(
+            src.join("helper.py"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         let tgz = d.join("pkg.tgz");
         let file = std::fs::File::create(&tgz).unwrap();
         let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
@@ -911,7 +945,11 @@ mod tests {
         unpack_targz(&tgz, &d.join("unpacked"), &[]).unwrap();
         // 治理前 run.sh 应带执行位（或已被 unpack 剥离——unpack keep 空名单直接剥）
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode();
-        assert_eq!(mode(&out.join("run.sh")) & 0o111, 0, "keep 空名单应剥离全部执行位");
+        assert_eq!(
+            mode(&out.join("run.sh")) & 0o111,
+            0,
+            "keep 空名单应剥离全部执行位"
+        );
         // keep 主命令：重解包带 keep
         let out2 = d.join("unpacked2/pkg");
         std::fs::create_dir_all(d.join("unpacked2")).unwrap();
@@ -943,7 +981,10 @@ mod tests {
         assert!(err.contains("已安装"), "应报冲突：{err}");
         // 覆盖：data/ 保留
         place_plugin(&plugins, &r2, true).unwrap();
-        assert!(plugins.join("hello/data/keep.txt").is_file(), "data/ 应保留");
+        assert!(
+            plugins.join("hello/data/keep.txt").is_file(),
+            "data/ 应保留"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -978,26 +1019,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(keep_exec_names(&m), vec!["run.sh".to_string()]);
-        let m2: PluginManifest = serde_json::from_str(
-            r#"{ "id": "p", "process": { "command": ["python3", "x.py"] } }"#,
-        )
-        .unwrap();
+        let m2: PluginManifest =
+            serde_json::from_str(r#"{ "id": "p", "process": { "command": ["python3", "x.py"] } }"#)
+                .unwrap();
         assert!(keep_exec_names(&m2).is_empty(), "解释器不算包内主命令");
     }
 
     #[tokio::test]
     async fn 安装_本地包全流程() {
         let d = tmp("flow");
-        let tgz = make_pkg(&d, &[
-            ("pkg/plugin.json", MANIFEST),
-            ("pkg/readme.md", "hi"),
-        ]);
+        let tgz = make_pkg(
+            &d,
+            &[("pkg/plugin.json", MANIFEST), ("pkg/readme.md", "hi")],
+        );
         let plugins = d.join("plugins");
         std::fs::create_dir_all(&plugins).unwrap();
         let pm = PluginManager::new(&plugins);
         let out = install_from_source(
             &pm,
-            &InstallSource::TarGz { url: tgz.to_string_lossy().to_string() },
+            &InstallSource::TarGz {
+                url: tgz.to_string_lossy().to_string(),
+            },
             &plugins,
             "0.5.3",
             false,
@@ -1014,21 +1056,28 @@ mod tests {
     #[tokio::test]
     async fn 安装_Core级往返与来源持久化() {
         let d = tmp("coreflow");
-        let tgz = make_pkg(&d, &[
-            ("pkg/plugin.json", MANIFEST),
-        ]);
+        let tgz = make_pkg(&d, &[("pkg/plugin.json", MANIFEST)]);
         let mut cfg = crate::config::ExmConfig::load(&d);
         cfg.use_mock = true;
         cfg.memory_enabled = false;
         let core = crate::Core::with_config(cfg).unwrap();
         let out = core
-            .plugin_install(&InstallSource::TarGz { url: tgz.to_string_lossy().to_string() }, false)
+            .plugin_install(
+                &InstallSource::TarGz {
+                    url: tgz.to_string_lossy().to_string(),
+                },
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(out.id, "hello");
         // 来源记录持久化
         let cfg2 = core.config();
-        let inst = cfg2.plugins.installations.get("hello").expect("installation 应记录");
+        let inst = cfg2
+            .plugins
+            .installations
+            .get("hello")
+            .expect("installation 应记录");
         assert_eq!(inst.kind, "targz");
         assert!(inst.url.ends_with("pkg.tgz"));
         // 声明式工具回接：ToolGateway 下发含 hello__ping
@@ -1043,7 +1092,11 @@ mod tests {
         drop(core);
         let cfg3 = crate::config::ExmConfig::load(&d);
         let core2 = crate::Core::with_config(cfg3).unwrap();
-        assert!(core2.plugins().list().iter().any(|e| e.manifest.id == "hello"));
+        assert!(core2
+            .plugins()
+            .list()
+            .iter()
+            .any(|e| e.manifest.id == "hello"));
         // 卸载：目录删除 + 记录清理
         assert!(core2.plugin_uninstall("hello").unwrap());
         assert!(!d.join("plugins/hello").exists());
@@ -1055,15 +1108,26 @@ mod tests {
     #[tokio::test]
     async fn 更新_保数据与状态() {
         let d = tmp("upd");
-        let tgz_v1 = make_pkg(&d.join("v1"), &[
-            ("pkg/plugin.json", r#"{ "id": "hello", "version": "0.1.0", "tools": [ { "name": "ping", "kind": "http", "target": "https://example.com", "method": "GET" } ] }"#),
-        ]);
+        let tgz_v1 = make_pkg(
+            &d.join("v1"),
+            &[(
+                "pkg/plugin.json",
+                r#"{ "id": "hello", "version": "0.1.0", "tools": [ { "name": "ping", "kind": "http", "target": "https://example.com", "method": "GET" } ] }"#,
+            )],
+        );
         let mut cfg = crate::config::ExmConfig::load(&d);
         cfg.use_mock = true;
         cfg.memory_enabled = false;
         let core = crate::Core::with_config(cfg).unwrap();
         let url_v1 = tgz_v1.to_string_lossy().to_string();
-        core.plugin_install(&InstallSource::TarGz { url: url_v1.clone() }, false).await.unwrap();
+        core.plugin_install(
+            &InstallSource::TarGz {
+                url: url_v1.clone(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
         // 写入运行数据 + 手动禁用
         std::fs::create_dir_all(d.join("plugins/hello/data")).unwrap();
         std::fs::write(d.join("plugins/hello/data/state.json"), r#"{ "seen": 1 }"#).unwrap();
@@ -1072,27 +1136,44 @@ mod tests {
         c1.plugins.state.insert("hello".into(), false);
         core.apply_config(c1).unwrap();
         // 更新到 v2
-        let tgz_v2 = make_pkg(&d.join("v2"), &[
-            ("pkg/plugin.json", r#"{ "id": "hello", "version": "0.2.0", "tools": [ { "name": "ping", "kind": "http", "target": "https://example.com", "method": "GET" } ] }"#),
-        ]);
+        let tgz_v2 = make_pkg(
+            &d.join("v2"),
+            &[(
+                "pkg/plugin.json",
+                r#"{ "id": "hello", "version": "0.2.0", "tools": [ { "name": "ping", "kind": "http", "target": "https://example.com", "method": "GET" } ] }"#,
+            )],
+        );
         let url_v2 = tgz_v2.to_string_lossy().to_string();
         // 来源记录仍指向 v1 → 先改成 v2 模拟远端更新（同 URL 场景；此处直接装 v2 URL）
         {
             let mut c2 = (*core.config()).clone();
-            c2.plugins.installations.insert("hello".into(), crate::config::PluginInstallation {
-                kind: "targz".into(), url: url_v2.clone(), ..Default::default()
-            });
+            c2.plugins.installations.insert(
+                "hello".into(),
+                crate::config::PluginInstallation {
+                    kind: "targz".into(),
+                    url: url_v2.clone(),
+                    ..Default::default()
+                },
+            );
             core.apply_config(c2).unwrap();
         }
         let (updated, msg) = core.plugin_update("hello").await.unwrap();
         assert!(updated, "应发生更新：{msg}");
         // data/ 保留、版本更新、禁用状态保持
-        assert!(d.join("plugins/hello/data/state.json").is_file(), "data/ 应保留");
+        assert!(
+            d.join("plugins/hello/data/state.json").is_file(),
+            "data/ 应保留"
+        );
         assert_eq!(
-            core.plugins().get("hello").map(|e| e.manifest.version.clone()),
+            core.plugins()
+                .get("hello")
+                .map(|e| e.manifest.version.clone()),
             Some("0.2.0".into())
         );
-        assert!(!core.plugins().get("hello").unwrap().enabled, "禁用状态应保持");
+        assert!(
+            !core.plugins().get("hello").unwrap().enabled,
+            "禁用状态应保持"
+        );
         // 已是最新：再更一次不落盘（mtime 不变口径太脆——用返回值验证）
         let (updated2, msg2) = core.plugin_update("hello").await.unwrap();
         assert!(!updated2, "同版本不应再更新：{msg2}");
@@ -1131,7 +1212,10 @@ mod tests {
         assert_eq!(idx2[0].id, "demo");
         // 非法形态
         assert!(parse_index("{}").is_err());
-        assert!(parse_index("[{ \"version\": \"1\" }]").is_err(), "缺 id 应拒绝");
+        assert!(
+            parse_index("[{ \"version\": \"1\" }]").is_err(),
+            "缺 id 应拒绝"
+        );
         assert!(parse_index("not json").is_err());
     }
 
@@ -1142,15 +1226,20 @@ mod tests {
             name: id.into(),
             version: v.into(),
             description: String::new(),
-            source: IndexSource { kind: "targz".into(), url: format!("https://x/{id}.tgz"), subdir: None, r#ref: None },
+            source: IndexSource {
+                kind: "targz".into(),
+                url: format!("https://x/{id}.tgz"),
+                subdir: None,
+                r#ref: None,
+            },
             exm_min: exm_min.into(),
             sha256: None,
         };
         let entries = vec![
-            mk("new", "1.0.0", ""),          // 未装
-            mk("same", "1.0.0", ""),         // 已装同版
-            mk("old", "2.0.0", ""),          // 已装旧版
-            mk("future", "9.0.0", "99.0"),   // 宿主不满足
+            mk("new", "1.0.0", ""),        // 未装
+            mk("same", "1.0.0", ""),       // 已装同版
+            mk("old", "2.0.0", ""),        // 已装旧版
+            mk("future", "9.0.0", "99.0"), // 宿主不满足
         ];
         let installed = |id: &str| -> Option<(String, bool)> {
             match id {
@@ -1162,7 +1251,10 @@ mod tests {
         let out = compare_index(&entries, &installed, "0.5.3");
         assert_eq!(out[0].1, IndexStatus::Available);
         assert_eq!(out[1].1, IndexStatus::Installed("1.0.0".into()));
-        assert_eq!(out[2].1, IndexStatus::Updatable("1.0.0".into(), "2.0.0".into()));
+        assert_eq!(
+            out[2].1,
+            IndexStatus::Updatable("1.0.0".into(), "2.0.0".into())
+        );
         assert_eq!(out[3].1, IndexStatus::Incompatible("99.0".into()));
     }
 
@@ -1170,6 +1262,9 @@ mod tests {
     fn 索引_生效地址() {
         assert_eq!(effective_index_url(""), DEFAULT_INDEX_URL);
         assert_eq!(effective_index_url(" "), DEFAULT_INDEX_URL);
-        assert_eq!(effective_index_url("https://my.host/index.json"), "https://my.host/index.json");
+        assert_eq!(
+            effective_index_url("https://my.host/index.json"),
+            "https://my.host/index.json"
+        );
     }
 }

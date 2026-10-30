@@ -33,6 +33,6 @@
     "required": [],
     "optional": []
   },
-  "promptFile": "machina/AGENTS.md",
+  "promptFile": "machina/PROMPT.md",
   "modelHint": "default"
 }

@@ -62,7 +62,9 @@ pub fn push_thinking(session_id: &str, delta: &str) {
     st.thinking.push_str(delta);
     match st.steps.last_mut() {
         Some(TraceStep::Thinking { text }) => text.push_str(delta),
-        _ => st.steps.push(TraceStep::Thinking { text: delta.to_string() }),
+        _ => st.steps.push(TraceStep::Thinking {
+            text: delta.to_string(),
+        }),
     }
 }
 
@@ -70,14 +72,18 @@ pub fn push_thinking(session_id: &str, delta: &str) {
 pub fn push_tool(session_id: &str, record: ToolCallRecord) {
     let mut map = states().lock();
     let st = map.entry(session_id.to_string()).or_default();
-    st.steps.push(TraceStep::Tool { call_id: record.call_id.clone() });
+    st.steps.push(TraceStep::Tool {
+        call_id: record.call_id.clone(),
+    });
     st.tools.push(record);
 }
 
 /// 轮次收束时取走全部过程数据（取走即清空该类数据，取消令牌不受影响）
 pub fn drain(session_id: &str) -> (Option<String>, Vec<ToolCallRecord>, Vec<TraceStep>) {
     let mut map = states().lock();
-    let Some(st) = map.get_mut(session_id) else { return (None, Vec::new(), Vec::new()) };
+    let Some(st) = map.get_mut(session_id) else {
+        return (None, Vec::new(), Vec::new());
+    };
     let thinking = (!st.thinking.trim().is_empty()).then(|| std::mem::take(&mut st.thinking));
     let tools = std::mem::take(&mut st.tools);
     let steps = std::mem::take(&mut st.steps);
@@ -122,5 +128,9 @@ pub fn is_cancelled(session_id: &str) -> bool {
 
 /// 本轮已记录的工具调用数
 pub fn tool_count(session_id: &str) -> usize {
-    states().lock().get(session_id).map(|st| st.tools.len()).unwrap_or(0)
+    states()
+        .lock()
+        .get(session_id)
+        .map(|st| st.tools.len())
+        .unwrap_or(0)
 }

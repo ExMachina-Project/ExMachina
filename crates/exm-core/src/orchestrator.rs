@@ -766,10 +766,18 @@ impl Orchestrator {
             let budget_chars =
                 (window as f64 * budget_ratio).floor() as usize * crate::budget::CHARS_PER_TOKEN;
             let system_chars = system_prompt.chars().count();
-            let summary_chars = summary_opt.as_deref().map(|s| s.chars().count()).unwrap_or(0);
+            let summary_chars = summary_opt
+                .as_deref()
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
             let history_chars: usize = rows
                 .iter()
-                .map(|m| m.statements.iter().map(|s| s.text.chars().count()).sum::<usize>())
+                .map(|m| {
+                    m.statements
+                        .iter()
+                        .map(|s| s.text.chars().count())
+                        .sum::<usize>()
+                })
                 .sum();
             let total = system_chars + summary_chars + history_chars;
             if total > budget_chars {
@@ -2306,8 +2314,7 @@ impl ExecCtx {
                 // 携带组主会话的滚动摘要 + 最近对话窗口——子个体不再只有 objective 孤岛视角。
                 // 摘要与窗口同源规划路径（ensure_compacted），口径一致。
                 if o.config_snapshot.read().experiments.group_shared_context {
-                    let (summary, recent) =
-                        o.ensure_compacted(&self.session_id).await;
+                    let (summary, recent) = o.ensure_compacted(&self.session_id).await;
                     if let Some(ctx) = shared_context_input(summary, recent) {
                         inputs.push(ctx);
                     }
