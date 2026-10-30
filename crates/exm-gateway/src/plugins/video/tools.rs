@@ -10,7 +10,7 @@
 
 use super::*;
 use exm_core::config::CustomTool;
-use exm_core::tools::{dynamic_exec, DynamicToolExec};
+use exm_core::tools::{dynamic_exec_images, DynamicToolExec};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -242,6 +242,20 @@ pub(crate) fn watch_tool_specs(kind: &str) -> Vec<CustomTool> {
             "相关/推荐视频（限量，结构同候选清单）",
             video_id_param("视频标识（bvid）"),
         ));
+        // 画面观看（视觉模态）：B站官方 videoshot 雪碧图抽帧——真正「看到」画面
+        out.push(spec(
+            "video__shots",
+            "视频画面抽帧（视觉直看）：按时间轴抽取关键帧图像直接供视觉观察——画面构图/字幕画面/UI 演示等文本工具拿不到的信息。建议与 summary/subtitle 配合使用",
+            json!({
+                "type": "object",
+                "properties": {
+                    "videoId": { "type": "string", "description": "视频标识（bvid）；可直接传完整链接或 b23.tv 短链（系统自动归一）" },
+                    "startSec": { "type": "integer", "description": "起始时间（秒；缺省 = 开头）" },
+                    "count": { "type": "integer", "description": "抽帧数 1-8（缺省 4；每帧间隔约 10-60 秒，覆盖视频不同阶段）" }
+                },
+                "required": ["videoId"]
+            }),
+        ));
     }
     out
 }
@@ -347,7 +361,7 @@ pub(crate) fn build_injections(
 
 fn build_exec(core: Arc<Core>, ch: Channel, name: String) -> DynamicToolExec {
     // 执行闭包：路由到具体工具实现；错误统一为结构化文本（工具结果 ok=false）
-    dynamic_exec(move |_agent, session, args| {
+    dynamic_exec_images(move |_agent, session, args| {
         let core = core.clone();
         let ch = ch.clone();
         let name = name.clone();
@@ -355,7 +369,7 @@ fn build_exec(core: Arc<Core>, ch: Channel, name: String) -> DynamicToolExec {
         async move {
             // 兜底自检：全局点播闭包可能滞后于通道停用（reconcile 10s 收敛窗内）
             if let Err(e) = guard_channel_alive(&ch).await {
-                return Ok(e.to_string());
+                return Ok((e.to_string(), Vec::new()));
             }
             let st = session_state(&session);
             dispatch_tool(&core, &name, &ch, &session, &st, args).await
@@ -364,6 +378,7 @@ fn build_exec(core: Arc<Core>, ch: Channel, name: String) -> DynamicToolExec {
 }
 
 /// 工具分发（单点：新增工具在此路由）
+/// 分发返回：(文本, 图像路径列表)。图像非空时经 DynamicToolOutput.images 视觉回灌。
 async fn dispatch_tool(
     core: &Arc<Core>,
     name: &str,
@@ -371,46 +386,52 @@ async fn dispatch_tool(
     session: &str,
     st: &Arc<Mutex<WatchSession>>,
     args: Value,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Vec<String>)> {
     // videoId 归一收口：所有吃 videoId 的工具统一过 resolve（裸号/长链/短链 → 归一 id）
     let vid = |k: &str| -> Option<String> { args.get(k).and_then(|v| v.as_str()).map(str::to_string) };
     match name {
         "video__summary" => {
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_summary(ch, id).await
+            tool_summary(ch, id).await.map(|s| (s, vec![]))
         }
         "video__subtitle" => {
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_subtitle(ch, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1)).await
+            tool_subtitle(ch, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1)).await.map(|s| (s, vec![]))
         }
         "video__danmaku" => {
             if ch.kind != "bilibili" {
-                return Ok("该平台无弹幕数据（YouTube 不提供弹幕；请用评论/字幕了解观众反应）".into());
+                return Ok(("该平台无弹幕数据（YouTube 不提供弹幕；请用评论/字幕了解观众反应）".into(), vec![]));
             }
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_danmaku(ch, id, args.get("segment").and_then(|s| s.as_u64()).map(|s| s as i64)).await
+            tool_danmaku(ch, id, args.get("segment").and_then(|s| s.as_u64()).map(|s| s as i64)).await.map(|s| (s, vec![]))
         }
         "video__comments" => {
             let sort = args.get("sort").and_then(|s| s.as_str()).unwrap_or("hot").to_string();
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_comments(ch, st, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1), &sort).await
+            tool_comments(ch, st, id, args.get("page").and_then(|p| p.as_u64()).unwrap_or(1), &sort).await.map(|s| (s, vec![]))
         }
-        "video__uploader" => tool_uploader(ch, vid("uploaderId").unwrap_or_default()).await,
+        "video__uploader" => tool_uploader(ch, vid("uploaderId").unwrap_or_default()).await.map(|s| (s, vec![])),
         "video__related" => {
             if ch.kind != "bilibili" {
-                return Ok("该平台工具暂不提供（YouTube 相关推荐请用 video__search）".into());
+                return Ok(("该平台工具暂不提供（YouTube 相关推荐请用 video__search）".into(), vec![]));
             }
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
-            tool_related(ch, id).await
+            tool_related(ch, id).await.map(|s| (s, vec![]))
         }
-        "video__search" => tool_search(ch, vid("query").unwrap_or_default()).await,
+        "video__search" => tool_search(ch, vid("query").unwrap_or_default()).await.map(|s| (s, vec![])),
+        "video__shots" => {
+            let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
+            let start = args.get("startSec").and_then(|v| v.as_u64());
+            let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(4).clamp(1, 8);
+            tool_shots(core, ch, &id, start, count as usize).await
+        }
         "video__act" => {
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
             let mut a = args.clone();
             if let Some(obj) = a.as_object_mut() {
                 obj.insert("videoId".into(), serde_json::Value::String(id));
             }
-            tool_act(core, ch, st, session, a).await
+            tool_act(core, ch, st, session, a).await.map(|s| (s, vec![]))
         }
         other => anyhow::bail!("未知视频工具：{other}"),
     }
@@ -895,6 +916,132 @@ fn act_gates() -> &'static Mutex<std::collections::HashMap<String, Arc<ActGate>>
     G.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// video__shots：B 站官方 videoshot 雪碧图抽帧——视觉模态直看画面。
+/// 雪碧图 = 每 10s 一帧的网格 JPG（img_x_len × img_y_len 张/图，多图按序铺满全片）。
+/// 流程：videoshot API 拿索引 → 按目标时间定位帧 → 下载所在雪碧图 → 裁出该帧
+/// → 存 .exmachina/video_shots/（png）→ 路径随 images 回灌视觉模型。
+/// 帧采样策略：count 帧均匀铺开（startSec 起到片尾），间隔 = max(10s, 剩余时长/count)。
+async fn tool_shots(
+    core: &Arc<Core>,
+    ch: &Channel,
+    video_id: &str,
+    start_sec: Option<u64>,
+    count: usize,
+) -> anyhow::Result<(String, Vec<String>)> {
+    use image::GenericImageView;
+    if ch.kind != "bilibili" {
+        return Ok((
+            "该平台无画面抽帧（YouTube 无雪碧图 API；请用 summary/subtitle/comments 了解内容）".into(),
+            vec![],
+        ));
+    }
+    if video_id.trim().is_empty() {
+        anyhow::bail!("缺少 videoId");
+    }
+    // 视频时长（帧采样铺满全片需要）
+    let view = bili_get(ch, &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}")).await?;
+    api_ok(&view)?;
+    let duration = view.pointer("/data/duration").and_then(as_u64).unwrap_or(0);
+    if duration == 0 {
+        anyhow::bail!("无法获取视频时长（视频不存在或已下架？）");
+    }
+    // 雪碧图索引
+    let vs = bili_get(ch, &format!("https://api.bilibili.com/x/player/videoshot?bvid={video_id}&index=1")).await?;
+    api_ok(&vs)?;
+    let data = vs.get("data").cloned().unwrap_or(Value::Null);
+    let images: Vec<String> = data
+        .get("image")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if images.is_empty() {
+        return Ok((format!("该视频无画面抽帧数据（{video_id}，可能未生成预览）"), vec![]));
+    }
+    let x_len = data.get("img_x_len").and_then(as_u64).unwrap_or(10) as u32; // 每行帧数
+    let y_len = data.get("img_y_len").and_then(as_u64).unwrap_or(10) as u32; // 每列帧数
+    let fw = data.get("img_x_size").and_then(as_u64).unwrap_or(480) as u32;  // 单帧宽
+    let fh = data.get("img_y_size").and_then(as_u64).unwrap_or(270) as u32;  // 单帧高
+    let per_sheet = (x_len * y_len).max(1); // 每张雪碧图帧数
+    let interval = data.get("img_x_len").and_then(as_u64).unwrap_or(10); // 帧间隔秒（img_x_len 复用字段：10s）
+
+    // 采样时间点：startSec（缺省 0）到片尾，均匀取 count 帧
+    let start = start_sec.unwrap_or(0).min(duration.saturating_sub(1));
+    let span = duration.saturating_sub(start).max(1);
+    let step = ((span as f64 / count as f64).ceil() as u64).max(interval);
+    let mut times: Vec<u64> = (0..count as u64)
+        .map(|i| (start + i * step).min(duration.saturating_sub(1)))
+        .collect();
+    times.dedup();
+
+    let dir = core.config().workspace_root.join(".exmachina").join("video_shots");
+    std::fs::create_dir_all(&dir)?;
+    // 雪碧图缓存（同图多帧只下载一次）
+    let mut sheet_cache: std::collections::HashMap<usize, Option<image::DynamicImage>> =
+        std::collections::HashMap::new();
+    let mut saved: Vec<(u64, String)> = Vec::new();
+    for &t in &times {
+        let frame_idx = (t / interval.max(1).max(1)) as usize; // 全局帧号（10s/帧）
+        let sheet_idx = frame_idx / per_sheet as usize;
+        let in_sheet = frame_idx % per_sheet as usize;
+        let Some(url) = images.get(sheet_idx) else { continue };
+        let sheet = match sheet_cache.get(&sheet_idx) {
+            Some(Some(img)) => img.clone(),
+            _ => {
+                let u = if url.starts_with("//") { format!("https:{url}") } else { url.clone() };
+                let bytes = http_client()
+                    .get(&u)
+                    .header(reqwest::header::USER_AGENT, UA)
+                    .header(reqwest::header::REFERER, BILI_REFERER)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("雪碧图下载失败：{e}"))?
+                    .bytes()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("雪碧图读取失败：{e}"))?;
+                let img = image::load_from_memory(&bytes).ok();
+                sheet_cache.insert(sheet_idx, img.clone());
+                match img {
+                    Some(i) => i,
+                    None => continue,
+                }
+            }
+        };
+        // 裁出目标帧（网格内行列）
+        let col = (in_sheet as u32) % x_len;
+        let row = (in_sheet as u32) / x_len;
+        let (sw, sh) = sheet.dimensions();
+        let x = (col * fw).min(sw.saturating_sub(fw));
+        let y = (row * fh).min(sh.saturating_sub(fh));
+        let frame = sheet.crop_imm(x, y, fw.min(sw), fh.min(sh));
+        let name = format!("shot-{}-{}s.png", video_id, t);
+        let path = dir.join(&name);
+        if frame.save(&path).is_err() {
+            continue;
+        }
+        saved.push((t, format!(".exmachina/video_shots/{name}")));
+    }
+    if saved.is_empty() {
+        return Ok((format!("画面抽帧失败（雪碧图下载或裁切均未产出；{video_id}）"), vec![]));
+    }
+    let list = saved
+        .iter()
+        .map(|(t, p)| format!("{}s → {}", fmt_mmss(*t), p))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let note = format!(
+        "已抽取 {} 帧画面（覆盖 {}–{}），图像已附带——请直接观察画面内容（构图/字幕画面/界面演示），与 summary/subtitle 文本互补：\n{list}",
+        saved.len(),
+        fmt_mmss(saved[0].0),
+        fmt_mmss(saved[saved.len() - 1].0),
+    );
+    Ok((note, saved.into_iter().map(|(_, p)| p).collect()))
+}
+
+/// 秒 → mm:ss
+fn fmt_mmss(sec: u64) -> String {
+    format!("{}:{:02}", sec / 60, sec % 60)
+}
+
 pub(crate) fn register_act_gate(session_id: &str, gate: ActGate) {
     act_gates().lock().unwrap().insert(session_id.to_string(), Arc::new(gate));
 }
@@ -1376,9 +1523,10 @@ mod tests {
     #[test]
     fn 工具schema_平台差异() {
         let bili = watch_tool_specs("bilibili");
-        assert_eq!(bili.len(), 7, "B站 7 工具：{bili:?}");
+        assert_eq!(bili.len(), 8, "B站 8 工具（含 shots 画面抽帧）：{bili:?}");
         assert!(bili.iter().any(|t| t.name == "video__danmaku"));
         assert!(bili.iter().any(|t| t.name == "video__related"));
+        assert!(bili.iter().any(|t| t.name == "video__shots"), "B站应有画面抽帧（视觉直看）");
 
         let yt = watch_tool_specs("youtube");
         assert_eq!(yt.len(), 5, "YouTube 5 工具（无 danmaku/related）：{yt:?}");
@@ -1444,7 +1592,8 @@ mod tests {
             json!({ "videoId": "vid1", "replyText": "你好", "replyTo": "ghost-id" }),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(r.contains("目标评论未见"), "{r}");
 
         // 正常评论（dry-run）→ 回执不落平台
@@ -1457,7 +1606,8 @@ mod tests {
             json!({ "videoId": "vid1", "comment": "测试评论内容" }),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(r.contains("[dry-run]"), "{r}");
         assert_eq!(act_gate_count("s1"), 1);
 
@@ -1471,7 +1621,8 @@ mod tests {
             json!({ "videoId": "vid1", "comment": "再来一条" }),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(r.contains("已达上限"), "{r}");
 
         drop_act_gate("s1");
@@ -1511,7 +1662,8 @@ mod tests {
             json!({ "videoId": "v", "comment": "hi" }),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(r.contains("未开启评论"), "{r}");
         drop_act_gate("s2");
         drop_session("s2");
@@ -1577,7 +1729,8 @@ mod act_approval_tests {
             json!({ "videoId": "vid1", "comment": "审批模式下的拟发评论" }),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
         // wait 语义：等待窗口内即时回执「已进入人工审批」；超时回执「等待超时本轮跳过」。
         // 两者都证明未直接落平台（审批分流生效），断言取并集。
         assert!(

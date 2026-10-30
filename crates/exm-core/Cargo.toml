@@ -29,7 +29,7 @@ flate2.workspace = true
 # xcap vendored：dbus 静态编译（容器 / 精简环境免装 libdbus 开发包，构建自包含）
 enigo = "0.3"
 xcap = { version = "0.4", features = ["vendored"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

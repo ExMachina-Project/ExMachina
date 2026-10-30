@@ -2471,6 +2471,8 @@ pub async fn update_channel(
         }
         // 整表替换：UI 编辑时按平台提交完整配置；启停等局部更新不带 config 即保持不变。
         // 敏感键掩码回传 = 从旧表取回原值；空值键不入库（用户清空敏感键即删除）。
+        // 防误丢保护：敏感键在旧表有值而新表缺失时保留旧值——API 直接 PUT 局部
+        // config（如仅 actRole）不应静默清掉登录凭据（部署实测踩坑）。
         let mut next: BTreeMap<String, String> = BTreeMap::new();
         for (k, val) in v {
             let t = val.trim();
@@ -2484,6 +2486,14 @@ pub async fn update_channel(
                 continue;
             }
             next.insert(k.clone(), t.to_string());
+        }
+        for (k, old) in &ch.config {
+            if !next.contains_key(k)
+                && !v.contains_key(k)
+                && is_sensitive_config_key(&ch.kind, k, &st.core)
+            {
+                next.insert(k.clone(), old.clone());
+            }
         }
         ch.config = next;
     }

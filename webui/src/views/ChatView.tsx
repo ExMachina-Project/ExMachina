@@ -352,16 +352,31 @@ export function ChatView(): React.ReactElement {
     [mention, mentionNodes, mentionIdx, applyMention],
   );
 
+  // 流式跟随只在「用户本来就贴底」时进行：中途上翻回看不打断。
+  // 距底阈值 80px 兼容流式渲染的轻微抖动；用 ref 记录贴底态避免重渲染竞态。
+  const stickRef = React.useRef(true);
   useEffect(() => {
     const el = document.querySelector(".chat-scroll");
     if (!el) return;
-    const onScroll = () => setShowBottomBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 120);
+    const onScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+      stickRef.current = atBottom;
+      // 用户主动回底 → 恢复跟随（按钮点击滚到底同样触发此路径）
+      setShowBottomBtn(!atBottom);
+    };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
   useEffect(() => {
+    // 新消息（非流式增量）：重置跟随（新轮次开始视为用户关注最新）
+    stickRef.current = true;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     setShowBottomBtn(false);
+  }, [messages.length]);
+  useEffect(() => {
+    // 流式增量（live/token/timeline）：仅贴底时跟随，不抢滚动条
+    if (!stickRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
   }, [messages, liveOrch, liveParts, runToolCalls, timeline]);
 
   useEffect(() => {
@@ -1019,7 +1034,10 @@ export function ChatView(): React.ReactElement {
             <button
               className="scroll-bottom-btn"
               aria-label={t("chat.scrollToBottom")}
-              onClick={() => bottomRef.current?.scrollIntoView({ behavior: "smooth" })}
+              onClick={() => {
+                stickRef.current = true;
+                bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+              }}
             >
               ↓
             </button>
