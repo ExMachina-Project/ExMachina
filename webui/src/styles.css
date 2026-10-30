@@ -410,6 +410,13 @@ input, textarea { caret-color: var(--accent); }
   border-radius: var(--r-lg) !important;
   border: 1px solid var(--line) !important;
   background: var(--bg-panel);
+  /* 资产语汇：面板内 40px 网格底纹（2% 白）——卡片从「普通容器」变成仪表盘面板，
+     与 profile/assets 的 SNAPSHOT / SWARM MANIFEST 同源。不参与布局，纯质地。 */
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: -1px -1px;
   box-shadow: var(--shadow-sm);
   transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
@@ -582,6 +589,12 @@ textarea.ant-input:focus,
   letter-spacing: 0.08em;
   color: var(--muted-dim);
   text-transform: uppercase;
+}
+/* 资产语汇：页头英文对照也走 `//` 注释前缀，与卡片头同一口径 */
+.page-en::before {
+  content: "// ";
+  color: var(--rank-4, var(--muted-dim));
+  letter-spacing: 0;
 }
 .page-desc {
   margin: 8px 0 0;
@@ -1377,19 +1390,28 @@ textarea.ant-input:focus,
 .chip {
   border: 1px solid var(--line);
   background: var(--bg-panel);
+  /* 资产语汇：读数卡也是面板——同款 40px 底纹 + 直角 */
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: -1px -1px;
   border-radius: var(--r-lg);
-  padding: 10px 18px;
-  min-width: 92px;
+  padding: 14px 20px 12px;
+  min-width: 104px;
   text-align: center;
   position: relative;
   box-shadow: var(--shadow-sm);
 }
+/* 资产语汇：大号亮白读数（profile 面板 39px 数字的比例，控制台里取 30px 免得压垮密排区） */
 .chip-num {
   display: block;
   font-family: var(--mono);
-  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  font-size: 30px;
   font-weight: 600;
-  line-height: 1.2;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
   color: var(--text-hi);
 }
 .chip-label {
