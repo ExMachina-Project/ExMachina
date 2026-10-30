@@ -13,6 +13,7 @@ webui/dist/
 
 # 激活组状态（运行时可变）
 agents/active_group
+entities/active_group
 # 工作目录（运行时可变）
 entities/active_workspace
 
