@@ -51,6 +51,14 @@
 
 /* ============ 品牌工具类（spec: ui-visual-language，资产语汇） ============ */
 
+/* 卡片头统一注入资产区块头语汇（// SWARM MANIFEST）：
+   ::before 画 "// " 前缀，让所有 antd 卡片头读起来像机器打印的清单节标。
+   标题为空（纯 extra/操作头）时 antd 不渲染 title 文本节点，前缀自然不可见。 */
+.ant-card .ant-card-head-title::before {
+  content: "// ";
+  color: var(--rank-4, var(--muted-dim));
+}
+
 /* 全大写宽字距等宽小标签（资产标签排版：LINES OF RUST / COMMIT VELOCITY） */
 .label-caps {
   font-family: var(--mono);
@@ -269,9 +277,11 @@ input, textarea { caret-color: var(--accent); }
 }
 .brand-row { display: flex; align-items: center; gap: 9px; }
 .brand-name {
-  font-size: 15px;
+  /* 资产 hero 字标语汇：全大写 + 宽字距（7.5/1000 比例 → 屏幕上取 0.18em）+ mono */
+  font-family: var(--mono);
+  font-size: 13.5px;
   font-weight: 650;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.18em;
   color: var(--text-hi);
 }
 .brand-led {
@@ -284,10 +294,13 @@ input, textarea { caret-color: var(--accent); }
 }
 @keyframes led-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 .brand-sub {
+  /* hero 副标语（ABSOLUTE RATIONALITY · …）语汇：小号大写宽字距灰阶 */
+  font-family: var(--mono);
   margin-top: 6px;
-  font-size: 11.5px;
-  color: var(--muted);
-  letter-spacing: 0.01em;
+  font-size: 10px;
+  color: var(--rank-3, var(--muted));
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 .brand-tag {
   margin-left: auto;
@@ -409,24 +422,33 @@ input, textarea { caret-color: var(--accent); }
 }
 .ant-card .ant-card-head-title {
   position: relative;
-  font-size: 13.5px;
+  /* 资产区块头语汇：卡片头 = mono 结构文本（与页头标题/弹窗标题同语言） */
+  font-family: var(--mono);
+  font-size: 12.5px;
   font-weight: 600;
+  letter-spacing: 0.02em;
   padding-inline-end: 8px;
   color: var(--text-hi);
 }
 .ant-table { border-radius: var(--r-md); background: transparent; }
 .ant-table-thead > tr > th {
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--muted);
+  /* 资产表头语汇（// SWARM MANIFEST 行）：mono + 大写 + 宽字距灰阶。
+     color 表头取 --muted（antd 默认 headerColor=colorText，会盖掉，须显式 !important 压回灰阶）。 */
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted) !important;
   background: var(--bg-raise) !important;
   border-bottom: 1px solid var(--line) !important;
 }
 .ant-table-tbody > tr > td { border-bottom: 1px solid var(--line); }
 .ant-tag {
   border-radius: 0;
-  font-size: 11.5px;
+  /* 技术标识语汇：Tag 内容多为 ID/枚举，走 mono 与资产标签排版同语言 */
+  font-family: var(--mono);
+  font-size: 11px;
   border-color: var(--line-strong);
 }
 
@@ -509,17 +531,18 @@ textarea.ant-input:focus,
 }
 .ant-modal-container, .ant-modal-content, .ant-drawer-content { border-radius: var(--r-xl); }
 .ant-modal-header { border-bottom: 1px solid var(--line); padding-bottom: 12px; }
-.ant-modal-title { font-size: 15px; font-weight: 600; color: var(--text-hi); }
+/* 结构性标题等宽（资产标题语汇）：弹窗标题与卡片头同语言 */
+.ant-modal-title { font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--text-hi); }
 .ant-drawer-header { border-bottom: 1px solid var(--line); }
 .ant-empty-description { color: var(--muted); font-size: 12.5px; }
 
 /* 长页滚动时页头保持可达：标题与操作钮吸顶（背景模糊避免与内容叠字） */
 .page-head {
   position: sticky;
-  /* 负 top：让盒背景盖住滚动容器顶部的 padding 空隙（12px），内容用 padding 补回原位 */
-  top: -12px;
-  margin-top: 0;
-  padding-top: 24px;
+  /* 顶距所有权在本元素：padding-top 即静止时的标题上空间，
+     滚动容器顶部无 padding（.app-content），故 top:0 吸附后位置零变化 */
+  top: 0;
+  padding-top: 18px;
   z-index: 20;
   background: color-mix(in srgb, var(--bg) 96%, transparent);
   box-shadow: 0 6px 14px -10px color-mix(in srgb, var(--bg-sunken) 80%, transparent);
@@ -529,7 +552,7 @@ textarea.ant-input:focus,
 
 /* ============ 统一页头 ============ */
 .page-head {
-  padding: 2px 0 14px;
+  padding-bottom: 14px;
   margin-bottom: 18px;
   border-bottom: 1px solid var(--line);
 }
@@ -592,7 +615,7 @@ textarea.ant-input:focus,
 
 /* 数据读数：键灰值亮，键做小号大写 */
 .readout { display: inline-flex; align-items: baseline; gap: 6px; font-size: 12.5px; }
-.readout .k { color: var(--muted); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; }
+.readout .k { color: var(--muted); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 500; font-family: var(--mono); }
 .readout .v { color: var(--text-hi); font-family: var(--mono); }
 .readout .v.ok { color: var(--green); }
 .readout .v.warn { color: var(--amber); }
@@ -601,7 +624,10 @@ textarea.ant-input:focus,
 @keyframes state-live { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
 /* ============ 对话 ============ */
-.chat-shell { display: flex; flex-direction: row-reverse; gap: 18px; height: calc(100dvh - 32px); max-width: 1258px; margin: 0 auto; }
+/* 高度 32px 扣减 = 滚动容器纵向 padding（顶 0 + 底 26px）+ 呼吸余量，随容器 padding 走 */
+/* box-sizing 必填：全局无 * 重置，content-box 会让 padding-top 叠加在 calc 高度之外，
+   实际占位超出可用空间 → .app-content 出现多余滚动条（桌面端对话页多余滚动根因） */
+.chat-shell { display: flex; flex-direction: row-reverse; gap: 18px; height: calc(100dvh - 26px - 6px); max-width: 1258px; margin: 0 auto; padding-top: 18px; box-sizing: border-box; }
 .chat-rail {
   box-sizing: border-box;
   width: 272px;
@@ -619,11 +645,13 @@ textarea.ant-input:focus,
 .rail-section { margin-bottom: 12px; }
 .rail-section.grow { flex: 1; display: flex; flex-direction: column; overflow: hidden; margin-bottom: 0; }
 .rail-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  /* 资产标签语汇：mono 大写宽字距（LINES OF RUST / COMMIT VELOCITY 同款） */
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--rank-3, var(--muted));
   margin-bottom: 8px;
   display: flex;
   align-items: center;
@@ -676,8 +704,11 @@ textarea.ant-input:focus,
   border-bottom: 1px solid var(--line);
 }
 .console-title {
-  font-size: 15px;
+  /* 资产标题语汇：mono 结构文本（与页头标题同语言） */
+  font-family: var(--mono);
+  font-size: 14px;
   font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--text-hi);
   display: flex;
   align-items: center;
@@ -783,7 +814,7 @@ textarea.ant-input:focus,
   margin: 0 auto;
   background: var(--panel, #1e1f24);
   border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
-  border-radius: 10px;
+  border-radius: 0;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   z-index: 30;
   overflow: hidden;
@@ -801,7 +832,7 @@ textarea.ant-input:focus,
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
   font-size: 12px;
 }
@@ -823,14 +854,14 @@ textarea.ant-input:focus,
   font-size: 13.5px;
   line-height: 1.65;
 }
-.chat-composer .composer-textarea.ant-input:focus {
-  border: 0 !important;
-  box-shadow: none !important;
-}
 /* iOS 聚焦缩放规避：触屏设备输入面字号提到 16px 阈值以上（Safari 聚焦 <16px 会整页缩放） */
 @media (hover: none) {
   .chat-composer .composer-textarea.ant-input { font-size: 16px; }
   .composer-bar .ant-btn { font-size: 14px; }
+}
+.chat-composer .composer-textarea.ant-input:focus {
+  border: 0 !important;
+  box-shadow: none !important;
 }
 .composer-bar {
   display: flex;
@@ -959,21 +990,31 @@ textarea.ant-input:focus,
 .settings-note { color: var(--muted); font-size: 12.5px; line-height: 1.7; }
 
 /* ============ 记忆 ============ */
-/* 统计读数：数字走 mono 读数语言（与控制台 TELEMETRY/TOKENS 一致），标题小号大写 */
+/* 统计读数：对齐资产 // SNAPSHOT 语汇 —— mono 大数字亮白 + 下方小号大写宽字距灰阶标签 */
 .ant-statistic { width: 100%; }
 .ant-statistic .ant-statistic-title {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--rank-3, var(--muted));
+  margin-bottom: 0;
+  margin-top: 6px;
+  order: 2;
 }
 .ant-statistic .ant-statistic-content {
+  display: flex;
+  flex-direction: column;
+}
+.ant-statistic .ant-statistic-content-value {
   font-family: var(--mono);
-  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+  font-size: 30px;
   font-weight: 600;
+  letter-spacing: -0.02em;
   color: var(--text-hi);
-  line-height: 1.2;
+  line-height: 1.1;
 }
 .memory-wrap { width: 100%; min-width: 0; }
 .memory-card { margin-top: 16px; }
@@ -1108,7 +1149,9 @@ textarea.ant-input:focus,
 .app-content {
   flex: 1;
   overflow: auto;
-  padding: 18px 22px 26px;
+  /* 顶部 padding 恒为 0：顶距由页头/视图自带（见 .page-head / .view-stage-top），
+     吸顶元素因此可以 top:0 直贴容器顶端——任何 padding 补偿魔数都不允许存在 */
+  padding: 0 22px 26px;
   background: transparent;
   position: relative;
 }
@@ -1139,6 +1182,19 @@ textarea.ant-input:focus,
 }
 .form-advanced { margin-top: 4px; }
 .form-advanced .ant-collapse-header { font-size: 12.5px; color: var(--muted); }
+
+/* 折叠面板头 = 资产区块头语汇：mono 结构文本 + "// " 前缀（与卡片头同一套打印语言） */
+.ant-collapse .ant-collapse-header {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-hi);
+}
+.ant-collapse .ant-collapse-header::before {
+  content: "// ";
+  color: var(--rank-4, var(--muted-dim));
+}
 .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
 .key-row { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
 .key-row .ant-form-item { flex: 1; min-width: 0; }
@@ -1193,7 +1249,7 @@ textarea.ant-input:focus,
   max-height: 320px;
   overflow-y: auto;
   border: 1px solid var(--line, rgba(127, 127, 127, 0.25));
-  border-radius: 8px;
+  border-radius: 0;
   padding: 4px;
 }
 .model-picker-item {
@@ -1201,7 +1257,7 @@ textarea.ant-input:focus,
   align-items: center;
   gap: 8px;
   padding: 5px 8px;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
   user-select: none;
 }
@@ -1270,11 +1326,12 @@ textarea.ant-input:focus,
   border-left: 2px solid transparent;
   padding-left: 12px;
 }
-.event-row.ev-dispatch { border-left-color: var(--blue); }
-.event-row.ev-sync, .event-row.ev-ledger { border-left-color: var(--green); }
-.event-row.ev-arbitration { border-left-color: var(--amber); }
+/* 左缘语义色条：对齐资产行为 —— 灰阶梯度为主（rank 系），错误红 / 完成紫点缀是仅有的彩色 */
+.event-row.ev-dispatch { border-left-color: var(--rank-2); }
+.event-row.ev-sync, .event-row.ev-ledger { border-left-color: var(--rank-3); }
+.event-row.ev-arbitration { border-left-color: var(--rank-2); }
 .event-row.ev-error { border-left-color: var(--red); }
-.event-row.ev-memory { border-left-color: var(--blue); }
+.event-row.ev-memory { border-left-color: var(--rank-3); }
 .event-row.ev-finished { border-left-color: var(--accent); }
 .event-row:hover { background: var(--hover); }
 .event-text { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
@@ -1336,10 +1393,11 @@ textarea.ant-input:focus,
   color: var(--text-hi);
 }
 .chip-label {
-  font-size: 10.5px;
-  color: var(--muted);
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--rank-3, var(--muted));
+  font-weight: 500;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 .member-stats { margin-bottom: 12px; }
@@ -1456,10 +1514,13 @@ textarea.ant-input:focus,
   box-shadow: var(--shadow-sm);
 }
 .cfg-panel-head h3 {
+  /* 资产标题语汇：设置区标题与页头/卡片头同语言（mono 结构文本） */
   margin: 0 0 3px;
   color: var(--text-hi);
-  font-size: 16px;
+  font-family: var(--mono);
+  font-size: 14.5px;
   font-weight: 600;
+  letter-spacing: 0.02em;
 }
 .cfg-panel-head p {
   margin: 0 0 6px;
@@ -2035,7 +2096,10 @@ textarea.ant-input:focus,
 @media (max-width: 860px) {
   .mobile-nav-btn {
     display: flex; align-items: center; justify-content: center;
-    position: fixed; top: 10px; left: 10px; z-index: 210;
+    /* sticky 而非 fixed：按钮在文档流内占位，容器无须 padding 补偿；
+       吸附在滚动容器顶端，滚动时保持可达（fixed+52px 补偿魔数已废弃） */
+    position: sticky; top: 0; z-index: 210;
+    margin: 0 0 8px;
     width: 38px; height: 38px; border-radius: var(--r-md);
     background: var(--bg-panel); border: 1px solid var(--line-strong);
     color: var(--text); cursor: pointer; font-size: 16px;
@@ -2055,9 +2119,10 @@ textarea.ant-input:focus,
     box-shadow: var(--shadow-lg);
   }
   .app-sider.open { transform: translateX(0); }
-  .app-content { padding: 52px 10px 14px 10px !important; }
+  /* 顶部无 padding 补偿：汉堡按钮 sticky 占位（见上），页头自带顶距 */
+  .app-content { padding: 0 10px 14px 10px !important; }
   /* 窄屏取消页头吸顶：触屏空间宝贵，吸顶头占位且与移动端顶栏重叠 */
-  .page-head { position: static; margin-top: 0; padding-top: 0; background: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .page-head { position: static; padding-top: 12px; background: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
   /* 对话竖屏改由「左栏抽屉」方案接管（见上方 media 块）：
    * 此处不再对 .chat-shell/.chat-rail 做纵向堆叠与 max-height 截断——
    * 两者叠加会把抽屉压到 38vh，会话列表只剩 20px 高并把行截断。 */
@@ -2068,7 +2133,7 @@ textarea.ant-input:focus,
 }
 
 /* ============================================================
-   CODE WORKBENCH（编码工作台）
+   CODE WORKBENCH（编码工作台）—— 遗留死代码：无组件引用，仅样式残留
    ============================================================ */
 .code-shell {
   display: flex; gap: 14px;
@@ -2229,8 +2294,9 @@ textarea.ant-input:focus,
 .edit-warn { margin-bottom: 12px; }
 
 /* ============ 紧凑化 ============ */
-.app-content { padding: 12px 16px 18px; }
-.page-head { padding: 0 0 10px; margin-bottom: 8px; padding-top: 24px; }
+.app-content { padding: 0 16px 18px; }
+/* 页头顶距只由自身 padding-top 表达（吸顶两态共享同一数值） */
+.page-head { padding-bottom: 10px; margin-bottom: 8px; padding-top: 14px; }
 .page-head-row { gap: 16px; }
 /* 吸顶盒底部阴影与分隔线已构成视觉分隔，页头与内容的间距收紧 */
 .page-head + .ant-spin-nested-loading,
@@ -2539,7 +2605,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
    .chat-shell 被内容宽度收窄到 255px —— 竖屏必须显式归零外边距并占满 */
   .chat-shell {
     position: relative; flex: 1; min-height: 0; height: auto; gap: 0;
-    margin: 0; max-width: none; width: 100%;
+    margin: 0; max-width: none; width: 100%; padding-top: 0;
   }
   /* 两页互斥 */
   .chat-shell[data-screen="list"] .chat-wrap { display: none; }
@@ -2662,7 +2728,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   }
   .session-bar {
     display: block; width: 2px; align-self: stretch; min-height: 30px;
-    border-radius: 2px; background: var(--line-strong);
+    border-radius: 0; background: var(--line-strong);
   }
   .session-row.active .session-bar { background: var(--accent); }
   .session-avatar {
@@ -2723,7 +2789,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 }
 
 @media (max-width: 480px) {
-  .app-content { padding: 10px 10px 14px; }
+  .app-content { padding: 0 10px 14px; }
   .ant-card .ant-card-body { padding: 12px !important; }
   .usage-body { max-height: 240px; }
   .nexus-link-row { flex-wrap: wrap; }
@@ -2807,7 +2873,9 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 }
 .tbar-brand {
   display: inline-flex; align-items: center; gap: 7px; padding: 0 14px;
-  color: var(--accent); font-weight: 700; letter-spacing: 0.1em;
+  /* hero 字标语汇：mono + 宽字距全大写（与侧栏品牌区同语言） */
+  font-family: var(--mono);
+  color: var(--text-hi); font-weight: 700; letter-spacing: 0.14em;
   border-right: 1px solid var(--line);
 }
 .tbar-brand .emblem { flex: none; }
@@ -2815,7 +2883,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   display: inline-flex; align-items: center; gap: 6px; padding: 0 12px;
   border-right: 1px solid var(--line);
 }
-.tbar-k { color: var(--muted); letter-spacing: 0.08em; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+.tbar-k { color: var(--muted); letter-spacing: 0.08em; font-size: 10px; font-weight: 500; text-transform: uppercase; font-family: var(--mono); }
 .tbar-v { color: var(--text); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
 .tbar-v.ok { color: var(--green); }
 .tbar-v.warn { color: var(--amber); }
@@ -2832,7 +2900,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 
 @media (min-width: 861px) {
   .app-shell { height: calc(100dvh - var(--tel-h)); }
-  .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h) - 32px); }
+  .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h) - 26px - 6px); }
 }
 @media (max-width: 860px) {
   .telemetry-bar { display: none; }
@@ -2957,7 +3025,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 
 /* ============ B 站扫码登录弹窗 ============ */
 .biliqr-body { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px 0 4px; }
-.biliqr-img { position: relative; line-height: 0; padding: 8px; border-radius: 8px; background: #fff; }
+.biliqr-img { position: relative; line-height: 0; padding: 8px; border-radius: 0; background: #fff; }
 .biliqr-img img { display: block; }
 .biliqr-img.scanned img { filter: blur(3px) opacity(0.35); }
 .biliqr-veil { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
@@ -3029,5 +3097,5 @@ pre.code-folded { position: relative; margin: 0; max-height: calc(14 * 1.6em + 2
 .tool-terminal { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .tool-terminal .term-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tool-terminal .term-label { font-size: 11px; color: var(--ant-color-text-tertiary, #999); flex: none; }
-.tool-terminal .term-cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--ant-color-fill-quaternary, #f5f5f5); padding: 1px 6px; border-radius: 4px; word-break: break-all; }
-.tool-terminal .term-out { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--ant-color-bg-layout, #fafafa); border-radius: 6px; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.tool-terminal .term-cmd { font-family: var(--mono); font-size: 12px; background: var(--ant-color-fill-quaternary, #f5f5f5); padding: 1px 6px; border-radius: 0; word-break: break-all; }
+.tool-terminal .term-out { margin: 0; font-family: var(--mono); font-size: 12px; background: var(--ant-color-bg-layout, #fafafa); border-radius: 0; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
