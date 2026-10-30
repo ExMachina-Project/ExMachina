@@ -1586,6 +1586,45 @@ textarea.ant-input:focus,
     radial-gradient(1100px 600px at 50% -12%, var(--accent-08), transparent 60%),
     var(--bg);
 }
+/* 资产 hero 底板语汇：40px 垂直网格线（白 1.8%）——登录壳从纯色底变成面板底 */
+.login-wrap::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+  background-size: 40px 100%;
+  z-index: 0;
+}
+/* 浅色主题：网格线翻成深色低透明（白线在近白底上不可见） */
+:root[data-mode="light"] .login-wrap::before {
+  background-image: linear-gradient(to right, rgba(0, 0, 0, 0.028) 1px, transparent 1px);
+}
+/* 轨道环：整环极慢自转（240s/圈，肉眼只读出「在轨」而非旋转）；层同字节雨 */
+.orbit-rings {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  color: var(--text);
+  z-index: 1;
+  pointer-events: none;
+  animation: orbit-spin 240s linear infinite;
+}
+@keyframes orbit-spin { to { transform: rotate(360deg); } }
+/* 角落微标（hero 左下 EST. 2026 / 右下链接语汇）：mono 微号宽字距，弱化灰 */
+.login-corner {
+  position: absolute;
+  bottom: 14px;
+  z-index: 2;
+  font-size: 8px;
+  letter-spacing: 0.275em;
+  text-transform: uppercase;
+  color: var(--rank-4, var(--muted-dim));
+  user-select: none;
+}
+.login-corner-left { left: 16px; }
+.login-corner-right { right: 16px; }
 .login-core { position: relative; z-index: 2; text-align: center; width: 420px; }
 .login-figure {
   display: flex;
@@ -1603,6 +1642,14 @@ textarea.ant-input:focus,
   white-space: nowrap;
   color: var(--text-hi);
 }
+/* hero 中文标语行（智械计划）：宽字距灰阶小字，压在字标与分隔线之间 */
+.login-cn {
+  margin-top: 8px;
+  font-size: 14px;
+  letter-spacing: 0.535em;
+  text-indent: 0.535em; /* 末字字距补偿：光学居中 */
+  color: var(--muted);
+}
 @media (max-width: 640px) {
   .login-title { font-size: clamp(20px, 7vw, 36px); letter-spacing: clamp(2px, 1.2vw, 6px); }
   .login-sub { font-size: 12px; }
@@ -1615,9 +1662,13 @@ textarea.ant-input:focus,
   letter-spacing: 0.16em;
 }
 .title-rule {
-  height: 1px;
-  margin: 12px 0 10px;
-  background: var(--line);
+  /* hero 分隔短标线语汇：52×2 品牌紫短标线（副标语与字标之间的落点标记），
+     居中短标线取代通栏 1px 实线 —— 长线读成「分割」，短线读成「标点」 */
+  width: 52px;
+  height: 2px;
+  margin: 14px auto 12px;
+  background: var(--accent);
+  opacity: 0.85;
 }
 .login-sub {
   font-size: 12px;
@@ -2918,6 +2969,8 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .tbar-led.err { background: var(--red); animation-duration: 1.1s; }
 .tbar-spacer { flex: 1; }
 .tbar-seg.sys { border-right: none; border-left: 1px solid var(--line); }
+/* hero 角落微标语汇（EST. 2026）：mono 微号宽字距，弱化灰阶 */
+.tbar-est { font-family: var(--mono); font-size: 8px; letter-spacing: 0.275em; color: var(--rank-4, var(--muted-dim)); }
 
 @media (min-width: 861px) {
   .app-shell { height: calc(100dvh - var(--tel-h)); }
@@ -2967,6 +3020,17 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   justify-content: center;
   flex: none;
   color: var(--text);
+}
+/* 轨道环垫底（chat-acquire 空态）：铺满捕获框，徽记浮在环心。
+ * 放大到 190%：最内环恰好落在徽记弧槽外缘（≈80px @180px 框），读成「徽记在轨心」
+ * 而非「线条穿过徽记」；框不裁剪（overflow 可见），外环自然溢出到留白区。 */
+.capture-frame .orbit-rings {
+  position: absolute;
+  inset: -45%;
+  width: 190%;
+  height: 190%;
+  color: var(--text);
+  animation: orbit-spin 240s linear infinite;
 }
 .brand-empty-figure { width: 104px; height: 104px; }
 
@@ -3125,3 +3189,28 @@ pre.code-folded { position: relative; margin: 0; max-height: calc(14 * 1.6em + 2
 .tool-terminal .term-label { font-size: 11px; color: var(--ant-color-text-tertiary, #999); flex: none; }
 .tool-terminal .term-cmd { font-family: var(--mono); font-size: 12px; background: var(--ant-color-fill-quaternary, #f5f5f5); padding: 1px 6px; border-radius: 0; word-break: break-all; }
 .tool-terminal .term-out { margin: 0; font-family: var(--mono); font-size: 12px; background: var(--ant-color-bg-layout, #fafafa); border-radius: 0; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+
+/* ============ 侧栏待办角标（审批等阻塞提醒） ============ */
+/* 菜单项 label 内联徽标：amber 底 + 深字，等宽字体读数（资产数字语汇） */
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: var(--r-full);
+  background: var(--amber);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  animation: nav-badge-pulse 1.6s ease-in-out infinite;
+}
+@keyframes nav-badge-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--amber) 45%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--amber) 45%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .nav-badge { animation: none; } }
