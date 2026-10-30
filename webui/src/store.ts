@@ -441,13 +441,13 @@ export const useExm = create<ExmState>((set, get) => ({
     }).catch(() => { /* 回放失败不阻断进会话 */ });
     // 内联审批恢复：approvals 只由 WS 事件维护，刷新/换页后清空——
     // approval.required 是纯广播事件不落事件流，无法回放；审批 API 的 pending 表
-    // 自带 sessionId 归属，直接按会话过滤恢复内联卡
+    // 自带 sessionId 归属，恢复【全部】pending 单（与 WS 直推口径一致——跨会话
+    // 审批也恢复，卡上「跳转子会话」按钮承担归属导航）
     void api.listApprovals("pending", 100).then((live) => {
       if (get().sessionId !== id) return;
-      const cards = live
-        .filter((x) => x.sessionId === id)
-        .map((x) => ({ approvalId: x.id, agentId: x.agentId, command: x.command, sessionId: x.sessionId }));
-      if (cards.length > 0) {
+      if (live.length > 0) {
+        const cards = live
+          .map((x) => ({ approvalId: x.id, agentId: x.agentId, command: x.command, sessionId: x.sessionId }));
         set({ approvals: [...get().approvals, ...cards.filter((c) => !get().approvals.some((a) => a.approvalId === c.approvalId))] });
       }
     }).catch(() => { /* API 不可用则跳过恢复 */ });
