@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     summary_upto INTEGER,
     parent_session TEXT,
     parent_upto INTEGER,
+    pinned INTEGER NOT NULL DEFAULT 0,
     ledger TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -103,6 +104,23 @@ pub struct SqliteStore {
     root: PathBuf,
 }
 
+/// 旧库平滑升级：列不存在时补建（CREATE TABLE IF NOT EXISTS 不覆盖已存表结构）
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) {
+    let exists: bool = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='{column}'"),
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )
+        .unwrap_or(false);
+    if !exists {
+        let _ = conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
+            [],
+        );
+    }
+}
+
 fn now_iso() -> String {
     crate::types::now_iso()
 }
@@ -121,6 +139,8 @@ impl SqliteStore {
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
         )?;
         conn.execute_batch(SCHEMA).context("初始化 schema 失败")?;
+        // 旧库列补齐（CREATE TABLE IF NOT EXISTS 不会给已存在的表加新列）
+        add_column_if_missing(&conn, "sessions", "pinned", "INTEGER NOT NULL DEFAULT 0");
 
         let store = SqliteStore {
             conn: Mutex::new(conn),
@@ -227,8 +247,8 @@ impl SqliteStore {
 
     fn insert_session_conn(conn: &Connection, s: &Session) -> anyhow::Result<()> {
         conn.execute(
-            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,ledger,created_at,updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,pinned,ledger,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             rusqlite::params![
                 s.id,
                 s.title,
@@ -238,6 +258,7 @@ impl SqliteStore {
                 s.summary_upto,
                 s.parent_session,
                 s.parent_upto,
+                s.pinned as i64,
                 serde_json::to_string(&s.ledger)?,
                 s.created_at,
                 s.updated_at,
@@ -257,6 +278,7 @@ impl SqliteStore {
             summary_upto: row.get("summary_upto")?,
             parent_session: row.get("parent_session")?,
             parent_upto: row.get("parent_upto")?,
+            pinned: row.get::<_, i64>("pinned").unwrap_or(0) != 0,
             ledger: serde_json::from_str(&row.get::<_, String>("ledger")?).unwrap_or_default(),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -283,6 +305,7 @@ impl SqliteStore {
             parent_upto: None,
             last_message_preview: None,
             last_active_at: None,
+            pinned: false,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
