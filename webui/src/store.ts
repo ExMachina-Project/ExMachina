@@ -188,12 +188,18 @@ let wsBackoff = 0;
 const WS_STALE_MS = 45000;
 let wsLastFrame = 0;
 let wsWatch: ReturnType<typeof setInterval> | null = null;
+/** 应用层心跳定时器句柄：与连接代际同生命周期，onclose 清理防叠加 */
+let wsHeartbeat: ReturnType<typeof setInterval> | null = null;
 
 function connectWs(get: () => ExmState): void {
   const sessionId = get().sessionId;
   if (!sessionId) return;
   const gen = ++wsGen;
-  // 主动关闭旧连接：其 onclose 携带旧 gen，不会触发重连
+  // 主动关闭旧连接：其 onclose 携带旧 gen，不会触发重连（也不会清心跳——故在此先清）
+  if (wsHeartbeat !== null) {
+    clearInterval(wsHeartbeat);
+    wsHeartbeat = null;
+  }
   ws?.close();
   const base = serverBase();
   const proto = base.startsWith("https") || (base === "" && location.protocol === "https:") ? "wss" : "ws";
@@ -236,6 +242,10 @@ function connectWs(get: () => ExmState): void {
   };
   ws.onclose = () => {
     if (gen !== wsGen) return; // 旧代际：静默退出，不碰当前连接、不重连
+    if (wsHeartbeat !== null) {
+      clearInterval(wsHeartbeat);
+      wsHeartbeat = null;
+    }
     get().setWs(false);
     reconnected = true;
     const delay = [2000, 5000, 10000, 30000][Math.min(wsBackoff, 3)];
@@ -253,6 +263,21 @@ function connectWs(get: () => ExmState): void {
       /* 忽略坏帧 */
     }
   };
+  // 应用层心跳：每 20s 发一条 ping 文本帧并把发送成功计为「活」。
+  // 根因：服务端 25s 协议层 Ping 的 Pong 由浏览器自动回但不触发 onmessage，
+  // 看门狗以收帧判活——空闲会话唯一流量是协议帧，45s 必误判链路死强拆重连
+  // （「网关断连」弹条周期性出现）。发送成功即链路可用（缓冲满会抛异常），
+  // 收方向由服务端事件流双保险。服务端对入站文本帧忽略（_ => {}），无副作用。
+  wsHeartbeat = setInterval(() => {
+    const cur = ws;
+    if (!cur || cur.readyState !== WebSocket.OPEN) return;
+    try {
+      cur.send("ping");
+      wsLastFrame = Date.now();
+    } catch {
+      /* 发送失败：缓冲满≈链路将死，交给看门狗 */
+    }
+  }, 20000);
   // 心跳看门狗（单例）：空闲超时强制重连（浏览器对协议 Pong 不暴露事件，以「收帧时刻」为准——
   // 服务端 25s 一跳且事件流通常活跃，45s 静默基本等于链路已死）
   if (wsWatch === null) {

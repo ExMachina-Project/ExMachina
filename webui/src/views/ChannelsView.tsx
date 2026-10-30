@@ -8,6 +8,7 @@ import { PlusOutlined, QrcodeOutlined, ReloadOutlined } from "@ant-design/icons"
 import { api, type Channel, type ChannelStatus } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { IdentityPanel } from "../components/IdentityPanel";
+import { MaskedPasswordInput } from "../components/MaskedInput";
 import { BiliQrLoginModal } from "../components/BiliQrLoginModal";
 import { useExm } from "../store";
 import { useT, type TKey } from "../i18n/core";
@@ -405,6 +406,7 @@ export function ChannelsView(): React.ReactElement {
       replyWebhook: c.replyWebhook,
       token: c.token,
       allowedChats: (c.allowedChats ?? []).join(", "),
+      admins: (c.admins ?? []).join(", "),
       capability: c.capability ?? "computer",
       memoryIsolation: c.memoryIsolation ?? false,
       config: cfg,
@@ -468,6 +470,10 @@ export function ChannelsView(): React.ReactElement {
       token: v.token || undefined,
       config,
       allowedChats: (v.allowedChats ?? "")
+        .split(/[,,\s]+/)
+        .map((s: string) => s.trim())
+        .filter(Boolean),
+      admins: (v.admins ?? "")
         .split(/[,,\s]+/)
         .map((s: string) => s.trim())
         .filter(Boolean),
@@ -809,7 +815,7 @@ export function ChannelsView(): React.ReactElement {
                           ) : f.multiline ? (
                             <Input.TextArea rows={3} placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           ) : f.secret ? (
-                            <Input.Password autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
+                            <MaskedPasswordInput autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           ) : (
                             <Input placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           )}
@@ -857,6 +863,14 @@ export function ChannelsView(): React.ReactElement {
                     extra={t("channels.f.memoryIsolationHelp")}
                   >
                     <Switch size="small" />
+                  </Form.Item>
+                  {/* 管理者账号：主体区直接可见（判权跟人走，任何通道配了都全局生效） */}
+                  <Form.Item
+                    name="admins"
+                    label={t("channels.f.admins")}
+                    extra={t("channels.f.adminsExtra")}
+                  >
+                    <Input placeholder={t("channels.f.adminsPh")} />
                   </Form.Item>
 
                   <Collapse

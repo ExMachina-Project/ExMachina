@@ -12,7 +12,10 @@
 //! 监督循环每 5 秒对账：新增账号拉起轮询，删除/停用/凭证变更的账号回收任务。
 
 use crate::channel_util::{builtin_command, first_seen, media_placeholder};
-use crate::platform::{admit, caps, report_status, spawn_reply, GateDecision, Channel, ChannelRun, InboundCtx, MediaItem};
+use crate::platform::{
+    admit, caps, report_status, spawn_reply, Channel, ChannelRun, GateDecision, InboundCtx,
+    MediaItem,
+};
 use exm_core::Core;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -37,7 +40,11 @@ fn pollers() -> &'static Mutex<HashMap<String, Poller>> {
 }
 
 fn fingerprint(ch: &Channel) -> String {
-    format!("{}|{}", ch.cfg("homeserver").unwrap_or_default(), ch.token.clone().unwrap_or_default())
+    format!(
+        "{}|{}",
+        ch.cfg("homeserver").unwrap_or_default(),
+        ch.token.clone().unwrap_or_default()
+    )
 }
 
 pub fn spawn_supervisor(core: Arc<Core>) {
@@ -56,7 +63,10 @@ async fn reconcile(core: &Arc<Core>) {
             c.kind == "matrix"
                 && c.enabled
                 && c.cfg("homeserver").is_some()
-                && c.token.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                && c.token
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false)
         })
         .collect();
 
@@ -82,13 +92,22 @@ async fn reconcile(core: &Arc<Core>) {
         let ch_task = ch.clone();
         let fp = fingerprint(ch);
         let handle = tokio::spawn(async move { poll_loop(core, ch_task).await });
-        guards.insert(ch.id.clone(), Poller { handle, fingerprint: fp });
+        guards.insert(
+            ch.id.clone(),
+            Poller {
+                handle,
+                fingerprint: fp,
+            },
+        );
     }
 }
 
 /// 长轮询超时 25s，客户端超时放宽到 60s
 fn client() -> Option<reqwest::Client> {
-    reqwest::Client::builder().timeout(Duration::from_secs(60)).build().ok()
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .ok()
 }
 
 async fn poll_loop(core: Arc<Core>, ch: Channel) {
@@ -117,7 +136,10 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
             }
         }
         Ok(r) => {
-            let msg = format!("access token 校验失败：HTTP {}（检查 homeserver 与令牌）", r.status());
+            let msg = format!(
+                "access token 校验失败：HTTP {}（检查 homeserver 与令牌）",
+                r.status()
+            );
             eprintln!("[matrix:{}] {msg}", ch.id);
             report_status(&ch.id, "error", msg);
         }
@@ -140,7 +162,12 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                 url_encode(s)
             ),
         };
-        match client.get(&url).header("Authorization", format!("Bearer {token}")).send().await {
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => {
                 let body: Value = match r.json().await {
                     Ok(v) => v,
@@ -152,7 +179,10 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                         continue;
                     }
                 };
-                let next = body.get("next_batch").and_then(|x| x.as_str()).map(|x| x.to_string());
+                let next = body
+                    .get("next_batch")
+                    .and_then(|x| x.as_str())
+                    .map(|x| x.to_string());
                 match &since {
                     // 首轮：只记游标，历史消息不入队（避免上线即回复陈年旧话）
                     None => {
@@ -161,7 +191,11 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                         report_status(
                             &ch.id,
                             "ok",
-                            if self_user.is_empty() { "轮询中".into() } else { format!("账号 {self_user}") },
+                            if self_user.is_empty() {
+                                "轮询中".into()
+                            } else {
+                                format!("账号 {self_user}")
+                            },
                         );
                         continue;
                     }
@@ -169,9 +203,15 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                         report_status(
                             &ch.id,
                             "ok",
-                            if self_user.is_empty() { "轮询中".into() } else { format!("账号 {self_user}") },
+                            if self_user.is_empty() {
+                                "轮询中".into()
+                            } else {
+                                format!("账号 {self_user}")
+                            },
                         );
-                        for (room, sender, event_id, mentioned, raw_text) in parse_events(&body, &self_user) {
+                        for (room, sender, event_id, mentioned, raw_text) in
+                            parse_events(&body, &self_user)
+                        {
                             // 消息去重（防御性）：/sync 游标本身保证不重放，这里兜底
                             // 「游标丢失（如长期断线后重置）导致同批事件重见」的场景
                             if !first_seen(&format!("matrix:{}", ch.id), &event_id) {
@@ -179,7 +219,9 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             }
                             // 入站媒体（组 6.4）：标记行解析 → mxc 下载 → 注入
                             let mut saved: Vec<(String, String, String)> = Vec::new();
-                            let text: String = if let Some((kind, mxc)) = parse_media_marker(&raw_text) {
+                            let text: String = if let Some((kind, mxc)) =
+                                parse_media_marker(&raw_text)
+                            {
                                 let dl = format!(
                                     "{}/_matrix/media/v3/download/{}",
                                     hs,
@@ -190,23 +232,52 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 let mut text = media_placeholder(&[&kind]);
                                 match client.get(dl).bearer_auth(&token).send().await {
                                     Ok(r) if r.status().is_success() => {
-                                        let ext = if kind == "image" { "png" } else if kind == "voice" { "ogg" } else { "bin" };
-                                        let name = format!("matrix-{}.{ext}", exm_core::types::now_ms());
-                                        if let Some(bytes) = r.bytes().await.ok().map(|b| b.to_vec()) {
-                                            if let Some(p) = crate::platform::save_inbound_media(core.as_ref(), &ch, &name, bytes.clone()).await {
+                                        let ext = if kind == "image" {
+                                            "png"
+                                        } else if kind == "voice" {
+                                            "ogg"
+                                        } else {
+                                            "bin"
+                                        };
+                                        let name =
+                                            format!("matrix-{}.{ext}", exm_core::types::now_ms());
+                                        if let Some(bytes) =
+                                            r.bytes().await.ok().map(|b| b.to_vec())
+                                        {
+                                            if let Some(p) = crate::platform::save_inbound_media(
+                                                core.as_ref(),
+                                                &ch,
+                                                &name,
+                                                bytes.clone(),
+                                            )
+                                            .await
+                                            {
                                                 saved.push((kind.to_string(), p, name.clone()));
                                             }
                                             // 语音转写（telegram 同款能力）：m.audio 下载成功即转写，
                                             // 结果以注记并入正文；失败静默——附件本体已保存，模型仍可按路径处理
                                             if kind == "voice" {
-                                                text.push_str(&crate::channel_util::voice_transcript_note(core.as_ref(), bytes, &name).await);
+                                                text.push_str(
+                                                    &crate::channel_util::voice_transcript_note(
+                                                        core.as_ref(),
+                                                        bytes,
+                                                        &name,
+                                                    )
+                                                    .await,
+                                                );
                                             }
                                         }
                                     }
                                     _ => {
                                         // 下载失败不硬塞空路径条目（会注出「已保存：<空>」的假话），
                                         // 改成显式失败占位，用户与模型都知道附件没收到
-                                        let kind_cn = if kind == "image" { "图片" } else if kind == "voice" { "语音" } else { "文件" };
+                                        let kind_cn = if kind == "image" {
+                                            "图片"
+                                        } else if kind == "voice" {
+                                            "语音"
+                                        } else {
+                                            "文件"
+                                        };
                                         text = format!("（用户发来一个{kind_cn}附件，但下载失败，未能读取内容）");
                                     }
                                 }
@@ -217,7 +288,9 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             if text.trim().is_empty() {
                                 continue;
                             }
-                            if !ch.allowed_chats.is_empty() && !ch.allowed_chats.iter().any(|a| a == &room) {
+                            if !ch.allowed_chats.is_empty()
+                                && !ch.allowed_chats.iter().any(|a| a == &room)
+                            {
                                 eprintln!("[matrix:{}] {room} 不在白名单，已忽略", ch.id);
                                 continue;
                             }
@@ -238,7 +311,9 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                     let hs2 = hs.clone();
                                     let token2 = token.clone();
                                     let room2 = room.clone();
-                                    tokio::spawn(async move { send_message(&client2, &hs2, &token2, &room2, &reply).await });
+                                    tokio::spawn(async move {
+                                        send_message(&client2, &hs2, &token2, &room2, &reply).await
+                                    });
                                     continue;
                                 }
                             }
@@ -248,7 +323,9 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 let hs2 = hs.clone();
                                 let token2 = token.clone();
                                 let room2 = room.clone();
-                                tokio::spawn(async move { send_message(&client2, &hs2, &token2, &room2, &reply).await });
+                                tokio::spawn(async move {
+                                    send_message(&client2, &hs2, &token2, &room2, &reply).await
+                                });
                                 continue;
                             }
                             let core = core.clone();
@@ -259,7 +336,11 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             let sender2 = sender.clone();
                             let self2 = self_user.clone();
                             tokio::spawn(async move {
-                                handle_message(&core, &ch2, &client2, &hs2, &token2, &room, &sender2, &self2, saved, &text).await;
+                                handle_message(
+                                    &core, &ch2, &client2, &hs2, &token2, &room, &sender2, &self2,
+                                    saved, &text,
+                                )
+                                .await;
                             });
                         }
                         since = next.or(since);
@@ -271,9 +352,15 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                 let status = r.status();
                 let body = r.text().await.unwrap_or_default();
                 let msg = if status.as_u16() == 401 {
-                    format!("access token 失效（HTTP 401）：{}", body.chars().take(120).collect::<String>())
+                    format!(
+                        "access token 失效（HTTP 401）：{}",
+                        body.chars().take(120).collect::<String>()
+                    )
                 } else {
-                    format!("sync HTTP {status}：{}", body.chars().take(120).collect::<String>())
+                    format!(
+                        "sync HTTP {status}：{}",
+                        body.chars().take(120).collect::<String>()
+                    )
                 };
                 eprintln!("[matrix:{}] {msg}", ch.id);
                 report_status(&ch.id, "error", msg);
@@ -324,9 +411,16 @@ fn parse_events(body: &Value, self_user: &str) -> Vec<(String, String, String, b
             if !self_user.is_empty() && sender == self_user {
                 continue;
             }
-            let event_id = e.get("event_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let event_id = e
+                .get("event_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             // 入站媒体（组 6.4）：m.image / m.file / m.audio → (kind, mxc, 文件名)
-            let msgtype = content.get("msgtype").and_then(|x| x.as_str()).unwrap_or("");
+            let msgtype = content
+                .get("msgtype")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
             if matches!(msgtype, "m.image" | "m.file" | "m.audio") {
                 let url = content.get("url").and_then(|x| x.as_str()).unwrap_or("");
                 if !url.is_empty() {
@@ -355,8 +449,17 @@ fn parse_events(body: &Value, self_user: &str) -> Vec<(String, String, String, b
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().any(|u| u.as_str() == Some(self_user)))
                 .unwrap_or(false)
-                || (!self_user.is_empty() && text.to_lowercase().contains(&format!("@{}", self_user.to_lowercase())));
-            out.push((room_id.clone(), sender.to_string(), event_id, mentioned, text.to_string()));
+                || (!self_user.is_empty()
+                    && text
+                        .to_lowercase()
+                        .contains(&format!("@{}", self_user.to_lowercase())));
+            out.push((
+                room_id.clone(),
+                sender.to_string(),
+                event_id,
+                mentioned,
+                text.to_string(),
+            ));
         }
     }
     out
@@ -367,7 +470,9 @@ fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -410,12 +515,25 @@ async fn handle_message(
             .await;
     }
     // 会话键用房间 id，房间内多人共享同一会话（Matrix 房间即群）
-    let Some((run, rx)) = ChannelRun::begin(core, ch, room).await else { return };
-    core.stamp_session_origin(&run.session_id, sender, core.identity_of(&ch.id, sender).map(|i| i.id).unwrap_or_else(|| format!("ch:{}:{}", ch.id, sender)).as_str());
+    let Some((run, rx)) = ChannelRun::begin(core, ch, room).await else {
+        return;
+    };
+    core.stamp_session_origin(
+        &run.session_id,
+        sender,
+        core.identity_of(&ch.id, sender)
+            .map(|i| i.id)
+            .unwrap_or_else(|| format!("ch:{}:{}", ch.id, sender))
+            .as_str(),
+    );
     // 入站媒体注入（组 6.4）：图片进多模态暂存，文件/语音附路径说明——
     // 曾下载保存后忘了传入执行上下文，附件等于白收
     let note = crate::platform::stage_inbound_media(core, &run.session_id, &media);
-    let text = if note.is_empty() { text.to_string() } else { format!("{text}{note}") };
+    let text = if note.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}{note}")
+    };
     let client2 = client.clone();
     let hs2 = hs.to_string();
     let token2 = token.to_string();
@@ -472,7 +590,10 @@ async fn mx_send_media(
         .unwrap_or_else(|| "media".into());
     static TXN: AtomicU64 = AtomicU64::new(0);
     let _ = TXN.fetch_add(1, Ordering::Relaxed); // 保留计数器自增：媒体上传序号语义（txn 已移除）
-    let upload = format!("{hs}/_matrix/media/v3/upload?filename={}", url_encode(&name));
+    let upload = format!(
+        "{hs}/_matrix/media/v3/upload?filename={}",
+        url_encode(&name)
+    );
     let resp = match client
         .post(upload)
         .header("Authorization", format!("Bearer {token}"))
@@ -501,8 +622,18 @@ async fn mx_send_media(
     static MTXN: AtomicU64 = AtomicU64::new(0);
     let mn = MTXN.fetch_add(1, Ordering::Relaxed);
     let mtxn = format!("exm-msg-{}-{mn}", exm_core::types::now_ms());
-    let msgtype = if item.kind == "voice" { "m.audio" } else if item.kind == "file" { "m.file" } else { "m.image" };
-    let send = format!("{hs}/_matrix/client/v3/rooms/{}/send/m.room.message/{}", url_encode(room), url_encode(&mtxn));
+    let msgtype = if item.kind == "voice" {
+        "m.audio"
+    } else if item.kind == "file" {
+        "m.file"
+    } else {
+        "m.image"
+    };
+    let send = format!(
+        "{hs}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
+        url_encode(room),
+        url_encode(&mtxn)
+    );
     let body = json!({
         "msgtype": msgtype,
         "body": if item.caption.is_empty() { name.clone() } else { item.caption.clone() },
@@ -525,7 +656,11 @@ async fn send_message(client: &reqwest::Client, hs: &str, token: &str, room: &st
     }
     static TXN: AtomicU64 = AtomicU64::new(0);
     let n = TXN.fetch_add(1, Ordering::Relaxed);
-    let txn = format!("exm{}-{}", exm_core::types::now_iso().replace([':', '.', '-', 'T', 'Z'], ""), n);
+    let txn = format!(
+        "exm{}-{}",
+        exm_core::types::now_iso().replace([':', '.', '-', 'T', 'Z'], ""),
+        n
+    );
     match client
         .put(format!(
             "{hs}/_matrix/client/v3/rooms/{}/send/m.room.message/{txn}",
@@ -586,7 +721,10 @@ mod tests {
         // 图片消息：标记行 \u{1}kind\u{1}mxc\u{1}room，未提及
         assert_eq!(out[1].2, "$e3");
         assert!(!out[1].3);
-        assert_eq!(out[1].4, format!("{US}media{US}image{US}mxc://x/abc{US}!r1:x"));
+        assert_eq!(
+            out[1].4,
+            format!("{US}media{US}image{US}mxc://x/abc{US}!r1:x")
+        );
         // 无 join 房间（初始 sync）返回空
         assert!(parse_events(&json!({}), "@me:x").is_empty());
     }
@@ -612,12 +750,22 @@ mod tests {
         assert_eq!(kind, "image");
         assert_eq!(mxc, "mxc://x/abc");
         // 语音与文件
-        let (kind, _) = parse_media_marker(&format!("{US}media{US}voice{US}mxc://x/au{US}!r:x")).expect("语音标记可解析");
+        let (kind, _) = parse_media_marker(&format!("{US}media{US}voice{US}mxc://x/au{US}!r:x"))
+            .expect("语音标记可解析");
         assert_eq!(kind, "voice");
         // 哨兵缺失 / 段数不符 / 字段为空 → 不认（普通正文不被误判成媒体）
-        assert!(parse_media_marker(&format!("{US}image{US}mxc://x/abc")).is_none(), "3 段旧格式不认");
-        assert!(parse_media_marker(&format!("{US}media{US}image{US}mxc://x/abc")).is_none(), "缺 room 段不认");
-        assert!(parse_media_marker(&format!("{US}media{US}{US}mxc://x/abc{US}!r:x")).is_none(), "kind 为空不认");
+        assert!(
+            parse_media_marker(&format!("{US}image{US}mxc://x/abc")).is_none(),
+            "3 段旧格式不认"
+        );
+        assert!(
+            parse_media_marker(&format!("{US}media{US}image{US}mxc://x/abc")).is_none(),
+            "缺 room 段不认"
+        );
+        assert!(
+            parse_media_marker(&format!("{US}media{US}{US}mxc://x/abc{US}!r:x")).is_none(),
+            "kind 为空不认"
+        );
         assert!(parse_media_marker("普通文本消息").is_none());
         assert!(parse_media_marker("").is_none());
     }

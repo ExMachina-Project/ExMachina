@@ -57,7 +57,10 @@ pub(crate) fn glob_hits(pattern: &str, rel: &str) -> bool {
             }
         }
     }
-    match globset::GlobBuilder::new(pattern).literal_separator(true).build() {
+    match globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+    {
         Ok(g) => g.compile_matcher().is_match(rel),
         Err(_) => false,
     }
@@ -118,7 +121,10 @@ fn merge_summary(events: &[FsEvent]) -> String {
         lines.push(format!("{} {}", ev.kind, ev.rel));
     }
     if events.len() > MERGE_DETAIL_CAP {
-        lines.push(format!("…（另有 {} 个变更）", events.len() - MERGE_DETAIL_CAP));
+        lines.push(format!(
+            "…（另有 {} 个变更）",
+            events.len() - MERGE_DETAIL_CAP
+        ));
     }
     lines.join("\n")
 }
@@ -133,24 +139,32 @@ pub fn spawn_file_watcher(core: Arc<exm_core::Core>) {
     let ws = core.config().workspace_root.clone();
     let exclude = cfg.exclude.clone();
     let ws_for_cb = ws.clone();
-    let watcher_res = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-        let Ok(ev) = res else { return };
-        for path in ev.paths {
-            let Ok(abs) = path.canonicalize() else { continue };
-            let Ok(rel) = abs.strip_prefix(&ws_for_cb) else { continue };
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            if rel.is_empty() || excluded(&rel, &exclude) {
-                continue;
+    let watcher_res =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(ev) = res else { return };
+            for path in ev.paths {
+                let Ok(abs) = path.canonicalize() else {
+                    continue;
+                };
+                let Ok(rel) = abs.strip_prefix(&ws_for_cb) else {
+                    continue;
+                };
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if rel.is_empty() || excluded(&rel, &exclude) {
+                    continue;
+                }
+                let kind = match ev.kind {
+                    notify::EventKind::Create(_) => "created",
+                    notify::EventKind::Modify(_) => "modified",
+                    notify::EventKind::Remove(_) => "removed",
+                    _ => continue,
+                };
+                let _ = tx.send(FsEvent {
+                    rel,
+                    kind: kind.to_string(),
+                });
             }
-            let kind = match ev.kind {
-                notify::EventKind::Create(_) => "created",
-                notify::EventKind::Modify(_) => "modified",
-                notify::EventKind::Remove(_) => "removed",
-                _ => continue,
-            };
-            let _ = tx.send(FsEvent { rel, kind: kind.to_string() });
-        }
-    });
+        });
     let mut watcher = match watcher_res {
         Ok(w) => w,
         Err(e) => {
@@ -220,11 +234,18 @@ pub(crate) async fn dispatch_fs_events(core: &exm_core::Core, events: &[FsEvent]
             continue;
         }
         let prompt = t.prompt.replace("{event}", &summary);
-        match core.run_event_prompt(&format!("trigger-{}", t.id), t.group.as_deref(), &prompt).await {
+        match core
+            .run_event_prompt(&format!("trigger-{}", t.id), t.group.as_deref(), &prompt)
+            .await
+        {
             Ok(sid) => {
-                let _ = core
-                    .store
-                    .audit_tool("triggers", "file_watch", &json!({ "triggerId": t.id, "events": events.len() }), &format!("注入会话 {sid}"), 0);
+                let _ = core.store.audit_tool(
+                    "triggers",
+                    "file_watch",
+                    &json!({ "triggerId": t.id, "events": events.len() }),
+                    &format!("注入会话 {sid}"),
+                    0,
+                );
                 let _ = core.events.send(exm_core::types::CoreEvent {
                     kind: "event.fired".into(),
                     session_id: sid,
@@ -289,18 +310,30 @@ pub async fn event_webhook(
         );
     };
     if !cfg.enabled || cfg.secret.trim().is_empty() {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "事件入口未启用" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "事件入口未启用" })),
+        )
+            .into_response();
     }
     let sig = headers.get("x-exm-signature").and_then(|v| v.to_str().ok());
     if !verify_signature(&cfg.secret, &body, sig) {
         audit("签名校验失败", json!({ "bodyBytes": body.len() }));
-        return (StatusCode::FORBIDDEN, Json(json!({ "error": "签名校验失败" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "签名校验失败" })),
+        )
+            .into_response();
     }
     let parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
             audit("载荷解析失败", json!({ "error": e.to_string() }));
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "载荷须为 JSON" }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "载荷须为 JSON" })),
+            )
+                .into_response();
         }
     };
     let kind = parsed
@@ -360,19 +393,29 @@ mod tests {
 
     #[test]
     fn 排除前缀命中() {
-        let exclude = vec![".exmachina/".into(), "target/".into(), "node_modules/".into()];
+        let exclude = vec![
+            ".exmachina/".into(),
+            "target/".into(),
+            "node_modules/".into(),
+        ];
         assert!(excluded(".exmachina/data/foo.json", &exclude));
         assert!(excluded("target/debug/a.rs", &exclude));
         assert!(excluded("node_modules/pkg/index.js", &exclude));
         assert!(!excluded("src/main.rs", &exclude));
-        assert!(!excluded("src/targets/a.rs", &exclude), "仅前缀段命中，非字符串前缀");
+        assert!(
+            !excluded("src/targets/a.rs", &exclude),
+            "仅前缀段命中，非字符串前缀"
+        );
     }
 
     #[test]
     fn glob_匹配_跨目录与文件名() {
         assert!(glob_hits("**/*.rs", "src/main.rs"));
         assert!(glob_hits("*.rs", "main.rs"));
-        assert!(glob_hits("*.rs", "src/main.rs"), "无 / 的模式按文件名兜底匹配");
+        assert!(
+            glob_hits("*.rs", "src/main.rs"),
+            "无 / 的模式按文件名兜底匹配"
+        );
         assert!(glob_hits("docs/*.md", "docs/x.md"));
         assert!(!glob_hits("docs/*.md", "docs/sub/x.md"), "单星不跨目录");
         assert!(!glob_hits("**/*.rs", "src/main.ts"));
@@ -385,7 +428,10 @@ mod tests {
     fn 同路径连续变更合并为一次() {
         let mut p = Pending::default();
         for _ in 0..5 {
-            p.push(FsEvent { rel: "src/lib.rs".into(), kind: "modified".into() });
+            p.push(FsEvent {
+                rel: "src/lib.rs".into(),
+                kind: "modified".into(),
+            });
         }
         // 去抖窗口未过：不产出
         assert!(p.drain_due(Duration::from_secs(60)).is_empty());
@@ -396,14 +442,20 @@ mod tests {
         let due = p.drain_due(Duration::from_secs(60));
         assert_eq!(due.len(), 1, "同路径连续变更应合并为一次注入");
         assert_eq!(due[0].rel, "src/lib.rs");
-        assert!(p.drain_due(Duration::from_secs(60)).is_empty(), "取走即清空");
+        assert!(
+            p.drain_due(Duration::from_secs(60)).is_empty(),
+            "取走即清空"
+        );
     }
 
     #[test]
     fn 多路径一次批量产出且封顶() {
         let mut p = Pending::default();
         for i in 0..(MERGE_DETAIL_CAP + 5) {
-            p.push(FsEvent { rel: format!("src/f{i}.rs"), kind: "created".into() });
+            p.push(FsEvent {
+                rel: format!("src/f{i}.rs"),
+                kind: "created".into(),
+            });
         }
         for (_, slot) in p.map.iter_mut() {
             slot.1 = Instant::now() - Duration::from_secs(3600);
@@ -411,7 +463,10 @@ mod tests {
         let due = p.drain_due(Duration::from_secs(60));
         assert_eq!(due.len(), MERGE_DETAIL_CAP + 5);
         let summary = merge_summary(&due);
-        assert!(summary.contains("…（另有 5 个变更）"), "超出明细上限应计数: {summary}");
+        assert!(
+            summary.contains("…（另有 5 个变更）"),
+            "超出明细上限应计数: {summary}"
+        );
         assert_eq!(summary.lines().count(), MERGE_DETAIL_CAP + 1);
     }
 
@@ -419,11 +474,17 @@ mod tests {
     fn 队列上限_丢弃最旧() {
         let mut p = Pending::default();
         for i in 0..(PENDING_CAP + 10) {
-            p.push(FsEvent { rel: format!("f/{i}"), kind: "modified".into() });
+            p.push(FsEvent {
+                rel: format!("f/{i}"),
+                kind: "modified".into(),
+            });
         }
         assert!(p.map.len() <= PENDING_CAP, "队列上限兜底: {}", p.map.len());
         assert!(!p.map.contains_key("f/0"), "最旧事件应被丢弃");
-        assert!(p.map.contains_key(&format!("f/{}", PENDING_CAP + 9)), "最新事件保留");
+        assert!(
+            p.map.contains_key(&format!("f/{}", PENDING_CAP + 9)),
+            "最新事件保留"
+        );
     }
 
     // ---------------- 签名校验（7.2） ----------------
@@ -439,7 +500,11 @@ mod tests {
         let good = format!("sha256={}", hex(&mac.finalize().into_bytes()));
         assert!(verify_signature(secret, body, Some(&good)));
         assert!(!verify_signature(secret, body, Some("sha256=deadbeef")));
-        assert!(!verify_signature(secret, body, Some(&good[..good.len() - 2])));
+        assert!(!verify_signature(
+            secret,
+            body,
+            Some(&good[..good.len() - 2])
+        ));
         assert!(!verify_signature(secret, body, None));
         assert!(!verify_signature(secret, b"tampered", Some(&good)));
     }
@@ -474,7 +539,11 @@ mod tests {
     fn 载荷摘要封顶() {
         let big = json!({ "data": "x".repeat(5000) });
         let digest = payload_digest("deploy", &big);
-        assert!(digest.chars().count() <= 700, "摘要应封顶: {}", digest.chars().count());
+        assert!(
+            digest.chars().count() <= 700,
+            "摘要应封顶: {}",
+            digest.chars().count()
+        );
     }
 
     // ---------------- 临时目录集成：连续变更合并为一次注入（7.1 验收口径） ----------------
@@ -507,7 +576,9 @@ mod tests {
         let mut cfg = exm_core::config::ExmConfig::load(&dir);
         cfg.use_mock = true; // 注入执行走替身通道（测试不依赖真实模型与网络）
         let core = Arc::new(exm_core::Core::with_config(cfg).unwrap());
-        core.registry().create_group(Some("t".into()), "监听测试组", "").unwrap();
+        core.registry()
+            .create_group(Some("t".into()), "监听测试组", "")
+            .unwrap();
         core.registry().upsert_agent("t", orch_def(), None).unwrap();
         core.registry().set_primary("t", "duty-orch").unwrap();
         core.registry().set_active_group("t").unwrap();
@@ -529,28 +600,71 @@ mod tests {
 
         // 一次风暴：同路径连续 3 次 + 另两路径各 1 次（排除前缀的路径不应触发）
         let events = vec![
-            FsEvent { rel: "src/lib.rs".into(), kind: "modified".into() },
-            FsEvent { rel: "src/lib.rs".into(), kind: "modified".into() },
-            FsEvent { rel: "src/lib.rs".into(), kind: "modified".into() },
-            FsEvent { rel: "src/main.rs".into(), kind: "created".into() },
-            FsEvent { rel: "target/debug/x.rs".into(), kind: "created".into() }, // 排除前缀
+            FsEvent {
+                rel: "src/lib.rs".into(),
+                kind: "modified".into(),
+            },
+            FsEvent {
+                rel: "src/lib.rs".into(),
+                kind: "modified".into(),
+            },
+            FsEvent {
+                rel: "src/lib.rs".into(),
+                kind: "modified".into(),
+            },
+            FsEvent {
+                rel: "src/main.rs".into(),
+                kind: "created".into(),
+            },
+            FsEvent {
+                rel: "target/debug/x.rs".into(),
+                kind: "created".into(),
+            }, // 排除前缀
         ];
         dispatch_fs_events(&core, &events).await;
 
         // 断言：目标组只建了一个触发器会话，用户消息只有 1 条且携带合并摘要
         let sessions = core.list_sessions_in_group("t").unwrap();
-        let s = sessions.iter().find(|s| s.title == "trigger-fw1").expect("注入会话应存在");
+        let s = sessions
+            .iter()
+            .find(|s| s.title == "trigger-fw1")
+            .expect("注入会话应存在");
         let msgs = core.store.list_messages(&s.id, 100).unwrap();
-        let user_msgs: Vec<_> = msgs.iter().filter(|m| matches!(m.role, exm_core::types::MessageRole::User)).collect();
-        assert_eq!(user_msgs.len(), 1, "连续变更应合并为一次注入，实际 {} 条", user_msgs.len());
-        let text = user_msgs[0].statements.iter().map(|s| s.text.clone()).collect::<String>();
-        assert!(text.contains("modified src/lib.rs"), "摘要含变更明细：{text}");
-        assert!(text.contains("created src/main.rs"), "多路径并入同一次注入：{text}");
+        let user_msgs: Vec<_> = msgs
+            .iter()
+            .filter(|m| matches!(m.role, exm_core::types::MessageRole::User))
+            .collect();
+        assert_eq!(
+            user_msgs.len(),
+            1,
+            "连续变更应合并为一次注入，实际 {} 条",
+            user_msgs.len()
+        );
+        let text = user_msgs[0]
+            .statements
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<String>();
+        assert!(
+            text.contains("modified src/lib.rs"),
+            "摘要含变更明细：{text}"
+        );
+        assert!(
+            text.contains("created src/main.rs"),
+            "多路径并入同一次注入：{text}"
+        );
         assert!(!text.contains("target/debug"), "排除前缀路径不注入：{text}");
 
         // 未命中 pattern 的变更不触发（docs/*.md 不匹配 src/**）
         let before = core.store.list_messages(&s.id, 100).unwrap().len();
-        dispatch_fs_events(&core, &[FsEvent { rel: "docs/x.md".into(), kind: "created".into() }]).await;
+        dispatch_fs_events(
+            &core,
+            &[FsEvent {
+                rel: "docs/x.md".into(),
+                kind: "created".into(),
+            }],
+        )
+        .await;
         let after = core.store.list_messages(&s.id, 100).unwrap().len();
         assert_eq!(before, after, "pattern 未命中不得注入");
 
@@ -571,7 +685,9 @@ mod tests {
         cfg.triggers.event_webhook.enabled = true;
         cfg.triggers.event_webhook.secret = "test-secret".into();
         let core = Arc::new(exm_core::Core::with_config(cfg).unwrap());
-        core.registry().create_group(Some("t".into()), "事件测试组", "").unwrap();
+        core.registry()
+            .create_group(Some("t".into()), "事件测试组", "")
+            .unwrap();
         core.registry().upsert_agent("t", orch_def(), None).unwrap();
         core.registry().set_primary("t", "duty-orch").unwrap();
         core.registry().set_active_group("t").unwrap();
@@ -594,26 +710,42 @@ mod tests {
         let body = br#"{"type":"deploy","data":{"env":"prod","rev":"a1b2c3"}}"#;
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"test-secret").unwrap();
         mac.update(body);
-        let sig: String = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let sig: String = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("x-exm-signature", format!("sha256={sig}").parse().unwrap());
         let addr = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
 
-        let resp = event_webhook(State(st.clone()), addr, headers, Bytes::from_static(body)).await.into_response();
+        let resp = event_webhook(State(st.clone()), addr, headers, Bytes::from_static(body))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK, "有效签名应受理");
         // 注入落地：事件会话建立且用户消息携带载荷摘要
         let sessions = core.list_sessions_in_group("t").unwrap();
-        let s = sessions.iter().find(|x| x.title == "trigger-ew1").expect("映射注入应建会话");
+        let s = sessions
+            .iter()
+            .find(|x| x.title == "trigger-ew1")
+            .expect("映射注入应建会话");
         let msgs = core.store.list_messages(&s.id, 100).unwrap();
         let text = msgs
             .iter()
             .filter(|m| matches!(m.role, exm_core::types::MessageRole::User))
             .flat_map(|m| m.statements.iter().map(|x| x.text.clone()))
             .collect::<String>();
-        assert!(text.contains("deploy") && text.contains("prod"), "注入含类型与载荷摘要：{text}");
+        assert!(
+            text.contains("deploy") && text.contains("prod"),
+            "注入含类型与载荷摘要：{text}"
+        );
         // 审计：成功接收留痕
         let audit = core.store.list_tool_audit("event-webhook", 10).unwrap();
-        assert!(audit.iter().any(|a| a["resultSummary"] == "事件已接收"), "有效事件入审计");
+        assert!(
+            audit.iter().any(|a| a["resultSummary"] == "事件已接收"),
+            "有效事件入审计"
+        );
 
         // 无效签名：拒绝 + 审计 + 不注入
         let sessions_before = core.list_sessions_in_group("t").unwrap().len();
@@ -629,7 +761,10 @@ mod tests {
         .into_response();
         assert_eq!(resp2.status(), StatusCode::FORBIDDEN, "签名失败应拒绝");
         let audit2 = core.store.list_tool_audit("event-webhook", 10).unwrap();
-        assert!(audit2.iter().any(|a| a["resultSummary"] == "签名校验失败"), "失败原因入审计");
+        assert!(
+            audit2.iter().any(|a| a["resultSummary"] == "签名校验失败"),
+            "失败原因入审计"
+        );
         assert_eq!(
             core.list_sessions_in_group("t").unwrap().len(),
             sessions_before,

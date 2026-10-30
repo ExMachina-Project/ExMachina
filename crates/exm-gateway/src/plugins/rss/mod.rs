@@ -132,10 +132,7 @@ impl Settings {
                 Some((name, url)) if url.contains("://") => {
                     (name.trim().to_string(), url.trim().to_string())
                 }
-                _ => (
-                    l.rsplit('/').next().unwrap_or(l).to_string(),
-                    l.to_string(),
-                ),
+                _ => (l.rsplit('/').next().unwrap_or(l).to_string(), l.to_string()),
             })
             .collect();
         Settings {
@@ -311,7 +308,11 @@ async fn read_session(
             src,
             it.title,
             it.link,
-            if it.summary.is_empty() { "（无摘要）" } else { &it.summary }
+            if it.summary.is_empty() {
+                "（无摘要）"
+            } else {
+                &it.summary
+            }
         ));
     }
     let (run, mut rx) = match ChannelRun::begin(core, ch, "rss").await {
@@ -324,7 +325,9 @@ async fn read_session(
     let sid = run.session_id.clone();
     // rss__digest 注入本会话（工具面与事件订阅同键）
     let injections = digest_injection(core, ch);
-    core.orchestrator().tools.inject_session_tools(&sid, injections);
+    core.orchestrator()
+        .tools
+        .inject_session_tools(&sid, injections);
     // 系统自动任务标记：落库消息带 auto:rss 来源
     let run = run.with_origin("auto:rss");
     let reply_run = run.clone();
@@ -347,7 +350,9 @@ async fn read_session(
         }
     };
     // 阅读多轮工具调用收束窗口：600s（video 同口径）
-    let timed_out = tokio::time::timeout(Duration::from_secs(600), wait).await.is_err();
+    let timed_out = tokio::time::timeout(Duration::from_secs(600), wait)
+        .await
+        .is_err();
     if timed_out {
         task.abort();
         let _ = task.await;
@@ -426,7 +431,11 @@ fn digest_exec(core: Arc<Core>, ch: Channel) -> exm_core::tools::DynamicToolExec
                 anyhow::bail!(
                     "未匹配到订阅源：{}（可用：{}）",
                     want.unwrap_or("?"),
-                    s.feeds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join("、")
+                    s.feeds
+                        .iter()
+                        .map(|(n, _)| n.clone())
+                        .collect::<Vec<_>>()
+                        .join("、")
                 );
             }
             let mut out = String::new();
@@ -577,6 +586,7 @@ mod tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -644,10 +654,7 @@ mod tests {
     fn 工具_清单与注入面() {
         let m = rss_manifest();
         assert_eq!(m.id, "rss");
-        assert_eq!(
-            m.channel.as_ref().unwrap().kinds,
-            vec!["rss".to_string()]
-        );
+        assert_eq!(m.channel.as_ref().unwrap().kinds, vec!["rss".to_string()]);
         assert_eq!(m.channel.as_ref().unwrap().credentials.len(), 4);
         assert!(m.watch.is_some() && m.process.is_none());
         // 注入面：digest 工具名带命名空间
@@ -666,7 +673,8 @@ mod tests {
     /// 材料拼装：标题/链接/摘要齐全，无摘要条目降级占位
     #[test]
     fn 单轮_材料拼装() {
-        let items = [(
+        let items = [
+            (
                 "源A".to_string(),
                 feed::FeedItem {
                     title: "t1".into(),
@@ -683,7 +691,8 @@ mod tests {
                     published: String::new(),
                     summary: String::new(),
                 },
-            )];
+            ),
+        ];
         // 与 read_session 相同的拼装口径（抽出来便于断言）
         let mut material = String::from("以下是本轮 RSS 新条目。请逐条给出一句话要点（格式：标题｜要点），最后给一行整体摘要：\n");
         for (i, (src, it)) in items.iter().enumerate() {
@@ -693,7 +702,11 @@ mod tests {
                 src,
                 it.title,
                 it.link,
-                if it.summary.is_empty() { "（无摘要）" } else { &it.summary }
+                if it.summary.is_empty() {
+                    "（无摘要）"
+                } else {
+                    &it.summary
+                }
             ));
         }
         assert!(material.contains("[源A] t1（https://x/1）"));
@@ -734,7 +747,11 @@ mod tests {
     /// digest 源筛选与错误口径：不匹配报错（含可用源清单）；匹配规则 名称/URL/前缀
     #[tokio::test]
     async fn 工具_digest源筛选与错误() {
-        let ch = mock_channel("HN=https://hnrss.org/newest\nhttps://example.com/feed.xml", "", 10);
+        let ch = mock_channel(
+            "HN=https://hnrss.org/newest\nhttps://example.com/feed.xml",
+            "",
+            10,
+        );
         let s = Settings::from_channel(&ch);
         // 复刻 digest_exec 的筛选逻辑（执行面会拉网，这里只测匹配规则）
         let select = |want: Option<&str>| -> Vec<(String, String)> {
@@ -749,8 +766,15 @@ mod tests {
         };
         assert_eq!(select(None).len(), 2, "缺省全源");
         assert_eq!(select(Some("HN")).len(), 1, "名称精确匹配");
-        assert_eq!(select(Some("https://example.com/feed.xml")).len(), 1, "URL 精确匹配");
+        assert_eq!(
+            select(Some("https://example.com/feed.xml")).len(),
+            1,
+            "URL 精确匹配"
+        );
         assert_eq!(select(Some("https://hnrss")).len(), 1, "URL 前缀匹配");
-        assert!(select(Some("不存在")).is_empty(), "不匹配 → 执行面报「未匹配到订阅源」");
+        assert!(
+            select(Some("不存在")).is_empty(),
+            "不匹配 → 执行面报「未匹配到订阅源」"
+        );
     }
 }

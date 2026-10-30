@@ -1,7 +1,13 @@
 //! 通道身份管理（控制台侧）：配对码签发 / 绑定清单 / 角色调整。
 //! 全部经后台鉴权中间件（auth_key）保护——能调这些端点即管理员。
-use axum::{extract::{Path, State}, Json, Router, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}};
-use serde_json::{Value, json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde_json::{json, Value};
 
 use crate::AppState;
 
@@ -57,16 +63,28 @@ pub struct PairingBody {
 
 /// POST /api/identity/code：签发配对码（可预设角色）
 async fn issue(State(st): State<AppState>, Json(b): Json<PairingBody>) -> Response {
-    let ttl = b.ttl_secs.unwrap_or(st.core.config().identity.pairing_ttl_secs).clamp(60, 86400);
+    let ttl = b
+        .ttl_secs
+        .unwrap_or(st.core.config().identity.pairing_ttl_secs)
+        .clamp(60, 86400);
     let role = b.role.as_deref().unwrap_or("member").trim();
     let role = if role == "admin" { "admin" } else { "member" };
-    match st.core.issue_pairing_code_role(b.note.as_deref().unwrap_or(""), b.platform.as_deref(), ttl, role) {
+    match st.core.issue_pairing_code_role(
+        b.note.as_deref().unwrap_or(""),
+        b.platform.as_deref(),
+        ttl,
+        role,
+    ) {
         Ok(c) => Json(json!({
             "code": c.code, "expiresAtMs": c.expires_at_ms, "role": role,
             "hint": format!("让用户在通道内发送 /pair {}", c.code),
         }))
         .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -74,7 +92,11 @@ async fn issue(State(st): State<AppState>, Json(b): Json<PairingBody>) -> Respon
 async fn unbind(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     match st.core.drop_identity(&id) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -88,15 +110,27 @@ pub struct RoleBody {
 /// POST /api/identity/role：调整角色
 async fn set_role(State(st): State<AppState>, Json(b): Json<RoleBody>) -> Response {
     if !matches!(b.role.as_str(), "admin" | "member") {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "role 仅支持 admin | member" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "role 仅支持 admin | member" })),
+        )
+            .into_response();
     }
     let Some(mut idn) = st.core.identity_of_id(&b.id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "绑定不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "绑定不存在" })),
+        )
+            .into_response();
     };
     idn.role = b.role;
     match st.core.save_identity(&idn) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

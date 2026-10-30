@@ -21,11 +21,19 @@ pub(crate) const KEY_MASK: &str = "***已配置***";
 pub(crate) const KEY_CLEAR: &str = "__CLEAR__";
 
 fn mask_key(k: &str) -> String {
-    if k.trim().is_empty() { String::new() } else { KEY_MASK.to_string() }
+    if k.trim().is_empty() {
+        String::new()
+    } else {
+        KEY_MASK.to_string()
+    }
 }
 
 fn profile_json(p: &LlmProfile) -> Value {
-    let keys: Vec<Value> = p.api_keys.iter().map(|k| Value::String(mask_key(k))).collect();
+    let keys: Vec<Value> = p
+        .api_keys
+        .iter()
+        .map(|k| Value::String(mask_key(k)))
+        .collect();
     let models: Vec<Value> = p
         .models
         .iter()
@@ -102,10 +110,7 @@ pub enum ApiKeyEntry {
     Keep { keep: usize },
 }
 
-fn resolve_profile_input(
-    existing: Option<&LlmProfile>,
-    v: &LlmProfileBody,
-) -> LlmProfile {
+fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> LlmProfile {
     // 显式清空优先：clearKeys=true 时主 Key 与 Key 池一律置空（删除密钥的保存语义）
     let key = if v.clear_keys {
         String::new()
@@ -113,7 +118,9 @@ fn resolve_profile_input(
         match v.api_key.as_deref() {
             Some(KEY_MASK) | None => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
             Some(KEY_CLEAR) => String::new(), // 显式清除主 Key（保留池）
-            Some(k) if k.trim().is_empty() => existing.map(|e| e.api_key.clone()).unwrap_or_default(),
+            Some(k) if k.trim().is_empty() => {
+                existing.map(|e| e.api_key.clone()).unwrap_or_default()
+            }
             Some(k) => k.to_string(),
         }
     };
@@ -189,19 +196,26 @@ fn resolve_profile_input(
         );
     }
     LlmProfile {
-        id: v.id
+        id: v
+            .id
             .clone()
             .unwrap_or_else(|| existing.map(|e| e.id.clone()).unwrap_or_default()),
-        name: v.name
-            .clone()
-            .unwrap_or_else(|| existing.map(|e| e.name.clone()).unwrap_or_else(|| "未命名".into())),
-        base_url: v.base_url
+        name: v.name.clone().unwrap_or_else(|| {
+            existing
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "未命名".into())
+        }),
+        base_url: v
+            .base_url
             .clone()
             .unwrap_or_else(|| existing.map(|e| e.base_url.clone()).unwrap_or_default()),
         api_key: key,
         api_keys,
         models,
-        api_format: v.api_format.clone().unwrap_or_else(|| existing.map(|e| e.api_format.clone()).unwrap_or_default()),
+        api_format: v
+            .api_format
+            .clone()
+            .unwrap_or_else(|| existing.map(|e| e.api_format.clone()).unwrap_or_default()),
         model: model_name,
         fallback: match v.fallback.as_deref() {
             None => existing.and_then(|e| e.fallback.clone()),
@@ -212,18 +226,24 @@ fn resolve_profile_input(
 }
 
 /// 新增/更新档案；若更新的是生效档案则同步热生效
-pub async fn save_profile(State(st): State<AppState>, Json(b): Json<LlmProfileBody>) -> impl IntoResponse {
+pub async fn save_profile(
+    State(st): State<AppState>,
+    Json(b): Json<LlmProfileBody>,
+) -> impl IntoResponse {
     let mut cfg = (*st.core.config()).clone();
-    let existing = b
-        .id
-        .as_deref()
-        .and_then(|id| cfg.llm_profiles.iter().find(|p| p.id == id));
+    let existing =
+        b.id.as_deref()
+            .and_then(|id| cfg.llm_profiles.iter().find(|p| p.id == id));
     let mut profile = resolve_profile_input(existing, &b);
     if profile.id.is_empty() {
         profile.id = format!("p{}", &exm_core::types::new_id()[..6]);
     }
     if profile.base_url.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "baseUrl 不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "baseUrl 不能为空" })),
+        )
+            .into_response();
     }
     if let Some(slot) = cfg.llm_profiles.iter_mut().find(|p| p.id == profile.id) {
         *slot = profile.clone();
@@ -245,18 +265,35 @@ pub async fn save_profile(State(st): State<AppState>, Json(b): Json<LlmProfileBo
     }
     cfg.use_mock = cfg.use_mock || exm_core::config::mock_enabled_from_env();
     match st.core.apply_config(cfg) {
-        Ok(_) => Json(json!({ "ok": true, "id": profile.id, "mock": st.core.is_mock() })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(_) => {
+            Json(json!({ "ok": true, "id": profile.id, "mock": st.core.is_mock() })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn delete_profile(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn delete_profile(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     let mut cfg = (*st.core.config()).clone();
     if cfg.llm_profiles.len() <= 1 {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "至少保留一个模型档案" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "至少保留一个模型档案" })),
+        )
+            .into_response();
     }
     let Some(pos) = cfg.llm_profiles.iter().position(|p| p.id == id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "档案不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "档案不存在" })),
+        )
+            .into_response();
     };
     cfg.llm_profiles.remove(pos);
     if cfg.active_profile == id {
@@ -278,18 +315,29 @@ pub async fn delete_profile(State(st): State<AppState>, Path(id): Path<String>) 
     let active = cfg.active_profile.clone();
     match st.core.apply_config(cfg) {
         Ok(_) => Json(json!({ "ok": true, "active": active })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// 切换生效档案（热生效：重建 Provider / Runtime / Orchestrator）
-pub async fn activate_profile(State(st): State<AppState>, Json(b): Json<LlmProfileBody>) -> impl IntoResponse {
+pub async fn activate_profile(
+    State(st): State<AppState>,
+    Json(b): Json<LlmProfileBody>,
+) -> impl IntoResponse {
     let Some(id) = b.id.clone() else {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "需要 id" }))).into_response();
     };
     let mut cfg = (*st.core.config()).clone();
     let Some(p) = cfg.llm_profiles.iter().find(|p| p.id == id).cloned() else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "档案不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "档案不存在" })),
+        )
+            .into_response();
     };
     cfg.active_profile = p.id.clone();
     let mut keys = p.api_keys.clone();
@@ -305,13 +353,22 @@ pub async fn activate_profile(State(st): State<AppState>, Json(b): Json<LlmProfi
     };
     cfg.use_mock = cfg.use_mock || exm_core::config::mock_enabled_from_env();
     match st.core.apply_config(cfg) {
-        Ok(_) => Json(json!({ "ok": true, "active": id, "mock": st.core.is_mock() })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(_) => {
+            Json(json!({ "ok": true, "active": id, "mock": st.core.is_mock() })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// 连通测试：向端点发一条 1-token 请求（真实网络，10s 超时）
-pub async fn test_profile(State(st): State<AppState>, Json(b): Json<LlmProfileBody>) -> impl IntoResponse {
+pub async fn test_profile(
+    State(st): State<AppState>,
+    Json(b): Json<LlmProfileBody>,
+) -> impl IntoResponse {
     let cfg = st.core.config();
     let profile = match &b.id {
         Some(id) => cfg.llm_profiles.iter().find(|p| p.id == *id).cloned(),
@@ -328,7 +385,11 @@ pub async fn test_profile(State(st): State<AppState>, Json(b): Json<LlmProfileBo
         }),
     };
     let Some(p) = profile else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "档案不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "档案不存在" })),
+        )
+            .into_response();
     };
     // 探针密钥：主 Key 优先，为空则回落 Key 池首键（与连通测试对齐已配置的键）
     let probe_key = if p.api_key.trim().is_empty() {
@@ -337,13 +398,19 @@ pub async fn test_profile(State(st): State<AppState>, Json(b): Json<LlmProfileBo
         p.api_key.clone()
     };
     if probe_key.trim().is_empty() {
-        return Json(json!({ "ok": false, "configured": false, "message": "该档案尚未配置 API Key" }))
-            .into_response();
+        return Json(
+            json!({ "ok": false, "configured": false, "message": "该档案尚未配置 API Key" }),
+        )
+        .into_response();
     }
     // 按档案协议构造 1-token 探针（URL / 鉴权头 / 请求体各不相同）
     let base = p.base_url.trim_end_matches('/');
     let model = p.model.as_str();
-    let fmt = if p.api_format.is_empty() { "openai" } else { p.api_format.as_str() };
+    let fmt = if p.api_format.is_empty() {
+        "openai"
+    } else {
+        p.api_format.as_str()
+    };
     let client = reqwest::Client::new();
     let rb = match fmt {
         "anthropic" => client
@@ -355,7 +422,9 @@ pub async fn test_profile(State(st): State<AppState>, Json(b): Json<LlmProfileBo
                 "messages": [{ "role": "user", "content": "ping" }],
             })),
         "azure" => client
-            .post(format!("{base}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"))
+            .post(format!(
+                "{base}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
+            ))
             .header("api-key", &probe_key)
             .json(&json!({
                 "messages": [{ "role": "user", "content": "ping" }], "max_tokens": 1,
@@ -450,14 +519,21 @@ pub async fn put_capabilities(
             }))
             .into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/llm/profiles", get(list_profiles).post(save_profile))
-        .route("/api/llm/profiles/:id", axum::routing::delete(delete_profile))
+        .route(
+            "/api/llm/profiles/:id",
+            axum::routing::delete(delete_profile),
+        )
         .route("/api/llm/active", axum::routing::put(activate_profile))
         .route("/api/llm/test", post(test_profile))
         .route("/api/llm/models", post(list_provider_models))
@@ -492,7 +568,11 @@ pub async fn list_provider_models(
     let cfg = st.core.config();
     let (base, probe_key, fmt): (String, String, String) = if let Some(id) = &b.id {
         let Some(p) = cfg.llm_profiles.iter().find(|p| p.id == *id) else {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "档案不存在" }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "档案不存在" })),
+            )
+                .into_response();
         };
         let key = if p.api_key.trim().is_empty() {
             p.api_keys.first().cloned().unwrap_or_default()
@@ -502,12 +582,25 @@ pub async fn list_provider_models(
         (
             p.base_url.trim_end_matches('/').to_string(),
             key,
-            if p.api_format.is_empty() { "openai".into() } else { p.api_format.clone() },
+            if p.api_format.is_empty() {
+                "openai".into()
+            } else {
+                p.api_format.clone()
+            },
         )
     } else {
-        let base = b.base_url.clone().unwrap_or_default().trim_end_matches('/').to_string();
+        let base = b
+            .base_url
+            .clone()
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
         if base.is_empty() {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "baseUrl 不能为空" }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "baseUrl 不能为空" })),
+            )
+                .into_response();
         }
         (
             base,
@@ -525,7 +618,9 @@ pub async fn list_provider_models(
             .get(format!("{base}/v1/models"))
             .header("x-api-key", &probe_key)
             .header("anthropic-version", "2023-06-01"),
-        "gemini" => client.get(format!("{base}/v1beta/models")).query(&[("key", &probe_key)]),
+        "gemini" => client
+            .get(format!("{base}/v1beta/models"))
+            .query(&[("key", &probe_key)]),
         "azure" => {
             return Json(json!({
                 "ok": true, "models": [],
@@ -540,7 +635,8 @@ pub async fn list_provider_models(
         Ok(r) => {
             let status = r.status().as_u16();
             let Ok(body) = r.text().await else {
-                return Json(json!({ "ok": false, "models": [], "error": "响应读取失败" })).into_response();
+                return Json(json!({ "ok": false, "models": [], "error": "响应读取失败" }))
+                    .into_response();
             };
             if !(200..300).contains(&status) {
                 return Json(json!({
@@ -571,7 +667,9 @@ pub async fn list_provider_models(
             models.dedup();
             Json(json!({ "ok": true, "models": models })).into_response()
         }
-        Err(e) => Json(json!({ "ok": false, "models": [], "error": e.to_string() })).into_response(),
+        Err(e) => {
+            Json(json!({ "ok": false, "models": [], "error": e.to_string() })).into_response()
+        }
     }
 }
 
@@ -629,7 +727,11 @@ mod key_tests {
         }));
         let p = resolve_profile_input(Some(&old), &b);
         assert_eq!(p.api_key, "", "主 Key 应被清除哨兵置空");
-        assert_eq!(p.api_keys, vec!["sk-pool-1".to_string()], "池按 keep 精确替换");
+        assert_eq!(
+            p.api_keys,
+            vec!["sk-pool-1".to_string()],
+            "池按 keep 精确替换"
+        );
     }
 
     /// 池行全部为 CLEAR 哨兵：显式清池（不再兜底沿用），主 Key 不受影响
@@ -657,7 +759,10 @@ mod key_tests {
         }));
         let p = resolve_profile_input(Some(&old), &b);
         assert_eq!(p.api_key, "sk-main");
-        assert_eq!(p.api_keys, vec!["sk-pool-2".to_string(), "sk-new".to_string()]);
+        assert_eq!(
+            p.api_keys,
+            vec!["sk-pool-2".to_string(), "sk-new".to_string()]
+        );
     }
 
     /// clearKeys 与掩码并存时清空优先（删除是显式意图，优先级最高）

@@ -28,7 +28,10 @@ async fn 插件面_video注册与能力枚举() {
     let ch = m.channel.as_ref().expect("channel 能力");
     assert!(ch.kinds.contains(&"bilibili".to_string()));
     assert!(ch.kinds.contains(&"youtube".to_string()));
-    assert!(ch.credentials.iter().any(|c| c.key == "sessdata" && c.sensitive));
+    assert!(ch
+        .credentials
+        .iter()
+        .any(|c| c.key == "sessdata" && c.sensitive));
     assert!(m.watch.is_some(), "watch 能力");
     // 通道能力枚举：enabled_providers 含 video 的 ChannelProvider
     let providers = pm.enabled_providers();
@@ -51,7 +54,10 @@ async fn 插件面_禁用后摘除() {
     let pm = core.plugins();
     assert!(pm.set_enabled("video", false));
     assert!(!pm.get("video").unwrap().enabled);
-    assert!(pm.enabled_providers().iter().all(|p| p.manifest().id != "video"));
+    assert!(pm
+        .enabled_providers()
+        .iter()
+        .all(|p| p.manifest().id != "video"));
 }
 
 /// 虚拟插件收编可见（无内容不登记 / 有内容登记且不可禁用）
