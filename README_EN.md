@@ -8,13 +8,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-dark.svg">
-  <img src="./docs/logo.svg" alt="EXMACHINA" width="132" height="132">
-</picture>
-<br>
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/wordmark-dark.svg">
-  <img src="./docs/wordmark.svg" alt="EXMACHINA" width="600">
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-animated-dark.svg">
+  <img src="./docs/logo-animated.svg" alt="EXMACHINA" width="660">
 </picture>
 
 ![Stage](https://img.shields.io/badge/stage-pre--alpha-orange)
