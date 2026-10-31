@@ -76,12 +76,9 @@ pub async fn create_skill(
 
 pub async fn delete_skill(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.remove_skill(&id) {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "技能不存在" })),
-        )
-            .into_response(),
+        // 幂等语义（对齐 sessions DELETE）：不存在也 200——重复删除/并发删除安全，
+        // 客户端无需区分「刚删过」与「从未存在」
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
