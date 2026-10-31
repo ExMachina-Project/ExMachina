@@ -40,42 +40,27 @@
 
 前置：[Rust](https://rustup.rs)（stable）与 Node.js ≥ 22（仅构建 WebUI 需要）。
 
-**快速启动**（下载预编译发行版，无需 Rust / Node）：
+**安装**（预编译发行版 或 源码构建，交互式二选一）：
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/quickstart.sh | bash
-```
-
-```batch
-:: Windows
-curl -fsSL -o quickstart.bat https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/quickstart.bat
-quickstart.bat
-```
-
-从 [Releases](https://github.com/KurohaneKaoruko/ExMachina/releases) 下载预编译包，解压即用，免编译。
-
-**从源码安装**（含 Rust/Node 安装 + 克隆 + 编译 + 构建 + 启动）：
-
-```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/install.sh | bash
 ```
 
 ```batch
 :: Windows（下载后运行）
-curl -fsSL -o install.bat https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/install.bat
+curl -fsSL -o install.bat https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/install.bat
 install.bat
 ```
 
-脚本自动安装缺失的 Rust / Node.js，克隆仓库，编译构建，启动网关。
+脚本交互式选择：预编译发行版（推荐，无需 Rust / Node.js）或源码构建；加 `--bin` / `--src` 可跳过询问。
 
 浏览器打开 http://127.0.0.1:4173 即可使用。首次建议到「模型」页配置提供商与 API 密钥。
 
 **手动构建**：
 
 ```bash
-git clone https://github.com/KurohaneKaoruko/ExMachina.git && cd ExMachina
+git clone https://github.com/ExMachina-Project/ExMachina.git && cd ExMachina
 npm install && npm run build:webui
 cargo run -p exm-gateway --release        # http://127.0.0.1:4173
 ```
