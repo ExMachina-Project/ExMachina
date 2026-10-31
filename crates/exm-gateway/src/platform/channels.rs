@@ -756,7 +756,8 @@ pub async fn channel_inbound(
         .clone()
         .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(&st.core)));
     let switched = switch_context_to(&st.core, &target);
-    // 会话复用（scope 内）：channel:{id}:{sessionKey|senderId|default}
+    // 会话复用（聊天流模型）：流绑定优先——不主动切换固定复用同一会话；
+    // 流无有效绑定时回落旧 title 寻址（升级迁移），再没有就开新会话并绑定流
     let key = b
         .session_key
         .clone()
@@ -766,25 +767,43 @@ pub async fn channel_inbound(
     let scope_id = st.core.registry().active_scope();
     let session = match st
         .core
-        .list_sessions_in_group(&scope_id)
-        .ok()
-        .and_then(|list| list.into_iter().find(|s| s.title == title))
+        .flow_active_session(&channel.id, &key)
+        .and_then(|sid| st.core.store.get_session(&sid).ok().flatten())
+        .filter(|s| s.group_id == scope_id)
+        .or_else(|| {
+            // 旧数据：按 title 寻址的存量会话自动认领到流上
+            let legacy = st
+                .core
+                .list_sessions_in_group(&scope_id)
+                .ok()
+                .and_then(|list| list.into_iter().find(|s| s.title == title));
+            if let Some(s) = &legacy {
+                let _ = st.core.bind_flow_session(&channel.id, &key, &s.id);
+            }
+            legacy
+        })
+        .or_else(|| match st.core.create_session(&title) {
+            Ok(s) => {
+                let _ = st.core.bind_flow_session(&channel.id, &key, &s.id);
+                Some(s)
+            }
+            Err(_) => None,
+        })
     {
         Some(s) => s,
-        None => match st.core.create_session(&title) {
-            Ok(s) => s,
-            Err(e) => {
-                if switched {
-                    restore_context(&st.core, &prev_group, &prev_single);
-                }
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
+        None => {
+            if switched {
+                restore_context(&st.core, &prev_group, &prev_single);
             }
-        },
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "会话建立失败" })),
+            )
+                .into_response();
+        }
     };
+    // 流预览回写（入站文本 → 列表展示）
+    let _ = st.core.touch_flow_message(&channel.id, &key, b.text.trim());
     // 能力边界 + 记忆隔离：webhook 与内置适配器走同一套通道配置语义
     let tool_scope = channel.tool_scope();
     let partition = channel.memory_partition(&scope_id);

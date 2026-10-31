@@ -25,6 +25,7 @@ import { SkeletonList } from "../components/SkeletonList";
 import { OrbitRings } from "../components/OrbitRings";
 import { TurnOps } from "../components/HistoryOps";
 import { Emblem } from "../components/Emblem";
+import { FlowRailSection } from "../components/FlowRailSection";
 import type { ChatMessage } from "../types";
 
 function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
@@ -650,6 +651,8 @@ export function ChatView(): React.ReactElement {
             )
           )}
         </div>
+        {/* 聊天流（chat flow）：外部 IM 的对话单元——一个群/私聊一条流，点流跳到绑定会话 */}
+        <FlowRailSection t={t} />
         <div className="rail-section grow">
           {/* 工具条：搜索 + 类型过滤（同行紧凑排布，见样式表） */}
           <div className="rail-toolbar">

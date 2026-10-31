@@ -389,6 +389,21 @@ export interface Channel {
   createdAt: string;
 }
 
+/** 通道聊天流（chat flow）：外部 IM 的一个对话单元（群聊/私聊各一条；无细分对话的平台整通道一条）。
+ *  一条流绑定一个活跃会话——不主动切换固定复用同一会话，跨轮上下文与记忆自然延续。 */
+export interface ChannelFlow {
+  id: string;
+  channelId: string;
+  chatKey: string;
+  displayName: string;
+  isGroup: boolean;
+  /** 当前绑定的会话 id（空 = 尚未有会话，下条消息自动开新） */
+  activeSession?: string;
+  lastMessage: string;
+  lastActiveAt: string;
+  createdAt: string;
+}
+
 /** 通道运行状态（内置适配器上报；桥接类型无运行时不产生条目） */
 export interface ChannelStatus {
   state: "ok" | "error";
@@ -783,6 +798,8 @@ export const api = {
 
   listChannels: () => req<Channel[]>("/channels"),
   channelStatus: () => req<Record<string, ChannelStatus>>("/channels/status"),
+  /** 聊天流列表（按最后活跃倒序；?channel= 过滤单通道） */
+  listChannelFlows: () => req<ChannelFlow[]>("/channels/flows"),
   /** B 站扫码登录：出码（返回二维码内容 URL）→ 前端渲染二维码 → 轮询到 confirmed 拿登录 Cookie */
   biliQrStart: () => req<{ qrcodeKey: string; url: string }>("/channels/bili-qr", { method: "POST" }),
   biliQrPoll: (key: string) =>
