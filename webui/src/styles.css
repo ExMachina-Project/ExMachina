@@ -1787,6 +1787,9 @@ textarea.ant-input:focus,
   padding: 9px 4px 3px;
 }
 .session-group-left { display: flex; align-items: baseline; gap: 6px; }
+.session-group-actions { display: inline-flex; align-items: center; gap: 2px; }
+.rail-mark-read { font-size: 11px; color: var(--muted); padding: 0 6px; height: 22px; }
+.rail-mark-read:hover { color: var(--text); }
 .session-group-label {
   font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted);
 }

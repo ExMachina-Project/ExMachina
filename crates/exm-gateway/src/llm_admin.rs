@@ -128,6 +128,8 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
     // 掩码哨兵 = 兼容旧客户端，按「第 n 个掩码沿用旧池第 n 把有效键」序数对位。
     // clearKeys 时整池跳过（清空优先于一切沿用引用）
     let mut api_keys: Vec<String> = Vec::new();
+    // 首键来源标记：区分「污染数据经沿用再现」与「用户明文显式输入同串」——收敛只删前者
+    let mut first_key_from_plain = false;
     if let Some(list) = &v.api_keys {
         if !v.clear_keys {
             let old_pool: Vec<&String> = existing
@@ -150,7 +152,12 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
                     ApiKeyEntry::Text(s) if s == KEY_CLEAR => {
                         // 显式删除该池位：跳过（不沿用旧键、不入新键、不占掩码序数）
                     }
-                    ApiKeyEntry::Text(s) if !s.trim().is_empty() => api_keys.push(s.clone()),
+                    ApiKeyEntry::Text(s) if !s.trim().is_empty() => {
+                        if api_keys.is_empty() {
+                            first_key_from_plain = true;
+                        }
+                        api_keys.push(s.clone());
+                    }
                     ApiKeyEntry::Text(_) => {}
                 }
             }
@@ -162,6 +169,13 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
     let pool_intent_given = v.api_keys.as_ref().is_some_and(|l| !l.is_empty());
     if api_keys.is_empty() && !v.clear_keys && !pool_intent_given {
         api_keys = existing.map(|e| e.api_keys.clone()).unwrap_or_default();
+        first_key_from_plain = false; // 档案整体沿用，首键不是明文输入
+    }
+    // 重复首键收敛（Key 变两把修复）：污染数据形态是「主 Key == 池[0] 且来自 keep/掩码沿用」。
+    // 仅当首键经沿用再现（非明文输入）且与主 Key 同串时剔除——用户明文输入与主 Key 同串
+    // 是显式行为（比如故意放两把做热备），保留。
+    if !first_key_from_plain && api_keys.first().is_some_and(|k| *k == key) {
+        api_keys.remove(0);
     }
     // 模型清单：缺省沿用旧清单；提交时空值模型名剔除。默认模型若不在清单中自动补入（能力未标记）。
     let mut models: Vec<ModelEntry> = match &v.models {
@@ -251,7 +265,13 @@ pub async fn save_profile(
         cfg.llm_profiles.push(profile.clone());
     }
     if cfg.active_profile == profile.id {
-        let mut keys = profile.api_keys.clone();
+        // 与 activate_profile 同口径：清空键剔除 + 主 Key 补位 + 与主 Key 同串去重
+        let mut keys: Vec<String> = profile
+            .api_keys
+            .iter()
+            .filter(|k| !k.trim().is_empty() && **k != profile.api_key)
+            .cloned()
+            .collect();
         if keys.is_empty() && !profile.api_key.trim().is_empty() {
             keys.push(profile.api_key.clone());
         }
@@ -341,6 +361,8 @@ pub async fn activate_profile(
     };
     cfg.active_profile = p.id.clone();
     let mut keys = p.api_keys.clone();
+    // 池空时主 Key 补位（Key 轮换需要非空池）；主 Key 已在池中（历史污染数据）则去重
+    keys.retain(|k| !k.trim().is_empty() && *k != p.api_key);
     if keys.is_empty() && !p.api_key.trim().is_empty() {
         keys.push(p.api_key.clone());
     }
@@ -778,5 +800,67 @@ mod key_tests {
         let p = resolve_profile_input(Some(&old), &b);
         assert_eq!(p.api_key, "");
         assert!(p.api_keys.is_empty());
+    }
+
+    /// Key 池污染修复回归 ①：池空档案（主 Key 经 activate 补位进运行时）保存时，
+    /// 主 Key 不得经任何路径混进档案池（keep 引用与掩码序数都指向空档案池，取不到键）。
+    #[test]
+    fn 密钥解析_池空档案保存后主键不进档案池() {
+        let old = LlmProfile {
+            api_keys: vec![],
+            ..existing()
+        };
+        // 前端编辑池空档案：只有主 Key 掩码行，无池行 → apiKeys 缺省走兜底沿用（空池）
+        let b = body(json!({ "id": "p1", "apiKey": KEY_MASK }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert!(p.api_keys.is_empty(), "池空档案保存后主 Key 不进池：{p:?}");
+
+        // 前端带显式空行提交（对齐 oldPoolSize=0 的序列）同口径
+        let b = body(json!({ "id": "p1", "apiKey": KEY_MASK, "apiKeys": [] }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert!(p.api_keys.is_empty());
+    }
+
+    /// Key 池污染修复回归 ②：已污染档案（主 Key == 池[0]，生产 pb9a743 形态）经
+    /// keep/掩码沿用保存后，重复首键收敛、档案池回干净。
+    #[test]
+    fn 密钥解析_已污染档案经沿用保存后收敛为池空() {
+        let old = LlmProfile {
+            api_keys: vec!["sk-main".into()], // 污染形态：池[0] == 主 Key
+            ..existing()
+        };
+        // 前端打开编辑：主 Key 掩码行（keep:-1）+ 池[0] 掩码行（keep:0）→ 原样保存
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ { "keep": 0 } ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert!(
+            p.api_keys.is_empty(),
+            "污染档案经沿用保存应收敛为池空：{p:?}"
+        );
+    }
+
+    /// Key 池污染修复回归 ③：用户明文输入与主 Key 同串 = 显式行为，保留不误删。
+    #[test]
+    fn 密钥解析_明文输入与主键同串时保留() {
+        let old = existing();
+        // 明文池首键 == 旧主 Key（用户粘贴同一把键进池）
+        let b = body(json!({
+            "id": "p1",
+            "apiKey": KEY_MASK,
+            "apiKeys": [ "sk-main", { "keep": 0 } ]
+        }));
+        let p = resolve_profile_input(Some(&old), &b);
+        assert_eq!(p.api_key, "sk-main");
+        assert_eq!(
+            p.api_keys,
+            vec!["sk-main".to_string(), "sk-pool-1".to_string()],
+            "明文输入是显式行为，不收敛"
+        );
     }
 }
