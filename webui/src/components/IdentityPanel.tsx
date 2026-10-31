@@ -23,6 +23,7 @@ interface CodeItem {
   createdAt: string;
   expiresAtMs: number;
   expired: boolean;
+  role?: string;
 }
 interface IdentityList {
   identityRequired: boolean;
@@ -34,6 +35,7 @@ export function IdentityPanel({ expanded = false }: { expanded?: boolean }): Rea
   const t = useT();
   const [data, setData] = useState<IdentityList | null>(null);
   const [note, setNote] = useState("");
+  const [asAdmin, setAsAdmin] = useState(false);
   const [issued, setIssued] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -52,11 +54,11 @@ export function IdentityPanel({ expanded = false }: { expanded?: boolean }): Rea
   const issue = async () => {
     setBusy(true);
     try {
-      const r = await identityIssue(note.trim());
+      const r = await identityIssue(note.trim(), asAdmin ? "admin" : "member");
       setIssued(r.code);
       setNote("");
       setOpen(true); // 签发即展开：码限时有效，置顶可见
-      message.success(t("identity.issued"));
+      message.success(asAdmin ? t("identity.issuedAdmin") : t("identity.issued"));
       await load();
     } catch (e) {
       message.error(String(e).slice(0, 160));
@@ -100,6 +102,11 @@ export function IdentityPanel({ expanded = false }: { expanded?: boolean }): Rea
           {t("identity.issue")}
         </Button>
       </Space.Compact>
+      {/* 预设角色：勾选后兑换即落 admin（管理者配对码），免二次手动提权 */}
+      <label className="identity-admin-check" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, cursor: "pointer" }}>
+        <input type="checkbox" checked={asAdmin} onChange={(e) => setAsAdmin(e.target.checked)} />
+        <span className="dim">{t("identity.asAdmin")}</span>
+      </label>
       {issued && (
         <div className="identity-issued">
           <Tag color="green">/pair {issued}</Tag>
@@ -120,6 +127,12 @@ export function IdentityPanel({ expanded = false }: { expanded?: boolean }): Rea
               },
               { title: t("identity.note"), dataIndex: "note" },
               { title: t("identity.platform"), dataIndex: "platform", render: (p?: string) => p ?? t("identity.any") },
+              {
+                title: t("identity.role"),
+                dataIndex: "role",
+                render: (r?: string) =>
+                  r === "admin" ? <Tag color="gold">admin</Tag> : <Tag>member</Tag>,
+              },
               {
                 title: t("identity.status"),
                 dataIndex: "expired",

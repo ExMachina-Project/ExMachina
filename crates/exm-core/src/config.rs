@@ -172,7 +172,12 @@ pub struct SearchConfig {
 
 impl Default for SearchConfig {
     fn default() -> Self {
-        SearchConfig { provider: String::new(), endpoint: String::new(), api_key: String::new(), max_results: 5 }
+        SearchConfig {
+            provider: String::new(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            max_results: 5,
+        }
     }
 }
 
@@ -309,6 +314,12 @@ pub struct CustomTool {
     /// 可见个体（identifier 列表）；空 = 全部个体可用
     #[serde(default)]
     pub agents: Vec<String>,
+    /// http：响应文本上限（缺省 8000 维持既有截断口径；插件生态扩展）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_max_chars: Option<usize>,
+    /// http：JSON path 摘取（`$.a.b[0].c`；JSON 响应按表达式摘取片段，非 JSON 忽略）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_select: Option<String>,
 }
 
 impl CustomTool {
@@ -319,7 +330,8 @@ impl CustomTool {
             && n.len() <= 48
             && !n.contains(':')
             && n.starts_with(|c: char| c.is_ascii_alphabetic())
-            && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }
 
     /// 归一化类型：http（默认）| shell
@@ -377,7 +389,8 @@ impl Default for AutomationConfig {
         AutomationConfig {
             heartbeat_enabled: false,
             heartbeat_interval_minutes: 30,
-            heartbeat_prompt: "系统心跳巡检：检查未决任务、受阻节点与风险账，无事项则简短报告正常。".into(),
+            heartbeat_prompt:
+                "系统心跳巡检：检查未决任务、受阻节点与风险账，无事项则简短报告正常。".into(),
             heartbeat_agent: None,
             auto_adapt: true,
             unit_max_steps: 16,
@@ -401,7 +414,11 @@ impl Default for FileWatchConfig {
         FileWatchConfig {
             enabled: false,
             debounce_ms: 1000,
-            exclude: vec![".exmachina/".into(), "target/".into(), "node_modules/".into()],
+            exclude: vec![
+                ".exmachina/".into(),
+                "target/".into(),
+                "node_modules/".into(),
+            ],
         }
     }
 }
@@ -437,7 +454,11 @@ pub struct IdentityConfig {
 
 impl Default for IdentityConfig {
     fn default() -> Self {
-        IdentityConfig { pairing_ttl_secs: 600, identity_required: false, group_gate_default: true }
+        IdentityConfig {
+            pairing_ttl_secs: 600,
+            identity_required: false,
+            group_gate_default: true,
+        }
     }
 }
 
@@ -474,9 +495,30 @@ impl Default for LimitsConfig {
     }
 }
 
+/// 回收站保留契约（filesystem delete 的 .exmachina/trash/）：按保留期与容量
+/// 上限自动清理，防无限膨胀拖垮磁盘。双约束并存，先到先清。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashConfig {
+    /// 保留期（天）：超期日期目录在周期巡检时删除
+    pub retention_days: u64,
+    /// 容量上限（字节）：超限按最旧日期目录优先淘汰，直至回到上限内
+    pub max_bytes: u64,
+}
+
+impl Default for TrashConfig {
+    fn default() -> Self {
+        TrashConfig {
+            retention_days: 7,
+            max_bytes: 512 * 1024 * 1024, // 512MB
+        }
+    }
+}
+
 /// 实验性功能开关（未稳定的行为面；默认全关，开启即自担体验波动）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct ExperimentsConfig {
     /// 动态上下文压缩：模型获得 context_compact 工具，自行判断压缩时机
     /// （判断依据：上下文变得冗长 / 早期细节已不再关键 / 即将进入长任务阶段），
@@ -489,13 +531,178 @@ pub struct ExperimentsConfig {
     pub group_shared_context: bool,
 }
 
-impl Default for ExperimentsConfig {
-    fn default() -> Self {
-        ExperimentsConfig {
-            dynamic_compaction: false,
-            group_shared_context: false,
-        }
+// ---------------------------------------------------------------- 插件系统（plugins/ 目录）
+
+/// 插件清单（plugins/<id>/plugin.json）：能力包的打包与安装单元。
+/// 四类能力（tools/channel/watch/resources）全部可选但至少声明一类；
+/// 形态由声明决定——内联 tools/resources = 声明式（零代码零进程）、
+/// process 字段 = 进程插件（stdio JSON-RPC）、builtin = 宿主内置实现（清单只做声明）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginManifest {
+    /// 插件 id（目录名；字母开头，字母/数字/-/_；全局唯一）
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    /// 最低宿主版本（SemVer；缺省 = 兼容）
+    #[serde(default)]
+    pub exm_min: String,
+    /// 工具组：内联 HTTP 工具声明（CustomTool 字面形状，零代码）；
+    /// process 形态时留空经协议 tools/list 发现
+    #[serde(default)]
+    pub tools: Vec<CustomTool>,
+    /// 通道适配声明（平台 kind 与凭据字段清单）
+    #[serde(default)]
+    pub channel: Option<PluginChannelDecl>,
+    /// 自动化 watcher 轮询声明
+    #[serde(default)]
+    pub watch: Option<PluginWatchDecl>,
+    /// 资源注入：技能/提示词文件的相对路径清单（相对插件目录）
+    #[serde(default)]
+    pub resources: Vec<String>,
+    /// 进程插件声明（存在即 process 形态）
+    #[serde(default)]
+    pub process: Option<PluginProcessDecl>,
+}
+
+/// 通道能力声明：凭据字段清单供 WebUI 通道配置页按清单渲染
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginChannelDecl {
+    /// 平台 kind 列表（一个插件可适配多平台，如 video 插件的 bilibili/youtube）
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// 凭据字段（字段名/标签/是否敏感）
+    #[serde(default)]
+    pub credentials: Vec<PluginCredentialField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCredentialField {
+    /// 配置键名（存 channel.config）
+    pub key: String,
+    /// 展示标签
+    #[serde(default)]
+    pub label: String,
+    /// 敏感字段（管理端点/日志/诊断一律脱敏）
+    #[serde(default)]
+    pub sensitive: bool,
+}
+
+/// watcher 轮询声明
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginWatchDecl {
+    /// 轮询间隔分钟（实现可按通道配置覆盖）
+    #[serde(default = "default_watch_interval")]
+    pub interval_minutes: u64,
+}
+
+fn default_watch_interval() -> u64 {
+    10
+}
+
+/// 进程插件声明：宿主按 command 拉起子进程，stdio JSON-RPC 通信
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginProcessDecl {
+    /// 可执行命令（argv；相对路径相对插件目录）
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// 附加环境变量
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// initialize 握手超时（秒；默认 15）
+    #[serde(default = "default_handshake_secs")]
+    pub handshake_secs: u64,
+    /// 单次工具调用超时（秒；默认 60，上限 300）
+    #[serde(default = "default_call_timeout_secs")]
+    pub call_timeout_secs: u64,
+    /// 并发调用上限（超出排队；默认 4）
+    #[serde(default = "default_plugin_concurrency")]
+    pub max_concurrency: usize,
+}
+
+fn default_handshake_secs() -> u64 {
+    15
+}
+fn default_call_timeout_secs() -> u64 {
+    60
+}
+fn default_plugin_concurrency() -> usize {
+    4
+}
+
+impl PluginManifest {
+    /// id 合法（字母开头，字母/数字/-/_；即目录名口径）
+    pub fn valid_id(&self) -> bool {
+        let id = self.id.trim();
+        !id.is_empty()
+            && id.len() <= 48
+            && id.starts_with(|c: char| c.is_ascii_alphabetic())
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     }
+
+    /// 至少声明一类能力（tools/channel/watch/resources 任一非空）
+    pub fn has_any_capability(&self) -> bool {
+        !self.tools.is_empty()
+            || self.channel.is_some()
+            || self.watch.is_some()
+            || !self.resources.is_empty()
+            // process 形态：工具在握手后动态发现，清单天然无静态能力声明
+            || self.is_process()
+    }
+
+    /// 是否进程形态（声明了 process 且给了可执行命令）
+    pub fn is_process(&self) -> bool {
+        self.process
+            .as_ref()
+            .map(|p| !p.command.is_empty())
+            .unwrap_or(false)
+    }
+}
+
+/// 插件启用状态持久化（config.plugins.state：id → enabled；缺省 = 启用）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginsConfig {
+    /// 运行状态覆盖：false = 禁用（清单初始态之上的人为覆盖）
+    #[serde(default)]
+    pub state: std::collections::BTreeMap<String, bool>,
+    /// 插件级凭据区（插件id → 键值；T1 声明式工具 `${credentials.<key>}` 变量解析
+    /// 与 T2 进程插件 config/set 下发的数据源）。管理端点回显一律掩码。
+    #[serde(default)]
+    pub credentials: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// 安装来源记录（插件id → 来源；更新流解析用。手工拷入的插件无记录 = 无法更新）
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub installations: std::collections::BTreeMap<String, PluginInstallation>,
+    /// 插件索引地址（缺省官方源；自定义源需自担信任）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub index_url: String,
+}
+
+/// 插件安装来源（plugin-ecosystem：更新流按此解析最新版）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallation {
+    /// targz | git
+    pub kind: String,
+    /// 包 URL 或 git 仓库地址
+    #[serde(default)]
+    pub url: String,
+    /// git 子目录（清单在仓库子目录时）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subdir: String,
+    /// git ref（分支/标签；缺省默认分支）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub r#ref: String,
 }
 
 /// MCP 服务端（把内置工具面按 ACL 暴露给外部客户端；与客户端接入段 mcpServers 解耦）
@@ -557,7 +764,15 @@ fn link_enabled() -> bool {
 
 impl Default for LinkTarget {
     fn default() -> Self {
-        LinkTarget { id: String::new(), name: String::new(), kind: "exmachina".into(), endpoint: String::new(), api_key: String::new(), command: String::new(), enabled: true }
+        LinkTarget {
+            id: String::new(),
+            name: String::new(),
+            kind: "exmachina".into(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            command: String::new(),
+            enabled: true,
+        }
     }
 }
 
@@ -581,7 +796,10 @@ pub struct NotifyConfig {
 
 impl Default for NotifyConfig {
     fn default() -> Self {
-        NotifyConfig { enabled: true, max_chars: 500 }
+        NotifyConfig {
+            enabled: true,
+            max_chars: 500,
+        }
     }
 }
 
@@ -646,6 +864,8 @@ pub struct ExmConfig {
     pub identity: IdentityConfig,
     /// 用量治理（速率限制与周期配额）
     pub limits: LimitsConfig,
+    /// 回收站保留契约（保留期 + 容量上限自动清理）
+    pub trash: TrashConfig,
     /// MCP 服务端（工具面对外暴露；默认关闭）
     pub mcp_serve: McpServeConfig,
     /// 推送（定时任务结果通道订阅）
@@ -654,6 +874,8 @@ pub struct ExmConfig {
     pub nexus: NexusConfig,
     /// 实验性功能开关（动态压缩 / 组共享上下文等；默认全关）
     pub experiments: ExperimentsConfig,
+    /// 插件系统（plugins/ 目录装载；state 持久化启停覆盖）
+    pub plugins: PluginsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -702,6 +924,8 @@ struct ConfigFile {
     #[serde(default)]
     limits: Option<LimitsConfig>,
     #[serde(default)]
+    trash: Option<TrashConfig>,
+    #[serde(default)]
     mcp_serve: Option<McpServeConfig>,
     #[serde(default)]
     notify: Option<NotifyConfig>,
@@ -709,6 +933,8 @@ struct ConfigFile {
     nexus: Option<NexusConfig>,
     #[serde(default)]
     experiments: Option<ExperimentsConfig>,
+    #[serde(default)]
+    plugins: Option<PluginsConfig>,
 }
 
 /// 能力模型槽位（模型设置页配置）：语音合成 / 语音识别 / 视觉转述。
@@ -765,9 +991,19 @@ impl LlmProfileFile {
     fn into_profile(self, fallback_model: &str) -> LlmProfile {
         let model = if !self.model.trim().is_empty() {
             self.model.trim().to_string()
-        } else if let Some(m) = self.orch_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .orch_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
-        } else if let Some(m) = self.unit_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .unit_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
         } else {
             fallback_model.to_string()
@@ -811,9 +1047,19 @@ impl LlmConfigFile {
     fn into_config(self) -> LlmConfig {
         let model = if !self.model.trim().is_empty() {
             self.model.trim().to_string()
-        } else if let Some(m) = self.orch_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .orch_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
-        } else if let Some(m) = self.unit_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        } else if let Some(m) = self
+            .unit_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             m.to_string()
         } else {
             String::new()
@@ -930,8 +1176,16 @@ impl Default for InstallManifest {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             config_version: CONFIG_VERSION,
             profile: "quick".into(),
-            channels: InstallChannels { cli: true, gateway: true, gateway_port: 4173, webui: true },
-            features: InstallFeatures { memory: true, tools: true },
+            channels: InstallChannels {
+                cli: true,
+                gateway: true,
+                gateway_port: 4173,
+                webui: true,
+            },
+            features: InstallFeatures {
+                memory: true,
+                tools: true,
+            },
             notes: vec![],
         }
     }
@@ -941,7 +1195,10 @@ impl Default for InstallManifest {
 /// 产品运行时**不存在**"无密钥自动降级"这一类行为——未配置模型即明确报错并引导配置。
 pub fn mock_enabled_from_env() -> bool {
     matches!(
-        std::env::var("EXM_LLM_MOCK").unwrap_or_default().to_lowercase().as_str(),
+        std::env::var("EXM_LLM_MOCK")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
         "1" | "true" | "yes" | "on"
     )
 }
@@ -1008,14 +1265,20 @@ impl ExmConfig {
             key_setup_dismissed: file_sec.key_setup_dismissed.unwrap_or(false),
         };
         let automation = AutomationConfig {
-            heartbeat_enabled: file_auto.heartbeat_enabled
+            heartbeat_enabled: file_auto
+                .heartbeat_enabled
                 .unwrap_or_else(|| AutomationConfig::default().heartbeat_enabled),
-            heartbeat_interval_minutes: file_auto.heartbeat_interval_minutes
+            heartbeat_interval_minutes: file_auto
+                .heartbeat_interval_minutes
                 .unwrap_or_else(|| AutomationConfig::default().heartbeat_interval_minutes),
-            heartbeat_prompt: file_auto.heartbeat_prompt
+            heartbeat_prompt: file_auto
+                .heartbeat_prompt
                 .clone()
                 .unwrap_or_else(|| AutomationConfig::default().heartbeat_prompt),
-            heartbeat_agent: file_auto.heartbeat_agent.clone().filter(|s| !s.trim().is_empty()),
+            heartbeat_agent: file_auto
+                .heartbeat_agent
+                .clone()
+                .filter(|s| !s.trim().is_empty()),
             auto_adapt: file_auto
                 .auto_adapt
                 .unwrap_or_else(|| AutomationConfig::default().auto_adapt),
@@ -1025,7 +1288,11 @@ impl ExmConfig {
         };
 
         let mut llm = LlmConfig {
-            base_url: env_or("EXM_LLM_BASE_URL", &file_llm.base_url, "https://api.openai.com/v1"),
+            base_url: env_or(
+                "EXM_LLM_BASE_URL",
+                &file_llm.base_url,
+                "https://api.openai.com/v1",
+            ),
             api_key: env_or("EXM_LLM_API_KEY", &file_llm.api_key, ""),
             api_keys: Vec::new(),
             api_format: String::new(),
@@ -1040,7 +1307,10 @@ impl ExmConfig {
             .into_iter()
             .map(|p| p.into_profile(&llm.model))
             .collect();
-        let active_profile = file.active_profile.clone().unwrap_or_else(|| "default".into());
+        let active_profile = file
+            .active_profile
+            .clone()
+            .unwrap_or_else(|| "default".into());
         if llm_profiles.is_empty() {
             llm_profiles.push(LlmProfile {
                 id: "default".into(),
@@ -1057,7 +1327,11 @@ impl ExmConfig {
         if !llm_profiles.iter().any(|p| p.id == active_profile) {
             if let Some(first) = llm_profiles.first() {
                 llm = LlmConfig {
-                    base_url: env_or("EXM_LLM_BASE_URL", &first.base_url, "https://api.openai.com/v1"),
+                    base_url: env_or(
+                        "EXM_LLM_BASE_URL",
+                        &first.base_url,
+                        "https://api.openai.com/v1",
+                    ),
                     api_key: env_or("EXM_LLM_API_KEY", &first.api_key, ""),
                     api_keys: Vec::new(),
                     api_format: String::new(),
@@ -1065,7 +1339,12 @@ impl ExmConfig {
                 };
             }
         } else if let Some(p) = llm_profiles.iter().find(|p| p.id == active_profile) {
-            let mut keys: Vec<String> = p.api_keys.clone().into_iter().filter(|k| !k.trim().is_empty()).collect();
+            let mut keys: Vec<String> = p
+                .api_keys
+                .clone()
+                .into_iter()
+                .filter(|k| !k.trim().is_empty())
+                .collect();
             if keys.is_empty() && !p.api_key.trim().is_empty() {
                 keys.push(p.api_key.clone());
             }
@@ -1133,7 +1412,8 @@ impl ExmConfig {
             tools: {
                 let mut t = file.tools.clone().unwrap_or_default();
                 // 声明式工具的合法性兜底：名字不合法或 target 为空的条目直接丢弃（不承诺坏配置）
-                t.custom.retain(|c| c.valid() && !c.target.trim().is_empty());
+                t.custom
+                    .retain(|c| c.valid() && !c.target.trim().is_empty());
                 t
             },
             llm_profiles,
@@ -1143,10 +1423,12 @@ impl ExmConfig {
             triggers: file.triggers.clone().unwrap_or_default(),
             identity: file.identity.clone().unwrap_or_default(),
             limits: file.limits.clone().unwrap_or_default(),
+            trash: file.trash.clone().unwrap_or_default(),
             mcp_serve: file.mcp_serve.clone().unwrap_or_default(),
             notify: file.notify.clone().unwrap_or_default(),
             nexus: file.nexus.clone().unwrap_or_default(),
             experiments: file.experiments.clone().unwrap_or_default(),
+            plugins: file.plugins.clone().unwrap_or_default(),
         }
     }
 
@@ -1223,10 +1505,12 @@ impl ExmConfig {
             triggers: Some(self.triggers.clone()),
             identity: Some(self.identity.clone()),
             limits: Some(self.limits.clone()),
+            trash: Some(self.trash.clone()),
             mcp_serve: Some(self.mcp_serve.clone()),
             notify: Some(self.notify.clone()),
             nexus: Some(self.nexus.clone()),
             experiments: Some(self.experiments.clone()),
+            plugins: Some(self.plugins.clone()),
         };
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1287,7 +1571,10 @@ fn migrate_file(mut file: ConfigFile, path: &Path) -> ConfigFile {
         }
         if file.identity.is_none() {
             let gate_on = version == 0;
-            file.identity = Some(IdentityConfig { group_gate_default: gate_on, ..IdentityConfig::default() });
+            file.identity = Some(IdentityConfig {
+                group_gate_default: gate_on,
+                ..IdentityConfig::default()
+            });
         }
         if file.limits.is_none() {
             file.limits = Some(LimitsConfig::default());
@@ -1502,6 +1789,18 @@ pub fn config_schema() -> serde_json::Value {
                 ]
             },
             {
+                "key": "trash",
+                "label": "回收站",
+                "fields": [
+                    { "key": "trash.retentionDays", "label": "保留期（天）", "kind": "number",
+                      "default": "7", "required": false, "min": 1, "max": 365,
+                      "help": "文件删除进回收站后的保留天数；超期目录在每小时巡检时自动清理" },
+                    { "key": "trash.maxBytes", "label": "容量上限（字节）", "kind": "number",
+                      "default": "536870912", "required": false, "min": 10485760, "max": 1073741824,
+                      "help": "回收站总大小上限（默认 512MB）；超限按最旧日期目录优先淘汰" }
+                ]
+            },
+            {
                 "key": "hooks",
                 "label": "生命周期钩子",
                 "fields": [
@@ -1638,7 +1937,10 @@ mod config_tests {
         assert_eq!(cfg.config_version, CONFIG_VERSION);
         assert!(cfg.identity.group_gate_default, "新装门控应默认开");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
-        assert!(!cfg.identity.identity_required, "身份管控默认关（白名单即全权）");
+        assert!(
+            !cfg.identity.identity_required,
+            "身份管控默认关（白名单即全权）"
+        );
         assert!(!cfg.triggers.file_watch.enabled, "文件监听默认关");
         assert_eq!(cfg.triggers.file_watch.exclude.len(), 3, "默认排除清单");
         assert!(!cfg.limits.enabled, "限流默认关");
@@ -1691,7 +1993,11 @@ mod config_tests {
         let groups = schema["groups"].as_array().unwrap();
         let keys: Vec<&str> = groups.iter().filter_map(|g| g["key"].as_str()).collect();
         for expected in ["identity", "limits", "triggers", "mcpServe", "notify"] {
-            assert!(keys.contains(&expected), "config_schema 缺少组 {}", expected);
+            assert!(
+                keys.contains(&expected),
+                "config_schema 缺少组 {}",
+                expected
+            );
         }
         assert_eq!(schema["configVersion"], CONFIG_VERSION);
     }
@@ -1702,9 +2008,17 @@ mod config_tests {
     fn 半衰期配置_非法值回落默认() {
         assert_eq!(sanitize_half_life_days(None), 30.0, "未配置取默认");
         assert_eq!(sanitize_half_life_days(Some(7.0)), 7.0, "合法值透传");
-        assert_eq!(sanitize_half_life_days(Some(0.1)), 0.1, "小于 1 天也是合法正数（decay 内部另有下限）");
+        assert_eq!(
+            sanitize_half_life_days(Some(0.1)),
+            0.1,
+            "小于 1 天也是合法正数（decay 内部另有下限）"
+        );
         for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(sanitize_half_life_days(Some(bad)), 30.0, "非法值 {bad} 应回落默认 30 天");
+            assert_eq!(
+                sanitize_half_life_days(Some(bad)),
+                30.0,
+                "非法值 {bad} 应回落默认 30 天"
+            );
         }
     }
 }

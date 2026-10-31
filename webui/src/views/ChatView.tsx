@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
+import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { api, type LlmProfile } from "../api";
 import { agentIdEn } from "../models";
@@ -10,6 +10,7 @@ import { useT } from "../i18n/core";
 
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
 import { StatementList } from "../components/Statements";
+import { PlanCard } from "../components/PlanCard";
 import { Markdown } from "../components/Markdown";
 import { AsciiMeter } from "../components/Ascii";
 import { ToolCallList } from "../components/ToolCall";
@@ -20,6 +21,7 @@ import { UsageBar } from "../components/UsageBar";
 import { ProcessSteps } from "../components/ProcessSteps";
 import { TimelineTag } from "../components/TimelineTag";
 import { SkeletonList } from "../components/SkeletonList";
+import { OrbitRings } from "../components/OrbitRings";
 import { TurnOps } from "../components/HistoryOps";
 import { Emblem } from "../components/Emblem";
 import type { ChatMessage } from "../types";
@@ -147,9 +149,13 @@ export function ChatView(): React.ReactElement {
     timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
+    toggleSessionPin, unreadCounts, markAllRead,
     refreshAgents,
     loadGroups,
     sessionsLoaded,
+    plan, planApplied, planPending, decidePlan, setPlanMode,
+    todo,
+    spawns, clearSpawns,
   } = useExm();
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
@@ -188,6 +194,7 @@ export function ChatView(): React.ReactElement {
   };
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
+  const [expandedSpawns, setExpandedSpawns] = useState<string[]>([]);
   /** `@` 文件提及（对话即编码）：输入 @ 触发候选弹层，选中插入路径 */
   const [mention, setMention] = useState<MentionState>({ open: false, query: "", start: 0 });
   const [mentionIdx, setMentionIdx] = useState(0);
@@ -347,17 +354,39 @@ export function ChatView(): React.ReactElement {
     [mention, mentionNodes, mentionIdx, applyMention],
   );
 
+  // 流式跟随只在「用户本来就贴底」时进行：中途上翻回看不打断。
+  // 距底阈值 80px 兼容流式渲染的轻微抖动；用 ref 记录贴底态避免重渲染竞态。
+  const stickRef = React.useRef(true);
   useEffect(() => {
     const el = document.querySelector(".chat-scroll");
     if (!el) return;
-    const onScroll = () => setShowBottomBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 120);
+    const onScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+      stickRef.current = atBottom;
+      // 用户主动回底 → 恢复跟随（按钮点击滚到底同样触发此路径）
+      setShowBottomBtn(!atBottom);
+    };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
   useEffect(() => {
+    // 新消息（非流式增量）：重置跟随（新轮次开始视为用户关注最新）
+    stickRef.current = true;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     setShowBottomBtn(false);
+  }, [messages.length]);
+  useEffect(() => {
+    // 流式增量（live/token/timeline）：仅贴底时跟随，不抢滚动条
+    if (!stickRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
   }, [messages, liveOrch, liveParts, runToolCalls, timeline]);
+  // 审批卡到达：强制拉到卡位（审批是阻塞等待，时效性强——
+  // 用户上翻回看时也该被打断，错过 = 工具在等待窗内一直挂着）
+  useEffect(() => {
+    if (approvals.length === 0) return;
+    stickRef.current = true;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [approvals.length]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -370,7 +399,12 @@ export function ChatView(): React.ReactElement {
     })();
   }, [sessionId, messages.length, running]);
 
-  const liveUnitEntries = Object.entries(liveParts).filter(([, v]) => v.length > 0);
+  // 单智能体模式：交互主体 = 该个体，过程（工具/思考）与正文同源——
+  // liveOrch 卡已聚合 thinking 与工具栏（runToolCalls），liveParts 若再建卡
+  // 就是同一个体被拆成两张分裂卡（identifier 一大一小写两张头像）。过滤掉。
+  const liveUnitEntries = Object.entries(liveParts).filter(
+    ([agent, v]) => v.length > 0 && !(target.mode === "single" && agent === target.id),
+  );
   const activeMeta = groups.find((g) => g.id === activeGroup);
   // 指挥体显示名（10）：智能体模式显示该智能体名；组模式显示「指挥体 [组名]」
   const orchLabel = target.mode === "single"
@@ -435,30 +469,41 @@ export function ChatView(): React.ReactElement {
         .filter((s) =>
           sessionKind === "all" ? true : sessionKind === "channel" ? s.title.startsWith("channel:") : !s.title.startsWith("channel:"),
         )
-        .filter((s) => !sessionFilter || s.title.toLowerCase().includes(sessionFilter.toLowerCase())),
+        .filter(
+          (s) =>
+            !sessionFilter ||
+            s.title.toLowerCase().includes(sessionFilter.toLowerCase()) ||
+            (s.lastMessagePreview ?? "").toLowerCase().includes(sessionFilter.toLowerCase()),
+        ),
     [sessions, sessionKind, sessionFilter],
   );
 
-  /** 按活跃时间分组：今天 / 昨天 / 更早（移动端列表页的段落结构） */
+  /** 分组：置顶 / 今天 / 昨天 / 更早（置顶常驻列表头，不受时间分组沉底影响） */
   const sessionGroups = useMemo(() => {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const startOfYesterday = new Date(startOfToday);
     startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-    const buckets: { key: "today" | "yesterday" | "earlier"; labelKey: string; items: typeof sessions }[] = [
+    type Bucket = { key: string; labelKey: string; items: typeof sessions };
+    const buckets: Bucket[] = [
+      { key: "pinned", labelKey: "chat.groupPinned", items: [] },
       { key: "today", labelKey: "chat.groupToday", items: [] },
       { key: "yesterday", labelKey: "chat.groupYesterday", items: [] },
       { key: "earlier", labelKey: "chat.groupEarlier", items: [] },
     ];
     for (const s of visibleSessions) {
+      if (s.pinned) {
+        buckets[0].items.push(s);
+        continue;
+      }
       const ts = new Date(s.lastActiveAt ?? s.updatedAt ?? s.createdAt).getTime();
       const bucket = Number.isNaN(ts)
-        ? buckets[2]
+        ? buckets[3]
         : ts >= startOfToday.getTime()
-          ? buckets[0]
+          ? buckets[1]
           : ts >= startOfYesterday.getTime()
-            ? buckets[1]
-            : buckets[2];
+            ? buckets[2]
+            : buckets[3];
       bucket.items.push(s);
     }
     return buckets.filter((b) => b.items.length > 0);
@@ -509,7 +554,8 @@ export function ChatView(): React.ReactElement {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}.md`;
+      const day = new Date().toISOString().slice(0, 10);
+      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-${day}.md`;
       a.click();
       URL.revokeObjectURL(url);
       message.success(t("chat.exportDone"));
@@ -654,18 +700,31 @@ export function ChatView(): React.ReactElement {
                   </span>
                   {/* 新建入口跟着第一段走：省一整行控制条，也符合移动端列表的惯例 */}
                   {gi === 0 && (
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<PlusOutlined />}
-                      className="rail-new-session"
-                      onClick={() => {
-                        void newSession();
-                        setScreen("thread"); // 竖屏：新建后直接进会话页
-                      }}
-                    >
-                      {t("session.new")}
-                    </Button>
+                    <span className="session-group-actions">
+                      {/* 全部已读：有未读才亮（无未读时不占视觉噪音） */}
+                      {Object.keys(unreadCounts).length > 0 && (
+                        <Button
+                          type="text"
+                          size="small"
+                          className="rail-mark-read"
+                          onClick={() => markAllRead()}
+                        >
+                          {t("chat.markAllRead")}
+                        </Button>
+                      )}
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<PlusOutlined />}
+                        className="rail-new-session"
+                        onClick={() => {
+                          void newSession();
+                          setScreen("thread"); // 竖屏：新建后直接进会话页
+                        }}
+                      >
+                        {t("session.new")}
+                      </Button>
+                    </span>
                   )}
                 </header>
                 {g.items.map((s) => (
@@ -678,6 +737,12 @@ export function ChatView(): React.ReactElement {
                     }}
                   >
                     <span className="session-bar" />
+                    {/* 未读圆点：切走期间该会话有新末条（后台回复/通道消息） */}
+                    {(unreadCounts[s.id] ?? 0) > 0 && (
+                      <span className="session-unread" aria-label={`${unreadCounts[s.id]} ${t("chat.unread")}`}>
+                        {unreadCounts[s.id] > 9 ? "9+" : unreadCounts[s.id]}
+                      </span>
+                    )}
                     {/* 头像承载「会话类型」而非组名首字母：副标题已经写了组名，
                      * 首字母与之一一对应（整组同字母）＝零信息；类型恰好是列表里可筛的维度。 */}
                     {(() => {
@@ -698,10 +763,16 @@ export function ChatView(): React.ReactElement {
                                   ? s.title.replace(/^sub:[^:]+:/, "")
                                   : s.title}
                             </span>
+                            {/* 副标题 = 末条消息预览（比组名信息量大：组几乎全列表同名）；
+                                预览缺省回落组名（新会话还没有消息） */}
                             <span className="session-sub">
-                              {isSub ? `@${subAgent} · ${t("chat.subSession")}` : groupNameOf(s.groupId)}
+                              {isSub && !s.lastMessagePreview
+                                ? `@${subAgent} · ${t("chat.subSession")}`
+                                : s.lastMessagePreview || groupNameOf(s.groupId)}
                             </span>
                           </span>
+                          {/* 置顶标识：标题右侧小图钉（与「⋮」菜单的 pin 开关呼应） */}
+                          {s.pinned && <PushpinOutlined className="session-pin" aria-label={t("chat.groupPinned")} />}
                         </>
                       );
                     })()}
@@ -713,6 +784,11 @@ export function ChatView(): React.ReactElement {
                           items: [
                             { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
                             { key: "rename", icon: <EditOutlined />, label: t("common.rename") },
+                            {
+                              key: "pin",
+                              icon: <PushpinOutlined />,
+                              label: s.pinned ? t("chat.unpin") : t("chat.pin"),
+                            },
                             { type: "divider" },
                             { key: "delete", icon: <CloseOutlined />, label: t("chat.delete"), danger: true },
                           ],
@@ -720,6 +796,7 @@ export function ChatView(): React.ReactElement {
                             domEvent.stopPropagation();
                             if (key === "export") void exportSession(s.id, s.title);
                             else if (key === "rename") setRenaming({ id: s.id, title: s.title });
+                            else if (key === "pin") void toggleSessionPin(s.id, !s.pinned);
                             else {
                               modal.confirm({
                                 title: t("chat.deleteConfirm"),
@@ -795,47 +872,109 @@ export function ChatView(): React.ReactElement {
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} style={{ marginLeft: "auto" }} />
         </div>
         {!wsConnected && <Alert type="warning" message={t("chat.wsDown")} showIcon className="ws-alert app-banner" />}
-        {/* 内联审批：命令被拦截时在消息流中直接裁决——批准后输出回灌，模型继续干活 */}
-        {approvals.map((a) => (
-          <Card key={a.approvalId} size="small" className="approval-card">
-            <div className="approval-head">
-              <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
-              <span className="approval-agent mono">{a.agentId}</span>
-            </div>
-            <pre className="approval-cmd">{a.command}</pre>
-            <div className="approval-ops">
-              <Button
-                type="primary"
-                size="small"
-                icon={<CheckOutlined />}
-                onClick={() => void decideApproval(a.approvalId, true)}
-              >
-                {t("chat.approvalApprove")}
-              </Button>
-              <Button size="small" danger onClick={() => void decideApproval(a.approvalId, false)}>
-                {t("chat.approvalDeny")}
-              </Button>
-              {a.sessionId && a.sessionId !== sessionId && (
-                <Button size="small" type="link" onClick={() => void selectSession(a.sessionId!)}>
-                  {t("chat.openSubSession")}
-                </Button>
-              )}
-              <span className="approval-hint">{t("chat.approvalHint")}</span>
-            </div>
-          </Card>
-        ))}
+        {/* 计划模式（spec plan-mode：WebUI 跨端审批呈现）——模式开关 + 计划卡片 */}
+        <div className="plan-mode-bar">
+          <Segmented
+            size="small"
+            value={plan?.mode ?? "execute"}
+            onChange={(v) => void setPlanMode(v === "plan")}
+            options={[
+              { value: "execute", label: t("plan.modeExecute") },
+              { value: "plan", label: t("plan.modePlan") },
+            ]}
+          />
+          {plan?.mode === "plan" && <span className="plan-mode-hint">{t("plan.modeHint")}</span>}
+          {/* 任务清单进度（spec agent-todo）：todo.updated 实时刷新 */}
+          {todo && todo.count > 0 && (
+            <span className={`todo-progress${todo.allDone ? " todo-all-done" : ""}`}>
+              <span className="todo-progress-label">📋 {t("todo.progress", { done: String(todo.doneCount), total: String(todo.count) })}</span>
+              <span className="todo-bar">
+                <span
+                  className="todo-bar-fill"
+                  style={{ width: `${Math.round((todo.doneCount / todo.count) * 100)}%` }}
+                />
+              </span>
+            </span>
+          )}
+        </div>
+        {todo && todo.count > 0 && (
+          <div className="todo-strip">
+            {todo.items.map((it) => (
+              <span key={it.id} className={`todo-chip todo-${it.status}`}>
+                {it.status === "done" ? "✅" : it.status === "in_progress" ? "🔄" : "⬜"} {it.content}
+              </span>
+            ))}
+          </div>
+        )}
+        {/* 后台子任务卡（spec subagent-spawn WebUI 呈现）：运行中 spinner + 终态展开 + 清除 */}
+        {spawns.length > 0 && (
+          <div className="spawns-strip">
+            {spawns.map((s) => (
+              <div key={s.spawnId} className={`spawn-card spawn-${s.status}`}>
+                <div
+                  className="spawn-card-head"
+                  onClick={() => setExpandedSpawns((prev) => (prev.includes(s.spawnId) ? prev.filter((x) => x !== s.spawnId) : [...prev, s.spawnId]))}
+                >
+                  <span className="spawn-status-icon">
+                    {s.status === "running" ? (
+                      <Spin size="small" />
+                    ) : s.status === "done" ? (
+                      "✅"
+                    ) : s.status === "timeout" ? (
+                      "⏱"
+                    ) : (
+                      "❌"
+                    )}
+                  </span>
+                  <span className="spawn-preview">{s.preview || s.spawnId}</span>
+                  {s.status !== "running" && s.resultPreview && (
+                    <span className="spawn-expand-hint">
+                      {expandedSpawns.includes(s.spawnId) ? t("spawn.foldLess") : t("spawn.foldMore")}
+                    </span>
+                  )}
+                </div>
+                {s.status !== "running" && s.resultPreview && expandedSpawns.includes(s.spawnId) && (
+                  <pre className="spawn-result">{s.resultPreview}</pre>
+                )}
+              </div>
+            ))}
+            <Button type="link" size="small" className="spawn-clear" onClick={clearSpawns}>
+              {t("spawn.clear")}
+            </Button>
+          </div>
+        )}
+        {plan && (plan.items.length > 0 || planPending) && (
+          <PlanCard
+            info={plan}
+            applied={planApplied}
+            pending={planPending}
+            onApprove={() => void decidePlan("approve")}
+            onReject={() => void decidePlan("reject")}
+          />
+        )}
         <div className="chat-scroll">
           {/* 空态：当前会话尚无消息且未在运行 —— 目标捕获盘（与桌面端空态同源母题） */}
           {renderMessages.length === 0 && !running && (
             <div className="chat-acquire">
               <span className="capture-frame chat-acquire-figure">
+                <OrbitRings />
                 <Emblem size={224} />
               </span>
               <div className="chat-acquire-title">{t("chat.acquireTitle")}</div>
-              <div className="chat-acquire-desc">{t("chat.acquireDesc")}</div>
+              {/* 文案按目标模式分叉：单智能体说的是它自己的话（独立接单到交付），
+                  组目标才讲「切组/派发」——此前单一文案让单智能体空态也在讲组的故事 */}
+              <div className="chat-acquire-desc">
+                {target.mode === "single"
+                  ? t("chat.acquireDescSingle", { name: orchLabel })
+                  : t("chat.acquireDesc")}
+              </div>
               <div className="chat-acquire-readouts">
                 <span className="readout"><span className="k">TGT</span><span className="v">{orchLabel}</span></span>
-                <span className="readout"><span className="k">GROUP</span><span className="v">{activeMeta?.name ?? activeGroup}</span></span>
+                {target.mode === "single" ? (
+                  <span className="readout"><span className="k">AGENT</span><span className="v">{target.id}</span></span>
+                ) : (
+                  <span className="readout"><span className="k">GROUP</span><span className="v">{activeMeta?.name ?? activeGroup}</span></span>
+                )}
                 <span className="readout"><span className="k">LINK</span><span className={`v ${wsConnected ? "ok" : "err"}`}>{wsConnected ? "ONLINE" : "RECONN"}</span></span>
               </div>
             </div>
@@ -930,11 +1069,45 @@ export function ChatView(): React.ReactElement {
               <pre className="live-pre">{liveOrch}</pre>
             </Card>
           )}
+          {/* 内联审批：渲染在消息流内（live 区之后、贴底锚之前）——
+              审批到达时随消息流滚动进视线；原先渲染在 chat-scroll 外的静态区，
+              流式输出期间用户盯着底部，上方的卡根本看不到（审批交互不可见 bug） */}
+          {approvals.map((a) => (
+            <Card key={a.approvalId} size="small" className="approval-card">
+              <div className="approval-head">
+                <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
+                <span className="approval-agent mono">{a.agentId}</span>
+              </div>
+              <pre className="approval-cmd">{a.command}</pre>
+              <div className="approval-ops">
+                <Button
+                  type="primary"
+                  size="small"
+                  icon={<CheckOutlined />}
+                  onClick={() => void decideApproval(a.approvalId, true)}
+                >
+                  {t("chat.approvalApprove")}
+                </Button>
+                <Button size="small" danger onClick={() => void decideApproval(a.approvalId, false)}>
+                  {t("chat.approvalDeny")}
+                </Button>
+                {a.sessionId && a.sessionId !== sessionId && (
+                  <Button size="small" type="link" onClick={() => void selectSession(a.sessionId!)}>
+                    {t("chat.openSubSession")}
+                  </Button>
+                )}
+                <span className="approval-hint">{t("chat.approvalHint")}</span>
+              </div>
+            </Card>
+          ))}
           {showBottomBtn && (
             <button
               className="scroll-bottom-btn"
               aria-label={t("chat.scrollToBottom")}
-              onClick={() => bottomRef.current?.scrollIntoView({ behavior: "smooth" })}
+              onClick={() => {
+                stickRef.current = true;
+                bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+              }}
             >
               ↓
             </button>

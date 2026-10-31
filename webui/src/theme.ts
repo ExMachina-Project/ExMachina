@@ -2,9 +2,8 @@
  *
  *  两个正交的轴：
  *  1) 主题预设 preset（决定明暗与中性色阶）—— 写入 <html data-theme>，由 CSS 接管色阶。
- *     · midnight  精炼暗色（默认）—— 蓝调中性、圆角、柔和阴影
  *     · minimal   极简浅色 —— 近白底、锌灰阶，主流极简主义
- *     · graphite  极简暗色 —— 中性石墨灰，无蓝调
+ *     · graphite  极简暗色（默认）—— 中性石墨灰，无蓝调
  *  2) 强调色 accent（5 套纯色）—— 由 JS 内联写入 CSS 变量（--accent / --accent-rgb / --accent-fg）。
  *     同一 accent 键在不同主题下取不同明度（浅色主题需要更深的色以保证对比度）。
  *
@@ -16,7 +15,7 @@
  *  主题/强调色的显示名走 i18n（theme.preset.<key> / theme.accent.<key>）。 */
 import { create } from "zustand";
 
-export type ThemeKey = "midnight" | "minimal" | "graphite";
+export type ThemeKey = "minimal" | "graphite";
 export type ThemeMode = "dark" | "light";
 
 export interface ThemePreset {
@@ -26,11 +25,10 @@ export interface ThemePreset {
   defaultAccent: string;
 }
 
-/** 主题预设清单（顺序即切换器顺序，midnight 置顶为默认） */
+/** 主题预设清单（顺序即切换器顺序，graphite 为默认暗色档） */
 export const THEMES: ThemePreset[] = [
-  { key: "midnight", mode: "dark", defaultAccent: "blue" },
-  { key: "minimal", mode: "light", defaultAccent: "blue" },
   { key: "graphite", mode: "dark", defaultAccent: "cyan" },
+  { key: "minimal", mode: "light", defaultAccent: "blue" },
 ];
 
 export interface AccentTheme {
@@ -41,16 +39,16 @@ export interface AccentTheme {
 
 /** 强调色矩阵：键名固定（cyan/blue/green/red/yellow），与 i18n 文案一一对应 */
 export const ACCENTS: AccentTheme[] = [
-  { key: "cyan", colors: { midnight: "#22d3ee", minimal: "#0891b2", graphite: "#22d3ee" } },
-  { key: "blue", colors: { midnight: "#7c8cff", minimal: "#2563eb", graphite: "#818cf8" } },
-  { key: "green", colors: { midnight: "#34d399", minimal: "#059669", graphite: "#4ade80" } },
-  { key: "red", colors: { midnight: "#f87171", minimal: "#dc2626", graphite: "#f87171" } },
-  { key: "yellow", colors: { midnight: "#fbbf24", minimal: "#b45309", graphite: "#fbbf24" } },
+  { key: "cyan", colors: { minimal: "#0891b2", graphite: "#22d3ee" } },
+  { key: "blue", colors: { minimal: "#2563eb", graphite: "#818cf8" } },
+  { key: "green", colors: { minimal: "#059669", graphite: "#4ade80" } },
+  { key: "red", colors: { minimal: "#dc2626", graphite: "#f87171" } },
+  { key: "yellow", colors: { minimal: "#b45309", graphite: "#fbbf24" } },
 ];
 
 export type StreamPref = "on" | "off";
 
-const savedPreset = localStorage.getItem("exm.preset") ?? "midnight";
+const savedPreset = localStorage.getItem("exm.preset") ?? "graphite";
 const savedAccent = localStorage.getItem("exm.accent") ?? "";
 /** 启动即应用数据流偏好（模块加载先于首帧渲染，避免闪烁） */
 const savedStream: StreamPref = localStorage.getItem("exm.stream") === "off" ? "off" : "on";
@@ -103,9 +101,9 @@ export function applyTheme(presetKey: string, accentKey: string): void {
   root.style.colorScheme = preset.mode;
 }
 
-/** 初始值校验：非法 preset 回落 midnight；accent 缺失时取该主题默认 */
+/** 初始值校验：非法/已下线（midnight）preset 回落 graphite；accent 缺失时取该主题默认 */
 function initialPreset(): ThemeKey {
-  return THEMES.some((t) => t.key === savedPreset) ? (savedPreset as ThemeKey) : "midnight";
+  return THEMES.some((t) => t.key === savedPreset) ? (savedPreset as ThemeKey) : "graphite";
 }
 function initialAccent(preset: ThemeKey): string {
   if (accentOf(savedAccent) && savedAccent && ACCENTS.some((a) => a.key === savedAccent)) return savedAccent;
