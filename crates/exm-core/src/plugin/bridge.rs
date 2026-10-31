@@ -116,7 +116,7 @@ impl PluginProcess {
             }
             // 流结束：唤醒所有等待者（发错误响应）
             let mut ps = pending.lock().await;
-            for (_, tx) in std::mem::take(&mut *ps) {
+            for tx in std::mem::take(&mut *ps).into_values() {
                 let _ =
                     tx.send(json!({ "error": { "code": -32000, "message": "插件进程已退出" } }));
             }
