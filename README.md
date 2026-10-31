@@ -44,27 +44,27 @@
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/quickstart.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/quickstart.sh | bash
 ```
 
 ```batch
 :: Windows
-curl -fsSL -o quickstart.bat https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/quickstart.bat
+curl -fsSL -o quickstart.bat https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/quickstart.bat
 quickstart.bat
 ```
 
-从 [Releases](https://github.com/KurohaneKaoruko/ExMachina/releases) 下载预编译包，解压即用，免编译。
+从 [Releases](https://github.com/ExMachina-Project/ExMachina/releases) 下载预编译包，解压即用，免编译。
 
 **从源码安装**（含 Rust/Node 安装 + 克隆 + 编译 + 构建 + 启动）：
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/install.sh | bash
 ```
 
 ```batch
 :: Windows（下载后运行）
-curl -fsSL -o install.bat https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/install.bat
+curl -fsSL -o install.bat https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/install.bat
 install.bat
 ```
 
@@ -75,7 +75,7 @@ install.bat
 **手动构建**：
 
 ```bash
-git clone https://github.com/KurohaneKaoruko/ExMachina.git && cd ExMachina
+git clone https://github.com/ExMachina-Project/ExMachina.git && cd ExMachina
 npm install && npm run build:webui
 cargo run -p exm-gateway --release        # http://127.0.0.1:4173
 ```
