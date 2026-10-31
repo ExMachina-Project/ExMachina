@@ -35,31 +35,27 @@
 
 Prerequisites: [Rust](https://rustup.rs) (stable) and Node.js ≥ 22 (WebUI build only).
 
-**One-click start** (downloads prebuilt release, no compilation):
+**Install** (prebuilt release or from source, picked interactively):
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/quickstart.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/install.sh | bash
 ```
 
 ```batch
-:: Windows
-curl -fsSL -o quickstart.bat https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/quickstart.bat
-quickstart.bat
+:: Windows (download, then run)
+curl -fsSL -o install.bat https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/install.bat
+install.bat
 ```
+
+The script asks which method to use: a prebuilt release (recommended, no Rust / Node.js needed) or building from source; pass `--bin` / `--src` to skip the prompt.
 
 Opens http://127.0.0.1:4173 — configure your API key on the Providers page.
-
-**From source** (auto-installs Rust + Node, clones, builds, runs):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/install.sh | bash
-```
 
 **Manual build**:
 
 ```bash
-git clone https://github.com/KurohaneKaoruko/ExMachina.git && cd ExMachina
+git clone https://github.com/ExMachina-Project/ExMachina.git && cd ExMachina
 npm install && npm run build:webui
 cargo run -p exm-gateway --release        # http://127.0.0.1:4173
 ```
