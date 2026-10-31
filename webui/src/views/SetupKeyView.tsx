@@ -9,6 +9,7 @@ import { Button, Input, type InputRef } from "antd";
 import { KeyOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { Emblem } from "../components/Emblem";
+import { OrbitRings } from "../components/OrbitRings";
 import { DataStream } from "../components/DataStream";
 import { useT } from "../i18n/core";
 
@@ -60,6 +61,8 @@ export function SetupKeyView({ onEnter }: { onEnter: () => void }): React.ReactE
 
   return (
     <div className="login-wrap">
+      {/* 资产 hero 轨道环（底层）：与登录门同一套壳 */}
+      <OrbitRings />
       {/* 背景十六进制字节雨：与登录门同一套主题，仅信息不同 */}
       <DataStream side="left" />
       <DataStream side="right" />

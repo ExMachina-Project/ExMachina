@@ -8,17 +8,18 @@ import { useT } from "../i18n/core";
 import type { TaskNode, TaskStatus } from "../types";
 
 /** 状态 → 纯色（扁平硬朗口径：白/灰阶 + 五个语义纯色，无渐变） */
+// 节点状态色 → 资产语汇：灰阶梯度为主，紫点缀运行中，红仅失败
 const STATUS_COLORS: Record<TaskStatus, string> = {
-  pending: "#5a5a5a",
-  ready: "#ffffff",
-  dispatched: "#00e5ff",
-  running: "#ffea00",
-  syncing: "#7c8cff",
-  done: "#00e676",
-  blocked: "#ff1744",
-  failed: "#ff1744",
-  arbitrating: "#ffea00",
-  cancelled: "#333333",
+  pending: "#59626f",
+  ready: "#aeb7c4",
+  dispatched: "#7c8695",
+  running: "#7c8cff",
+  syncing: "#a9b4ff",
+  done: "#f2f5f9",
+  blocked: "#f87171",
+  failed: "#f87171",
+  arbitrating: "#fbbf24",
+  cancelled: "#333b46",
 };
 
 const NODE_W = 180;
@@ -184,7 +185,7 @@ export function GraphView(): React.ReactElement {
       <Drawer open={!!selected} onClose={() => setSelected(null)} title={selected ? `${selected.id} ${selected.title}` : ""} width={420}>
         {selected && (
           <div>
-            <p><Tag color={STATUS_COLORS[selected.status]}>{selected.status}</Tag> <b>{selected.agentIdentifier}</b> <Tag>{selected.priority}</Tag></p>
+            <p><Tag>{selected.status}</Tag> <b>{selected.agentIdentifier}</b> <Tag>{selected.priority}</Tag></p>
             <Typography.Title level={5}>{t("graph.objective")}</Typography.Title>
             <p>{selected.objective}</p>
             <Typography.Title level={5}>{t("graph.acceptance")}</Typography.Title>

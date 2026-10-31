@@ -20,13 +20,10 @@ function eventGroup(kind: string): string {
   return "";
 }
 
-/** 事件语义色：按事件名归类，扫一眼能看出这是派发、回流、记忆还是结束 */
+/** 事件语义色：对齐资产行为 —— 灰阶为主、紫点缀（arbitration）、红仅报错误 */
 function colorOf(kind: string): string {
-  if (kind.startsWith("dispatch")) return "blue";
-  if (kind.startsWith("sync") || kind.startsWith("ledger")) return "green";
-  if (kind.includes("arbitration") || kind.startsWith("run.error")) return "red";
-  if (kind.startsWith("memory")) return "purple";
-  if (kind.startsWith("run.finished")) return "cyan";
+  if (kind.startsWith("run.error")) return "red";
+  if (kind.includes("arbitration")) return "purple";
   return "default";
 }
 

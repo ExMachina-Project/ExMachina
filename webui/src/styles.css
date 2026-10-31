@@ -1625,14 +1625,6 @@ textarea.ant-input:focus,
   white-space: nowrap;
   color: var(--text-hi);
 }
-/* hero 中文标语行（智械计划）：宽字距灰阶小字，压在字标与分隔线之间 */
-.login-cn {
-  margin-top: 8px;
-  font-size: 14px;
-  letter-spacing: 0.535em;
-  text-indent: 0.535em; /* 末字字距补偿：光学居中 */
-  color: var(--muted);
-}
 @media (max-width: 640px) {
   .login-title { font-size: clamp(20px, 7vw, 36px); letter-spacing: clamp(2px, 1.2vw, 6px); }
   .login-sub { font-size: 12px; }
