@@ -468,6 +468,8 @@ fn build_core(workspace: &Path) -> anyhow::Result<Arc<Core>> {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    // --version 由 clap 自动生成（CARGO_PKG_VERSION，随发布 bump）——审计补面：
+    // 此前 exm-gateway/exm 无版本参数，--version 会直接拉起实例
     let cli = Cli::parse();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async { dispatch(cli).await })

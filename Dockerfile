@@ -34,11 +34,16 @@ FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 # 运行时动态库：enigo/xcap 的 X11 栈（libxdo / X11 / xkbcommon；容器内无显示面，Computer Use 默认关闭，
 # 但二进制加载即需这些 .so）+ CA 证书与 curl（健康检查）
+# 命令面口径：终端白名单 AllowRule 允许的非开发工具链命令，镜像必须提供——否则审批流走完才失败，
+# 浪费轮次与信任（审计实证：7 张审批单 failed 全为工具缺失）。开发工具链（node/cargo/go/gcc…）
+# 属宿主机编码场景，不进镜像。
 # apt 源换国内（deb.debian.org 为 Fastly CDN，该网络下不可达）
 RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git libxdo3 libx11-6 libxcb1 libxext6 libxinerama1 libxtst6 libxkbcommon0 \
       python3 jq sqlite3 xxd \
+      ffmpeg imagemagick iproute2 iputils-ping dnsutils tree file procps util-linux-extra \
+      bsdextrautils bc unzip zip xz-utils openssh-client rsync util-linux \
     && rm -rf /var/lib/apt/lists/*
 # 一键更新工具链:docker cli + compose 插件由 compose 从宿主机只读挂载(零构建期下载,版本与宿主引擎一致)
 COPY --from=rust-builder /build/target/release/exm /usr/local/bin/exm

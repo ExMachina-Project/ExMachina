@@ -308,7 +308,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/config/schema", get(get_config_schema))
         .route("/api/mcp", get(mcp_servers))
         .route("/api/mcp/refresh", post(mcp_refresh))
-        .route("/api/voice/transcribe", post(voice_transcribe))
+        .route("/api/voice/transcribe", post(voice_transcribe).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)))
         .route("/api/voice/speak", post(voice_speak))
         .route("/api/sessions/:id/tokens", get(session_tokens))
         // 文件检查点（写工具落笔前的自动快照）：回看与回滚
@@ -377,6 +377,10 @@ pub fn build_router(core: Arc<Core>) -> Router {
         // 提取器拒绝归一为全站错误契约（放在鉴权之内：拒绝体不含数据，但口径一致优先）
         .layer(axum::middleware::from_fn(normalize_rejection))
         .layer(tower_http::cors::CorsLayer::permissive())
+        // 请求体上限 2MB（审计补面：此前无限制，1MB 纯文本 chat 直接过——公网部署的 DoS 面）。
+        // 注意：Option<Json<T>> 提取器会把 413 吞成 None——需要拒绝语义的端点别用 Option 包 Json。
+        // 未来大载荷端点（知识库导入等）用 DefaultBodyLimit::max 在该路由显式覆盖。
+        .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state);
 
     // 静态托管 WebUI 构建产物（存在时）；根路径回落 index.html（SPA）
@@ -1020,15 +1024,36 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
 
 async fn create_session(
     State(st): State<AppState>,
-    body: Option<Json<Value>>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let title = body
-        .and_then(|Json(v)| {
-            v.get("title")
-                .and_then(|t| t.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "新会话".to_string());
+    // 用 Bytes 而非 Option<Json>：Option 会吞掉内层提取器的拒绝（含 413 超限），
+    // 使全局请求体上限对这一端点失效（审计 5.3 实证）。Bytes 层超限直接 413。
+    // 空 body / 无 title 字段 / title 非 string 均兜底「新会话」（原兼容语义）。
+    let v: Value = if body.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "请求体不是合法 JSON" })),
+                )
+                    .into_response()
+            }
+        }
+    };
+    let explicit_title = v.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
+    // 显式传了 title 字段但 trim 后为空 → 400（「新会话」兜底只覆盖缺省场景；
+    // 纯空白标题在会话列表里是不可辨识的垃圾行）
+    if explicit_title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "标题不能为空（空白字符不算）" })),
+        )
+            .into_response();
+    }
+    let title = explicit_title.unwrap_or_else(|| "新会话".to_string());
     match st.core.create_session(&title) {
         Ok(s) => Json(serde_json::to_value(s).unwrap_or(Value::Null)).into_response(),
         Err(e) => (
