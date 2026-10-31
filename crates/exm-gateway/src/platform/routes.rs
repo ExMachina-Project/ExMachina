@@ -40,6 +40,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/workbench/tree", get(workbench_tree))
         .route("/api/workbench/file", get(workbench_file))
         .route("/api/channels/status", get(channel_status))
+        .route("/api/channels/flows", get(list_channel_flows))
         .route("/api/channels/bili-qr", post(bili_qr_start))
         .route("/api/channels/bili-qr/:key", get(bili_qr_poll))
         .route("/api/channels", get(list_channels).post(create_channel))
