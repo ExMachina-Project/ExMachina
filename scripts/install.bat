@@ -36,7 +36,7 @@ exit /b %RC%
 :write_ps1
 >> "%PS1%" echo param([int]$Port = 4173)
 >> "%PS1%" echo $ErrorActionPreference = 'Stop'
->> "%PS1%" echo $repo = 'https://github.com/KurohaneKaoruko/ExMachina'
+>> "%PS1%" echo $repo = 'https://github.com/ExMachina-Project/ExMachina'
 >> "%PS1%" echo $dir = 'ExMachina'
 >> "%PS1%" echo $branch = 'main'
 >> "%PS1%" echo if ($env:EXM_BRANCH) { $branch = $env:EXM_BRANCH }

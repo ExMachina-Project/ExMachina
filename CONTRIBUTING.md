@@ -5,7 +5,7 @@ Thank you for your interest in EXMACHINA! | 感谢你关注 EXMACHINA！
 ## Getting Started | 快速上手
 
 ```bash
-git clone https://github.com/KurohaneKaoruko/ExMachina.git
+git clone https://github.com/ExMachina-Project/ExMachina.git
 cd ExMachina
 npm install && npm run build:webui
 cargo test --workspace
