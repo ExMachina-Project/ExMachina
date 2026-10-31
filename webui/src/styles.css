@@ -656,6 +656,8 @@ textarea.ant-input:focus,
 .session-row.active {
   background: var(--accent-soft);
   color: var(--text-hi);
+  /* 选中语汇对齐侧栏导航：亮色左指示 + 强调底 */
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .session-row-icon { color: var(--muted); flex: none; }
 .session-row.active .session-row-icon { color: var(--accent); }
@@ -706,6 +708,8 @@ textarea.ant-input:focus,
 .msg-user {
   background: var(--bg-raise) !important;
   border: 1px solid var(--line) !important;
+  /* 用户输入 = 强调色左边条：与智能体输出在滚动中一眼分流（对齐激活档案卡语汇） */
+  box-shadow: inset 2px 0 0 var(--accent) !important;
 }
 .msg-agent {
   background: var(--bg-panel) !important;
@@ -719,9 +723,24 @@ textarea.ant-input:focus,
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
+  /* 去底部横线：横线让每条消息读成表格行；层级靠头像徽记与字色承担 */
 }
+.msg-head > .anticon:first-child {
+  /* 头像徽记化：小圆角块底（用户=强调色 / 智能体=面板底） */
+  width: 20px; height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  color: var(--muted);
+}
+.msg-user .msg-head > .anticon:first-child {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.msg-user .msg-head b { color: var(--text-hi); }
 .stmt-line { margin: 4px 0; line-height: 1.75; }
 .stmt-tag { margin-right: 6px; }
 .stmt-level { margin-left: 6px; font-family: var(--mono); font-size: 11px; }
@@ -1847,7 +1866,9 @@ textarea.ant-input:focus,
 .rail-mark-read { font-size: 11px; color: var(--muted); padding: 0 6px; height: 22px; }
 .rail-mark-read:hover { color: var(--text); }
 .session-group-label {
-  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted);
+  /* 资产标签语汇：mono 大写宽字距（与 rail-label / 表头同语言） */
+  font-family: var(--mono);
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
 }
 .session-group-count { font-size: 10.5px; color: var(--muted-dim); }
 .rail-empty {
