@@ -1002,10 +1002,11 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-// ---------------------------------------------------------------- 技能包（数据化技能，docs/10）
+// ---------------------------------------------------------------- 技能包（SKILL.md 通用格式）
 
 /// 技能包：任务目标命中触发词时，把指令注入相关个体的派发指令。
-/// 技能是数据（`agents/skills/` 或自定义组 `skills/`），热装载，扩编不写代码。
+/// 存储格式 = SKILL.md（YAML frontmatter + Markdown 正文=instructions，跨工具通用标准）；
+/// 旧 `*.json` 单文件仍可读（热转换，迁移零成本）。热装载，扩编不写代码。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDef {
@@ -1016,7 +1017,7 @@ pub struct SkillDef {
     /// 触发词：目标/节点标题包含任一词即注入
     #[serde(default)]
     pub triggers: Vec<String>,
-    /// 随派发下发的行为约束与作业知识
+    /// 随派发下发的行为约束与作业知识（= SKILL.md 正文）
     pub instructions: String,
     /// 适用的个体 identifier；空 = 全体适用
     #[serde(default)]
