@@ -5,7 +5,7 @@
 use exm_core::tools::ToolGateway;
 use exm_core::types::{AgentDefinition, ToolName};
 use exm_core::{config::ExmConfig, Core};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn mock_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("exm-h3-{tag}-{}", std::process::id()));
@@ -14,8 +14,8 @@ fn mock_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn gateway(dir: &PathBuf) -> (ToolGateway, Core) {
-    let cfg = ExmConfig::load(&dir);
+fn gateway(dir: &Path) -> (ToolGateway, Core) {
+    let cfg = ExmConfig::load(dir);
     let core = Core::with_config(cfg).expect("创建 Core 失败");
     let (events, _rx) = tokio::sync::broadcast::channel(64);
     let sec = exm_core::config::SecurityConfig {

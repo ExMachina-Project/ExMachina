@@ -2,7 +2,7 @@
 //! 覆盖装配缺口（进程插件工具曾只存管理面快照，会话内不可见不可调）。
 
 use exm_core::Core;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn mock_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("exm-t2-{tag}-{}", std::process::id()));
@@ -33,7 +33,7 @@ for line in sys.stdin:
 "#
 }
 
-fn write_plugin(dir: &PathBuf, id: &str) {
+fn write_plugin(dir: &Path, id: &str) {
     let pdir = dir.join("plugins").join(id);
     std::fs::create_dir_all(&pdir).unwrap();
     std::fs::write(pdir.join("plugin.py"), mock_script()).unwrap();

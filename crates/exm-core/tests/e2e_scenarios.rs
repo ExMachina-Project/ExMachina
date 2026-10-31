@@ -41,10 +41,12 @@ async fn 场景1_计划模式改代码全流程() {
             &s.id,
             &[exm_core::types::ToolName::Read],
             exm_core::types::ToolName::Read,
-            &serde_json::json!({ "path": "mod.rs" }),
+            // 读工作区根（必然存在）：写操作被拦截转条目，mod.rs 尚未落地，
+            // 读它必然失败——用目录列表验证「读不被拦截」的本意
+            &serde_json::json!({ "path": "." }),
         )
         .await;
-    assert!(r2.ok || !r2.ok, "读操作在 plan 模式放行（不转条目）");
+    assert!(r2.ok, "读操作在 plan 模式放行（不转条目）");
     assert_eq!(core.plan_list(&s.id).len(), 1, "写操作转 1 条");
     assert!(
         core.approval_list(Some("pending"), 10).unwrap().len() == 1,

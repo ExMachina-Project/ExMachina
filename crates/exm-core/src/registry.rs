@@ -2145,7 +2145,7 @@ mod skills_dir_tests {
 
     /// SKILL.md 往返：write 落 SKILL.md 格式，load 原样读回（通用标准格式的主链路）
     #[test]
-    fn 技能_SKILLMD往返() {
+    fn 技能_skillmd往返() {
         let (reg, root) = mk_registry("md");
         let s = crate::types::SkillDef {
             id: "rt-skill".into(),
@@ -2170,7 +2170,7 @@ mod skills_dir_tests {
 
     /// 同 id 双源：SKILL.md 优先，旧 json 不分叉；write 后旧 json 被清
     #[test]
-    fn 技能_同id双源SKILLMD优先() {
+    fn 技能_同id双源skillmd优先() {
         let (reg, root) = mk_registry("dup");
         let skills = root.join("entities").join("skills");
         // 旧 json 版本
@@ -2202,7 +2202,7 @@ mod skills_dir_tests {
 
     /// SKILL.md 解析：逐行列表项写法 + frontmatter 异常路径
     #[test]
-    fn 技能_SKILLMD解析_逐行列表与异常() {
+    fn 技能_skillmd解析_逐行列表与异常() {
         // 逐行列表
         let md = "---\nid: line-list\nname: 逐行\ntriggers:\n  - 甲\n  - 乙\nagents:\n  - machina\n---\n\n正文\n";
         let s = parse_skill_md(md).unwrap().unwrap();
