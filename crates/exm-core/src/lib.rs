@@ -658,6 +658,87 @@ impl Core {
         n
     }
 
+    // ---------------- 聊天流（chat flow）：外部通道的对话单元与会话绑定 ----------------
+
+    /// 流 id 口径：`{channelId}:{chatKey}`
+    pub fn flow_id(channel_id: &str, chat_key: &str) -> String {
+        format!("{channel_id}:{chat_key}")
+    }
+
+    /// 取流（不存在返回 None）
+    pub fn channel_flow(&self, channel_id: &str, chat_key: &str) -> Option<ChannelFlow> {
+        self.store
+            .get_channel_flow(&Self::flow_id(channel_id, chat_key))
+            .ok()
+            .flatten()
+    }
+
+    pub fn channel_flows(&self, channel_id: Option<&str>) -> Vec<ChannelFlow> {
+        self.store.list_channel_flows(channel_id).unwrap_or_default()
+    }
+
+    /// 保存流（upsert）
+    pub fn save_channel_flow(&self, flow: &ChannelFlow) -> anyhow::Result<()> {
+        self.store.put_channel_flow(flow)
+    }
+
+    pub fn drop_channel_flow(&self, id: &str) -> anyhow::Result<()> {
+        self.store.delete_channel_flow(id)
+    }
+
+    /// 流绑定的活跃会话；不存在或已删 → None（调用方开新会话后回写绑定）
+    pub fn flow_active_session(&self, channel_id: &str, chat_key: &str) -> Option<String> {
+        let flow = self.channel_flow(channel_id, chat_key)?;
+        let sid = flow.active_session?;
+        // 会话可能已被用户在控制台删除：失效绑定顺带清理，下次重建
+        if self.store.get_session(&sid).ok().flatten().is_none() {
+            let _ = self.drop_channel_flow(&flow.id);
+            return None;
+        }
+        Some(sid)
+    }
+
+    /// 把流绑定到会话（流不存在则创建；顺带刷最后活跃）
+    pub fn bind_flow_session(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let id = Self::flow_id(channel_id, chat_key);
+        let mut flow = self
+            .channel_flow(channel_id, chat_key)
+            .unwrap_or(ChannelFlow {
+                id: id.clone(),
+                channel_id: channel_id.to_string(),
+                chat_key: chat_key.to_string(),
+                display_name: String::new(),
+                is_group: false,
+                active_session: None,
+                last_message: String::new(),
+                last_active_at: String::new(),
+                created_at: now_iso(),
+            });
+        flow.active_session = Some(session_id.to_string());
+        flow.last_active_at = now_iso();
+        self.store.put_channel_flow(&flow)
+    }
+
+    /// 流的消息预览回写（入站消息落库后调用；不建流——只有 begin 才建）
+    pub fn touch_flow_message(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        preview: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(mut flow) = self.channel_flow(channel_id, chat_key) {
+            flow.last_message = preview.chars().take(120).collect();
+            flow.last_active_at = now_iso();
+            self.store.put_channel_flow(&flow)?;
+        }
+        Ok(())
+    }
+
     /// 签发一次性配对码（8 位短码，TTL 由调用方给）
     pub fn issue_pairing_code(
         &self,

@@ -456,16 +456,18 @@ pub(crate) async fn admit(
     if ctx.text.trim() == "/stop" {
         let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
         let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
-        let receipt = match core
-            .list_sessions_in_group(&gid)
-            .ok()
-            .and_then(|list| list.into_iter().find(|s| s.title == title))
-        {
-            Some(session) => match core.stop_session(&session.id) {
-                Ok(n) => format!("⏹ 已停止本轮（已执行 {n} 次工具调用）。"),
-                Err(_) => "当前没有运行中的任务。".to_string(),
-            },
-            None => "当前没有运行中的任务。".to_string(),
+        let sid = core
+            .flow_active_session(&ch.id, ctx.chat_key)
+            .or_else(|| {
+                // 流无绑定（含升级前的存量数据）：回落旧 title 寻址
+                core.list_sessions_in_group(&gid)
+                    .ok()
+                    .and_then(|list| list.into_iter().find(|s| s.title == title))
+                    .map(|s| s.id)
+            });
+        let receipt = match sid.map(|id| core.stop_session(&id)) {
+            Some(Ok(n)) => format!("⏹ 已停止本轮（已执行 {n} 次工具调用）。"),
+            Some(Err(_)) | None => "当前没有运行中的任务。".to_string(),
         };
         return GateDecision::Deny(receipt);
     }
@@ -485,6 +487,12 @@ pub(crate) async fn admit(
             )),
             Err(e) => GateDecision::Deny(format!("【报告】绑定失败：{e}")),
         };
+    }
+
+    // ①' 聊天流（chat flow）会话管理：一个群 / 一个私聊各是一条流，流固定复用
+    // 一个活跃会话；不切换就一直在同一会话里聊，跨轮上下文自然延续。
+    if let Some(reply) = flow_command(core, ch, ctx).await {
+        return GateDecision::Deny(reply);
     }
 
     // ② 群聊唤醒门控：群内仅提及 / 回复触发；私聊豁免
@@ -539,6 +547,128 @@ pub(crate) async fn admit(
     GateDecision::Allow
 }
 
+/// 聊天流（chat flow）会话管理指令：
+/// - `/new [标题]`：开新会话并绑到流（旧会话保留可切回）
+/// - `/sessions`：列出流内全部会话（含当前绑定标记）
+/// - `/use <序号|标题片段>`：切换流的活跃会话
+///
+/// 返回 Some(reply) = 指令已处理（Deny 语义回帖）；None = 非流指令，放行后续闸门。
+async fn flow_command(
+    core: &exm_core::Core,
+    ch: &Channel,
+    ctx: &InboundCtx<'_>,
+) -> Option<String> {
+    let text = ctx.text.trim();
+    let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
+    let title_prefix = format!("channel:{}:{}:", ch.id, ctx.chat_key);
+
+    if text == "/new" || text.starts_with("/new ") {
+        let custom = text.strip_prefix("/new").unwrap_or_default().trim();
+        let title = if custom.is_empty() {
+            format!("channel:{}:{}", ch.id, ctx.chat_key)
+        } else {
+            format!("{title_prefix}{custom}")
+        };
+        return match core.create_session(&title) {
+            Ok(s) => match core.bind_flow_session(&ch.id, ctx.chat_key, &s.id) {
+                Ok(()) => Some(format!("已开新会话（{}）。", short_id(&s.id))),
+                Err(e) => Some(format!("会话已建但绑定失败：{e}")),
+            },
+            Err(e) => Some(format!("开新会话失败：{e}")),
+        };
+    }
+
+    if text == "/sessions" {
+        // 流内会话 = 同流前缀标题的全部会话（新旧口径都覆盖）
+        let all = core.list_sessions_in_group(&gid).unwrap_or_default();
+        let mut mine: Vec<_> = all
+            .iter()
+            .filter(|s| s.title.starts_with(&title_prefix) || {
+                s.title == format!("channel:{}:{}", ch.id, ctx.chat_key)
+            })
+            .cloned()
+            .collect();
+        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        if mine.is_empty() {
+            return Some("本聊天流还没有会话。发送 /new 开一个。".into());
+        }
+        let active = core.flow_active_session(&ch.id, ctx.chat_key);
+        let lines: Vec<String> = mine
+            .iter()
+            .take(10)
+            .enumerate()
+            .map(|(i, s)| {
+                let mark = if active.as_deref() == Some(s.id.as_str()) {
+                    "●"
+                } else {
+                    "○"
+                };
+                let label = s
+                    .title
+                    .strip_prefix(&title_prefix)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| default_flow_session_label(&s.created_at));
+                format!("{mark} {i}. {label}（{}）", short_id(&s.id))
+            })
+            .collect();
+        return Some(format!(
+            "本聊天流的会话：\n{}\n/use <序号> 切换；/new 开新的。",
+            lines.join("\n")
+        ));
+    }
+
+    if let Some(rest) = text.strip_prefix("/use ") {
+        let rest = rest.trim();
+        let all = core.list_sessions_in_group(&gid).unwrap_or_default();
+        let mut mine: Vec<_> = all
+            .iter()
+            .filter(|s| s.title.starts_with(&title_prefix) || {
+                s.title == format!("channel:{}:{}", ch.id, ctx.chat_key)
+            })
+            .cloned()
+            .collect();
+        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        // 序号优先；否则按标题片段模糊匹配
+        let hit = if let Ok(idx) = rest.parse::<usize>() {
+            mine.get(idx).cloned().map(|s| s.id).map(|id| (id, rest.to_string()))
+        } else {
+            mine.iter()
+                .find(|s| {
+                    s.title
+                        .strip_prefix(&title_prefix)
+                        .map(|t| t.contains(rest))
+                        .unwrap_or(false)
+                })
+                .map(|s| (s.id.clone(), rest.to_string()))
+        };
+        return match hit {
+            Some((sid, label)) => match core.bind_flow_session(&ch.id, ctx.chat_key, &sid) {
+                Ok(()) => Some(format!("已切换到会话 {label}（{}）。", short_id(&sid))),
+                Err(e) => Some(format!("切换失败：{e}")),
+            },
+            None => Some(format!("没找到会话「{rest}」。/sessions 看全部。")),
+        };
+    }
+
+    None
+}
+
+/// 流内会话的默认展示名（无自定义标题时用创建时间区分）
+fn default_flow_session_label(created_at: &str) -> String {
+    // ISO 时间取到分位（2026-11-01T15:30:00 → 11-01 15:30）
+    let chars: Vec<char> = created_at.chars().collect();
+    if chars.len() >= 16 {
+        chars[5..16].iter().collect()
+    } else {
+        created_at.to_string()
+    }
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 /// 运行收束事件 → 纯文本回帖（telegram / napcat / qqbot 三个适配器共用）。
 pub(crate) fn flatten_statements(payload: &serde_json::Value, max_chars: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -583,6 +713,8 @@ pub(crate) struct ChannelRun {
     pub(crate) scope: exm_core::types::ToolScope,
     /// 自动任务来源标记（None = 人工触发的平台消息；"auto:video" = 主动观看等系统自动内容）
     pub origin: Option<&'static str>,
+    /// 聊天流定位（begin 时快照；run 落库后回写流预览用）
+    pub(crate) flow: Option<(String, String)>,
 }
 
 impl ChannelRun {
@@ -602,12 +734,33 @@ impl ChannelRun {
             .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(core)));
         let switched = switch_context_to(core, &target);
         let scope = core.registry().active_scope();
+        // 聊天流（chat flow）会话定位：流绑定优先——不主动切换时固定复用
+        // 同一会话（跨轮上下文与记忆自然延续）。旧数据（按 title 寻址的存量
+        // 通道会话）自动认领迁移到流上，行为无缝升级。
         let title = format!("channel:{}:{chat_key}", ch.id);
-        let session = core
-            .list_sessions_in_group(&scope)
-            .ok()
-            .and_then(|list| list.into_iter().find(|s| s.title == title))
-            .or_else(|| core.create_session(&title).ok());
+        let session = match core.flow_active_session(&ch.id, chat_key) {
+            // 绑定有效且仍在当前交互范围内（通道换组后旧绑定会话不跨组复用）
+            Some(sid) => core
+                .store
+                .get_session(&sid)
+                .ok()
+                .flatten()
+                .filter(|s| s.group_id == scope),
+            None => None,
+        };
+        let session = match session {
+            Some(s) => Some(s),
+            None => {
+                // 流无有效绑定：认领旧 title 会话（升级迁移），否则开新会话
+                let legacy = core
+                    .list_sessions_in_group(&scope)
+                    .ok()
+                    .and_then(|list| list.into_iter().find(|s| s.title == title));
+                let s = legacy.or_else(|| core.create_session(&title).ok())?;
+                let _ = core.bind_flow_session(&ch.id, chat_key, &s.id);
+                Some(s)
+            }
+        };
         let Some(session) = session else {
             // 会话建立失败也别把交互上下文留在别人身上
             if switched {
@@ -632,6 +785,7 @@ impl ChannelRun {
                 kind: ch.kind.clone(),
                 scope: ch.tool_scope(),
                 origin: None,
+                flow: Some((ch.id.clone(), chat_key.to_string())),
             },
             rx,
         ))
@@ -697,6 +851,12 @@ impl ChannelRun {
 
     /// 执行本轮；返回后交互上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
     pub(crate) async fn run(self, text: &str) {
+        // 聊天流预览回写（列表展示最新一条；失败不影响执行）
+        if let Some((ch_id, chat_key)) = &self.flow {
+            let _ = self
+                .core
+                .touch_flow_message(ch_id, chat_key, text.trim());
+        }
         let _restore = GroupRestore {
             core: self.core.clone(),
             prev_group: self.prev_group.clone(),

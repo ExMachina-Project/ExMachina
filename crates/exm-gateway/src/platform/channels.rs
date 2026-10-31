@@ -295,6 +295,37 @@ pub async fn list_channels(State(st): State<AppState>) -> impl IntoResponse {
     Json(list).into_response()
 }
 
+/// GET /api/channels/flows：全部聊天流（控制台「外部对话」视图数据源）。
+/// 按最后活跃倒序；`?channel=<id>` 过滤单通道。
+pub async fn list_channel_flows(
+    State(st): State<AppState>,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> impl IntoResponse {
+    let filter = q
+        .as_deref()
+        .and_then(|s| s.split_once("channel="))
+        .map(|(_, v)| v.split('&').next().unwrap_or("").to_string());
+    let flows: Vec<Value> = st
+        .core
+        .channel_flows(filter.as_deref().map(|s| s.to_string()).as_deref())
+        .iter()
+        .map(|f| {
+            json!({
+                "id": f.id,
+                "channelId": f.channel_id,
+                "chatKey": f.chat_key,
+                "displayName": if f.display_name.is_empty() { f.chat_key.clone() } else { f.display_name.clone() },
+                "isGroup": f.is_group,
+                "activeSession": f.active_session,
+                "lastMessage": f.last_message,
+                "lastActiveAt": f.last_active_at,
+                "createdAt": f.created_at,
+            })
+        })
+        .collect();
+    Json(flows).into_response()
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelBody {

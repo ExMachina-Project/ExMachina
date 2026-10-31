@@ -32,6 +32,17 @@ mod identity_gate_tests {
         }
     }
 
+    fn g_ctx_like<'a>() -> InboundCtx<'a> {
+        InboundCtx {
+            text: "",
+            external_id: "u1",
+            display_name: "u1",
+            is_group: true,
+            mentioned: true,
+            chat_key: "g100",
+        }
+    }
+
     fn ctx<'a>(text: &'a str, uid: &'a str, is_group: bool, mentioned: bool) -> InboundCtx<'a> {
         InboundCtx {
             text,
@@ -219,6 +230,93 @@ mod identity_gate_tests {
         assert!(!codes.iter().any(|c| c.code == "stale1"), "过期码应已删除");
         // 幂等：无过期码时再跑返回 0
         assert_eq!(core.purge_expired_pairing_codes(), 0);
+    }
+
+    /// 聊天流（chat flow）会话管理：/new 开新绑定、/sessions 列表、/use 切换、
+    /// 普通消息固定复用流绑定会话（不切换就一直同一会话）
+    #[tokio::test]
+    async fn 聊天流_会话绑定与切换() {
+        let core = std::sync::Arc::new(test_core());
+        let ch = chan(None);
+
+        // 首条普通消息：流无绑定 → 自动开新会话并绑定
+        let run1 = ChannelRun::begin(&core, &ch, "g100").await;
+        assert!(run1.is_some(), "流首轮应建立会话");
+        let (run1, _) = run1.unwrap();
+        let sid1 = run1.session_id.clone();
+        assert_eq!(
+            core.flow_active_session(&ch.id, "g100").as_deref(),
+            Some(sid1.as_str()),
+            "首轮应绑定到流"
+        );
+
+        // 第二条普通消息：固定复用同一会话
+        let (run2, _) = ChannelRun::begin(&core, &ch, "g100").await.unwrap();
+        assert_eq!(run2.session_id, sid1, "不切换时应复用流绑定会话");
+
+        // /new：开新会话并改绑（ctx 与 begin 同 chat_key，命中同一流）
+        let g_ctx = InboundCtx {
+            text: "/new 调研",
+            external_id: "u1",
+            display_name: "u1",
+            is_group: true,
+            mentioned: true,
+            chat_key: "g100",
+        };
+        let r = admit(&core, &ch, &g_ctx).await;
+        match r {
+            GateDecision::Deny(msg) => assert!(msg.contains("已开新会话"), "{msg}"),
+            _ => panic!("/new 应回执开新结果"),
+        }
+        let sid2 = core.flow_active_session(&ch.id, "g100").expect("新会话应已绑定");
+        assert_ne!(sid1, sid2, "/new 应改绑到新会话");
+
+        // /sessions：列出流内会话（新旧都在，当前带 ● 标记）
+        let g_sessions = InboundCtx { text: "/sessions", ..g_ctx_like() };
+        let r = admit(&core, &ch, &g_sessions).await;
+        match r {
+            GateDecision::Deny(msg) => {
+                assert!(msg.contains("●"), "应标记当前会话：{msg}");
+                assert!(msg.contains("调研"), "自定义标题应可见：{msg}");
+            }
+            _ => panic!("/sessions 应回执列表"),
+        }
+
+        // /use 0：切回首轮会话
+        let g_use = InboundCtx { text: "/use 1", ..g_ctx_like() };
+        let r = admit(&core, &ch, &g_use).await;
+        match r {
+            GateDecision::Deny(msg) => assert!(msg.contains("已切换"), "{msg}"),
+            _ => panic!("/use 应回执切换结果"),
+        }
+        assert_eq!(
+            core.flow_active_session(&ch.id, "g100").as_deref(),
+            Some(sid1.as_str()),
+            "/use 后绑定应回到旧会话"
+        );
+
+        // 切换后普通消息落在切回的会话
+        let (run3, _) = ChannelRun::begin(&core, &ch, "g100").await.unwrap();
+        assert_eq!(run3.session_id, sid1, "切换后消息应落进切回的会话");
+    }
+
+    /// 流绑定会话被删（控制台清理）：失效绑定自动重建，不炸不挂
+    #[tokio::test]
+    async fn 聊天流_绑定会话删除后自愈() {
+        let core = std::sync::Arc::new(test_core());
+        let ch = chan(None);
+        let (run, _) = ChannelRun::begin(&core, &ch, "u9").await.unwrap();
+        let sid = run.session_id.clone();
+        core.delete_session(&sid).unwrap();
+        assert_eq!(core.flow_active_session(&ch.id, "u9"), None, "失效绑定应判空");
+        // 下一轮消息：自动另建会话并重绑
+        let (run2, _) = ChannelRun::begin(&core, &ch, "u9").await.unwrap();
+        assert_ne!(run2.session_id, sid);
+        assert_eq!(
+            core.flow_active_session(&ch.id, "u9").as_deref(),
+            Some(run2.session_id.as_str()),
+            "重建后应重新绑定"
+        );
     }
 
     /// 平台限定码：其他平台提交无效

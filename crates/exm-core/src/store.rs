@@ -774,6 +774,29 @@ impl Store {
         self.db.delete("pairing_codes", code)
     }
 
+    // ---------------------------------------------------------------- 通道聊天流（chat flow）
+
+    pub fn put_channel_flow(&self, flow: &ChannelFlow) -> Result<()> {
+        self.db.put("channel_flows", &flow.id, flow)
+    }
+
+    pub fn get_channel_flow(&self, id: &str) -> Result<Option<ChannelFlow>> {
+        self.db.get("channel_flows", id)
+    }
+
+    pub fn list_channel_flows(&self, channel: Option<&str>) -> Result<Vec<ChannelFlow>> {
+        let mut list: Vec<ChannelFlow> = self.db.list("channel_flows")?;
+        if let Some(c) = channel {
+            list.retain(|f| f.channel_id == c);
+        }
+        list.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+        Ok(list)
+    }
+
+    pub fn delete_channel_flow(&self, id: &str) -> Result<()> {
+        self.db.delete("channel_flows", id)
+    }
+
     // ---------------------------------------------------------------- 事件触发器（文件监听 / webhook 事件源）
 
     pub fn put_event_trigger(&self, trigger: &EventTrigger) -> Result<()> {

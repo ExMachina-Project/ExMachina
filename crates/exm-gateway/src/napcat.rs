@@ -454,12 +454,15 @@ async fn napcat_gate(
     text: &str,
 ) -> Option<String> {
     let is_group = group_id.is_some();
-    // 提及归一化：原始消息含 @ 段（CQ:at）即视为提及（QQ 群内 @ 机器人是主语义）
-    let raw_text = raw
-        .get("message")
-        .map(|m| m.to_string())
-        .unwrap_or_default();
-    let mentioned = raw_text.contains("CQ:at");
+    // 提及归一化：@ 机器人本体才算提及（群内 @ 机器人是主语义）。
+    // NapCat 上报两种格式：CQ 码字符串（[CQ:at qq=xxx]）与数组段
+    // （[{"type":"at","data":{"qq":"..."}}]）——后者是默认，只认 CQ 码时
+    // 数组消息恒判「未提及」→ 群聊唤醒门控全灭（群里说话无反应的根因）。
+    let self_id = v_self_id(raw);
+    let raw_message = raw.get("message");
+    let mentioned = raw_message
+        .map(|m| is_mentioned(m, self_id))
+        .unwrap_or(false);
     let external_id = user_id.map(|u| u.to_string()).unwrap_or_default();
     // 会话键（与 ChannelRun::begin 同口径）：群号优先，私聊为用户 id
     let peer = group_id
@@ -506,6 +509,42 @@ fn extract_text(m: &serde_json::Value) -> String {
         strip_cq(s)
     } else {
         String::new()
+    }
+}
+
+/// 取上报事件里的机器人自身 QQ（self_id 字段；数组段提及判定的比对基准）
+fn v_self_id(raw: &serde_json::Value) -> Option<i64> {
+    raw.get("self_id").and_then(|x| x.as_i64())
+}
+
+/// 消息是否 @ 了机器人本体（两种上报格式都认；群内 @ 他人不算）。
+/// CQ 码：`[CQ:at qq=2511705734]`；数组段：`{"type":"at","data":{"qq":"2511705734"}}`。
+fn is_mentioned(m: &serde_json::Value, self_id: Option<i64>) -> bool {
+    if let Some(arr) = m.as_array() {
+        arr.iter().any(|seg| {
+            let qq = seg
+                .pointer("/data/qq")
+                .and_then(|x| x.as_str())
+                .and_then(|s| s.parse::<i64>().ok());
+            seg.get("type").and_then(|t| t.as_str()) == Some("at") && qq == self_id
+        })
+    } else if let Some(s) = m.as_str() {
+        let Some(self_id) = self_id else {
+            return s.contains("[CQ:at");
+        };
+        // 逐个 [CQ:at 出现位，检查其后参数段（到 ] 为止）是否 qq=<self_id>
+        let mut rest = s;
+        while let Some(i) = rest.find("[CQ:at") {
+            let tail = &rest[i + 6..];
+            let end = tail.find(']').unwrap_or(tail.len());
+            if tail[..end].contains(&format!("qq={self_id}")) {
+                return true;
+            }
+            rest = &rest[i + 6..];
+        }
+        false
+    } else {
+        false
     }
 }
 
@@ -732,5 +771,30 @@ mod tests {
         );
         // CQ 码字符串形态：无结构化段 → 空（不至于误采）
         assert!(collect_media(&json!("[CQ:image,url=x]")).is_empty());
+    }
+
+    /// 提及判定回归（群里无反应根因）：数组段是 NapCat 默认上报格式，
+    /// 只认 CQ 码时数组消息恒「未提及」→ 群聊唤醒门控静默全灭。
+    #[test]
+    fn 提及判定_数组段与cq码() {
+        let self_id = Some(2511705734i64);
+        // 数组段：@ 机器人本体
+        let arr_hit = json!([
+            { "type": "at", "data": { "qq": "2511705734" } },
+            { "type": "text", "data": { "text": " 在吗" } }
+        ]);
+        assert!(is_mentioned(&arr_hit, self_id), "数组段 @ 机器人应判提及");
+        // 数组段：@ 他人不算
+        let arr_other = json!([{ "type": "at", "data": { "qq": "10086" } }]);
+        assert!(!is_mentioned(&arr_other, self_id), "@ 他人不应判提及");
+        // CQ 码：qq 参数命中
+        let cq_hit = json!("[CQ:at,qq=2511705734] 在吗");
+        assert!(is_mentioned(&cq_hit, self_id), "CQ 码 @ 机器人应判提及");
+        // CQ 码：@ 他人
+        let cq_other = json!("[CQ:at,qq=10086] 帮我叫他");
+        assert!(!is_mentioned(&cq_other, self_id), "CQ 码 @ 他人不应判提及");
+        // 无 self_id（异常上报）：CQ 码退化为「含 at 即提及」（旧行为），数组段严格不命中
+        assert!(is_mentioned(&cq_hit, None));
+        assert!(!is_mentioned(&arr_hit, None));
     }
 }
