@@ -7,6 +7,7 @@ import { api, type LlmProfile } from "../api";
 import { agentIdEn } from "../models";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
+import { relativeTime } from "../time";
 
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
 import { StatementList } from "../components/Statements";
@@ -126,22 +127,8 @@ function TimelineRows({ items, tb, onOpenSub }: { items: TimelineItem[]; tb: (k:
   );
 }
 
-/** 相对时间（chat-ergonomics）：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / 日期 */
-export function relativeTime(iso?: string): string {
-  if (!iso) return "";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
-  const diff = Date.now() - t;
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
-  const hour = Math.floor(min / 60);
-  if (hour < 24) return `${hour} 小时前`;
-  const day = Math.floor(hour / 24);
-  if (day === 1) return "昨天";
-  if (day < 7) return `${day} 天前`;
-  return iso.slice(0, 10);
-}
+/** 相对时间已提取到 src/time.ts（列表场景共用） */
+export { relativeTime } from "../time";
 
 export function ChatView(): React.ReactElement {
   const t = useT();

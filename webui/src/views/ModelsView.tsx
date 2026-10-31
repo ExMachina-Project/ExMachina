@@ -14,7 +14,7 @@ import {
 import { BrandEmpty } from "../components/BrandEmpty";
 import { MaskedPasswordInput } from "../components/MaskedInput";
 import {
-  ApiOutlined, CheckCircleOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
+  ApiOutlined, AudioOutlined, CheckCircleOutlined, ClusterOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
 import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../api";
@@ -387,20 +387,33 @@ export function ModelsView(): React.ReactElement {
     label: string,
     hint: string,
     placeholder: string,
-  ) => (
-    <div className="cap-row" key={key}>
-      <div className="cap-label">{label}</div>
-      <Select
-        allowClear
-        showSearch
-        value={caps[key] || undefined}
-        placeholder={placeholder}
-        options={capOptions}
-        onChange={(v) => setCaps((c) => ({ ...c, [key]: v ?? "" }))}
-      />
-      <div className="dim cap-hint">{hint}</div>
-    </div>
-  );
+    icon: React.ReactNode,
+  ) => {
+    const val = caps[key] || "";
+    return (
+      <div className="cap-slot" key={key}>
+        <div className="cap-slot-head">
+          <span className="cap-slot-icon">{icon}</span>
+          <span className="cap-slot-name">{label}</span>
+          {val ? (
+            <Tag className="tag-ok cap-slot-set">{t("models.capSet")}</Tag>
+          ) : (
+            <Tag className="cap-slot-unset">{t("models.capUnset")}</Tag>
+          )}
+        </div>
+        <Select
+          allowClear
+          showSearch
+          className="cap-slot-select"
+          value={val || undefined}
+          placeholder={placeholder}
+          options={capOptions}
+          onChange={(v) => setCaps((c) => ({ ...c, [key]: v ?? "" }))}
+        />
+        <div className="cap-hint">{hint}</div>
+      </div>
+    );
+  };
 
   const saveCaps = async () => {
     setCapSaving(true);
@@ -474,7 +487,7 @@ export function ModelsView(): React.ReactElement {
               <Card
                 key={p.id}
                 size="small"
-                className="hud model-card"
+                className={`hud model-card ${active ? "model-card-active" : ""}`}
                 title={
                   <div className="model-head">
                     <span>{p.name}</span>
@@ -483,6 +496,7 @@ export function ModelsView(): React.ReactElement {
                 }
                 extra={
                   <Space size={4}>
+                    {active && <Tag className="tag-ok model-active-tag">{t("models.globalDefault")}</Tag>}
                     {!active && (
                       <Tooltip title={t("models.setDefaultTip")}>
                         <Button size="small" icon={<CheckCircleOutlined />} onClick={() => void activate(p.id)}>
@@ -502,6 +516,13 @@ export function ModelsView(): React.ReactElement {
                   </Space>
                 }
               >
+                {/* 默认模型：卡内主角（大字 mono），一眼看清这家端点跑的是谁 */}
+                <div className="model-default">
+                  <span className="model-default-name mono">{p.model || <span className="dim">{t("models.capNone")}</span>}</span>
+                  {active ? (
+                    <Tag className="tag-ok">{t("models.inUse")}</Tag>
+                  ) : null}
+                </div>
                 <div className="model-kv">
                   <span className="k">{t("models.endpoint")}</span>
                   <span className="mono">{p.baseUrl}</span>
@@ -567,10 +588,10 @@ export function ModelsView(): React.ReactElement {
         >
           <div className="dim cap-hint" style={{ marginBottom: 10 }}>{t("models.capGlobalHint")}</div>
           <div className="cap-grid">
-            {capField("speech", t("models.capSpeech"), t("models.capSpeechHint"), t("models.capUnset"))}
-            {capField("transcribe", t("models.capStt"), t("models.capSttHint"), t("models.capUnset"))}
-            {capField("visionRelay", t("models.capVisionRelay"), t("models.capVisionHint"), t("models.capUnset"))}
-            {capField("embedding", t("models.capEmbed"), t("models.capEmbedHint"), t("models.capEmbedPh"))}
+            {capField("speech", t("models.capSpeech"), t("models.capSpeechHint"), t("models.capUnset"), <SoundOutlined />)}
+            {capField("transcribe", t("models.capStt"), t("models.capSttHint"), t("models.capUnset"), <AudioOutlined />)}
+            {capField("visionRelay", t("models.capVisionRelay"), t("models.capVisionHint"), t("models.capUnset"), <EyeOutlined />)}
+            {capField("embedding", t("models.capEmbed"), t("models.capEmbedHint"), t("models.capEmbedPh"), <ClusterOutlined />)}
           </div>
         </Card>
       )}

@@ -235,6 +235,8 @@ export const en: Partial<Dict> = {
   "models.capVisionRelay": "Vision relay",
   "models.capEmbed": "Embedding (semantic recall)",
   "models.capUnset": "Not configured",
+  "models.capSet": "Assigned",
+  "models.inUse": "In use",
   "models.capEmbedPh": "Empty = lexical recall only",
   "models.capSpeechHint": "Model used for speech playback; empty = global profile default (tts-1).",
   "models.capSttHint": "Model that turns voice messages into text; empty = global profile default (whisper-1).",
