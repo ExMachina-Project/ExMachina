@@ -8,7 +8,7 @@
     · 用法：<img src="logo-exmachina.svg" width="480" alt="EXMACHINA">
             或把本文件内容整段内联进 HTML（内联后可用 CSS 变量改色）
     · 配色：全部走 currentColor。浅底用 color:#0b0d10，深底用 color:#e9e9ee
-    · 节奏：改下面 @keyframes 的 animation 时间即可；整段约 2.2s，之后静止
+    · 节奏：改下面 @keyframes 的 animation 时间即可；整段约 3.6s（含 1.5s 起步延迟），之后静止
     · 减速偏好：系统开启"减少动态效果"时直接呈现终态
   -->
 
@@ -24,11 +24,11 @@
       animation: exmDraw 0.8s cubic-bezier(.22,1,.36,1) forwards;
     }
     /* 圆环用 100.6 的虚线段长：比路径长 0.6，首尾重叠，避免闭合处出现发丝缝 */
-    .exm-ring { stroke-width: 24.5; animation-delay: 0.05s; stroke-dasharray: 100.6; stroke-dashoffset: 100.6; }
+    .exm-ring { stroke-width: 24.5; animation-delay: 1.55s; stroke-dasharray: 100.6; stroke-dashoffset: 100.6; }
     .exm-arc  { stroke-width: 24.5; }
 
 
-    .exm-wm-clip { animation: exmWipe 1.1s cubic-bezier(.65,0,.35,1) 1.05s forwards; clip-path: inset(-2% 100% -2% 0); }
+    .exm-wm-clip { animation: exmWipe 1.1s cubic-bezier(.65,0,.35,1) 2.55s forwards; clip-path: inset(-2% 100% -2% 0); }
     .exm-wm { fill: currentColor; }
 
 
@@ -47,12 +47,12 @@
   <g transform="translate(540 196) scale(0.55) translate(-200.0 -200.0)">
     <g class="exm-mark">
       <circle class="exm-draw exm-ring" cx="200.0" cy="200.0" r="56.5" pathLength="100"/>
-      <path class="exm-draw exm-arc" d="M 321.49 250.32 A 131.5 131.5 0 0 0 321.49 149.68" pathLength="100" style="animation-delay:0.180s"/>
-      <path class="exm-draw exm-arc" d="M 298.86 159.05 A 107 107 0 0 0 240.95 101.14" pathLength="100" style="animation-delay:0.255s"/>
-      <path class="exm-draw exm-arc" d="M 159.05 101.14 A 107 107 0 0 0 101.14 159.05" pathLength="100" style="animation-delay:0.330s"/>
-      <path class="exm-draw exm-arc" d="M 78.51 149.68 A 131.5 131.5 0 0 0 78.51 250.32" pathLength="100" style="animation-delay:0.405s"/>
-      <path class="exm-draw exm-arc" d="M 101.14 240.95 A 107 107 0 0 0 159.05 298.86" pathLength="100" style="animation-delay:0.480s"/>
-      <path class="exm-draw exm-arc" d="M 240.95 298.86 A 107 107 0 0 0 298.86 240.95" pathLength="100" style="animation-delay:0.555s"/>
+      <path class="exm-draw exm-arc" d="M 321.49 250.32 A 131.5 131.5 0 0 0 321.49 149.68" pathLength="100" style="animation-delay:1.680s"/>
+      <path class="exm-draw exm-arc" d="M 298.86 159.05 A 107 107 0 0 0 240.95 101.14" pathLength="100" style="animation-delay:1.755s"/>
+      <path class="exm-draw exm-arc" d="M 159.05 101.14 A 107 107 0 0 0 101.14 159.05" pathLength="100" style="animation-delay:1.830s"/>
+      <path class="exm-draw exm-arc" d="M 78.51 149.68 A 131.5 131.5 0 0 0 78.51 250.32" pathLength="100" style="animation-delay:1.905s"/>
+      <path class="exm-draw exm-arc" d="M 101.14 240.95 A 107 107 0 0 0 159.05 298.86" pathLength="100" style="animation-delay:1.980s"/>
+      <path class="exm-draw exm-arc" d="M 240.95 298.86 A 107 107 0 0 0 298.86 240.95" pathLength="100" style="animation-delay:2.055s"/>
     </g>
   </g>
 
