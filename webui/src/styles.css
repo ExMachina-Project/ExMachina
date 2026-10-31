@@ -219,7 +219,9 @@ input, textarea { caret-color: var(--accent); }
 .app-shell { display: flex; height: 100dvh; overflow: hidden; }
 
 .app-sider {
-  width: 244px;
+  /* 208px：EN 品牌副标（AGENT CLUSTER // CONSOLE，mono+0.1em 字距 ≈168px）
+     为宽度硬底，双语文本均不折行；移动端另有 min(78vw, 300px) 覆盖 */
+  width: 208px;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -1026,6 +1028,11 @@ textarea.ant-input:focus,
 .app-sider .ant-menu-item .ant-menu-title-content,
 .theme-option { font-family: var(--mono); }
 .app-sider .ant-menu-item { font-size: 13px; letter-spacing: 0.02em; }
+/* 收窄侧栏：导航与主题行文本不折行（宽度以最长项为准，溢出即设计问题） */
+.app-sider .ant-menu-item .ant-menu-title-content,
+.theme-toggle, .theme-option { white-space: nowrap; }
+.theme-toggle .theme-current, .theme-option .label-en { overflow: hidden; text-overflow: ellipsis; }
+.nav-footer { flex-wrap: wrap; row-gap: 4px; }
 /* 主题选项选中态底色被强调色提亮，括注同理 */
 :root .theme-option.active .label-en { color: var(--text); }
 /* 可勾选筛选标签（记忆类型等）：仅修未选中态——antd 默认字色只有 3.85:1。
