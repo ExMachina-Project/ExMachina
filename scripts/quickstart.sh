@@ -2,13 +2,13 @@
 # EXMACHINA 快速启动：下载预编译发行版 → 校验 → 解压 → 前台启动（无需 Rust / Node.js）
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/quickstart.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/quickstart.sh | bash
 #   ./quickstart.sh [--port 4173]
 #
 # 兼容 macOS 自带 bash 3.2（POSIX 风格，未使用 bash4 特性）。
 set -Eeuo pipefail
 
-REPO="KurohaneKaoruko/ExMachina"
+REPO="ExMachina-Project/ExMachina"
 DIR="exmachina"
 PORT="${EXM_PORT:-4173}"
 VER="${EXM_VERSION:-}"

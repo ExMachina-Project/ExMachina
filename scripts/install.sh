@@ -2,13 +2,13 @@
 # EXMACHINA 源码安装：Rust + Node 工具链 → 克隆仓库 → 编译 → 前台启动
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/KurohaneKaoruko/ExMachina/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ExMachina-Project/ExMachina/main/scripts/install.sh | bash
 #   ./install.sh [--port 4173]
 #
 # 兼容 macOS 自带 bash 3.2（POSIX 风格，未使用 bash4 特性）。
 set -Eeuo pipefail
 
-REPO="https://github.com/KurohaneKaoruko/ExMachina"
+REPO="https://github.com/ExMachina-Project/ExMachina"
 BRANCH="${EXM_BRANCH:-main}"
 DIR="${EXM_DIR:-ExMachina}"
 PORT="${EXM_PORT:-4173}"

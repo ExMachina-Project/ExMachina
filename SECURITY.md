@@ -2,9 +2,9 @@
 
 ## Reporting a Vulnerability | 报告漏洞
 
-**English**: If you discover a security vulnerability, please **do not** file a public Issue. Report it privately via [GitHub Security Advisories](https://github.com/KurohaneKaoruko/ExMachina/security/advisories/new). We will respond within 48 hours.
+**English**: If you discover a security vulnerability, please **do not** file a public Issue. Report it privately via [GitHub Security Advisories](https://github.com/ExMachina-Project/ExMachina/security/advisories/new). We will respond within 48 hours.
 
-**中文**：如果你发现安全漏洞，请**不要**在公开 Issue 中提交。通过 [GitHub Security Advisories](https://github.com/KurohaneKaoruko/ExMachina/security/advisories/new) 私密报告。我们会在 48 小时内响应。
+**中文**：如果你发现安全漏洞，请**不要**在公开 Issue 中提交。通过 [GitHub Security Advisories](https://github.com/ExMachina-Project/ExMachina/security/advisories/new) 私密报告。我们会在 48 小时内响应。
 
 ## Supported Versions | 支持版本
 
