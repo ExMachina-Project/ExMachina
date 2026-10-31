@@ -28,7 +28,9 @@ async fn app_with(auth_key: &str) -> (axum::Router, std::path::PathBuf, String) 
     cfg.security.auth_key = auth_key.into();
     let core = std::sync::Arc::new(exm_core::Core::with_config(cfg).unwrap());
     // 测试组 + 主智能体 + 会话
-    core.registry().create_group(Some("t".into()), "mcp组", "").unwrap();
+    core.registry()
+        .create_group(Some("t".into()), "mcp组", "")
+        .unwrap();
     let def = exm_core::types::AgentDefinition {
         name: "服务体".into(),
         identifier: "mcp-orch".into(),
@@ -56,20 +58,33 @@ async fn app_with(auth_key: &str) -> (axum::Router, std::path::PathBuf, String) 
     (router, dir, s.id)
 }
 
-async fn post(router: &axum::Router, path: &str, key: Option<&str>, body: Value) -> (StatusCode, Value) {
+async fn post(
+    router: &axum::Router,
+    path: &str,
+    key: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method("POST").uri(path);
     if let Some(k) = key {
         builder = builder.header("x-auth-key", k);
     }
     let mut req = builder.body(Body::from(body.to_string())).unwrap();
     // serve() 经 into_make_service_with_connect_info 注入对端地址；直连调用补同款扩展
-    req.extensions_mut().insert(axum::extract::ConnectInfo(
-        std::net::SocketAddr::from(([127, 0, 0, 1], 50000)),
-    ));
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            50000,
+        ))));
     let resp = router.clone().call(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let v = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::Null) };
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let v = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
     (status, v)
 }
 
@@ -77,7 +92,13 @@ async fn post(router: &axum::Router, path: &str, key: Option<&str>, body: Value)
 async fn http挂载_未启用404_启用后调用成功且鉴权生效() {
     // 启用 + 无鉴权：协议全流程
     let (router, dir, sid) = app_with("").await;
-    let (st, _) = post(&router, "/mcp", None, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
+    let (st, _) = post(
+        &router,
+        "/mcp",
+        None,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     // 会话亲和：有效会话执行 read
     std::fs::write(dir.join("n.txt"), "http mcp").unwrap();
@@ -91,7 +112,10 @@ async fn http挂载_未启用404_启用后调用成功且鉴权生效() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["result"]["isError"], false, "{body}");
-    assert!(body["result"]["content"][0]["text"].as_str().unwrap().contains("http mcp"));
+    assert!(body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("http mcp"));
     // 无效会话拒绝（会话亲和）
     let (st, body) = post(
         &router,
@@ -101,14 +125,36 @@ async fn http挂载_未启用404_启用后调用成功且鉴权生效() {
                 "params": { "name": "read", "arguments": { "session": "ghost", "path": "n.txt" } } }),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "协议层错误仍走 200（JSON-RPC error 载荷）");
-    assert!(body["error"]["message"].as_str().unwrap().contains("会话不存在"), "{body}");
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "协议层错误仍走 200（JSON-RPC error 载荷）"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("会话不存在"),
+        "{body}"
+    );
 
     // 鉴权：authKey 配置后缺密钥 401
     let (router2, dir2, _) = app_with("secret-key").await;
-    let (st, _) = post(&router2, "/mcp", None, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
+    let (st, _) = post(
+        &router2,
+        "/mcp",
+        None,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED, "复用鉴权中间件：缺密钥拒绝");
-    let (st, _) = post(&router2, "/mcp", Some("secret-key"), json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
+    let (st, _) = post(
+        &router2,
+        "/mcp",
+        Some("secret-key"),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "带密钥放行");
 
     // 未启用：挂载点不存在（404，spec：默认关闭）
@@ -118,7 +164,13 @@ async fn http挂载_未启用404_启用后调用成功且鉴权生效() {
     cfg.mcp_serve.enabled = false;
     let core3 = std::sync::Arc::new(exm_core::Core::with_config(cfg).unwrap());
     let router3 = exm_gateway::build_router(core3).layer(CorsLayer::permissive());
-    let (st, _) = post(&router3, "/mcp", None, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
+    let (st, _) = post(
+        &router3,
+        "/mcp",
+        None,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND, "默认关闭 = 挂载点不可用");
 
     let _ = std::fs::remove_dir_all(&dir);

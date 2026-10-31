@@ -8,6 +8,7 @@ import { Button, Input, type InputRef } from "antd";
 import { KeyOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { Emblem } from "../components/Emblem";
+import { OrbitRings } from "../components/OrbitRings";
 import { DataStream } from "../components/DataStream";
 import { useT } from "../i18n/core";
 
@@ -43,9 +44,14 @@ export function LoginView({ onUnlock }: { onUnlock: () => void }): React.ReactEl
 
   return (
     <div className="login-wrap">
+      {/* 资产 hero 轨道环（底层）：同心虚线轨道 + 在轨卫星点，集群母题 */}
+      <OrbitRings />
       {/* 背景十六进制字节雨（左右两列）：放在 login-wrap 内部（它是定位祖先），z-index 低于 login-core */}
       <DataStream side="left" />
       <DataStream side="right" />
+      {/* 角落微标（hero 左下/右下语汇）：EST. 2026 / 链接，mono 微号宽字距 */}
+      <span className="login-corner login-corner-left mono">EST. 2026</span>
+      <span className="login-corner login-corner-right mono">EXMACHINA-PROJECT</span>
       <div className="login-core">
         <div className="login-figure">
           <Emblem size={132} animated />

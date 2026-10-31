@@ -11,7 +11,7 @@ import type {
   TaskGraph,
   ToolCallItem,
 } from "./types";
-import { api, serverBase, type GatewayConfig, type GroupMeta, type RecallHit } from "./api";
+import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit, type SpawnBgItem, type TodoItem } from "./api";
 import { tr } from "./i18n/core";
 
 export interface TimelineItem {
@@ -38,6 +38,8 @@ interface WsEvent {
 
 interface ExmState {
   sessions: Session[];
+  /** 未读计数（会话 id → 条数；切走后该会话的新末条计入） */
+  unreadCounts: Record<string, number>;
   sessionId: string | null;
   messages: ChatMessage[];
   graph: TaskGraph | null;
@@ -55,6 +57,21 @@ interface ExmState {
   runToolCalls: ToolCallItem[];
   /** 待人工审批单（聊天内联裁决） */
   approvals: ApprovalItem[];
+  /** 计划模式（spec plan-mode WebUI 卡片）：当前会话计划数据 + 拉取防抖 */
+  plan: PlanInfo | null;
+  planSession: string | null;
+  planApplied: PlanAppliedItem[] | null;
+  planPending: boolean;
+  planDirtyAt: number;
+  refreshPlan: (sessionId: string) => Promise<void>;
+  decidePlan: (action: "approve" | "reject" | "setMode", plan?: boolean) => Promise<void>;
+  setPlanMode: (on: boolean) => Promise<void>;
+  /** 任务清单（spec agent-todo）：todo.updated 事件快照 */
+  todo: { count: number; doneCount: number; allDone: boolean; items: TodoItem[] } | null;
+  /** 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件维护 */
+  spawns: SpawnBgItem[];
+  /** 清除全部后台子任务卡（终态收讫后手动清理） */
+  clearSpawns: () => void;
   timeline: TimelineItem[];
   /** 时间线归属会话：切到子会话/其它会话时不在那里展示别处的调度轨迹 */
   timelineSession: string | null;
@@ -77,8 +94,17 @@ interface ExmState {
   /** 会话输入草稿（内存态；sessionStorage 镜像持久化） */
   drafts: Record<string, string>;
   setDraft: (sessionId: string, text: string) => void;
+  /** 全局待审批数（侧栏角标数据源；轮询兜底——WS 丢事件时也能恢复） */
+  pendingApprovals: number;
+  refreshPendingApprovals: () => Promise<void>;
   /** 新消息落会话列表时刷新该会话的末条预览（chat-ergonomics） */
   updateSessionPreview: (sessionId: string, preview: string) => void;
+  /** 会话置顶切换（乐观更新 + 服务端落库） */
+  toggleSessionPin: (sessionId: string, pinned: boolean) => Promise<void>;
+  /** 清会话未读（进入会话时） */
+  clearUnread: (sessionId: string) => void;
+  /** 全部已读（清 unreadCounts 全表） */
+  markAllRead: () => void;
   saveConfig: (body: Record<string, unknown>) => Promise<void>;
   decideApproval: (id: string, approve: boolean) => Promise<void>;
   handleEvent: (evt: WsEvent) => void;
@@ -162,18 +188,26 @@ function firstMainSession(list: Session[]): Session | undefined {
 let ws: WebSocket | null = null;
 /** 连接代际号：每次 connectWs 递增。旧代际残留的 onclose/定时器一律失效，根治 A→B→A 快速切换的闭包竞态 */
 let wsGen = 0;
+/** 会话选择代际号：每次 selectSession 递增。快速切换时旧响应乱序到达不得覆盖新状态 */
+let selectSeq = 0;
 /** 连续失败退避（2s → 5s → 10s → 30s 封顶）：成功 open 即归零 */
 let wsBackoff = 0;
 /** 心跳看门狗：超过该时长未收到任何帧（含协议 Pong）即判死重连 */
 const WS_STALE_MS = 45000;
 let wsLastFrame = 0;
 let wsWatch: ReturnType<typeof setInterval> | null = null;
+/** 应用层心跳定时器句柄：与连接代际同生命周期，onclose 清理防叠加 */
+let wsHeartbeat: ReturnType<typeof setInterval> | null = null;
 
 function connectWs(get: () => ExmState): void {
   const sessionId = get().sessionId;
   if (!sessionId) return;
   const gen = ++wsGen;
-  // 主动关闭旧连接：其 onclose 携带旧 gen，不会触发重连
+  // 主动关闭旧连接：其 onclose 携带旧 gen，不会触发重连（也不会清心跳——故在此先清）
+  if (wsHeartbeat !== null) {
+    clearInterval(wsHeartbeat);
+    wsHeartbeat = null;
+  }
   ws?.close();
   const base = serverBase();
   const proto = base.startsWith("https") || (base === "" && location.protocol === "https:") ? "wss" : "ws";
@@ -187,10 +221,11 @@ function connectWs(get: () => ExmState): void {
     get().setWs(true);
     if (!reconnected) return;
     // 断连补偿：重拉消息与任务图恢复丢失事件；图无在途节点则解除 running 卡死
+    const compSeq = selectSeq; // 补偿期间的选择切换同样不得被旧快照覆盖
     void (async () => {
       try {
         const [messages, graph] = await Promise.all([api.messages(sessionId), api.graph(sessionId)]);
-        if (gen !== wsGen || useExm.getState().sessionId !== sessionId) return;
+        if (gen !== wsGen || useExm.getState().sessionId !== sessionId || selectSeq !== compSeq) return;
         const pending = (graph?.nodes ?? []).some((n) =>
           ["running", "dispatched", "syncing"].includes(String((n as { status?: string }).status ?? "")),
         );
@@ -198,10 +233,27 @@ function connectWs(get: () => ExmState): void {
       } catch {
         /* 补偿失败静默：下轮断连重连时再次补偿 */
       }
+      // 断连窗内产生的审批单补偿：pending 表全量对照（跨会话口径与直推/恢复一致）
+      try {
+        const live = await api.listApprovals("pending", 100);
+        if (gen !== wsGen || useExm.getState().sessionId !== sessionId || selectSeq !== compSeq) return;
+        useExm.setState((s) => ({
+          approvals: [
+            ...s.approvals,
+            ...live
+              .map((x) => ({ approvalId: x.id, agentId: x.agentId, command: x.command, sessionId: x.sessionId }))
+              .filter((c) => !s.approvals.some((a) => a.approvalId === c.approvalId)),
+          ],
+        }));
+      } catch { /* 审批补偿失败静默 */ }
     })();
   };
   ws.onclose = () => {
     if (gen !== wsGen) return; // 旧代际：静默退出，不碰当前连接、不重连
+    if (wsHeartbeat !== null) {
+      clearInterval(wsHeartbeat);
+      wsHeartbeat = null;
+    }
     get().setWs(false);
     reconnected = true;
     const delay = [2000, 5000, 10000, 30000][Math.min(wsBackoff, 3)];
@@ -219,6 +271,21 @@ function connectWs(get: () => ExmState): void {
       /* 忽略坏帧 */
     }
   };
+  // 应用层心跳：每 20s 发一条 ping 文本帧并把发送成功计为「活」。
+  // 根因：服务端 25s 协议层 Ping 的 Pong 由浏览器自动回但不触发 onmessage，
+  // 看门狗以收帧判活——空闲会话唯一流量是协议帧，45s 必误判链路死强拆重连
+  // （「网关断连」弹条周期性出现）。发送成功即链路可用（缓冲满会抛异常），
+  // 收方向由服务端事件流双保险。服务端对入站文本帧忽略（_ => {}），无副作用。
+  wsHeartbeat = setInterval(() => {
+    const cur = ws;
+    if (!cur || cur.readyState !== WebSocket.OPEN) return;
+    try {
+      cur.send("ping");
+      wsLastFrame = Date.now();
+    } catch {
+      /* 发送失败：缓冲满≈链路将死，交给看门狗 */
+    }
+  }, 20000);
   // 心跳看门狗（单例）：空闲超时强制重连（浏览器对协议 Pong 不暴露事件，以「收帧时刻」为准——
   // 服务端 25s 一跳且事件流通常活跃，45s 静默基本等于链路已死）
   if (wsWatch === null) {
@@ -253,6 +320,7 @@ if (typeof window !== "undefined") {
 
 export const useExm = create<ExmState>((set, get) => ({
   sessions: [],
+  unreadCounts: {},
   sessionsLoaded: false,
   sessionId: null,
   messages: [],
@@ -267,6 +335,13 @@ export const useExm = create<ExmState>((set, get) => ({
   liveParts: {},
   runToolCalls: [],
   approvals: [],
+  plan: null,
+  planSession: null,
+  planApplied: null,
+  planPending: false,
+  planDirtyAt: 0,
+  todo: null,
+  spawns: [],
   timeline: [],
   timelineSession: null,
   lastRecall: [],
@@ -359,11 +434,17 @@ export const useExm = create<ExmState>((set, get) => ({
   },
 
   selectSession: async (id) => {
+    // 代际守卫：快速切会话时旧请求的响应可能晚于新请求到达（网络乱序），
+    // 旧快照整体覆盖会抹掉新状态（切页面后回复消失 bug 的一半根因）。
+    // 每次选择递增序号，只有最新请求的响应才允许落盘。
+    const seq = ++selectSeq;
     const [messages, graph, session] = await Promise.all([
       api.messages(id),
       api.graph(id),
       api.getSession(id),
     ]);
+    if (seq !== selectSeq) return;
+    get().clearUnread(id);
     set({
       sessionId: id,
       messages,
@@ -374,10 +455,50 @@ export const useExm = create<ExmState>((set, get) => ({
       liveParts: {},
       runToolCalls: [],
       approvals: [],
+      plan: null,
+      planSession: id,
+      planApplied: null,
+      planPending: false,
+      todo: null,
+      spawns: [],
       timeline: [],
       timelineSession: null,
       running: false,
     });
+    // 计划模式：进会话拉取当前清单与模式位（后续靠 plan.* 事件增量刷新）
+    void get().refreshPlan(id);
+    // 任务清单回放（spec agent-todo）：todo 快照只由事件维护，切会话/刷新后
+    // 从事件流尾部找回最近一次 todo.updated（含清空语义——找到空清单即无卡）
+    void api.sessionEvents(id, 200).then((evts) => {
+      if (get().sessionId !== id) return;
+      for (let i = evts.length - 1; i >= 0; i--) {
+        const p = evts[i].payload as { type?: string; payload?: Record<string, unknown> } | undefined;
+        if (p?.type === "todo.updated") {
+          const d = (p.payload ?? {}) as Record<string, unknown>;
+          set({
+            todo: {
+              count: Number(d.count ?? 0),
+              doneCount: Number(d.doneCount ?? 0),
+              allDone: Boolean(d.allDone),
+              items: (d.items ?? []) as unknown as TodoItem[],
+            },
+          });
+          break;
+        }
+      }
+    }).catch(() => { /* 回放失败不阻断进会话 */ });
+    // 内联审批恢复：approvals 只由 WS 事件维护，刷新/换页后清空——
+    // approval.required 是纯广播事件不落事件流，无法回放；审批 API 的 pending 表
+    // 自带 sessionId 归属，恢复【全部】pending 单（与 WS 直推口径一致——跨会话
+    // 审批也恢复，卡上「跳转子会话」按钮承担归属导航）
+    void api.listApprovals("pending", 100).then((live) => {
+      if (get().sessionId !== id) return;
+      if (live.length > 0) {
+        const cards = live
+          .map((x) => ({ approvalId: x.id, agentId: x.agentId, command: x.command, sessionId: x.sessionId }));
+        set({ approvals: [...get().approvals, ...cards.filter((c) => !get().approvals.some((a) => a.approvalId === c.approvalId))] });
+      }
+    }).catch(() => { /* API 不可用则跳过恢复 */ });
     connectWs(get);
   },
 
@@ -415,11 +536,19 @@ export const useExm = create<ExmState>((set, get) => ({
     try {
       await api.chat(id, text, images, sendMode ?? undefined);
     } finally {
-      // 草稿已发出：清除（chat-ergonomics）
+      // 草稿已发出：清除（chat-ergonomics）。
+      // 修 bug：历史版本逐会话存 exm.draft.<id>，现行复合存 exm.drafts JSON——
+      // 此前只 removeItem 旧键而复合键未清，切视图重挂载后草稿初始化把
+      // 已发送文本读回输入框。两处都清（旧键兜底 + 复合键同步）。
+      const sid = id;
+      set((s) => {
+        const drafts = { ...s.drafts, [sid]: "" };
+        try { sessionStorage.setItem("exm.drafts", JSON.stringify(drafts)); } catch { /* 隐私模式忽略 */ }
+        return { drafts };
+      });
       try {
-        sessionStorage.removeItem(draftKey(id));
+        sessionStorage.removeItem(draftKey(sid));
       } catch { /* 隐私模式忽略 */ }
-      set((s) => ({ drafts: { ...s.drafts, [id]: "" } }));
     }
     get().updateSessionPreview(id, label);
   },
@@ -437,10 +566,53 @@ export const useExm = create<ExmState>((set, get) => ({
       await api.decideApproval(id, approve);
       // 乐观移除（approval.resolved 事件到达时幂等）
       set({ approvals: get().approvals.filter((a) => a.approvalId !== id) });
+      void get().refreshPendingApprovals();
     } catch (e) {
       message.error(String(e));
     }
   },
+
+  /** 拉取计划清单（plan.item 事件高频到达时 300ms 防抖合并） */
+  refreshPlan: async (sessionId) => {
+    if (get().planSession !== sessionId) {
+      set({ plan: null, planSession: sessionId, planApplied: null, planPending: false });
+    }
+    const stamp = Date.now();
+    set({ planDirtyAt: stamp });
+    await new Promise((r) => setTimeout(r, 300));
+    if (get().planDirtyAt !== stamp) return; // 已有更新的一次拉取接管
+    try {
+      const info = await api.getPlan(sessionId);
+      if (get().planSession === sessionId) set({ plan: info, planSession: sessionId });
+    } catch { /* 会话删除等场景静默 */ }
+  },
+
+  decidePlan: async (action, plan) => {
+    const sid = get().sessionId;
+    if (!sid) return;
+    try {
+      if (action === "approve") {
+        const r = await api.decidePlan(sid, "approve");
+        set({ planApplied: r.applied ?? [], planPending: false });
+        message.success(tr("store.plan.approved", { n: String(r.okCount ?? 0) }));
+      } else if (action === "reject") {
+        await api.decidePlan(sid, "reject");
+        set({ planPending: false });
+        message.info(tr("store.plan.rejected"));
+      } else {
+        await api.decidePlan(sid, "setMode", plan);
+      }
+      await get().refreshPlan(sid);
+    } catch (e) {
+      message.error(String(e));
+    }
+  },
+
+  setPlanMode: async (on) => {
+    await get().decidePlan("setMode", on);
+  },
+
+  clearSpawns: () => set({ spawns: [] }),
 
   navRequest: null,
   requestNav: (view, sessionId) => set({ navRequest: { view, sessionId, nonce: Date.now() } }),
@@ -453,14 +625,57 @@ export const useExm = create<ExmState>((set, get) => ({
     set((s) => ({ drafts: { ...s.drafts, [sessionId]: text } }));
     try { sessionStorage.setItem("exm.drafts", JSON.stringify({ ...useExm.getState().drafts, [sessionId]: text })); } catch { /* 隐私模式忽略 */ }
   },
+  pendingApprovals: 0,
+  refreshPendingApprovals: async () => {
+    try {
+      const items = await api.listApprovals("pending", 50);
+      set({ pendingApprovals: items.length });
+    } catch {
+      /* 审批接口不可用时保持旧值 */
+    }
+  },
   updateSessionPreview: (sessionId, preview) => {
+    const cur = get().sessionId;
+    // 未读计数：非当前会话收到新末条（后台回复/通道消息）→ 未读 +1（当前会话即时已读）
+    if (cur !== sessionId) {
+      const n = (get().unreadCounts[sessionId] ?? 0) + 1;
+      set((s) => ({ unreadCounts: { ...s.unreadCounts, [sessionId]: n } }));
+    }
     set((s) => ({ sessions: s.sessions.map((x) => (x.id === sessionId ? { ...x, lastMessagePreview: preview, lastActiveAt: new Date().toISOString() } : x)) }));
+  },
+  /** 进入会话即清未读（切走再切回重新计数） */
+  clearUnread: (sessionId) => {
+    if (get().unreadCounts[sessionId]) {
+      set((s) => {
+        const next = { ...s.unreadCounts };
+        delete next[sessionId];
+        return { unreadCounts: next };
+      });
+    }
+  },
+  /** 全部已读：清空未读表（内存态，无需服务端对账） */
+  markAllRead: () => {
+    if (Object.keys(get().unreadCounts).length > 0) {
+      set({ unreadCounts: {} });
+    }
+  },
+  /** 会话置顶切换：乐观更新 + 服务端落库（失败回滚） */
+  toggleSessionPin: async (sessionId, pinned) => {
+    const prev = get().sessions;
+    set({ sessions: prev.map((x) => (x.id === sessionId ? { ...x, pinned } : x)) });
+    try {
+      await api.pinSession(sessionId, pinned);
+    } catch {
+      set({ sessions: prev });
+    }
   },
 
   handleEvent: (evt) => {
     const p = evt.payload as Record<string, unknown>;
     // 审批不受当前会话限制：子会话（子个体）里的审批请求同样要在视图内可裁决
     if (evt.type === "approval.required") {
+      // 全局计数即时刷新（侧栏角标；不依赖轮询周期）
+      void get().refreshPendingApprovals();
       const prefs = loadNotifyPrefs();
       if (prefs.enabled && prefs.approval && document.visibilityState === "hidden" && typeof Notification !== "undefined" && Notification.permission === "granted") {
         fireNotification(
@@ -484,6 +699,90 @@ export const useExm = create<ExmState>((set, get) => ({
     }
     if (evt.type === "approval.resolved") {
       set({ approvals: get().approvals.filter((a) => a.approvalId !== String(p.approvalId)) });
+      return;
+    }
+    // 任务清单（spec agent-todo）：todo.updated 快照（仅当前会话）
+    if (evt.type === "todo.updated") {
+      if (evt.sessionId === get().sessionId) {
+        set({
+          todo: {
+            count: Number(p.count ?? 0),
+            doneCount: Number(p.doneCount ?? 0),
+            allDone: Boolean(p.allDone),
+            items: ((p.items ?? []) as unknown as TodoItem[]),
+          },
+        });
+      }
+      return;
+    }
+    // 后台子任务卡（spec subagent-spawn WebUI 呈现）：started 建条目 / finished 收终态
+    if (evt.type === "spawn.started" || evt.type === "spawn.finished") {
+      if (evt.sessionId !== get().sessionId) return;
+      const spawnId = String(p.spawnId ?? "");
+      if (!spawnId) return;
+      if (evt.type === "spawn.started") {
+        // 只跟踪后台派生（同步派生的结果在工具调用内直接可见）
+        if (!Boolean(p.background)) return;
+        const preview = String(p.taskPreview ?? "");
+        const fresh: SpawnBgItem = { spawnId, preview, status: "running", startedAt: Date.now() };
+        set({ spawns: [fresh, ...get().spawns.filter((s) => s.spawnId !== spawnId)].slice(0, 20) });
+        return;
+      }
+      // finished：更新终态；running 条目缺失时补建（事件先于 started 到达等边缘）
+      const status = p.status === "done" ? "done" : p.status === "timeout" ? "timeout" : "failed";
+      const existing = get().spawns.find((s) => s.spawnId === spawnId);
+      const next: SpawnBgItem = existing
+        ? { ...existing, status, resultPreview: String(p.summaryPreview ?? ""), finishedAt: Date.now() }
+        : {
+            spawnId,
+            preview: String(p.taskPreview ?? p.summaryPreview ?? ""),
+            status,
+            resultPreview: String(p.summaryPreview ?? ""),
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+          };
+      set({ spawns: [next, ...get().spawns.filter((s) => s.spawnId !== spawnId)] });
+      return;
+    }
+    // 计划事件（spec plan-mode：WebUI 卡片实时刷新，不靠轮询）
+    // 卡片只跟随当前会话：子会话的计划条目不混入本视图（切过去自然加载）
+    if (evt.type.startsWith("plan.")) {
+      const sid = evt.sessionId || get().sessionId;
+      if (!sid || sid !== get().sessionId) return;
+      switch (evt.type) {
+        case "plan.item":
+          // 新条目累积：防抖拉取最新清单（条目可能连续到达）
+          void get().refreshPlan(sid);
+          break;
+        case "plan.pending":
+          set({ planPending: true });
+          void get().refreshPlan(sid);
+          break;
+        case "plan.approved":
+          // 回放中：applied 事件会带逐条结果
+          set({ planPending: false });
+          break;
+        case "plan.rejected":
+          set({ planPending: false });
+          void get().refreshPlan(sid);
+          break;
+        case "plan.applied":
+          // 事件逐条发出（每 payload 单项）：增量累积成回放结果
+          set({
+            planApplied: [
+              ...(get().planApplied ?? []),
+              {
+                itemId: String(p.itemId ?? ""),
+                tool: String(p.tool ?? ""),
+                target: String(p.target ?? ""),
+                ok: Boolean(p.ok),
+              },
+            ],
+            planPending: false,
+          });
+          void get().refreshPlan(sid);
+          break;
+      }
       return;
     }
     if (evt.sessionId !== get().sessionId) return;
@@ -542,10 +841,12 @@ export const useExm = create<ExmState>((set, get) => ({
         delete parts[agent];
         set({ liveParts: parts });
         const sid2 = evt.sessionId;
+        // 回填代际守卫（同 run.finished）：回拉期间的选择切换不得被旧快照覆盖
+        const refilSeq2 = selectSeq;
         void (async () => {
           try {
             const msgs = await api.messages(sid2);
-            if (useExm.getState().sessionId === sid2) useExm.setState({ messages: msgs });
+            if (useExm.getState().sessionId === sid2 && selectSeq === refilSeq2) useExm.setState({ messages: msgs });
           } catch {
             /* 回拉失败静默：刷新/切会话时自然补齐 */
           }
@@ -653,7 +954,9 @@ export const useExm = create<ExmState>((set, get) => ({
         }
         const statements = (p.statements ?? []) as Statement[];
         const id = get().sessionId!;
-        // 工具轨迹与思维链随最终消息留存（收起栏可随时展开回看，不再「突然消失」）
+        // 权威回填代际：回拉期间若用户切走（selectSession 落了新会话），不得覆盖。
+        // 比较选择代际：回拉发起时的序号仍是最新 → 没有更新的选择发生 → 安全落盘。
+        const refilSeq = selectSeq;
         const toolCalls = get().runToolCalls;
         const thinking = get().liveThinking;
         set({
@@ -682,7 +985,9 @@ export const useExm = create<ExmState>((set, get) => ({
         void (async () => {
           try {
             const msgs = await api.messages(id);
-            if (useExm.getState().sessionId === id) useExm.setState({ messages: msgs });
+            // 双守卫：会话号一致 + 选择代际未变（回拉期间切走又切回的乱序覆盖）。
+            // 服务端快照含最终消息，覆盖是安全的；只在「已发生更新的选择」时让位。
+            if (useExm.getState().sessionId === id && selectSeq === refilSeq) useExm.setState({ messages: msgs });
           } catch {
             /* 回拉失败静默：保留本地乐观消息 */
           }

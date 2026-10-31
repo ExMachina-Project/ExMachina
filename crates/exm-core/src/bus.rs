@@ -11,7 +11,12 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 pub trait MessageBus: Send + Sync {
     async fn publish(&self, topic: &str, msg: Envelope) -> anyhow::Result<()>;
     fn subscribe(&self, topic: &str) -> broadcast::Receiver<Envelope>;
-    async fn request(&self, topic: &str, msg: Envelope, timeout_ms: u64) -> anyhow::Result<Envelope>;
+    async fn request(
+        &self,
+        topic: &str,
+        msg: Envelope,
+        timeout_ms: u64,
+    ) -> anyhow::Result<Envelope>;
 }
 
 pub struct InProcessBus {
@@ -22,7 +27,10 @@ pub struct InProcessBus {
 impl InProcessBus {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(4096);
-        InProcessBus { tx, pending: Arc::new(Mutex::new(HashMap::new())) }
+        InProcessBus {
+            tx,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -81,7 +89,9 @@ pub struct TopicFilter {
 
 impl TopicFilter {
     pub fn new(prefix: impl Into<String>) -> Self {
-        TopicFilter { topic_prefix: prefix.into() }
+        TopicFilter {
+            topic_prefix: prefix.into(),
+        }
     }
     pub fn matches(&self, topic: &str) -> bool {
         self.topic_prefix.is_empty() || topic.starts_with(&self.topic_prefix)
@@ -97,7 +107,10 @@ pub struct RedisBusStub {
 
 impl RedisBusStub {
     pub fn new(url: impl Into<String>) -> Self {
-        RedisBusStub { url: url.into(), namespace: "exmachina".into() }
+        RedisBusStub {
+            url: url.into(),
+            namespace: "exmachina".into(),
+        }
     }
     fn channel(&self, topic: &str) -> String {
         format!("{}:{}", self.namespace, topic)

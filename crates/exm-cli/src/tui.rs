@@ -176,7 +176,7 @@ fn event_to_msg(evt: &CoreEvent) -> Option<Msg> {
             let args = evt
                 .payload
                 .get("args")
-                .map(|a| compact_args(a))
+                .map(compact_args)
                 .unwrap_or_default();
             Some(Msg::Tool { name: name.into(), args, ok: true, out: String::new() })
         }
@@ -214,14 +214,33 @@ fn event_to_msg(evt: &CoreEvent) -> Option<Msg> {
         }
         "spawn.started" => {
             let p = evt.payload.get("taskPreview").and_then(|v| v.as_str()).unwrap_or("");
-            Some(Msg::Plan(format!("🚀 派生子任务：{p}")))
+            let bg = evt.payload.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            if bg {
+                Some(Msg::Plan(format!("🚀 后台子任务启动：{p}（结果稍后可查）")))
+            } else {
+                Some(Msg::Plan(format!("🚀 派生子任务：{p}")))
+            }
         }
         "spawn.finished" => {
             let status = evt.payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let bg = evt.payload.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            let suffix = if bg { "（后台，结果待收）" } else { "" };
             match status {
-                "done" => Some(Msg::Plan("🚀 子任务完成（结论已回传）".into())),
-                "timeout" => Some(Msg::Plan("🚀 子任务超时终止".into())),
-                _ => Some(Msg::Plan(format!("🚀 子任务失败：{status}"))),
+                "done" => Some(Msg::Plan(format!("🚀 子任务完成（结论已回传）{suffix}"))),
+                "timeout" => Some(Msg::Plan(format!("🚀 子任务超时终止{suffix}"))),
+                _ => Some(Msg::Plan(format!("🚀 子任务失败：{status}{suffix}"))),
+            }
+        }
+        "todo.updated" => {
+            let done = evt.payload.get("doneCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total = evt.payload.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let all = evt.payload.get("allDone").and_then(|v| v.as_bool()).unwrap_or(false);
+            if total == 0 {
+                Some(Msg::Plan("📋 任务清单已清空".into()))
+            } else if all {
+                Some(Msg::Plan(format!("📋 任务清单全部完成（{done}/{total}）")))
+            } else {
+                Some(Msg::Plan(format!("📋 任务清单更新：{done}/{total} 完成")))
             }
         }
         _ => None,
@@ -288,7 +307,7 @@ fn msg_lines(m: &Msg, width: usize) -> Vec<Line<'static>> {
     match m {
         Msg::User(t) => {
             let mut v = vec![Line::styled(
-                format!("┌─ 你"),
+                "┌─ 你".to_string(),
                 Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             )];
             for raw in t.split('\n') {
@@ -499,9 +518,7 @@ async fn handle_term(
     use crossterm::event::Event;
     match ev {
         Event::Key(k) => {
-            if handle_key(core, tui, k, evt_tx).await? {
-                return Ok(true);
-            }
+            return handle_key(core, tui, k, evt_tx).await;
         }
         Event::Resize(_, _) => {} // ratatui 下次 draw 自动按新尺寸重绘
         _ => {}
@@ -589,17 +606,15 @@ async fn handle_chat_key(
         KeyCode::Backspace => tui.input_backspace(),
         KeyCode::Left => tui.input_left(),
         KeyCode::Right => tui.input_right(),
-        KeyCode::Up => {
+        KeyCode::Up if !tui.history.is_empty() => {
             // 输入历史回溯
-            if !tui.history.is_empty() {
-                let idx = match tui.history_idx {
-                    None => tui.history.len() - 1,
-                    Some(i) => i.saturating_sub(1),
-                };
-                tui.history_idx = Some(idx);
-                tui.input = tui.history[idx].clone();
-                tui.cursor = tui.input.chars().count();
-            }
+            let idx = match tui.history_idx {
+                None => tui.history.len() - 1,
+                Some(i) => i.saturating_sub(1),
+            };
+            tui.history_idx = Some(idx);
+            tui.input = tui.history[idx].clone();
+            tui.cursor = tui.input.chars().count();
         }
         KeyCode::Down => {
             if let Some(i) = tui.history_idx {
@@ -709,8 +724,17 @@ async fn handle_approval_key(
 /// 斜杠命令执行（共享 panel 分派；输出捕获进消息流）。
 /// 面板命令的输出走 println!（stdout）——TUI 下 stdout 被 ratatui 接管，
 /// 直接打印会打穿界面。这里在 fd 层把 stdout 重定向到管道，捕获后回灌消息流。
+/// 平台分层：Unix 用 POSIX pipe/dup/dup2；Windows 用 CRT 的 _pipe/_dup/_dup2（语义等价）。
 async fn run_slash(core: &Arc<exm_core::Core>, tui: &mut Tui, line: &str) -> Flow {
-    use std::io::Read;
+    // 平台统一的捕获器：创建管道 + 重定向 stdout 进管道 + 命令执行 + 还原
+    let cap = match StdoutCapture::new() {
+        Ok(c) => c,
+        Err(_) => {
+            tui.push(Msg::System("命令执行失败（管道创建失败）".into()));
+            return Flow::Continue;
+        }
+    };
+    let reader = cap.spawn_reader();
     let mut panel = Panel::new(
         core.config().workspace_root.clone(),
         crate::panel::prefs_root(core),
@@ -721,43 +745,8 @@ async fn run_slash(core: &Arc<exm_core::Core>, tui: &mut Tui, line: &str) -> Flo
         session_title: tui.session_title.clone(),
         turns: tui.turns,
     };
-    // 管道 + 后台读线程（防 64KB 管道缓冲写满阻塞）
-    let mut pipe_fds = [0i32; 2];
-    let pipe_ok = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
-    if !pipe_ok {
-        tui.push(Msg::System("命令执行失败（管道创建失败）".into()));
-        return Flow::Continue;
-    }
-    let (read_fd, write_fd) = {
-        use std::os::fd::FromRawFd;
-        unsafe {
-            (
-                std::os::fd::OwnedFd::from_raw_fd(pipe_fds[0]),
-                std::os::fd::OwnedFd::from_raw_fd(pipe_fds[1]),
-            )
-        }
-    };
-    let reader = std::thread::spawn(move || {
-        let mut file = std::fs::File::from(read_fd);
-        let mut out = String::new();
-        let _ = file.read_to_string(&mut out);
-        out
-    });
-    // 重定向 stdout（fd 1）→ 管道写端； OwnedFd Drop 时自动关（先 dup 保底）
-    use std::os::fd::AsRawFd;
-    let write_raw = write_fd.as_raw_fd();
-    let saved = unsafe { libc::dup(1) };
-    unsafe {
-        libc::dup2(write_raw, 1);
-    }
     let flow = panel.dispatch(core, &mut state, line).await;
-    // 还原 fd1 并关管道写端（reader 读到 EOF 收口）；write_fd Drop 重复关由 OwnedFd 语义兜底
-    drop(write_fd);
-    unsafe {
-        libc::dup2(saved, 1);
-        libc::close(saved);
-    }
-    let captured = reader.join().unwrap_or_default();
+    let captured = cap.restore_and_collect(reader);
     if !captured.trim().is_empty() {
         tui.push(Msg::System(captured.trim_end().to_string()));
     }
@@ -771,6 +760,173 @@ async fn run_slash(core: &Arc<exm_core::Core>, tui: &mut Tui, line: &str) -> Flo
 }
 
 // ---------------- fd 操作：libc（crossterm 已带传递依赖，显式声明更稳） ----------------
+
+/// stdout 捕获器：管道接住 TUI 下 panel 命令的 println! 输出，事后整段收回。
+/// 平台实现分列——CRT fd 数值不等于 Windows 原生 HANDLE，两端读策略各自闭环：
+/// Unix 读线程拿 owned File（fd 直转）；Windows 读线程用 CRT `_read` 直接读 fd。
+struct StdoutCapture {
+    /// 管道写端（重定向期间由本结构持有；还原时 drop 关闭 → 读端 EOF）
+    write: Option<std::fs::File>,
+    /// 原 stdout 的备份 fd
+    saved: i32,
+}
+
+impl StdoutCapture {
+    fn new() -> Result<Self, ()> {
+        platform_impl::setup()
+    }
+
+    /// 启动后台读线程（防 64KB 管道缓冲写满阻塞命令执行）
+    fn spawn_reader(&self) -> std::thread::JoinHandle<String> {
+        let read_fd = platform_impl::take_reader_fd();
+        std::thread::spawn(move || platform_impl::read_to_end(read_fd))
+    }
+
+    /// 还原 stdout 并收回捕获的输出（阻塞到读线程收口）
+    fn restore_and_collect(self, reader: std::thread::JoinHandle<String>) -> String {
+        drop(self.write); // 关管道写端 → reader 读到 EOF 收口
+        platform_impl::restore(self.saved);
+        reader.join().unwrap_or_default()
+    }
+}
+
+/// 平台专属 fd 操作。
+/// Unix：POSIX pipe/dup/dup2/close，读端转 owned File 用 `read_to_string`。
+/// Windows：CRT _pipe/_dup/_dup2/_close，读端保持裸 fd 用 `_read` 循环
+///（CRT fd 数值 ≠ 原生 HANDLE，不能 `File::from_raw_fd` 直转，见下方注释）。
+#[cfg(unix)]
+mod platform_impl {
+    use std::os::fd::FromRawFd;
+
+    pub(super) type Raw = i32;
+
+    pub(super) fn setup() -> Result<super::StdoutCapture, ()> {
+        let mut fds = [0i32; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(());
+        }
+        let write = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        READ_FD.with(|cell| cell.set(fds[0]));
+        let saved = unsafe { libc::dup(1) };
+        let write_raw = {
+            use std::os::fd::AsRawFd;
+            write.as_raw_fd()
+        };
+        unsafe {
+            libc::dup2(write_raw, 1);
+        }
+        Ok(super::StdoutCapture {
+            write: Some(write),
+            saved,
+        })
+    }
+
+    pub(super) fn take_reader_fd() -> Raw {
+        // 读端 fd 在 setup 里存进线程局部；take 后置 -1（所有权移交读线程）
+        READ_FD.with(|cell| cell.replace(-1))
+    }
+
+    pub(super) fn read_to_end(fd: Raw) -> String {
+        use std::io::Read;
+        if fd < 0 {
+            return String::new();
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut out = String::new();
+        let _ = file.read_to_string(&mut out);
+        out
+    }
+
+    pub(super) fn restore(saved: Raw) {
+        unsafe {
+            libc::dup2(saved, 1);
+            libc::close(saved);
+        }
+    }
+
+    thread_local! {
+        static READ_FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
+    }
+}
+
+#[cfg(windows)]
+mod platform_impl {
+    // CRT 管道/重定向/读：<io.h> 的 _pipe/_dup/_dup2/_close/_read。extern 声明零新依赖
+    //（libc crate 在 Windows target 不导出这批 CRT 符号）。
+    // 关键：CRT fd 是 int 索引，不是原生 HANDLE——std File::from_raw_fd 在 Windows
+    // 要求原生 HANDLE，直转 CRT fd 是未定义行为。所以读端不走 File，用 _read 闭循环。
+    extern "system" {
+        fn _pipe(fds: *mut i32, psize: u32, textmode: i32) -> i32;
+        fn _dup(fd: i32) -> i32;
+        fn _dup2(src: i32, dst: i32) -> i32;
+        fn _close(fd: i32) -> i32;
+        fn _read(fd: i32, buf: *mut u8, count: u32) -> i32;
+    }
+    /// _O_BINARY（无文本模式翻译），管道缓冲区 64KB 与 Unix 侧行为一致
+    const O_BINARY: i32 = 0x8000;
+    const PIPE_SIZE: u32 = 64 * 1024;
+
+    pub(super) type Raw = i32;
+
+    pub(super) fn setup() -> Result<super::StdoutCapture, ()> {
+        let mut fds = [0i32; 2];
+        if unsafe { _pipe(fds.as_mut_ptr(), PIPE_SIZE, O_BINARY) } != 0 {
+            return Err(());
+        }
+        // 写端同样不能 File::from_raw_fd（CRT fd ≠ HANDLE）——裸 fd 表达，restore 时 _close
+        WRITE_FD.with(|cell| cell.set(fds[1]));
+        READ_FD.with(|cell| cell.set(fds[0]));
+        let saved = unsafe { _dup(1) };
+        if saved < 0 {
+            return Err(());
+        }
+        unsafe { _dup2(fds[1], 1) };
+        Ok(super::StdoutCapture {
+            write: None,
+            saved,
+        })
+    }
+
+    pub(super) fn take_reader_fd() -> Raw {
+        READ_FD.with(|cell| cell.replace(-1))
+    }
+
+    pub(super) fn read_to_end(fd: Raw) -> String {
+        if fd < 0 {
+            return String::new();
+        }
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = unsafe { _read(fd, buf.as_mut_ptr(), buf.len() as u32) };
+            if n <= 0 {
+                break; // 0 = EOF，负 = 错误
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+        unsafe { _close(fd) };
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    pub(super) fn restore(saved: Raw) {
+        // 关管道写端（读端 EOF 收口）→ 还原 stdout → 关备份
+        WRITE_FD.with(|cell| {
+            let fd = cell.replace(-1);
+            if fd >= 0 {
+                unsafe { _close(fd) };
+            }
+        });
+        unsafe {
+            _dup2(saved, 1);
+            _close(saved);
+        }
+    }
+
+    thread_local! {
+        static READ_FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
+        static WRITE_FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
+    }
+}
 
 
 /// 核心事件 → 状态更新
@@ -849,7 +1005,7 @@ fn draw_topbar(f: &mut Frame, tui: &Tui, area: Rect) {
         Span::styled(tabs, Style::new().fg(Color::Cyan)),
         Span::raw(pending),
         Span::styled(
-            format!("  Tab 切页  Ctrl+C 退出"),
+            "  Tab 切页  Ctrl+C 退出".to_string(),
             Style::new().fg(Color::DarkGray),
         ),
     ]);
@@ -943,7 +1099,7 @@ fn draw_input(f: &mut Frame, tui: &mut Tui, area: Rect) {
     let prompt = "> ";
     let cursor = tui.cursor;
     let text = tui.input.clone();
-    let line = Line::from(vec![Span::styled(prompt, style.clone()), Span::raw(text)]);
+    let line = Line::from(vec![Span::styled(prompt, style), Span::raw(text)]);
     let para = Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(title).border_style(style));
     f.render_widget(para, area);
     // 光标绘制：计算 prompt 宽 + 前 cursor 个字符显示宽

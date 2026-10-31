@@ -6,7 +6,6 @@
 //! ④ 严格审批下 git commit（审批单 → 批准 → 代执行）
 
 use exm_core::types::{SpeechTag, Statement};
-use std::sync::Arc;
 
 fn core() -> exm_core::Core {
     let dir = std::env::temp_dir().join(format!("exm-e2e-{}", exm_core::types::new_id()));
@@ -42,15 +41,24 @@ async fn 场景1_计划模式改代码全流程() {
             &s.id,
             &[exm_core::types::ToolName::Read],
             exm_core::types::ToolName::Read,
-            &serde_json::json!({ "path": "mod.rs" }),
+            // 读工作区根（必然存在）：写操作被拦截转条目，mod.rs 尚未落地，
+            // 读它必然失败——用目录列表验证「读不被拦截」的本意
+            &serde_json::json!({ "path": "." }),
         )
         .await;
-    assert!(r2.ok || !r2.ok, "读操作在 plan 模式放行（不转条目）");
+    assert!(r2.ok, "读操作在 plan 模式放行（不转条目）");
     assert_eq!(core.plan_list(&s.id).len(), 1, "写操作转 1 条");
-    assert!(core.approval_list(Some("pending"), 10).unwrap().len() == 1, "审批单已落");
+    assert!(
+        core.approval_list(Some("pending"), 10).unwrap().len() == 1,
+        "审批单已落"
+    );
     // 批准：回放落地
     let rs = core.plan_approve(&s.id).await.expect("批准回放");
-    assert!(rs.iter().all(|(_, r)| r.ok), "回放全部成功（失败数：{}）", rs.iter().filter(|(_, r)| !r.ok).count());
+    assert!(
+        rs.iter().all(|(_, r)| r.ok),
+        "回放全部成功（失败数：{}）",
+        rs.iter().filter(|(_, r)| !r.ok).count()
+    );
     assert!(
         core.config().workspace_root.join("mod.rs").exists(),
         "文件应落地"
@@ -70,7 +78,9 @@ async fn 场景2_工作台改代码与回滚() {
     // 会话轮：模型经 edit 工具改文件（检查点登记）→ 收束（快照挂检查点链）→ undo 回滚
     let s = core.create_session("工作台改码").unwrap();
     // mock 编排：建组 + 最小主智能体（chat 轮次收束需要）
-    core.registry().create_group(Some("t".into()), "e2e组", "").unwrap();
+    core.registry()
+        .create_group(Some("t".into()), "e2e组", "")
+        .unwrap();
     let orch_def = exm_core::types::AgentDefinition {
         name: "主控".into(),
         identifier: "e2e-orch".into(),
@@ -104,15 +114,22 @@ async fn 场景2_工作台改代码与回滚() {
         )
         .await;
     assert!(r.ok, "edit 应成功：{:?}", r.error);
-    assert!(std::fs::read_to_string(ws.join("app.rs")).unwrap().contains("LINE1"));
+    assert!(std::fs::read_to_string(ws.join("app.rs"))
+        .unwrap()
+        .contains("LINE1"));
     // 跑一轮收束（mock 模型不调工具；本测试的 edit 检查点在收束时挂进轮次快照）
     core.chat(&s.id, "确认改动").await.expect("轮次收束");
     // 撤销该轮（restore_files）：文件回滚到改动前
     let snaps = core.store.list_turn_snapshots(&s.id).unwrap();
     let last_turn = snaps.last().map(|t| t.turn).unwrap_or(1);
-    core.undo_session(&s.id, last_turn.saturating_sub(1), true).await.expect("undo");
+    core.undo_session(&s.id, last_turn.saturating_sub(1), true)
+        .await
+        .expect("undo");
     let after = std::fs::read_to_string(ws.join("app.rs")).unwrap();
-    assert!(after.contains("line1") && !after.contains("LINE1"), "检查点回滚生效：{after}");
+    assert!(
+        after.contains("line1") && !after.contains("LINE1"),
+        "检查点回滚生效：{after}"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -122,7 +139,11 @@ async fn 场景3_spawn派生检索子任务() {
     let core = core();
     let s = core.create_session("派生").unwrap();
     // 准备检索目标文件
-    std::fs::write(core.config().workspace_root.join("doc.md"), "# 指南\n关键字 ALPHA-X9").unwrap();
+    std::fs::write(
+        core.config().workspace_root.join("doc.md"),
+        "# 指南\n关键字 ALPHA-X9",
+    )
+    .unwrap();
     // 主会话轮：经 orchestrator 工具面调 spawn（走 Core 装配的真执行器 → chat_execute）
     let orch = core.orchestrator().clone();
     let r = orch
@@ -142,8 +163,14 @@ async fn 场景3_spawn派生检索子任务() {
     assert!(r.ok, "spawn 应成功：{:?}", r.error);
     // spawn.started/finished 事件进事件库（可观测）
     let evts = core.store_events_of(&s.id).unwrap();
-    assert!(evts.iter().any(|e| e.contains("spawn.started")), "启动事件留痕");
-    assert!(evts.iter().any(|e| e.contains("spawn.finished")), "完成事件留痕");
+    assert!(
+        evts.iter().any(|e| e.contains("spawn.started")),
+        "启动事件留痕"
+    );
+    assert!(
+        evts.iter().any(|e| e.contains("spawn.finished")),
+        "完成事件留痕"
+    );
     let _ = std::fs::remove_dir_all(&core.config().workspace_root);
 }
 
@@ -153,7 +180,11 @@ async fn 场景4_严格审批下git提交() {
     let core = core();
     let ws = core.config().workspace_root.clone();
     // 初始化 git 仓
-    std::process::Command::new("git").arg("init").current_dir(&ws).output().unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(&ws)
+        .output()
+        .unwrap();
     std::process::Command::new("git")
         .args(["config", "user.email", "t@e.local"])
         .current_dir(&ws)
@@ -197,7 +228,13 @@ async fn 场景4_严格审批下git提交() {
     eprintln!("pending 审批单：{cmds:?}");
     assert!(!pending.is_empty(), "commit 应产生审批单");
     // 按依赖序批准：add 先于 commit（列表序不保证创建序）
-    pending.sort_by_key(|p| if p.command.starts_with("git add") { 0 } else { 1 });
+    pending.sort_by_key(|p| {
+        if p.command.starts_with("git add") {
+            0
+        } else {
+            1
+        }
+    });
     for ap in pending {
         let id = ap.id.clone();
         let cmd = ap.command.clone();

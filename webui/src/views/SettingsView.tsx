@@ -4,11 +4,13 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Input, InputNumber, message, Select, Switch, Card, Tag } from "antd";
-import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
+import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DeleteOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import { useExm } from "../store";
 import { useTheme } from "../theme";
 import { useT, type TKey } from "../i18n/core";
+import { LANGS, useLang } from "../i18n/core";
 import { PageHeader } from "../components/PageHeader";
+import { MaskedPasswordInput } from "../components/MaskedInput";
 import { api, limitsStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
 import { loadNotifyPrefs, saveNotifyPrefs, type NotifyPrefs } from "../store";
 
@@ -30,6 +32,7 @@ const SECTIONS: Record<string, { icon: React.ReactNode; titleKey: TKey; descKey:
   notify: { icon: <NotificationOutlined />, titleKey: "sec.notify", descKey: "sec.notify.desc" },
   experiments: { icon: <ThunderboltOutlined />, titleKey: "sec.experiments", descKey: "sec.experiments.desc" },
   tools: { icon: <ToolOutlined />, titleKey: "sec.tools", descKey: "sec.tools.desc" },
+  trash: { icon: <DeleteOutlined />, titleKey: "sec.trash", descKey: "sec.trash.desc" },
   ui: { icon: <BgColorsOutlined />, titleKey: "sec.ui", descKey: "sec.ui.desc" },
   version: { icon: <CloudDownloadOutlined />, titleKey: "sec.version", descKey: "sec.version.desc" },
 };
@@ -151,6 +154,10 @@ function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
       return cfg.memory.mdMaxChars;
     case "tools.custom":
       return JSON.stringify(cfg.tools?.custom ?? [], null, 2);
+    case "trash.retentionDays":
+      return cfg.trash?.retentionDays;
+    case "trash.maxBytes":
+      return cfg.trash?.maxBytes;
     case "security.execApproval":
       return cfg.security.execApproval;
     case "security.execAllowlist":
@@ -215,11 +222,13 @@ function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
 export function SettingsView(): React.ReactElement {
   const { config, saveConfig } = useExm();
   const stream = useTheme((s) => s.stream);
+  const lang = useLang((s) => s.lang);
+  const setLang = useLang((s) => s.setLang);
   const setStream = useTheme((s) => s.setStream);
   const t = useT();
   const [schema, setSchema] = useState<ConfigSchema | null>(null);
   const [values, setValues] = useState<Record<string, unknown>>({});
-  const [selected, setSelected] = useState<string>("runtime");
+  const [selected, setSelected] = useState<string>("ui");
   const [saving, setSaving] = useState(false);
   /** schema 载入态：未就绪时分类导航只剩「界面/版本更新」，面板空白，
    *  与「配置项不存在」难以区分；拉取失败同样静默塌缩且无从重试 */
@@ -269,7 +278,7 @@ export function SettingsView(): React.ReactElement {
     setSaving(true);
     try {
       const body: Record<string, unknown> = {};
-      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "experiments"];
+      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "trash", "experiments"];
       for (const [k, v] of Object.entries(values)) {
         if (v === undefined) continue;
         const dot = k.indexOf(".");
@@ -298,19 +307,26 @@ export function SettingsView(): React.ReactElement {
 
   return (
     <div className="pane-wrap">
-      <PageHeader
-        en="CONFIG"
-        title={t("settings.title")}
-        desc={t("settings.desc")}
-      />
+      <PageHeader en="CONFIG" title={t("settings.title")} />
       <div className="settings2">
-        {/* 左侧分类导航：后端 schema 分组 + 本地「界面」偏好 */}
+        {/* 左侧分类导航：「界面」本地偏好置顶 + 后端 schema 分组 + 版本垫底。
+            外层 cfg-nav 是等高卡片（与右侧面板 stretch 对齐）；
+            内层 cfg-nav-scroll 承担 sticky 吸顶与自身滚动 */}
         <nav className="cfg-nav">
+        <div className="cfg-nav-scroll">
           {/* 载入中：分类列表尚不可知，给骨架而非空白（空导航会被当成「配置项没了」） */}
           {schemaLoading && !schemaErr &&
             Array.from({ length: 8 }, (_, i) => (
               <span key={`sk-${i}`} className="cfg-nav-item cfg-nav-skeleton" />
             ))}
+          {/* 界面（本地偏好）：置顶——最常调，后端分组排其后 */}
+          <button
+            className={`cfg-nav-item ${selected === "ui" ? "on" : ""}`}
+            onClick={() => setSelected("ui")}
+          >
+            <span className="cfg-nav-icon">{SECTIONS.ui.icon}</span>
+            <span>{t("sec.ui")}</span>
+          </button>
           {groups.map((g) => (
             <button
               key={g.key}
@@ -321,17 +337,11 @@ export function SettingsView(): React.ReactElement {
               <span>{SECTIONS[g.key] ? t(SECTIONS[g.key]!.titleKey) : g.label}</span>
             </button>
           ))}
-          <button
-            className={`cfg-nav-item ${selected === "ui" ? "on" : ""}`}
-            onClick={() => setSelected("ui")}
-          >
-            <span className="cfg-nav-icon">{SECTIONS.ui.icon}</span>
-            <span>{t("sec.ui")}</span>
-          </button>
           <button className={`cfg-nav-item ${selected === "version" ? "on" : ""}`} onClick={() => setSelected("version")}>
             <span className="cfg-nav-icon">{SECTIONS.version.icon}</span>
             <span>{t("sec.version")}</span>
           </button>
+        </div>
         </nav>
         {/* 右侧面板：仅当前分类 */}
         <section className="cfg-panel">
@@ -363,6 +373,21 @@ export function SettingsView(): React.ReactElement {
                   <Switch checked={stream === "on"} onChange={(v) => setStream(v ? "on" : "off")} />
                 </div>
               </div>
+              {/* 界面语言（原侧栏语言菜单收编至此）：本地偏好，即时生效 */}
+              <div className="cfg2-row">
+                <div className="cfg2-label">
+                  <div className="cfg2-name">{t("settings.ui.langName")}</div>
+                  <div className="cfg2-help">{t("settings.ui.langHelp")}</div>
+                </div>
+                <div className="cfg2-ctrl">
+                  <Select
+                    value={lang}
+                    onChange={(v) => setLang(v)}
+                    style={{ minWidth: 140 }}
+                    options={LANGS.map((l) => ({ value: l.code, label: l.name }))}
+                  />
+                </div>
+              </div>
             </div>
             <div className="cfg2-foot">
               <span className="dim">{t("settings.localTip")}</span>
@@ -373,7 +398,7 @@ export function SettingsView(): React.ReactElement {
           <>
             <header className="cfg-panel-head">
               <h3>{t(meta.titleKey)}</h3>
-              <p>{t(meta.descKey)}。{t("settings.hotTip")}</p>
+              <p>{t(meta.descKey)}</p>
             </header>
             {current.key === "limits" && <LimitsStatsCard />}
             <div className="cfg-list">
@@ -401,7 +426,7 @@ export function SettingsView(): React.ReactElement {
                     onChange={(v) => setField(f.key, v)}
                   />
                 ) : f.kind === "password" ? (
-                  <Input.Password
+                  <MaskedPasswordInput
                     style={{ width: 320 }}
                     value={String(value ?? f.default)}
                     onChange={(e) => setField(f.key, e.target.value)}
@@ -431,7 +456,6 @@ export function SettingsView(): React.ReactElement {
               <Button type="primary" loading={saving} onClick={save}>
                 {t("settings.save")}
               </Button>
-              <span className="dim">{t("settings.hotTip")}</span>
             </div>
           </>
         ) : (
