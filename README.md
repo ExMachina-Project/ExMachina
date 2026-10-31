@@ -7,13 +7,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-dark.svg">
-  <img src="./docs/logo.svg" alt="EXMACHINA" width="132" height="132">
-</picture>
-<br>
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/wordmark-dark.svg">
-  <img src="./docs/wordmark.svg" alt="EXMACHINA" width="600">
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-animated-tagline-dark.svg">
+  <img src="./docs/logo-animated-tagline.svg" alt="EXMACHINA —— 让我们摒弃拟人表达，让AI回归绝对理性" width="660">
 </picture>
 
 </div>
@@ -31,8 +26,6 @@
 <p align="center">
   <a href="./README.md">简体中文</a> · <a href="./README_EN.md">English</a>
 </p>
-
-> 让我们摒弃拟人表达，让AI回归绝对理性。
 
 ---
 
