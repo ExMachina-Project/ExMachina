@@ -36,7 +36,7 @@ crates/exm-cli/       # CLI (exm / exmachina dual entry) | 命令行工具
 webui/                # WebUI (React 19 + antd 6 + Vite)
 agents/               # Agent roster data (JSON + Markdown prompts) | 智能体编成数据
 docs/                 # Contract docs (single source of truth) | 契约文档
-scripts/              # Install / quickstart scripts | 安装/启动脚本
+scripts/              # Install scripts (interactive: prebuilt or source) | 安装脚本（交互式：预编译或源码）
 ```
 
 ## Submitting a Pull Request | 提交 PR
