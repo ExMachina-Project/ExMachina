@@ -233,6 +233,8 @@ export const zh = {
   "models.capVisionRelay": "视觉转述",
   "models.capEmbed": "嵌入（语义检索）",
   "models.capUnset": "未配置",
+  "models.capSet": "已指定",
+  "models.inUse": "使用中",
   "models.capEmbedPh": "留空 = 仅词项召回",
   "models.capSpeechHint": "语音播报输出用的模型；留空 = 全局档案默认（tts-1）。",
   "models.capSttHint": "语音消息转文字用的模型；留空 = 全局档案默认（whisper-1）。",
