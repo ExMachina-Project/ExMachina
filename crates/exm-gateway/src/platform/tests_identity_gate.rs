@@ -196,6 +196,31 @@ mod identity_gate_tests {
         }
     }
 
+    /// 过期自动清理：未兑换的过期码被周期任务清掉，有效码保留
+    #[tokio::test]
+    async fn 配对码_过期自动清理() {
+        let core = test_core();
+        let live = core.issue_pairing_code("待用", None, 600).unwrap();
+        let expired = PairingCode {
+            code: "stale1".into(),
+            note: String::new(),
+            channel_platform: None,
+            created_by: "console".into(),
+            created_at: exm_core::types::now_iso(),
+            expires_at_ms: exm_core::types::now_ms() - 1000,
+            role: String::new(),
+        };
+        core.save_pairing_code(&expired).unwrap();
+
+        let purged = core.purge_expired_pairing_codes();
+        assert_eq!(purged, 1, "应恰好清掉一张过期码");
+        let codes = core.pairing_codes();
+        assert!(codes.iter().any(|c| c.code == live.code), "有效码不得误删");
+        assert!(!codes.iter().any(|c| c.code == "stale1"), "过期码应已删除");
+        // 幂等：无过期码时再跑返回 0
+        assert_eq!(core.purge_expired_pairing_codes(), 0);
+    }
+
     /// 平台限定码：其他平台提交无效
     #[tokio::test]
     async fn 配对码_平台限定() {
