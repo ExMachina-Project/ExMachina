@@ -1857,6 +1857,64 @@ textarea.ant-input:focus,
 .rail-new-session { color: var(--accent); font-weight: 500; }
 /* 日期分组（今天 / 昨天 / 更早）：标题 + 该段新建动作同一行 */
 .session-group { display: block; }
+
+/* ============ 聊天流（chat flow）：外部 IM 对话单元列表 ============ */
+.flow-list { display: flex; flex-direction: column; gap: 8px; }
+.flow-channel { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.flow-channel-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 9px;
+  background: var(--bg-raise);
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+}
+.flow-channel-name { font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-channel-type {
+  margin-left: auto; flex: none;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted-dim);
+}
+.flow-led { width: 7px; height: 7px; flex: none; border-radius: var(--r-full); background: var(--muted-dim); }
+.flow-led.ok { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent); }
+.flow-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+  border-left: 2px solid transparent;
+}
+.flow-row:hover { background: var(--hover); }
+.flow-row.active {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+.flow-kind-icon {
+  flex: none;
+  width: 20px; height: 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm);
+  font-family: var(--mono); font-size: 11px;
+  background: var(--bg-sunken); color: var(--muted);
+}
+.flow-kind-icon.group { color: var(--blue); }
+.flow-kind-icon.dm { color: var(--green); }
+.flow-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.flow-name {
+  font-size: 12.5px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.flow-row.active .flow-name { color: var(--text-hi); }
+.flow-preview {
+  font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.flow-side { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.flow-time { font-size: 10px; font-family: var(--mono); color: var(--muted-dim); }
+.flow-live {
+  width: 6px; height: 6px; border-radius: var(--r-full);
+  background: var(--accent);
+  animation: led-pulse 1.4s ease-in-out infinite;
+}
 .session-group-head {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 9px 4px 3px;

@@ -120,6 +120,8 @@ export const en: Partial<Dict> = {
   "chat.primary": "Primary",
   "chat.unset": "unset",
   "chat.sessions": "Sessions",
+  "chat.flows": "Chat Flows",
+  "chat.flowEmpty": "No messages yet — next one starts a session",
   "chat.sessionsShort": "Chats",
   "chat.delete": "Delete",
   "chat.moreOps": "Session actions",
