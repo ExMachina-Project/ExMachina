@@ -118,6 +118,8 @@ export const zh = {
   "chat.primary": "主智能体",
   "chat.unset": "未设",
   "chat.sessions": "会话",
+  "chat.flows": "聊天流",
+  "chat.flowEmpty": "暂无消息——下条消息自动开会话",
   "chat.sessionsShort": "会话",
   "chat.delete": "删除",
   "chat.moreOps": "会话操作",
