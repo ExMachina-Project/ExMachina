@@ -412,6 +412,18 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             }
         });
     }
+    // 过期配对码自动清理：未兑换的码过期即成死数据，周期清扫（1h 间隔；
+    // TTL 默认 600s，清理粒度远小于有效期，不会出现可见的过期残留）
+    {
+        let core_for_codes = core.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(180)).await; // 启动错峰（与回收站错开）
+            loop {
+                core_for_codes.purge_expired_pairing_codes();
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
     telegram::spawn_supervisor(core.clone());
     napcat::spawn_supervisor(core.clone());
     qqbot::spawn_supervisor(core.clone());

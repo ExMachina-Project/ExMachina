@@ -930,6 +930,16 @@ export function identityUnbind(id: string): Promise<{ ok: boolean }> {
   return req(`/identity/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
+/** 通道身份：撤销配对码（过期清理 / 误签发撤销；幂等） */
+export function identityRevokeCode(code: string): Promise<{ ok: boolean }> {
+  return req(`/identity/code/${encodeURIComponent(code)}`, { method: "DELETE" });
+}
+
+/** 通道身份：一键清理全部过期配对码 */
+export function identityPurgeCodes(): Promise<{ ok: boolean; purged: number }> {
+  return req(`/identity/codes/purge`, { method: "POST", body: JSON.stringify({}) });
+}
+
 export interface LimitsStats {
   enabled: boolean;
   windowSecs: number;

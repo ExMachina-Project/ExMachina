@@ -134,10 +134,29 @@ async fn set_role(State(st): State<AppState>, Json(b): Json<RoleBody>) -> Respon
     }
 }
 
+/// DELETE /api/identity/code/:code：撤销配对码（过期码清理 / 误签发撤销；幂等：不存在也 200）
+async fn revoke_code(State(st): State<AppState>, Path(code): Path<String>) -> Response {
+    match st.core.drop_pairing_code(&code) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/identity/codes/purge：清理全部过期配对码；返回删除数
+async fn purge_expired_codes(State(st): State<AppState>) -> Response {
+    Json(json!({ "ok": true, "purged": st.core.purge_expired_pairing_codes() })).into_response()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/identity/list", get(list))
         .route("/api/identity/code", post(issue))
+        .route("/api/identity/code/:code", axum::routing::delete(revoke_code))
+        .route("/api/identity/codes/purge", post(purge_expired_codes))
         .route("/api/identity/role", post(set_role))
         .route("/api/identity/:id", axum::routing::delete(unbind))
 }

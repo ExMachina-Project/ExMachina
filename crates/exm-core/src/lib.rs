@@ -641,6 +641,23 @@ impl Core {
         self.store.delete_identity(id)
     }
 
+    /// 撤销配对码（控制台删除；幂等：不存在也成功）
+    pub fn drop_pairing_code(&self, code: &str) -> anyhow::Result<()> {
+        self.store.delete_pairing_code(code)
+    }
+
+    /// 清理全部过期配对码，返回清理数（周期任务与控制台「一键清理」共用）
+    pub fn purge_expired_pairing_codes(&self) -> usize {
+        let now = now_ms();
+        let mut n = 0usize;
+        for c in self.pairing_codes() {
+            if now > c.expires_at_ms && self.drop_pairing_code(&c.code).is_ok() {
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// 签发一次性配对码（8 位短码，TTL 由调用方给）
     pub fn issue_pairing_code(
         &self,

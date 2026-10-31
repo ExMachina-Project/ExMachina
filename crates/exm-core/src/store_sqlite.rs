@@ -1117,6 +1117,11 @@ impl SqliteStore {
         }
     }
 
+    /// 显式删除配对码（控制台撤销 / 过期码清理；幂等：不存在也 Ok）
+    pub fn delete_pairing_code(&self, code: &str) -> Result<()> {
+        self.fsdb.delete("pairing_codes", code)
+    }
+
     pub fn put_event_trigger(&self, trigger: &EventTrigger) -> Result<()> {
         self.fsdb.put("event_triggers", &trigger.id, trigger)
     }
