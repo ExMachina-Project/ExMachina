@@ -12,6 +12,7 @@ import { MaskedPasswordInput } from "../components/MaskedInput";
 import { BiliQrLoginModal } from "../components/BiliQrLoginModal";
 import { useExm } from "../store";
 import { useT, type TKey } from "../i18n/core";
+import { fullTime, relativeTime } from "../time";
 
 /** 平台目录：表单字段、凭证判定、回复形态全部由目录驱动 —— 接新平台加一条即可 */
 interface ChanField {
@@ -607,7 +608,9 @@ export function ChannelsView(): React.ReactElement {
                   <b>
                     {c.account ?? c.id} {c.account ? <span className="mono dim">{c.id}</span> : null}
                   </b>
-                  <span className="mono dim">{c.createdAt}</span>
+                  <Tooltip title={fullTime(c.createdAt)}>
+                    <span className="mono dim">{relativeTime(c.createdAt) || c.createdAt}</span>
+                  </Tooltip>
                 </Space>
               ),
             },
