@@ -1105,7 +1105,8 @@ impl LocalRegistry {
         Some(new)
     }
 
-    /// 装载全局技能包（`skills/*.json`，热装载，全体组共用）
+    /// 装载全局技能包（SKILL.md 优先 + 旧 `*.json` 兼容读，热装载，全体组共用）。
+    /// 同 id 同时存在 SKILL.md 与 json 时 SKILL.md 优先（json 视为待迁移旧档）。
     pub fn load_skills(&self) -> anyhow::Result<Vec<crate::types::SkillDef>> {
         let Some(dir) = self.skills_dir() else {
             return Ok(vec![]);
@@ -1113,23 +1114,41 @@ impl LocalRegistry {
         if !dir.exists() {
             return Ok(vec![]);
         }
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-            .collect();
-        files.sort();
-        let mut out = Vec::new();
-        for f in files {
+        // 两类来源：skills/<id>/SKILL.md（新标准）与 skills/<id>.json（旧格式兼容）
+        let mut md: Vec<PathBuf> = Vec::new();
+        let mut json: Vec<PathBuf> = Vec::new();
+        for p in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).map(|e| e.path()) {
+            if p.extension().map(|x| x == "json").unwrap_or(false) {
+                json.push(p);
+            } else if p.is_dir() && p.join("SKILL.md").exists() {
+                md.push(p.join("SKILL.md"));
+            }
+        }
+        md.sort();
+        json.sort();
+        let mut out: Vec<crate::types::SkillDef> = Vec::new();
+        for f in md {
             let raw = std::fs::read_to_string(&f)?;
-            out.push(
-                serde_json::from_str::<crate::types::SkillDef>(&raw)
-                    .with_context(|| format!("技能包校验失败: {}", f.display()))?,
-            );
+            match parse_skill_md(&raw) {
+                Ok(Some(s)) => out.push(s),
+                Ok(None) => anyhow::bail!("技能包缺少 frontmatter: {}", f.display()),
+                Err(e) => anyhow::bail!("技能包校验失败: {}（{e}）", f.display()),
+            }
+        }
+        let md_ids: std::collections::HashSet<String> =
+            out.iter().map(|s| s.id.clone()).collect();
+        for f in json {
+            let raw = std::fs::read_to_string(&f)?;
+            let s: crate::types::SkillDef = serde_json::from_str(&raw)
+                .with_context(|| format!("技能包校验失败: {}", f.display()))?;
+            if !md_ids.contains(&s.id) {
+                out.push(s); // 同 id 的 SKILL.md 已收，旧 json 跳过
+            }
         }
         Ok(out)
     }
 
-    /// 写入技能包到全局目录（id 校验同个体标识）
+    /// 写入技能包到全局目录（SKILL.md 格式：frontmatter + 正文=instructions）
     pub fn write_skill(&self, skill: &crate::types::SkillDef) -> anyhow::Result<()> {
         let Some(dir) = self.skills_dir() else {
             anyhow::bail!("无激活组")
@@ -1145,13 +1164,15 @@ impl LocalRegistry {
         if skill.name.trim().is_empty() || skill.instructions.trim().is_empty() {
             anyhow::bail!("name/instructions 不能为空");
         }
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir.join(id))?;
         let mut skill = skill.clone();
         skill.id = id.to_string();
-        std::fs::write(
-            dir.join(format!("{id}.json")),
-            serde_json::to_string_pretty(&skill)?,
-        )?;
+        std::fs::write(dir.join(id).join("SKILL.md"), render_skill_md(&skill))?;
+        // 同 id 旧 json 一并清除（防双源分叉：load 已优先 SKILL.md，旧档留着徒增困惑）
+        let legacy = dir.join(format!("{id}.json"));
+        if legacy.exists() {
+            let _ = std::fs::remove_file(&legacy);
+        }
         Ok(())
     }
 
@@ -1364,13 +1385,19 @@ impl LocalRegistry {
         let Some(dir) = self.skills_dir() else {
             anyhow::bail!("无激活组")
         };
-        let path = dir.join(format!("{id}.json"));
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        // 新格式目录 + 旧格式单文件都清（迁移期双源）
+        let skill_dir = dir.join(id);
+        let legacy = dir.join(format!("{id}.json"));
+        let mut removed = false;
+        if skill_dir.is_dir() {
+            std::fs::remove_dir_all(&skill_dir)?;
+            removed = true;
         }
+        if legacy.exists() {
+            std::fs::remove_file(&legacy)?;
+            removed = true;
+        }
+        Ok(removed)
     }
 
     // ---------------- 组内个体增删改（主智能体权限 / 用户操作） ----------------
@@ -1923,6 +1950,105 @@ fn parse_inline_list(v: &str) -> Vec<String> {
         .collect()
 }
 
+/// SKILL.md frontmatter 解析：`---` 包裹的元数据头 + Markdown 正文 = instructions。
+/// 行级解析（与 protocol 文档同风格，零 YAML 依赖）；支持 triggers/agents 的
+/// 内联列表（`[a, b]`）与逐行 `- item` 两种写法。无 frontmatter 返回 None。
+fn parse_skill_md(raw: &str) -> Result<Option<crate::types::SkillDef>, String> {
+    let raw = raw.trim_start_matches('\u{feff}');
+    let mut lines = raw.lines();
+    if lines.next().map(|l| l.trim()) != Some("---") {
+        return Ok(None);
+    }
+    let mut id = String::new();
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut triggers: Vec<String> = Vec::new();
+    let mut agents: Vec<String> = Vec::new();
+    let mut created_at = String::new();
+    let mut closed = false;
+    // 逐行列表项的归属：跟随最近声明的列表字段（triggers → agents）
+    let mut list_field: u8 = 0; // 0=无 1=triggers 2=agents
+    for line in &mut lines {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        if let Some(item) = line.trim().strip_prefix("- ") {
+            let item = item.trim().to_string();
+            if item.is_empty() {
+                continue;
+            }
+            match list_field {
+                2 => agents.push(item),
+                1 => triggers.push(item),
+                _ => {}
+            }
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        match k {
+            "id" => id = v.to_string(),
+            "name" => name = v.to_string(),
+            "description" => description = v.to_string(),
+            "triggers" => {
+                triggers = parse_inline_list(v);
+                list_field = 1;
+            }
+            "agents" => {
+                agents = parse_inline_list(v);
+                list_field = 2;
+            }
+            "createdAt" | "created_at" => created_at = v.to_string(),
+            _ => {}
+        }
+    }
+    if !closed {
+        return Err("frontmatter 未闭合".into());
+    }
+    if id.trim().is_empty() || name.trim().is_empty() {
+        return Err("id/name 不能为空".into());
+    }
+    let instructions: String = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    if instructions.is_empty() {
+        return Err("正文（instructions）不能为空".into());
+    }
+    Ok(Some(crate::types::SkillDef {
+        id,
+        name,
+        description,
+        triggers,
+        instructions,
+        agents,
+        created_at,
+    }))
+}
+
+/// SKILL.md 渲染：frontmatter（内联列表）+ 空行 + Markdown 正文
+fn render_skill_md(s: &crate::types::SkillDef) -> String {
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("id: {}\n", s.id));
+    fm.push_str(&format!("name: {}\n", s.name));
+    if !s.description.trim().is_empty() {
+        fm.push_str(&format!("description: {}\n", s.description));
+    }
+    if !s.triggers.is_empty() {
+        fm.push_str(&format!("triggers: [{}]\n", s.triggers.join(", ")));
+    }
+    if !s.agents.is_empty() {
+        fm.push_str(&format!("agents: [{}]\n", s.agents.join(", ")));
+    }
+    if !s.created_at.trim().is_empty() {
+        fm.push_str(&format!("createdAt: {}\n", s.created_at));
+    }
+    fm.push_str("---\n\n");
+    fm.push_str(s.instructions.trim());
+    fm.push('\n');
+    fm
+}
+
 #[cfg(test)]
 mod protocol_parse_tests {
     use super::*;
@@ -2015,5 +2141,78 @@ mod skills_dir_tests {
         assert!(list.iter().any(|s| s.id == "fresh"));
         assert!(!list.iter().any(|s| s.id == "stale"), "并存时只读新目录");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// SKILL.md 往返：write 落 SKILL.md 格式，load 原样读回（通用标准格式的主链路）
+    #[test]
+    fn 技能_SKILLMD往返() {
+        let (reg, root) = mk_registry("md");
+        let s = crate::types::SkillDef {
+            id: "rt-skill".into(),
+            name: "往返技能".into(),
+            description: "验证 SKILL.md 读写".into(),
+            triggers: vec!["往返".into(), "roundtrip".into()],
+            instructions: "1) 约束一\n2) 约束二".into(),
+            agents: vec![],
+            created_at: "2026-10-31T00:00:00.000Z".into(),
+        };
+        reg.write_skill(&s).unwrap();
+        let dir = reg.skills_dir().unwrap();
+        assert!(dir.join("rt-skill/SKILL.md").exists(), "写入应为 SKILL.md 格式");
+        let list = reg.load_skills().unwrap();
+        let got = list.iter().find(|x| x.id == "rt-skill").expect("应可读回");
+        assert_eq!(got.name, "往返技能");
+        assert_eq!(got.triggers, vec!["往返".to_string(), "roundtrip".to_string()]);
+        assert!(got.instructions.contains("约束一"));
+        assert!(got.agents.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 同 id 双源：SKILL.md 优先，旧 json 不分叉；write 后旧 json 被清
+    #[test]
+    fn 技能_同id双源SKILLMD优先() {
+        let (reg, root) = mk_registry("dup");
+        let skills = root.join("entities").join("skills");
+        // 旧 json 版本
+        mk_skill(&skills, "dual");
+        // SKILL.md 版本（内容不同）
+        std::fs::create_dir_all(skills.join("dual")).unwrap();
+        std::fs::write(
+            skills.join("dual/SKILL.md"),
+            "---\nid: dual\nname: MD版\n---\n\nMD 正文\n",
+        )
+        .unwrap();
+        let list = reg.load_skills().unwrap();
+        let got = list.iter().find(|x| x.id == "dual").unwrap();
+        assert_eq!(got.name, "MD版", "SKILL.md 应优先于旧 json");
+        // write 清旧 json
+        reg.write_skill(&crate::types::SkillDef {
+            id: "dual".into(),
+            name: "新版".into(),
+            description: String::new(),
+            triggers: vec![],
+            instructions: "新正文".into(),
+            agents: vec![],
+            created_at: String::new(),
+        })
+        .unwrap();
+        assert!(!skills.join("dual.json").exists(), "write 应清除同 id 旧 json");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// SKILL.md 解析：逐行列表项写法 + frontmatter 异常路径
+    #[test]
+    fn 技能_SKILLMD解析_逐行列表与异常() {
+        // 逐行列表
+        let md = "---\nid: line-list\nname: 逐行\ntriggers:\n  - 甲\n  - 乙\nagents:\n  - machina\n---\n\n正文\n";
+        let s = parse_skill_md(md).unwrap().unwrap();
+        assert_eq!(s.triggers, vec!["甲".to_string(), "乙".to_string()]);
+        assert_eq!(s.agents, vec!["machina".to_string()]);
+        // 无 frontmatter
+        assert!(parse_skill_md("没有头").unwrap().is_none());
+        // 未闭合
+        assert!(parse_skill_md("---\nid: x\nname: y\n").is_err());
+        // 缺正文
+        assert!(parse_skill_md("---\nid: x\nname: y\n---\n").is_err());
     }
 }
