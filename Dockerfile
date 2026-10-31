@@ -46,7 +46,6 @@ COPY --from=rust-builder /build/target/release/exmachina /usr/local/bin/exmachin
 COPY --from=rust-builder /build/target/release/exm-gateway /usr/local/bin/exm-gateway
 COPY --from=webui-builder /build/dist ./webui/dist
 COPY entities ./entities
-COPY skills ./skills
 ENV EXM_LANG=zh
 ENV RUST_LOG=info
 # git 短哈希:runtime 阶段才注入(进程运行时读取)——若放 builder 阶段,每个 commit 都会作废整条 Rust 编译缓存

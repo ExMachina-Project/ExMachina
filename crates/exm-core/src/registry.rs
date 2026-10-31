@@ -1064,14 +1064,45 @@ impl LocalRegistry {
 
     // ---------------- 技能包（激活组，docs/10） ----------------
 
-    /// 技能全局目录：`skills/`，全体组共用（技能是动态加载的作业指令，不做组隔离）
+    /// 技能全局目录：`entities/skills/`，全体组共用（技能是动态加载的作业指令，不做组隔离）。
+    /// 历史路径是项目根 `skills/`（重组遗留）：存在旧目录且无新目录时自动迁移，
+    /// 旧目录与新目录并存时新目录优先（旧目录只读兼容）。
     fn skills_dir(&self) -> Option<PathBuf> {
-        Some(
-            self.dir
-                .parent()
-                .unwrap_or(self.dir.as_path())
-                .join("skills"),
-        )
+        let parent = self
+            .dir
+            .parent()
+            .unwrap_or(self.dir.as_path())
+            .to_path_buf();
+        let new = parent.join("entities").join("skills");
+        let old = parent.join("skills");
+        if new.is_dir() {
+            return Some(new);
+        }
+        if old.is_dir() {
+            // 旧目录存量迁移：entities/skills 建不出来或写失败时退回旧目录（只读兼容）
+            if std::fs::create_dir_all(&new).is_ok() {
+                let moved = std::fs::read_dir(&old)
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok())
+                            .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                            .map(|e| e.path())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut ok = true;
+                for p in moved {
+                    let dst = new.join(p.file_name().unwrap_or_default());
+                    if std::fs::rename(&p, &dst).is_err() {
+                        ok = false;
+                    }
+                }
+                if ok {
+                    return Some(new);
+                }
+            }
+            return Some(old);
+        }
+        Some(new)
     }
 
     /// 装载全局技能包（`skills/*.json`，热装载，全体组共用）
@@ -1924,5 +1955,65 @@ mod protocol_parse_tests {
         let p = parse_protocol_doc(raw).unwrap().unwrap();
         assert_eq!(p.scope, "both");
         assert!(p.injects_plan() && p.injects_unit());
+    }
+}
+
+#[cfg(test)]
+mod skills_dir_tests {
+    use super::*;
+
+    /// 生产同构布局：<workspace>/entities 作为 agents_dir（config.rs 口径）
+    fn mk_registry(tag: &str) -> (LocalRegistry, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("exm-skills-{tag}-{}", crate::types::new_id()));
+        let reg = LocalRegistry::new(root.join("entities")).unwrap();
+        (reg, root)
+    }
+
+    fn mk_skill(dir: &std::path::Path, id: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let s = serde_json::json!({
+            "id": id, "name": id, "description": "测试技能",
+            "triggers": [id], "instructions": "测试指令"
+        });
+        std::fs::write(dir.join(format!("{id}.json")), s.to_string()).unwrap();
+    }
+
+    /// 技能目录修复回归：读取路径必须是 entities/skills（技能实体的真实存放地；
+    /// 此前解析到项目根 skills/——重组遗留路径，容器内恒为空导致技能面全空）
+    #[test]
+    fn 技能目录_新路径优先() {
+        let (reg, root) = mk_registry("new");
+        let dir = reg.skills_dir().unwrap();
+        assert_eq!(
+            dir,
+            root.join("entities").join("skills"),
+            "技能目录应解析到 entities/skills"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 旧目录存量自动迁移：老部署技能在根 skills/ → 迁到 entities/skills 后可读
+    #[test]
+    fn 技能目录_旧目录迁移() {
+        let (reg, root) = mk_registry("mig");
+        mk_skill(&root.join("skills"), "legacy");
+        // skills_dir 解析即迁移：legacy 应已搬到新目录
+        let dir = reg.skills_dir().unwrap();
+        assert!(dir.join("legacy.json").exists(), "旧技能应已迁移到新目录");
+        let list = reg.load_skills().unwrap();
+        assert!(list.iter().any(|s| s.id == "legacy"), "迁移后可装载：{list:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 新旧并存：新目录优先，旧目录不再吞写
+    #[test]
+    fn 技能目录_并存时新目录优先() {
+        let (reg, root) = mk_registry("both");
+        mk_skill(&root.join("entities").join("skills"), "fresh");
+        mk_skill(&root.join("skills"), "stale");
+        let list = reg.load_skills().unwrap();
+        assert!(list.iter().any(|s| s.id == "fresh"));
+        assert!(!list.iter().any(|s| s.id == "stale"), "并存时只读新目录");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
