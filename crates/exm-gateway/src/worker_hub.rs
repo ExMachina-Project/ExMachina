@@ -168,7 +168,9 @@ impl RemoteExecutor for WorkerHub {
                 .find(|w| w.agents.is_empty() || w.agents.contains(&def.identifier))
                 .map(|w| w.out.clone())
         };
-        let Some(out) = out else { anyhow::bail!("无在线工作者") };
+        let Some(out) = out else {
+            anyhow::bail!("无在线工作者")
+        };
         let did = format!("d{}", &exm_core::types::new_id()[..10]);
         let (report_tx, report_rx) = oneshot::channel();
         let (token_tx, mut token_rx) = mpsc::unbounded_channel::<(String, String)>();
@@ -187,7 +189,8 @@ impl RemoteExecutor for WorkerHub {
             order: order.clone(),
             attach_images,
         })?;
-        out.send(Message::Text(frame)).map_err(|e| anyhow::anyhow!("工作者连接已断: {e}"))?;
+        out.send(Message::Text(frame))
+            .map_err(|e| anyhow::anyhow!("工作者连接已断: {e}"))?;
 
         // 超时 = 派发约束；期间 token 泵即时回调（report 就绪前持续消费）
         let timeout = std::time::Duration::from_millis(order.constraints.timeout_ms.max(5_000));

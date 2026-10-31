@@ -10,8 +10,12 @@
 //! 出站 typing：Slack 机器人无输入中指示 API，能力矩阵恒关（不支持项见 platform::caps 注释）。
 //! 监督循环每 5 秒对账：新增账号拉起会话，删除/停用/凭证变更的账号回收任务。
 
-use crate::channel_util::{builtin_command, classify_attachment, first_seen, media_placeholder, voice_transcript_note};
-use crate::platform::{admit, report_status, spawn_reply, GateDecision, Channel, ChannelRun, InboundCtx, MediaItem};
+use crate::channel_util::{
+    builtin_command, classify_attachment, first_seen, media_placeholder, voice_transcript_note,
+};
+use crate::platform::{
+    admit, report_status, spawn_reply, Channel, ChannelRun, GateDecision, InboundCtx, MediaItem,
+};
 use exm_core::Core;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
@@ -20,8 +24,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 
 const API: &str = "https://slack.com/api";
 /// chat.postMessage 单条上限 4000 字符，留出余量
@@ -39,7 +43,11 @@ fn sessions() -> &'static Mutex<HashMap<String, Sess>> {
 }
 
 fn fingerprint(ch: &Channel) -> String {
-    format!("{}|{}", ch.cfg("appToken").unwrap_or_default(), ch.token.clone().unwrap_or_default())
+    format!(
+        "{}|{}",
+        ch.cfg("appToken").unwrap_or_default(),
+        ch.token.clone().unwrap_or_default()
+    )
 }
 
 pub fn spawn_supervisor(core: Arc<Core>) {
@@ -58,7 +66,10 @@ async fn reconcile(core: &Arc<Core>) {
             c.kind == "slack"
                 && c.enabled
                 && c.cfg("appToken").is_some()
-                && c.token.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                && c.token
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false)
         })
         .collect();
 
@@ -84,14 +95,23 @@ async fn reconcile(core: &Arc<Core>) {
         let ch_task = ch.clone();
         let fp = fingerprint(ch);
         let handle = tokio::spawn(async move { session_loop(core, ch_task).await });
-        guards.insert(ch.id.clone(), Sess { handle, fingerprint: fp });
+        guards.insert(
+            ch.id.clone(),
+            Sess {
+                handle,
+                fingerprint: fp,
+            },
+        );
     }
 }
 
 async fn session_loop(core: Arc<Core>, ch: Channel) {
     let app_token = ch.cfg("appToken").unwrap_or_default();
     let bot_token = ch.token.clone().unwrap_or_default();
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(30)).build() else {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    else {
         eprintln!("[slack:{}] HTTP 客户端构建失败", ch.id);
         return;
     };
@@ -108,7 +128,11 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
             if v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
                 let name = v.get("user").and_then(|x| x.as_str()).unwrap_or("?");
                 let team = v.get("team").and_then(|x| x.as_str()).unwrap_or("");
-                bot_user = v.get("user_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                bot_user = v
+                    .get("user_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 println!("[slack:{}] 机器人已连结：{name}（{team}）", ch.id);
                 report_status(&ch.id, "ok", format!("机器人 {name}"));
             } else {
@@ -141,7 +165,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                     v.get("url").and_then(|u| u.as_str()).map(|u| u.to_string())
                 } else {
                     let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("unknown");
-                    let msg = format!("Socket Mode 开启失败：{err}（检查 appToken 与 connections:write 权限）");
+                    let msg = format!(
+                        "Socket Mode 开启失败：{err}（检查 appToken 与 connections:write 权限）"
+                    );
                     eprintln!("[slack:{}] {msg}", ch.id);
                     report_status(&ch.id, "error", msg);
                     None
@@ -192,7 +218,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                     break;
                 }
             };
-            let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
             match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
                 "hello" => {
                     println!("[slack:{}] Socket Mode 已连结", ch.id);
@@ -200,7 +228,10 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                     fail_streak = 0;
                 }
                 "disconnect" => {
-                    let reason = v.get("reason").and_then(|x| x.as_str()).unwrap_or("unknown");
+                    let reason = v
+                        .get("reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("unknown");
                     eprintln!("[slack:{}] 服务端要求重连：{reason}", ch.id);
                     report_status(&ch.id, "error", format!("服务端要求重连：{reason}"));
                     break;
@@ -214,7 +245,10 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         }
                     }
                     let payload = v.get("payload").cloned().unwrap_or(Value::Null);
-                    let Some((channel, ts, mentioned, text)) = parse_event(&payload, &bot_user) else { continue };
+                    let Some((channel, ts, mentioned, text)) = parse_event(&payload, &bot_user)
+                    else {
+                        continue;
+                    };
                     // 消息去重：Slack 对同一条消息会同时投 `message` 与 `app_mention` 双事件（同 ts），
                     // 不去重会执行两轮；配合 parse_event 的提及归一化，无论哪个事件先到语义一致
                     if !first_seen(&format!("slack:{}", ch.id), &ts) {
@@ -224,19 +258,32 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                     // 先盘附件再定正文：纯文件消息没有文字，需要占位正文兜底——
                     // 曾漏接 media_placeholder，空正文直接进会话，「只发一个文件」石沉大海
                     let mut inbound: Vec<(String, String, String, String)> = Vec::new();
-                    if let Some(files) = payload.pointer("/event/files").and_then(|x| x.as_array()) {
+                    if let Some(files) = payload.pointer("/event/files").and_then(|x| x.as_array())
+                    {
                         for f in files {
-                            let url = f.get("url_private_download").or_else(|| f.get("url_private")).and_then(|x| x.as_str()).unwrap_or("");
+                            let url = f
+                                .get("url_private_download")
+                                .or_else(|| f.get("url_private"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("");
                             let name = f.get("name").and_then(|x| x.as_str()).unwrap_or("file.bin");
                             if url.is_empty() {
                                 continue;
                             }
-                            let kind = classify_attachment(f.get("mimetype").and_then(|x| x.as_str()).unwrap_or(""));
-                            inbound.push((kind.to_string(), url.to_string(), name.to_string(), bot_token.clone()));
+                            let kind = classify_attachment(
+                                f.get("mimetype").and_then(|x| x.as_str()).unwrap_or(""),
+                            );
+                            inbound.push((
+                                kind.to_string(),
+                                url.to_string(),
+                                name.to_string(),
+                                bot_token.clone(),
+                            ));
                         }
                     }
                     let mut text = if text.trim().is_empty() {
-                        let kinds: Vec<&str> = inbound.iter().map(|(k, _, _, _)| k.as_str()).collect();
+                        let kinds: Vec<&str> =
+                            inbound.iter().map(|(k, _, _, _)| k.as_str()).collect();
                         media_placeholder(&kinds)
                     } else {
                         text
@@ -245,7 +292,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                     if text.trim().is_empty() {
                         continue;
                     }
-                    if !ch.allowed_chats.is_empty() && !ch.allowed_chats.iter().any(|a| a == &channel) {
+                    if !ch.allowed_chats.is_empty()
+                        && !ch.allowed_chats.iter().any(|a| a == &channel)
+                    {
                         eprintln!("[slack:{}] {channel} 不在白名单，已忽略", ch.id);
                         continue;
                     }
@@ -256,7 +305,14 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         .and_then(|x| x.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let gate_ctx = InboundCtx { text: &text, external_id: &external_id, display_name: &external_id, is_group, mentioned, chat_key: channel.as_str() };
+                    let gate_ctx = InboundCtx {
+                        text: &text,
+                        external_id: &external_id,
+                        display_name: &external_id,
+                        is_group,
+                        mentioned,
+                        chat_key: channel.as_str(),
+                    };
                     match admit(core.as_ref(), &ch, &gate_ctx).await {
                         GateDecision::Allow => {}
                         GateDecision::Ignore => continue,
@@ -264,7 +320,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                             let client2 = client.clone();
                             let token2 = bot_token.clone();
                             let chan = channel.clone();
-                            tokio::spawn(async move { send_message(&client2, &token2, &chan, &reply).await });
+                            tokio::spawn(async move {
+                                send_message(&client2, &token2, &chan, &reply).await
+                            });
                             continue;
                         }
                     }
@@ -273,7 +331,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         let client2 = client.clone();
                         let token2 = bot_token.clone();
                         let chan = channel.clone();
-                        tokio::spawn(async move { send_message(&client2, &token2, &chan, &reply).await });
+                        tokio::spawn(async move {
+                            send_message(&client2, &token2, &chan, &reply).await
+                        });
                         continue;
                     }
                     let core = core.clone();
@@ -285,19 +345,40 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         let mut saved: Vec<(String, String, String)> = Vec::new();
                         let mut transcript_note = String::new();
                         for (kind, url, name, tk) in inbound {
-                            if let Some(bytes) = crate::platform::download_bytes_auth(&url, &tk).await {
-                                if let Some(p) = crate::platform::save_inbound_media(&core, &ch2, &name, bytes.clone()).await {
+                            if let Some(bytes) =
+                                crate::platform::download_bytes_auth(&url, &tk).await
+                            {
+                                if let Some(p) = crate::platform::save_inbound_media(
+                                    &core,
+                                    &ch2,
+                                    &name,
+                                    bytes.clone(),
+                                )
+                                .await
+                                {
                                     saved.push((kind.clone(), p, name.clone()));
                                 }
                                 if kind == "voice" {
-                                    transcript_note.push_str(&voice_transcript_note(&core, bytes, &name).await);
+                                    transcript_note.push_str(
+                                        &voice_transcript_note(&core, bytes, &name).await,
+                                    );
                                 }
                             }
                         }
                         if !transcript_note.is_empty() {
                             text.push_str(&transcript_note);
                         }
-                        handle_message(&core, &ch2, &client2, &token2, &channel, &external_id, saved, text.trim()).await;
+                        handle_message(
+                            &core,
+                            &ch2,
+                            &client2,
+                            &token2,
+                            &channel,
+                            &external_id,
+                            saved,
+                            text.trim(),
+                        )
+                        .await;
                     });
                 }
                 _ => {}
@@ -325,10 +406,14 @@ fn parse_event(payload: &Value, bot_user: &str) -> Option<(String, String, bool,
         return None;
     }
     let channel = ev.get("channel").and_then(|x| x.as_str())?.to_string();
-    let ts = ev.get("ts").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let ts = ev
+        .get("ts")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let content = ev.get("text").and_then(|x| x.as_str()).unwrap_or("");
-    let mentioned = t == "app_mention"
-        || (!bot_user.is_empty() && content.contains(&format!("<@{bot_user}>")));
+    let mentioned =
+        t == "app_mention" || (!bot_user.is_empty() && content.contains(&format!("<@{bot_user}>")));
     Some((channel, ts, mentioned, strip_mentions(content)))
 }
 
@@ -365,11 +450,24 @@ async fn handle_message(
     media: Vec<(String, String, String)>,
     text: &str,
 ) {
-    let Some((run, rx)) = ChannelRun::begin(core, ch, channel).await else { return };
-    core.stamp_session_origin(&run.session_id, external_id, core.identity_of(&ch.id, external_id).map(|i| i.id).unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id)).as_str());
+    let Some((run, rx)) = ChannelRun::begin(core, ch, channel).await else {
+        return;
+    };
+    core.stamp_session_origin(
+        &run.session_id,
+        external_id,
+        core.identity_of(&ch.id, external_id)
+            .map(|i| i.id)
+            .unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id))
+            .as_str(),
+    );
     // 入站媒体注入（组 6.4）
     let note = crate::platform::stage_inbound_media(core, &run.session_id, &media);
-    let text = if note.is_empty() { text.to_string() } else { format!("{text}{note}") };
+    let text = if note.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}{note}")
+    };
     let client2 = client.clone();
     let token2 = bot_token.to_string();
     let chan = channel.to_string();
@@ -418,7 +516,10 @@ async fn slack_send_media(
     let up: Value = match client
         .post(format!("{API}/files.getUploadURLExternal"))
         .bearer_auth(bot_token)
-        .query(&[("filename", name.as_str()), ("length", &bytes.len().to_string())])
+        .query(&[
+            ("filename", name.as_str()),
+            ("length", &bytes.len().to_string()),
+        ])
         .send()
         .await
     {
@@ -428,10 +529,18 @@ async fn slack_send_media(
         },
         Err(_) => return false,
     };
-    let Some(upload_url) = up.get("upload_url").and_then(|x| x.as_str()).map(|s| s.to_string()) else {
+    let Some(upload_url) = up
+        .get("upload_url")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+    else {
         return false;
     };
-    let Some(file_id) = up.get("file_id").and_then(|x| x.as_str()).map(|s| s.to_string()) else {
+    let Some(file_id) = up
+        .get("file_id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+    else {
         return false;
     };
     // ② 直传字节
@@ -473,7 +582,9 @@ async fn slack_send_media(
 /// 回帖里的代码与泛型（`Vec<T>`、`a && b`）会被误解析成实体甚至整段吞掉——
 /// 出站前统一转义保证字面显示。先转 `&`，避免二次转义。
 fn escape_mrkdwn(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 async fn send_message(client: &reqwest::Client, bot_token: &str, channel: &str, text: &str) {
@@ -547,7 +658,10 @@ mod tests {
     #[test]
     fn 实体转义_字面显示防误解析() {
         assert_eq!(escape_mrkdwn("a<b&c>d"), "a&lt;b&amp;c&gt;d");
-        assert_eq!(escape_mrkdwn("Vec<T> 与 && 以及 <@U1>"), "Vec&lt;T&gt; 与 &amp;&amp; 以及 &lt;@U1&gt;");
+        assert_eq!(
+            escape_mrkdwn("Vec<T> 与 && 以及 <@U1>"),
+            "Vec&lt;T&gt; 与 &amp;&amp; 以及 &lt;@U1&gt;"
+        );
         assert_eq!(escape_mrkdwn("普通中文"), "普通中文");
         assert_eq!(escape_mrkdwn(""), "");
         // 幂等性来自「先转 &」：已转义文本不会被二次转坏

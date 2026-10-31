@@ -68,12 +68,19 @@ fn 装载编成_数据契约完整() {
     let core = Core::with_config(cfg).expect("创建 Core 失败");
     let agents = core.agents();
     assert!(agents.len() >= 10, "编成装载异常：个体数 {}", agents.len());
-    let orchestrators = agents.iter().filter(|a| matches!(a.tier, Tier::Orchestrator)).count();
+    let orchestrators = agents
+        .iter()
+        .filter(|a| matches!(a.tier, Tier::Orchestrator))
+        .count();
     assert_eq!(orchestrators, 1, "指挥体应恰好 1 个");
 
     // 个体契约：职责描述非空、能力标签非空、提示词文件存在
     for a in &agents {
-        assert!(!a.description.trim().is_empty(), "{} 缺少职责描述", a.identifier);
+        assert!(
+            !a.description.trim().is_empty(),
+            "{} 缺少职责描述",
+            a.identifier
+        );
         assert!(!a.capabilities.is_empty(), "{} 缺少能力标签", a.identifier);
         assert!(
             core.registry().prompt_exists(&a.prompt_file),
@@ -121,10 +128,17 @@ fn 协议契约_frontmatter完整且可注入() {
     assert!(protocols.len() >= 12, "协议装载异常：{}", protocols.len());
     let mut ids = std::collections::HashSet::new();
     for p in &protocols {
-        assert!(!p.id.trim().is_empty() && !p.name.trim().is_empty(), "协议缺少 id/name");
+        assert!(
+            !p.id.trim().is_empty() && !p.name.trim().is_empty(),
+            "协议缺少 id/name"
+        );
         assert!(ids.insert(p.id.clone()), "协议 id 重复：{}", p.id);
         assert!(!p.body.trim().is_empty(), "协议 {} 正文为空", p.id);
-        assert!(!p.triggers.is_empty(), "协议 {} 未声明触发词（无法参与注入）", p.id);
+        assert!(
+            !p.triggers.is_empty(),
+            "协议 {} 未声明触发词（无法参与注入）",
+            p.id
+        );
     }
 }
 
@@ -139,7 +153,11 @@ fn 自由建组_自定义集群热切换() {
     let _ = std::fs::remove_dir_all(root.join("entities").join("groups").join("smoke-style"));
 
     let g = core
-        .create_group(Some("smoke-style".into()), "风格实验组", "验证自由建组与热切换")
+        .create_group(
+            Some("smoke-style".into()),
+            "风格实验组",
+            "验证自由建组与热切换",
+        )
         .expect("建组失败");
     assert_eq!(g.id, "smoke-style");
     assert!(!g.builtin);
@@ -165,15 +183,22 @@ fn 自由建组_自定义集群热切换() {
     // 组感知：指挥体身份随激活组主智能体解析
     assert_eq!(core.orchestrator_id(), "chief-writer");
     assert!(core.agent("chief-writer").is_some());
-    assert_eq!(core.active_group_meta().unwrap().primary.as_deref(), Some("chief-writer"));
+    assert_eq!(
+        core.active_group_meta().unwrap().primary.as_deref(),
+        Some("chief-writer")
+    );
 
     // 技能全局共用：切到自定义组后仍装载同一份技能（不做组隔离）
     let skills_in_group = core.skills().expect("技能装载失败");
     assert!(!skills_in_group.is_empty(), "自定义组应能看到全局技能包");
 
     // 组级记忆：写入归属激活组；组内可见，切回默认组后不可见
-    core.memory_remember(MemoryDraft::new(MemoryKind::Fact, "风格组私有结论", "仅 smoke-style 组可见"))
-        .expect("组内写入记忆失败");
+    core.memory_remember(MemoryDraft::new(
+        MemoryKind::Fact,
+        "风格组私有结论",
+        "仅 smoke-style 组可见",
+    ))
+    .expect("组内写入记忆失败");
     let in_group = core.memory_recall("风格组私有结论", Some(5)).unwrap();
     assert!(
         in_group.iter().any(|h| h.entry.title == "风格组私有结论"),
@@ -220,20 +245,26 @@ async fn 执行审批_高危命令拦截与批准放行() {
         .execute(
             "coding-agent",
             "ses",
-                        &[ToolName::Terminal],
+            &[ToolName::Terminal],
             ToolName::Terminal,
             &serde_json::json!({ "command": "echo blocked-test" }),
         )
         .await;
     assert!(!blocked.ok, "未放行命令应被拦截");
-    assert!(blocked.error.unwrap_or_default().contains("待人工审批"), "拦截信息应含审批提示");
+    assert!(
+        blocked.error.unwrap_or_default().contains("待人工审批"),
+        "拦截信息应含审批提示"
+    );
     // 事件流：先 tool.call 再 approval.required（工具执行可视化事件与审批事件并存）
     let mut evt = rx.try_recv().expect("应发出审批事件");
     while evt.kind != "approval.required" {
         evt = rx.try_recv().expect("应发出审批事件");
     }
     assert_eq!(evt.kind, "approval.required");
-    assert_eq!(evt.session_id, "ses", "审批事件应携带会话归属（聊天内联裁决的前提）");
+    assert_eq!(
+        evt.session_id, "ses",
+        "审批事件应携带会话归属（聊天内联裁决的前提）"
+    );
 
     let pending = core.approval_list(Some("pending"), 10).unwrap();
     assert_eq!(pending.len(), 1, "应产生一张待审批单");
@@ -265,13 +296,17 @@ async fn 执行审批_高危命令拦截与批准放行() {
         .execute(
             "coding-agent",
             "ses",
-                        &[ToolName::Terminal],
+            &[ToolName::Terminal],
             ToolName::Terminal,
             &serde_json::json!({ "command": "echo ok" }),
         )
         .await;
     assert!(allowed.ok, "命中豁免白名单的命令应直接放行");
-    assert_eq!(core.approval_list(Some("pending"), 10).unwrap().len(), 0, "放行不应产生审批单");
+    assert_eq!(
+        core.approval_list(Some("pending"), 10).unwrap().len(),
+        0,
+        "放行不应产生审批单"
+    );
 
     // off 模式（默认）：不拦截
     let gw_off = exm_core::tools::ToolGateway::new(
@@ -285,7 +320,7 @@ async fn 执行审批_高危命令拦截与批准放行() {
         .execute(
             "coding-agent",
             "ses",
-                        &[ToolName::Terminal],
+            &[ToolName::Terminal],
             ToolName::Terminal,
             &serde_json::json!({ "command": "echo free" }),
         )
@@ -310,7 +345,7 @@ async fn 执行审批_高危命令拦截与批准放行() {
         .execute(
             "coding-agent",
             "ses",
-                        &[ToolName::Terminal],
+            &[ToolName::Terminal],
             ToolName::Terminal,
             &serde_json::json!({ "command": "echo safe" }),
         )
@@ -421,7 +456,10 @@ async fn 执行审批_等待批准_结果回灌与拒绝短路() {
     assert!(denied, "第二张审批单应出现并被拒绝");
     let r2 = exec2.await.unwrap();
     assert!(!r2.ok, "拒绝后工具应失败");
-    assert!(r2.error.unwrap_or_default().contains("拒绝"), "拒绝原因应回灌模型");
+    assert!(
+        r2.error.unwrap_or_default().contains("拒绝"),
+        "拒绝原因应回灌模型"
+    );
 
     // ---- 场景三：无人处理 → 超时受阻回流（旧行为） ----
     let t0 = std::time::Instant::now();
@@ -435,7 +473,10 @@ async fn 执行审批_等待批准_结果回灌与拒绝短路() {
         )
         .await;
     assert!(!r3.ok, "超时应受阻");
-    assert!(r3.error.unwrap_or_default().contains("超时"), "超时说明应回灌");
+    assert!(
+        r3.error.unwrap_or_default().contains("超时"),
+        "超时说明应回灌"
+    );
     assert!(
         t0.elapsed() >= Duration::from_secs(7) && t0.elapsed() < Duration::from_secs(20),
         "应等待约 approvalWaitSecs 后返回，实际 {:?}",
@@ -447,7 +488,11 @@ async fn 执行审批_等待批准_结果回灌与拒绝短路() {
 async fn single_agent_target_switch_and_l0_direct() {
     let cfg = test_config();
     // 残留清理（只清演练个体与目标状态；不得动 entities/agents 全目录——默认智能体种子在此）
-    let agents_root = std::env::current_dir().unwrap().join("..").join("..").join("entities");
+    let agents_root = std::env::current_dir()
+        .unwrap()
+        .join("..")
+        .join("..")
+        .join("entities");
     let _ = std::fs::remove_file(agents_root.join("active_single"));
     let _ = std::fs::remove_file(agents_root.join("agents").join("lone-writer.json")); // 旧布局残留
     let _ = std::fs::remove_dir_all(agents_root.join("agents").join("lone-writer"));
@@ -462,15 +507,29 @@ async fn single_agent_target_switch_and_l0_direct() {
         "tools": ["read", "terminal"]
     }))
     .expect("定义构造失败");
-    core.registry().upsert_single(def, None).expect("创建单体失败");
-    core.registry().set_active_single(Some("lone-writer")).expect("切换目标失败");
+    core.registry()
+        .upsert_single(def, None)
+        .expect("创建单体失败");
+    core.registry()
+        .set_active_single(Some("lone-writer"))
+        .expect("切换目标失败");
 
     assert!(core.registry().single_mode());
-    assert_eq!(core.orchestrator_id(), "lone-writer", "指挥体身份 = 当前单体");
+    assert_eq!(
+        core.orchestrator_id(),
+        "lone-writer",
+        "指挥体身份 = 当前单体"
+    );
     assert!(core.registry().units().is_empty(), "单体模式无派发个体");
     let active_list = core.registry().list_active();
-    assert!(active_list.iter().any(|a| a.identifier == "lone-writer"), "当前范围应含目标单体");
-    assert!(active_list.iter().all(|a| a.identifier != "orchestrator"), "单体模式不应混入组编成");
+    assert!(
+        active_list.iter().any(|a| a.identifier == "lone-writer"),
+        "当前范围应含目标单体"
+    );
+    assert!(
+        active_list.iter().all(|a| a.identifier != "orchestrator"),
+        "单体模式不应混入组编成"
+    );
     let scope = core.registry().active_scope();
     assert_eq!(scope, "single:lone-writer");
 
@@ -478,12 +537,20 @@ async fn single_agent_target_switch_and_l0_direct() {
     let session = core.create_session("单体冒烟").expect("建会话失败");
     assert!(session.group_id.starts_with("single:"), "会话归属单体范围");
     let orch = core.orchestrator();
-    orch.handle_user_message(&session.id, "用一句话介绍你自己").await.expect("单体对话失败");
+    orch.handle_user_message(&session.id, "用一句话介绍你自己")
+        .await
+        .expect("单体对话失败");
     // L0 直答不产生任务图；消息归属单体（本机）
-    assert!(core.store.latest_graph(&session.id).unwrap().is_none(), "L0 不应有派发任务图");
+    assert!(
+        core.store.latest_graph(&session.id).unwrap().is_none(),
+        "L0 不应有派发任务图"
+    );
     let messages = core.store.list_messages(&session.id, 50).unwrap();
     assert!(
-        messages.iter().any(|m| m.role == MessageRole::Orchestrator && m.agent_id.as_deref() == Some("lone-writer")),
+        messages
+            .iter()
+            .any(|m| m.role == MessageRole::Orchestrator
+                && m.agent_id.as_deref() == Some("lone-writer")),
         "收束消息应归属智能体"
     );
 
@@ -497,10 +564,16 @@ async fn single_agent_target_switch_and_l0_direct() {
     // 默认智能体（生成器预置）：存在、显示名 Machina；角色设定在 SOUL、行为协议在 PROMPT
     let machina = core.registry().single("machina").expect("默认智能体应预置");
     assert_eq!(machina.name, "Machina");
-    let prompt = core.registry().load_single_prompt(&machina.prompt_file).unwrap();
+    let prompt = core
+        .registry()
+        .load_single_prompt(&machina.prompt_file)
+        .unwrap();
     assert!(!prompt.contains("你是"), "PROMPT 不定义角色设定（归 SOUL）");
     let soul = core.registry().single_persona("machina").unwrap();
-    assert!(soul.contains("理性"), "SOUL 应含性格准则（默认与用户定制均满足）");
+    assert!(
+        soul.contains("理性"),
+        "SOUL 应含性格准则（默认与用户定制均满足）"
+    );
     // 指挥体不叫 Machina（组指挥体 ≠ 默认智能体）
     let orch = core.agent("orchestrator").expect("指挥体应存在");
     assert_ne!(orch.name, "Machina");
@@ -519,24 +592,35 @@ async fn 单体直接循环_工具回灌与过程留痕() {
         "tools": ["read", "terminal"]
     }))
     .expect("定义构造失败");
-    core.registry().upsert_single(def, None).expect("创建单体失败");
-    core.registry().set_active_single(Some("tool-runner")).expect("切换目标失败");
+    core.registry()
+        .upsert_single(def, None)
+        .expect("创建单体失败");
+    core.registry()
+        .set_active_single(Some("tool-runner"))
+        .expect("切换目标失败");
     assert!(core.registry().single_mode());
 
     // 触发直接工具循环:Mock 第一步产出文本协议工具调用,回灌后第二步收敛
     let session = core.create_session("单体工具循环").expect("建会话失败");
     let orch = core.orchestrator();
-    orch.handle_user_message(&session.id, "触发工具循环").await.expect("直接循环失败");
+    orch.handle_user_message(&session.id, "触发工具循环")
+        .await
+        .expect("直接循环失败");
 
     // 无任务图(不进规划/派发)
-    assert!(core.store.latest_graph(&session.id).unwrap().is_none(), "直接循环不应有派发任务图");
+    assert!(
+        core.store.latest_graph(&session.id).unwrap().is_none(),
+        "直接循环不应有派发任务图"
+    );
 
     // 最终消息归属单体;工具调用轨迹留痕;收敛文本在场
     let messages = core.store.list_messages(&session.id, 50).unwrap();
     let final_msg = messages
         .iter()
         .rev()
-        .find(|m| m.role == MessageRole::Orchestrator && m.agent_id.as_deref() == Some("tool-runner"))
+        .find(|m| {
+            m.role == MessageRole::Orchestrator && m.agent_id.as_deref() == Some("tool-runner")
+        })
         .expect("应有单体最终回复");
     assert!(!final_msg.tool_calls.is_empty(), "工具调用轨迹应留痕");
     assert!(
@@ -547,11 +631,17 @@ async fn 单体直接循环_工具回灌与过程留痕() {
         "有序步骤应含工具调用（按调用顺序展示的数据源）"
     );
     assert!(
-        final_msg.tool_calls.iter().any(|c| c.tool == "terminal" && c.ok),
+        final_msg
+            .tool_calls
+            .iter()
+            .any(|c| c.tool == "terminal" && c.ok),
         "应记录 terminal 工具调用且执行成功"
     );
     assert!(
-        final_msg.statements.iter().any(|s| s.text.contains("任务完成")),
+        final_msg
+            .statements
+            .iter()
+            .any(|s| s.text.contains("任务完成")),
         "应有工具回灌后收敛的最终文本"
     );
 
@@ -574,16 +664,32 @@ async fn 经验优化_合成_版本与重置() {
     assert!(a1.content.starts_with("- "), "要点应为列表形式");
     assert!(a1.lessons_seen == 0, "无教训时计入 0 条");
     // 二次合成：修订号递增，旧版本入历史
-    let a2 = core.orchestrator().optimize_agent("scout-agent").await.unwrap();
+    let a2 = core
+        .orchestrator()
+        .optimize_agent("scout-agent")
+        .await
+        .unwrap();
     assert_eq!(a2.revision, 2);
     assert_eq!(a2.previous.len(), 1, "旧版本应入历史");
     assert_eq!(a2.previous[0].revision, 1);
-    assert!(core.registry().load_adaptation("scout-agent").unwrap().is_some());
+    assert!(core
+        .registry()
+        .load_adaptation("scout-agent")
+        .unwrap()
+        .is_some());
     // 不存在的个体报错（不会创建任何东西）
-    assert!(core.orchestrator().optimize_agent("no-such-agent").await.is_err());
+    assert!(core
+        .orchestrator()
+        .optimize_agent("no-such-agent")
+        .await
+        .is_err());
     // 重置
     assert!(core.registry().reset_adaptation("scout-agent").unwrap());
-    assert!(core.registry().load_adaptation("scout-agent").unwrap().is_none());
+    assert!(core
+        .registry()
+        .load_adaptation("scout-agent")
+        .unwrap()
+        .is_none());
     assert!(!core.registry().reset_adaptation("scout-agent").unwrap());
 }
 
@@ -623,21 +729,50 @@ async fn 端到端_对话到收束全链路() {
         .expect("收集任务 panic");
 
     // 事件流契约
-    for expect in ["orchestrator.token", "graph.updated", "dispatch.sent", "sync.received", "run.finished"] {
-        assert!(kinds.iter().any(|k| k == expect), "缺少事件 {expect}，实际: {kinds:?}");
+    for expect in [
+        "orchestrator.token",
+        "graph.updated",
+        "dispatch.sent",
+        "sync.received",
+        "run.finished",
+    ] {
+        assert!(
+            kinds.iter().any(|k| k == expect),
+            "缺少事件 {expect}，实际: {kinds:?}"
+        );
     }
 
     // 图与回流
-    let graph = core.store.latest_graph(&session.id).unwrap().expect("任务图缺失");
-    assert!(graph.nodes.len() >= 4, "节点数应 >= 4，实际 {}", graph.nodes.len());
+    let graph = core
+        .store
+        .latest_graph(&session.id)
+        .unwrap()
+        .expect("任务图缺失");
+    assert!(
+        graph.nodes.len() >= 4,
+        "节点数应 >= 4，实际 {}",
+        graph.nodes.len()
+    );
     assert!(
         graph.nodes.iter().all(|n| n.status.is_terminal()),
         "存在未终态节点: {:?}",
-        graph.nodes.iter().map(|n| (n.id.clone(), n.status)).collect::<Vec<_>>()
+        graph
+            .nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.status))
+            .collect::<Vec<_>>()
     );
-    let done = graph.nodes.iter().filter(|n| n.status == TaskStatus::Done).count();
+    let done = graph
+        .nodes
+        .iter()
+        .filter(|n| n.status == TaskStatus::Done)
+        .count();
     assert!(done >= 3, "完成节点应 >= 3，实际 {done}");
-    let parallel_roots = graph.nodes.iter().filter(|n| n.depends_on.is_empty()).count();
+    let parallel_roots = graph
+        .nodes
+        .iter()
+        .filter(|n| n.depends_on.is_empty())
+        .count();
     assert!(parallel_roots >= 2, "应存在并行根节点");
 
     // 证据账与三账
@@ -650,7 +785,10 @@ async fn 端到端_对话到收束全链路() {
     // 收束消息：user / orchestrator 齐备；子个体输出落子会话（个体消息 + 有序步骤）
     let messages = core.store.list_messages(&session.id, 200).unwrap();
     for role in [MessageRole::User, MessageRole::Orchestrator] {
-        assert!(messages.iter().any(|m| m.role == role), "缺少 {role:?} 消息");
+        assert!(
+            messages.iter().any(|m| m.role == role),
+            "缺少 {role:?} 消息"
+        );
     }
     assert!(
         !messages.iter().any(|m| m.role == MessageRole::Unit),
@@ -663,7 +801,11 @@ async fn 端到端_对话到收束全链路() {
         .into_iter()
         .find(|s| s.parent_session.as_deref() == Some(session.id.as_str()))
         .expect("派发应创建子会话");
-    assert!(child.title.starts_with("sub:"), "子会话标题应带 sub: 前缀: {}", child.title);
+    assert!(
+        child.title.starts_with("sub:"),
+        "子会话标题应带 sub: 前缀: {}",
+        child.title
+    );
     let child_messages = core.store.list_messages(&child.id, 50).unwrap();
     assert!(
         child_messages.iter().any(|m| m.role == MessageRole::Unit),
@@ -714,8 +856,16 @@ fn sample_def(identifier: &str) -> AgentDefinition {
 fn 默认模型_组与个体解析与持久化() {
     // ---- ModelPool 解析语义 ----
     let mut pool = exm_core::provider::ModelPool::new();
-    pool.insert("p-a", std::sync::Arc::new(exm_core::provider::MockLlmProvider), "model-a");
-    pool.insert("p-b", std::sync::Arc::new(exm_core::provider::MockLlmProvider), "model-b");
+    pool.insert(
+        "p-a",
+        std::sync::Arc::new(exm_core::provider::MockLlmProvider),
+        "model-a",
+    );
+    pool.insert(
+        "p-b",
+        std::sync::Arc::new(exm_core::provider::MockLlmProvider),
+        "model-b",
+    );
     // 档案ID：取该档案的默认模型
     let (prov, model) = pool.resolve("p-a").expect("应命中 p-a");
     assert_eq!(model, "model-a");
@@ -732,21 +882,32 @@ fn 默认模型_组与个体解析与持久化() {
         .create_group(Some("model-grp".into()), "模型组", "")
         .expect("建组失败");
     assert!(g.model.is_none());
-    reg.set_group_model("model-grp", "p-b/unit-b").expect("设置组模型失败");
-    assert_eq!(reg.group_meta("model-grp").unwrap().model.as_deref(), Some("p-b/unit-b"));
-    reg.set_group_model("model-grp", "").expect("清除组模型失败");
+    reg.set_group_model("model-grp", "p-b/unit-b")
+        .expect("设置组模型失败");
+    assert_eq!(
+        reg.group_meta("model-grp").unwrap().model.as_deref(),
+        Some("p-b/unit-b")
+    );
+    reg.set_group_model("model-grp", "")
+        .expect("清除组模型失败");
     assert!(reg.group_meta("model-grp").unwrap().model.is_none());
 
     // ---- 个体默认模型：单体与组内个体均可设置并持久化 ----
     let def = sample_def("solo-one");
     reg.upsert_single(def, None).expect("创建单体失败");
-    reg.set_agent_model("solo-one", "p-a").expect("设置单体模型失败");
-    assert_eq!(reg.single("solo-one").unwrap().model_hint.as_deref(), Some("p-a"));
+    reg.set_agent_model("solo-one", "p-a")
+        .expect("设置单体模型失败");
+    assert_eq!(
+        reg.single("solo-one").unwrap().model_hint.as_deref(),
+        Some("p-a")
+    );
 
     reg.set_active_group("model-grp").expect("切组失败");
     let member = sample_def("member-one");
-    reg.upsert_agent("model-grp", member, None).expect("创建组内个体失败");
-    reg.set_agent_model("member-one", "p-b/orch-b").expect("设置个体模型失败");
+    reg.upsert_agent("model-grp", member, None)
+        .expect("创建组内个体失败");
+    reg.set_agent_model("member-one", "p-b/orch-b")
+        .expect("设置个体模型失败");
     assert_eq!(
         reg.agents_in_group("model-grp")
             .iter()
@@ -757,7 +918,8 @@ fn 默认模型_组与个体解析与持久化() {
         Some("p-b/orch-b")
     );
     // 清除 = 跟随组/全局
-    reg.set_agent_model("member-one", "").expect("清除个体模型失败");
+    reg.set_agent_model("member-one", "")
+        .expect("清除个体模型失败");
     assert!(reg
         .agents_in_group("model-grp")
         .iter()
@@ -775,9 +937,21 @@ fn 模型回退链_展开与冷却() {
     use std::sync::Arc;
 
     let mut pool = ModelPool::new();
-    pool.insert("p-a", Arc::new(exm_core::provider::MockLlmProvider), "model-a");
-    pool.insert("p-b", Arc::new(exm_core::provider::MockLlmProvider), "model-b");
-    pool.insert("p-c", Arc::new(exm_core::provider::MockLlmProvider), "model-c");
+    pool.insert(
+        "p-a",
+        Arc::new(exm_core::provider::MockLlmProvider),
+        "model-a",
+    );
+    pool.insert(
+        "p-b",
+        Arc::new(exm_core::provider::MockLlmProvider),
+        "model-b",
+    );
+    pool.insert(
+        "p-c",
+        Arc::new(exm_core::provider::MockLlmProvider),
+        "model-c",
+    );
     pool.set_active("p-a");
     pool.set_fallback("p-a", "p-b");
     pool.set_fallback("p-b", "p-c");
@@ -785,7 +959,10 @@ fn 模型回退链_展开与冷却() {
     pool.set_fallback("p-c", "p-a");
 
     let chain = pool.chain("p-a");
-    assert_eq!(chain, vec!["p-a".to_string(), "p-b".to_string(), "p-c".to_string()]);
+    assert_eq!(
+        chain,
+        vec!["p-a".to_string(), "p-b".to_string(), "p-c".to_string()]
+    );
     // 起点即全局档案时不追加重复兜底
     assert_eq!(pool.chain("p-a").len(), 3);
     // entry 取该档案的默认模型
@@ -817,30 +994,59 @@ async fn 上下文压缩与collect_多轮会话语义() {
     use exm_core::types::{MessageRole, SpeechTag, Statement};
     for k in 0..12 {
         core.store
-            .add_message(&s.id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, format!("旧问题{k}"))])
+            .add_message(
+                &s.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, format!("旧问题{k}"))],
+            )
             .unwrap();
         core.store
-            .add_message(&s.id, MessageRole::System, None, vec![Statement::report(format!("旧答复{k}"))])
+            .add_message(
+                &s.id,
+                MessageRole::System,
+                None,
+                vec![Statement::report(format!("旧答复{k}"))],
+            )
             .unwrap();
     }
 
     // 触发一轮对话：plan 应完成压缩（rolling_summary 生成，summary_upto=24）并成功收束
-    core.chat(&s.id, "用一句话介绍你自己").await.expect("对话失败");
+    core.chat(&s.id, "用一句话介绍你自己")
+        .await
+        .expect("对话失败");
     let sess = core.store.get_session(&s.id).unwrap().expect("会话存在");
     assert!(sess.rolling_summary.is_some(), "应生成滚动摘要");
-    assert_eq!(sess.summary_upto, Some(13), "摘要应覆盖 13 条旧消息（25 总量 - 12 保留窗口）");
+    assert_eq!(
+        sess.summary_upto,
+        Some(13),
+        "摘要应覆盖 13 条旧消息（25 总量 - 12 保留窗口）"
+    );
 
     // collect：上一轮收束后再连发两条（未跑），第三条触发时应合并三条为一轮目标
     core.store
-        .add_message(&s.id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, "补充一".to_string())])
+        .add_message(
+            &s.id,
+            MessageRole::User,
+            None,
+            vec![Statement::new(SpeechTag::要求, "补充一".to_string())],
+        )
         .unwrap();
     core.store
-        .add_message(&s.id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, "补充二".to_string())])
+        .add_message(
+            &s.id,
+            MessageRole::User,
+            None,
+            vec![Statement::new(SpeechTag::要求, "补充二".to_string())],
+        )
         .unwrap();
     core.chat(&s.id, "现在处理").await.expect("collect 轮失败");
     let ledger = core.store.ledger_of(&s.id).unwrap();
-    assert!(ledger.task.goal.contains("补充一") && ledger.task.goal.contains("补充二"),
-        "collect 应合并排队输入，实际 goal: {:?}", ledger.task.goal);
+    assert!(
+        ledger.task.goal.contains("补充一") && ledger.task.goal.contains("补充二"),
+        "collect 应合并排队输入，实际 goal: {:?}",
+        ledger.task.goal
+    );
 }
 
 /// MCP 客户端（http 传输）：测试内起一个最小 JSON-RPC 服务器，走完 configure→refresh→snapshot→call 全链
@@ -890,7 +1096,10 @@ async fn mcp_客户端_http全链() {
     reg.configure(&[cfg.clone()]);
 
     let results = reg.refresh_all().await;
-    assert!(matches!(&results[..], [(id, Ok(n))] if id == "t" && *n == 1), "应列出 1 个工具: {results:?}");
+    assert!(
+        matches!(&results[..], [(id, Ok(n))] if id == "t" && *n == 1),
+        "应列出 1 个工具: {results:?}"
+    );
 
     // 快照：个体可见（allowedAgents 空 = 全体）
     let snap = reg.tool_snapshot_for("anyone");
@@ -898,14 +1107,27 @@ async fn mcp_客户端_http全链() {
     assert_eq!(snap[0].name, "mcp:t:echo");
 
     // 调用：全名 → 回声
-    let r = reg.call("mcp:t:echo", "anyone", &serde_json::json!({ "text": "你好" })).await.expect("调用失败");
+    let r = reg
+        .call(
+            "mcp:t:echo",
+            "anyone",
+            &serde_json::json!({ "text": "你好" }),
+        )
+        .await
+        .expect("调用失败");
     assert!(r.ok);
     assert_eq!(r.text, "回声:你好");
 
     // 个体白名单：仅限 scout-agent
     cfg.allowed_agents = vec!["scout-agent".into()];
     reg.configure(&[cfg]);
-    let denied = reg.call("mcp:t:echo", "other-agent", &serde_json::json!({ "text": "x" })).await;
+    let denied = reg
+        .call(
+            "mcp:t:echo",
+            "other-agent",
+            &serde_json::json!({ "text": "x" }),
+        )
+        .await;
     assert!(matches!(denied, Some(r) if !r.ok), "白名单外的个体应被拒绝");
     assert!(reg.tool_snapshot_for("other-agent").is_empty());
     assert_eq!(reg.tool_snapshot_for("scout-agent").len(), 1);
@@ -922,10 +1144,18 @@ async fn 混合记忆_语义兜底与加成() {
 
     // 两条群体记忆：词项完全不含查询词（检验语义兜底）
     let a = mem
-        .remember(&MemoryDraft::new(MemoryKind::Fact, "部署要点".to_string(), "生产环境部署前必须跑通全量验收与回滚演练".to_string()))
+        .remember(&MemoryDraft::new(
+            MemoryKind::Fact,
+            "部署要点".to_string(),
+            "生产环境部署前必须跑通全量验收与回滚演练".to_string(),
+        ))
         .unwrap();
     let b = mem
-        .remember(&MemoryDraft::new(MemoryKind::Fact, "发布纪律".to_string(), "每次发版都要留好回滚路径与灰度开关".to_string()))
+        .remember(&MemoryDraft::new(
+            MemoryKind::Fact,
+            "发布纪律".to_string(),
+            "每次发版都要留好回滚路径与灰度开关".to_string(),
+        ))
         .unwrap();
 
     // 定性向量：a 与查询同向，b 近正交
@@ -934,11 +1164,22 @@ async fn 混合记忆_语义兜底与加成() {
     mem.set_embedding(&b.id, vec![0.0, 1.0, 0.0]).unwrap();
 
     // 查询词与两条记忆零词项重叠：纯词项会退化为 recent；带查询向量应语义命中 a
-    let hits = mem.recall("上线之前需要注意什么仪式感的东西", 5, None, None, Some(&qv)).unwrap();
+    let hits = mem
+        .recall("上线之前需要注意什么仪式感的东西", 5, None, None, Some(&qv))
+        .unwrap();
     assert!(!hits.is_empty(), "语义兜底应命中");
-    assert_eq!(hits[0].entry.id, a.id, "最相似应为 a（同向向量）: {:?}",
-        hits.iter().map(|h| (&h.entry.title, h.score)).collect::<Vec<_>>());
-    assert!(hits[0].reasons.iter().any(|r| r.contains("语义相似")), "理由应含语义相似");
+    assert_eq!(
+        hits[0].entry.id,
+        a.id,
+        "最相似应为 a（同向向量）: {:?}",
+        hits.iter()
+            .map(|h| (&h.entry.title, h.score))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        hits[0].reasons.iter().any(|r| r.contains("语义相似")),
+        "理由应含语义相似"
+    );
 
     // 词项路径不受影响：查询含「部署」且带向量 → 语义加成仍排第一
     let hits2 = mem.recall("部署 要点", 5, None, None, Some(&qv)).unwrap();
@@ -965,12 +1206,22 @@ async fn web_fetch工具与图片暂存() {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     // 规格注册：白名单内含 web_fetch
-    let specs = exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebFetch], false, false, false);
-    assert!(specs.iter().any(|s| s.name == "web_fetch"), "web_fetch 应在规格中");
+    let specs =
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebFetch], false, false, false);
+    assert!(
+        specs.iter().any(|s| s.name == "web_fetch"),
+        "web_fetch 应在规格中"
+    );
 
     // 工具面（对标主流 agent）：edit / grep / glob 在白名单内即下发
     let full = exm_core::tools::ToolGateway::tool_specs(
-        &[ToolName::Read, ToolName::Edit, ToolName::Grep, ToolName::Glob, ToolName::WebSearch],
+        &[
+            ToolName::Read,
+            ToolName::Edit,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::WebSearch,
+        ],
         false,
         false,
         false,
@@ -983,18 +1234,38 @@ async fn web_fetch工具与图片暂存() {
         !full.iter().any(|s| s.name == "web_search"),
         "搜索未配置时不得下发 web_search（不承诺不存在的能力）"
     );
-    let with_search = exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebSearch], true, false, false);
-    assert!(with_search.iter().any(|s| s.name == "web_search"), "搜索就绪时应下发 web_search");
+    let with_search =
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebSearch], true, false, false);
+    assert!(
+        with_search.iter().any(|s| s.name == "web_search"),
+        "搜索就绪时应下发 web_search"
+    );
     // 浏览器同理：探测不到浏览器可执行文件时不下发 browser
-    let no_browser = exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, false, false);
-    assert!(!no_browser.iter().any(|s| s.name == "browser"), "无浏览器时不得下发 browser");
-    let with_browser = exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, true, false);
-    assert!(with_browser.iter().any(|s| s.name == "browser"), "浏览器就绪时应下发 browser");
+    let no_browser =
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, false, false);
+    assert!(
+        !no_browser.iter().any(|s| s.name == "browser"),
+        "无浏览器时不得下发 browser"
+    );
+    let with_browser =
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, true, false);
+    assert!(
+        with_browser.iter().any(|s| s.name == "browser"),
+        "浏览器就绪时应下发 browser"
+    );
     // Computer Use 同理：总开关关闭时不下发 computer（整机输入权须显式交出）
-    let no_computer = exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, false);
-    assert!(!no_computer.iter().any(|s| s.name == "computer"), "未启用时不得下发 computer");
-    let with_computer = exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, true);
-    assert!(with_computer.iter().any(|s| s.name == "computer"), "启用后应下发 computer");
+    let no_computer =
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, false);
+    assert!(
+        !no_computer.iter().any(|s| s.name == "computer"),
+        "未启用时不得下发 computer"
+    );
+    let with_computer =
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, true);
+    assert!(
+        with_computer.iter().any(|s| s.name == "computer"),
+        "启用后应下发 computer"
+    );
 
     let cfg = {
         let _serial = serial_guard();
@@ -1012,7 +1283,7 @@ async fn web_fetch工具与图片暂存() {
         .execute(
             "machina",
             "ses",
-                        &[ToolName::WebFetch],
+            &[ToolName::WebFetch],
             ToolName::WebFetch,
             &serde_json::json!({ "url": format!("http://{addr}/page") }),
         )
@@ -1048,7 +1319,9 @@ async fn 记忆压缩_超限归档两模式() {
     assert!(compacted.contains("已压缩"), "Mock 压缩输出应落盘");
     // 归档文件应包含原文
     let archive = std::fs::read_to_string(
-        core.config().memory_md_path.with_file_name("memory_archive.md"),
+        core.config()
+            .memory_md_path
+            .with_file_name("memory_archive.md"),
     )
     .unwrap_or_default();
     assert!(archive.contains("记忆条目内容测试"), "原文应归档");
@@ -1065,7 +1338,11 @@ async fn 记忆压缩_超限归档两模式() {
         .memory
         .recall_all("memory.md 归档", 10, None, None)
         .unwrap_or_default();
-    assert!(hits.iter().any(|h| h.entry.title.contains("memory.md 归档")), "归档应进深层记忆");
+    assert!(
+        hits.iter()
+            .any(|h| h.entry.title.contains("memory.md 归档")),
+        "归档应进深层记忆"
+    );
 }
 
 /// 分布式执行节点：工作者（独立 Core，Mock）接入 → 派发远程执行 → 回流收束
@@ -1079,8 +1356,12 @@ async fn 分布式执行_工作者节点全链() {
 
     // ---- 最小 hub：实现 RemoteExecutor（工作者出站通道 + 回流 oneshot）----
     struct MiniHub {
-        out: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>>>,
-        report_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<exm_core::types::SyncReport, String>>>>,
+        out: tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>>,
+        >,
+        report_tx: tokio::sync::Mutex<
+            Option<tokio::sync::oneshot::Sender<Result<exm_core::types::SyncReport, String>>>,
+        >,
     }
     #[async_trait::async_trait]
     impl RemoteExecutor for MiniHub {
@@ -1095,7 +1376,12 @@ async fn 分布式执行_工作者节点全链() {
             _attach_images: bool,
             _on_delta: &(dyn Fn(exm_core::provider::StreamDelta) + Send + Sync),
         ) -> anyhow::Result<exm_core::types::SyncReport> {
-            let out = self.out.lock().await.clone().ok_or_else(|| anyhow::anyhow!("无工作者"))?;
+            let out = self
+                .out
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("无工作者"))?;
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.report_tx.lock().await = Some(tx);
             let frame = serde_json::to_string(&WorkerFrame::Dispatch {
@@ -1127,7 +1413,8 @@ async fn 分布式执行_工作者节点全链() {
             async move {
                 ws.on_upgrade(move |socket| async move {
                     let (sink, mut stream) = socket.split();
-                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<axum::extract::ws::Message>();
+                    let (tx, mut rx) =
+                        tokio::sync::mpsc::unbounded_channel::<axum::extract::ws::Message>();
                     let mut sink = sink;
                     tokio::spawn(async move {
                         while let Some(m) = rx.recv().await {
@@ -1137,8 +1424,12 @@ async fn 分布式执行_工作者节点全链() {
                         }
                     });
                     while let Some(Ok(msg)) = stream.next().await {
-                        let axum::extract::ws::Message::Text(t) = msg else { continue };
-                        let Ok(frame) = serde_json::from_str::<WorkerFrame>(&t) else { continue };
+                        let axum::extract::ws::Message::Text(t) = msg else {
+                            continue;
+                        };
+                        let Ok(frame) = serde_json::from_str::<WorkerFrame>(&t) else {
+                            continue;
+                        };
                         match frame {
                             WorkerFrame::Hello { .. } => {
                                 *hub.out.lock().await = Some(tx.clone());
@@ -1179,11 +1470,20 @@ async fn 分布式执行_工作者节点全链() {
     let core = Core::with_config(cfg).expect("中心 Core 失败");
     core.set_remote(hub).expect("注入远程执行器失败");
     let s = core.create_session("分布式演练").unwrap();
-    core.chat(&s.id, "评估当前项目的架构风险").await.expect("分布式任务失败");
+    core.chat(&s.id, "评估当前项目的架构风险")
+        .await
+        .expect("分布式任务失败");
 
     let graph = core.store.latest_graph(&s.id).unwrap().expect("任务图缺失");
-    assert!(graph.nodes.iter().all(|n| n.status.is_terminal()), "节点应全部终态");
-    let done = graph.nodes.iter().filter(|n| n.status == exm_core::types::TaskStatus::Done).count();
+    assert!(
+        graph.nodes.iter().all(|n| n.status.is_terminal()),
+        "节点应全部终态"
+    );
+    let done = graph
+        .nodes
+        .iter()
+        .filter(|n| n.status == exm_core::types::TaskStatus::Done)
+        .count();
     assert!(done >= 3, "远程执行完成节点应 >= 3，实际 {done}");
 
     ws_task.abort();
@@ -1198,9 +1498,15 @@ async fn 断点续跑_中断会话自动收束() {
     let s = core.create_session("中断演练").unwrap();
 
     // 先跑一轮完整任务（Mock），拿到合法图
-    core.chat(&s.id, "评估当前项目的架构风险").await.expect("首轮失败");
+    core.chat(&s.id, "评估当前项目的架构风险")
+        .await
+        .expect("首轮失败");
     let g = core.store.latest_graph(&s.id).unwrap().expect("图缺失");
-    let done = g.nodes.iter().filter(|n| n.status == exm_core::types::TaskStatus::Done).count();
+    let done = g
+        .nodes
+        .iter()
+        .filter(|n| n.status == exm_core::types::TaskStatus::Done)
+        .count();
     assert!(done >= 3);
 
     // 构造中断态：图改回 Executing、全部节点置为 dispatched（模拟进程被杀）
@@ -1218,12 +1524,20 @@ async fn 断点续跑_中断会话自动收束() {
 
     let resumed = core.resume_interrupted().await;
     assert_eq!(resumed, 1, "应恢复 1 个会话");
-    let g3 = core.store.latest_graph(&s.id).unwrap().expect("续跑后图缺失");
+    let g3 = core
+        .store
+        .latest_graph(&s.id)
+        .unwrap()
+        .expect("续跑后图缺失");
     assert!(
         g3.nodes.iter().all(|n| n.status.is_terminal()),
         "续跑后应全部终态"
     );
-    let done3 = g3.nodes.iter().filter(|n| n.status == exm_core::types::TaskStatus::Done).count();
+    let done3 = g3
+        .nodes
+        .iter()
+        .filter(|n| n.status == exm_core::types::TaskStatus::Done)
+        .count();
     assert!(done3 >= 3, "续跑完成节点应 >= 3，实际 {done3}");
 }
 
@@ -1233,7 +1547,11 @@ async fn 终端超时与会话预算() {
     use exm_core::tools::execute_shell_command_timed;
 
     // 挂死命令（长跑）1 秒超时强杀
-    let cmd = if cfg!(windows) { "ping -n 30 127.0.0.1" } else { "sleep 30" };
+    let cmd = if cfg!(windows) {
+        "ping -n 30 127.0.0.1"
+    } else {
+        "sleep 30"
+    };
     let root = std::env::temp_dir();
     let started = std::time::Instant::now();
     let r = execute_shell_command_timed(&root, cmd, 1).await;
@@ -1247,20 +1565,30 @@ async fn 终端超时与会话预算() {
     cfg.max_session_tokens = 1;
     let core = Core::with_config(cfg).expect("创建 Core 失败");
     let s = core.create_session("预算演练").unwrap();
-    core.chat(&s.id, "用一句话介绍你自己").await.expect("首轮应放行（预算从 0 起）");
+    core.chat(&s.id, "用一句话介绍你自己")
+        .await
+        .expect("首轮应放行（预算从 0 起）");
     assert!(core.session_tokens_estimate(&s.id) > 0, "估算应非零");
     let second = core.chat(&s.id, "再来一轮").await;
     assert!(second.is_err(), "超预算应拒绝");
-    assert!(second.unwrap_err().to_string().contains("预算"), "错误应含预算提示");
+    assert!(
+        second.unwrap_err().to_string().contains("预算"),
+        "错误应含预算提示"
+    );
 }
 
 /// 语音转写契约：Mock 通道明确不支持（真实路径走 openai/azure /audio/transcriptions）
 #[tokio::test]
 async fn 语音转写_通道契约() {
     use exm_core::provider::{LlmProvider, MockLlmProvider};
-    let r = MockLlmProvider.transcribe("whisper-1", b"RIFF....", "a.webm").await;
+    let r = MockLlmProvider
+        .transcribe("whisper-1", b"RIFF....", "a.webm")
+        .await;
     assert!(r.is_err(), "Mock 不支持转写");
-    assert!(r.unwrap_err().to_string().contains("不支持"), "错误应明示不支持");
+    assert!(
+        r.unwrap_err().to_string().contains("不支持"),
+        "错误应明示不支持"
+    );
     // 合成契约同构：Mock 明确不支持
     let s = MockLlmProvider.speak("tts-1", "你好").await;
     assert!(s.is_err() && s.unwrap_err().to_string().contains("不支持"));
@@ -1303,7 +1631,13 @@ async fn 工具面_编辑检索排程与安全边界() {
     assert!(w.ok, "写入应成功: {:?}", w.error);
 
     let r = tools
-        .execute("machina", "ses", &[ToolName::Read], ToolName::Read, &serde_json::json!({ "path": "docs/demo.txt" }))
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Read],
+            ToolName::Read,
+            &serde_json::json!({ "path": "docs/demo.txt" }),
+        )
         .await;
     assert!(r.ok, "读取应成功: {:?}", r.error);
     assert!(r.output.contains("    1→第一行"), "应带行号: {}", r.output);
@@ -1313,13 +1647,21 @@ async fn 工具面_编辑检索排程与安全边界() {
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Read],
+            &[ToolName::Read],
             ToolName::Read,
             &serde_json::json!({ "path": "docs/demo.txt", "offset": 2, "limit": 1 }),
         )
         .await;
-    assert!(page.output.contains("    2→第二行 标记"), "分页应命中第 2 行: {}", page.output);
-    assert!(page.output.contains("续读 offset=3"), "应提示续读: {}", page.output);
+    assert!(
+        page.output.contains("    2→第二行 标记"),
+        "分页应命中第 2 行: {}",
+        page.output
+    );
+    assert!(
+        page.output.contains("续读 offset=3"),
+        "应提示续读: {}",
+        page.output
+    );
 
     // --- edit：唯一命中替换 / 多命中拒绝 / 未命中提示 ---
     let e1 = tools
@@ -1333,7 +1675,10 @@ async fn 工具面_编辑检索排程与安全边界() {
         .await;
     assert!(e1.ok, "唯一命中应替换成功: {:?}", e1.error);
     let after = std::fs::read_to_string(tmp.join("docs/demo.txt")).unwrap();
-    assert!(after.contains("首行（已改）") && !after.contains("第一行"), "替换结果不符: {after}");
+    assert!(
+        after.contains("首行（已改）") && !after.contains("第一行"),
+        "替换结果不符: {after}"
+    );
 
     let e2 = tools
         .execute(
@@ -1344,7 +1689,11 @@ async fn 工具面_编辑检索排程与安全边界() {
             &serde_json::json!({ "path": "docs/demo.txt", "old_string": "标记", "new_string": "M" }),
         )
         .await;
-    assert!(!e2.ok && e2.error.clone().unwrap_or_default().contains("命中"), "多命中应拒绝: {:?}", e2.error);
+    assert!(
+        !e2.ok && e2.error.clone().unwrap_or_default().contains("命中"),
+        "多命中应拒绝: {:?}",
+        e2.error
+    );
 
     let e3 = tools
         .execute(
@@ -1355,37 +1704,62 @@ async fn 工具面_编辑检索排程与安全边界() {
             &serde_json::json!({ "path": "docs/demo.txt", "old_string": "不存在的文本", "new_string": "x" }),
         )
         .await;
-    assert!(!e3.ok && e3.error.clone().unwrap_or_default().contains("未找到"), "未命中应明示: {:?}", e3.error);
+    assert!(
+        !e3.ok && e3.error.clone().unwrap_or_default().contains("未找到"),
+        "未命中应明示: {:?}",
+        e3.error
+    );
 
     // --- grep / glob ---
     let g = tools
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Grep],
+            &[ToolName::Grep],
             ToolName::Grep,
             &serde_json::json!({ "pattern": "首行", "path": "docs" }),
         )
         .await;
-    assert!(g.ok && g.output.contains("docs/demo.txt:"), "grep 应返回 文件:行:内容: {}", g.output);
+    assert!(
+        g.ok && g.output.contains("docs/demo.txt:"),
+        "grep 应返回 文件:行:内容: {}",
+        g.output
+    );
 
     let gl = tools
-        .execute("machina", "ses", &[ToolName::Glob], ToolName::Glob, &serde_json::json!({ "pattern": "**/*.txt" }))
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Glob],
+            ToolName::Glob,
+            &serde_json::json!({ "pattern": "**/*.txt" }),
+        )
         .await;
-    assert!(gl.ok && gl.output.contains("docs/demo.txt"), "glob 应列出文件: {}", gl.output);
+    assert!(
+        gl.ok && gl.output.contains("docs/demo.txt"),
+        "glob 应列出文件: {}",
+        gl.output
+    );
 
     // --- 安全：路径越界（`..` 拼接不得逃逸）---
     let esc = tools
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Filesystem],
+            &[ToolName::Filesystem],
             ToolName::Filesystem,
             &serde_json::json!({ "op": "write", "path": "../escaped.txt", "content": "x" }),
         )
         .await;
-    assert!(!esc.ok && esc.error.clone().unwrap_or_default().contains("越界"), "越界应被拒: {:?}", esc.error);
-    assert!(!tmp.parent().unwrap().join("escaped.txt").exists(), "越界文件不得被创建");
+    assert!(
+        !esc.ok && esc.error.clone().unwrap_or_default().contains("越界"),
+        "越界应被拒: {:?}",
+        esc.error
+    );
+    assert!(
+        !tmp.parent().unwrap().join("escaped.txt").exists(),
+        "越界文件不得被创建"
+    );
 
     // --- 安全：终端白名单细化（子命令）与连接符拒绝 ---
     // 语义更新：未列入的子命令在审批档（risky/always）转人工审批单（批准即代执行），
@@ -1394,7 +1768,7 @@ async fn 工具面_编辑检索排程与安全边界() {
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Terminal],
+            &[ToolName::Terminal],
             ToolName::Terminal,
             &serde_json::json!({ "command": "cargo install some-crate" }),
         )
@@ -1417,7 +1791,7 @@ async fn 工具面_编辑检索排程与安全边界() {
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Terminal],
+            &[ToolName::Terminal],
             ToolName::Terminal,
             &serde_json::json!({ "command": "git status && rm -rf docs" }),
         )
@@ -1428,12 +1802,17 @@ async fn 工具面_编辑检索排程与安全边界() {
     // --- 检查点：写前快照 → 回滚 ---
     let cps = core.list_checkpoints();
     assert!(
-        cps.iter().any(|(_, rel, _)| rel.replace('\\', "/") == "docs/demo.txt"),
+        cps.iter()
+            .any(|(_, rel, _)| rel.replace('\\', "/") == "docs/demo.txt"),
         "应有该文件的写前快照: {cps:?}"
     );
-    core.restore_checkpoint(None, "docs/demo.txt").expect("回滚失败");
+    core.restore_checkpoint(None, "docs/demo.txt")
+        .expect("回滚失败");
     let restored = std::fs::read_to_string(tmp.join("docs/demo.txt")).unwrap();
-    assert!(restored.contains("第一行"), "回滚应恢复原始内容: {restored}");
+    assert!(
+        restored.contains("第一行"),
+        "回滚应恢复原始内容: {restored}"
+    );
 
     // --- 排程工具：AI 自建定时任务（创建 / 列表 / 删除）---
     let s1 = tools
@@ -1447,15 +1826,31 @@ async fn 工具面_编辑检索排程与安全边界() {
         .await;
     assert!(s1.ok, "创建排程应成功: {:?}", s1.error);
     let s2 = tools
-        .execute("machina", "ses", &[ToolName::Schedule], ToolName::Schedule, &serde_json::json!({ "op": "list" }))
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Schedule],
+            ToolName::Schedule,
+            &serde_json::json!({ "op": "list" }),
+        )
         .await;
-    assert!(s2.ok && s2.output.contains("每日巡检"), "列表应含新任务: {}", s2.output);
-    let job_id = core.cron.list().unwrap().first().map(|j| j.id.clone()).unwrap_or_default();
+    assert!(
+        s2.ok && s2.output.contains("每日巡检"),
+        "列表应含新任务: {}",
+        s2.output
+    );
+    let job_id = core
+        .cron
+        .list()
+        .unwrap()
+        .first()
+        .map(|j| j.id.clone())
+        .unwrap_or_default();
     let s3 = tools
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Schedule],
+            &[ToolName::Schedule],
             ToolName::Schedule,
             &serde_json::json!({ "op": "remove", "id": job_id }),
         )
@@ -1471,7 +1866,7 @@ async fn 工具面_编辑检索排程与安全边界() {
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Filesystem],
+            &[ToolName::Filesystem],
             ToolName::Filesystem,
             &serde_json::json!({ "op": "write", "path": "docs/many.txt", "content": many }),
         )
@@ -1481,7 +1876,7 @@ async fn 工具面_编辑检索排程与安全边界() {
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Grep],
+            &[ToolName::Grep],
             ToolName::Grep,
             &serde_json::json!({ "pattern": "命中行", "path": "docs", "maxResults": 500 }),
         )
@@ -1526,7 +1921,13 @@ async fn 沙箱_环境净化与联网闸门_浏览器() {
     #[cfg(not(target_os = "windows"))]
     let probe = "echo $EXM_TEST_SECRET";
     let r = tools
-        .execute("machina", "ses", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({ "command": probe }))
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Terminal],
+            ToolName::Terminal,
+            &serde_json::json!({ "command": probe }),
+        )
         .await;
     assert!(r.ok, "白名单内命令应执行: {:?}", r.error);
     assert!(
@@ -1555,7 +1956,13 @@ async fn 沙箱_环境净化与联网闸门_浏览器() {
         )
         .with_sandbox(core3.config().sandbox.clone());
         let r2 = lim_tools
-            .execute("machina", "ses", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({ "command": "echo job-ok" }))
+            .execute(
+                "machina",
+                "ses",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({ "command": "echo job-ok" }),
+            )
             .await;
         assert!(
             r2.ok && r2.output.contains("job-ok"),
@@ -1580,15 +1987,34 @@ async fn 沙箱_环境净化与联网闸门_浏览器() {
     )
     .with_sandbox(core2.config().sandbox.clone());
     let net = strict_tools
-        .execute("machina", "ses", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({ "command": "git fetch" }))
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Terminal],
+            ToolName::Terminal,
+            &serde_json::json!({ "command": "git fetch" }),
+        )
         .await;
     assert!(!net.ok, "strict 下联网命令应被拦截");
     let net_msg = net.error.clone().unwrap_or_default();
-    assert!(net_msg.contains("审批") || net_msg.contains("拦截"), "应给出审批提示: {net_msg}");
+    assert!(
+        net_msg.contains("审批") || net_msg.contains("拦截"),
+        "应给出审批提示: {net_msg}"
+    );
     let local = strict_tools
-        .execute("machina", "ses", &[ToolName::Terminal], ToolName::Terminal, &serde_json::json!({ "command": "echo local-ok" }))
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Terminal],
+            ToolName::Terminal,
+            &serde_json::json!({ "command": "echo local-ok" }),
+        )
         .await;
-    assert!(local.ok && local.output.contains("local-ok"), "strict 下本地命令应放行: {:?}", local.error);
+    assert!(
+        local.ok && local.output.contains("local-ok"),
+        "strict 下本地命令应放行: {:?}",
+        local.error
+    );
 
     // 浏览器工具：探测不到浏览器则跳过（按诚实性原则，此时该工具也不会下发给模型）
     if !tools.browser_ready() {
@@ -1612,32 +2038,49 @@ async fn 沙箱_环境净化与联网闸门_浏览器() {
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Browser],
+            &[ToolName::Browser],
             ToolName::Browser,
             &serde_json::json!({ "op": "open", "url": format!("http://{addr}/page") }),
         )
         .await;
     assert!(open.ok, "browser open 应成功: {:?}", open.error);
-    assert!(open.output.contains("动态正文"), "应取到渲染后正文: {}", open.output);
-    assert!(open.output.contains("脚本已执行"), "JS 渲染结果应可见（证明是真实浏览器）: {}", open.output);
+    assert!(
+        open.output.contains("动态正文"),
+        "应取到渲染后正文: {}",
+        open.output
+    );
+    assert!(
+        open.output.contains("脚本已执行"),
+        "JS 渲染结果应可见（证明是真实浏览器）: {}",
+        open.output
+    );
 
     let shot = tools
         .execute(
             "machina",
             "ses",
-                        &[ToolName::Browser],
+            &[ToolName::Browser],
             ToolName::Browser,
             &serde_json::json!({ "op": "screenshot", "name": "smoke-page" }),
         )
         .await;
     assert!(shot.ok, "截图应成功: {:?}", shot.error);
     assert!(
-        tmp.join(".exmachina").join("screenshots").join("smoke-page.png").is_file(),
+        tmp.join(".exmachina")
+            .join("screenshots")
+            .join("smoke-page.png")
+            .is_file(),
         "截图应落盘: {}",
         shot.output
     );
     let closed = tools
-        .execute("machina", "ses", &[ToolName::Browser], ToolName::Browser, &serde_json::json!({ "op": "close" }))
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Browser],
+            ToolName::Browser,
+            &serde_json::json!({ "op": "close" }),
+        )
         .await;
     assert!(closed.ok, "close 应成功");
 }
@@ -1660,14 +2103,19 @@ async fn 自定义工具_http与命令模板() {
     let app = axum::Router::new()
         .route(
             "/now",
-            axum::routing::get(|axum::extract::RawQuery(q): axum::extract::RawQuery| async move {
-                format!("q={}", q.unwrap_or_default())
-            }),
+            axum::routing::get(
+                |axum::extract::RawQuery(q): axum::extract::RawQuery| async move {
+                    format!("q={}", q.unwrap_or_default())
+                },
+            ),
         )
         .route(
             "/echo",
             axum::routing::post(|axum::Json(b): axum::Json<serde_json::Value>| async move {
-                format!("name={}", b.get("name").and_then(|v| v.as_str()).unwrap_or(""))
+                format!(
+                    "name={}",
+                    b.get("name").and_then(|v| v.as_str()).unwrap_or("")
+                )
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1688,6 +2136,8 @@ async fn 自定义工具_http与命令模板() {
             target: format!("http://{addr}/now?city={{city}}"),
             method: "GET".into(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec![],
         },
         // POST + JSON body
@@ -1703,6 +2153,8 @@ async fn 自定义工具_http与命令模板() {
             target: format!("http://{addr}/echo"),
             method: "POST".into(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec![],
         },
         // shell 模板（仅 machina 可见）
@@ -1718,6 +2170,8 @@ async fn 自定义工具_http与命令模板() {
             target: "echo hi-{word}".into(),
             method: String::new(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec!["machina".into()],
         },
         // 对 machina 不可见
@@ -1729,6 +2183,8 @@ async fn 自定义工具_http与命令模板() {
             target: "http://127.0.0.1:1/x".into(),
             method: "GET".into(),
             headers: Default::default(),
+            response_max_chars: None,
+            response_select: None,
             agents: vec!["someone-else".into()],
         },
     ];
@@ -1746,29 +2202,64 @@ async fn 自定义工具_http与命令模板() {
     // schema 下发按 agents 可见性过滤
     let specs = tools.custom_specs_for("machina");
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"weather") && names.contains(&"shout"), "可见自定义工具应下发: {names:?}");
-    assert!(!names.contains(&"other-tool"), "agents 未包含的个体不应看到该工具");
     assert!(
-        specs.iter().all(|s| s.name != "weather" || s.parameters.get("required").is_some()),
+        names.contains(&"weather") && names.contains(&"shout"),
+        "可见自定义工具应下发: {names:?}"
+    );
+    assert!(
+        !names.contains(&"other-tool"),
+        "agents 未包含的个体不应看到该工具"
+    );
+    assert!(
+        specs
+            .iter()
+            .all(|s| s.name != "weather" || s.parameters.get("required").is_some()),
         "参数 schema 应随工具下发"
     );
 
     // GET：query 插值 + URL 编码
     let r = tools
-        .execute_named("machina", "ses", &[], "weather", &serde_json::json!({ "city": "shanghai" }))
+        .execute_named(
+            "machina",
+            "ses",
+            &[],
+            "weather",
+            &serde_json::json!({ "city": "shanghai" }),
+        )
         .await;
     assert!(r.ok, "http 工具应成功: {:?}", r.error);
-    assert!(r.output.contains("city=shanghai"), "query 应带上实参: {}", r.output);
+    assert!(
+        r.output.contains("city=shanghai"),
+        "query 应带上实参: {}",
+        r.output
+    );
 
     // POST：实参作为 JSON body
     let r = tools
-        .execute_named("machina", "ses", &[], "greet", &serde_json::json!({ "name": "exm" }))
+        .execute_named(
+            "machina",
+            "ses",
+            &[],
+            "greet",
+            &serde_json::json!({ "name": "exm" }),
+        )
         .await;
-    assert!(r.ok && r.output.contains("name=exm"), "POST body 应带实参: {:?} {}", r.error, r.output);
+    assert!(
+        r.ok && r.output.contains("name=exm"),
+        "POST body 应带实参: {:?} {}",
+        r.error,
+        r.output
+    );
 
     // shell：模板插值（Windows cmd 对简单实参可能剥/留引号，归一后断言）
     let r = tools
-        .execute_named("machina", "ses", &[], "shout", &serde_json::json!({ "word": "X" }))
+        .execute_named(
+            "machina",
+            "ses",
+            &[],
+            "shout",
+            &serde_json::json!({ "word": "X" }),
+        )
         .await;
     assert!(
         r.ok && r.output.replace(['"', '\\'], "").contains("hi-X"),
@@ -1778,16 +2269,48 @@ async fn 自定义工具_http与命令模板() {
     );
 
     // 可见性：agents 未包含 → 拒绝
-    let r = tools.execute_named("machina", "ses", &[], "other-tool", &serde_json::json!({})).await;
-    assert!(!r.ok && r.error.clone().unwrap_or_default().contains("未对本个体开放"), "不可见工具应拒绝: {:?}", r.error);
+    let r = tools
+        .execute_named("machina", "ses", &[], "other-tool", &serde_json::json!({}))
+        .await;
+    assert!(
+        !r.ok
+            && r.error
+                .clone()
+                .unwrap_or_default()
+                .contains("未对本个体开放"),
+        "不可见工具应拒绝: {:?}",
+        r.error
+    );
 
     // 注入面：shell 实参带元字符 → 拒绝
     let r = tools
-        .execute_named("machina", "ses", &[], "shout", &serde_json::json!({ "word": "a&whoami" }))
+        .execute_named(
+            "machina",
+            "ses",
+            &[],
+            "shout",
+            &serde_json::json!({ "word": "a&whoami" }),
+        )
         .await;
-    assert!(!r.ok && r.error.clone().unwrap_or_default().contains("不允许的字符"), "危险实参应拒绝: {:?}", r.error);
+    assert!(
+        !r.ok && r.error.clone().unwrap_or_default().contains("不允许的字符"),
+        "危险实参应拒绝: {:?}",
+        r.error
+    );
 
     // 未知工具
-    let r = tools.execute_named("machina", "ses", &[], "no-such-tool", &serde_json::json!({})).await;
-    assert!(!r.ok && r.error.clone().unwrap_or_default().contains("未知工具"), "未知工具应报错: {:?}", r.error);
+    let r = tools
+        .execute_named(
+            "machina",
+            "ses",
+            &[],
+            "no-such-tool",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        !r.ok && r.error.clone().unwrap_or_default().contains("未知工具"),
+        "未知工具应报错: {:?}",
+        r.error
+    );
 }

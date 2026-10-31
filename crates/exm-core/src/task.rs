@@ -30,10 +30,20 @@ pub struct NewNode {
 
 impl NodeOutcome {
     pub fn done(node_id: impl Into<String>) -> Self {
-        NodeOutcome { node_id: node_id.into(), status: TaskStatus::Done, error: None, appends: vec![] }
+        NodeOutcome {
+            node_id: node_id.into(),
+            status: TaskStatus::Done,
+            error: None,
+            appends: vec![],
+        }
     }
     pub fn blocked(node_id: impl Into<String>) -> Self {
-        NodeOutcome { node_id: node_id.into(), status: TaskStatus::Blocked, error: None, appends: vec![] }
+        NodeOutcome {
+            node_id: node_id.into(),
+            status: TaskStatus::Blocked,
+            error: None,
+            appends: vec![],
+        }
     }
     pub fn failed(node_id: impl Into<String>, err: impl Into<String>) -> Self {
         NodeOutcome {
@@ -121,7 +131,10 @@ impl TaskGraphModel {
     }
 
     pub fn list(&self) -> Vec<TaskNode> {
-        self.order.iter().filter_map(|id| self.nodes.get(id).cloned()).collect()
+        self.order
+            .iter()
+            .filter_map(|id| self.nodes.get(id).cloned())
+            .collect()
     }
 
     /// 回填节点回流档案 id（断点续跑重放用）
@@ -168,11 +181,15 @@ impl TaskGraphModel {
             if n.status != TaskStatus::Pending {
                 continue;
             }
-            let deps: Vec<Option<TaskStatus>> =
-                n.depends_on.iter().map(|d| self.nodes.get(d).map(|x| x.status)).collect();
-            if deps.iter().any(|s| {
-                matches!(s, Some(TaskStatus::Failed) | Some(TaskStatus::Cancelled))
-            }) {
+            let deps: Vec<Option<TaskStatus>> = n
+                .depends_on
+                .iter()
+                .map(|d| self.nodes.get(d).map(|x| x.status))
+                .collect();
+            if deps
+                .iter()
+                .any(|s| matches!(s, Some(TaskStatus::Failed) | Some(TaskStatus::Cancelled)))
+            {
                 changes.push((id.clone(), TaskStatus::Blocked));
             } else if deps.iter().all(|s| matches!(s, Some(TaskStatus::Done))) {
                 changes.push((id.clone(), TaskStatus::Ready));
@@ -235,7 +252,9 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(max_concurrency: usize) -> Self {
-        Scheduler { max_concurrency: max_concurrency.max(1) }
+        Scheduler {
+            max_concurrency: max_concurrency.max(1),
+        }
     }
 
     pub async fn run<F>(
@@ -253,7 +272,9 @@ impl Scheduler {
             // 派发
             while inflight.len() < self.max_concurrency {
                 let ready = graph.ready_nodes();
-                let Some(node) = ready.into_iter().next() else { break };
+                let Some(node) = ready.into_iter().next() else {
+                    break;
+                };
                 graph.set_status(&node.id, TaskStatus::Dispatched);
                 on_change(graph);
                 inflight.insert(node.id.clone());
@@ -268,7 +289,9 @@ impl Scheduler {
                 continue;
             }
 
-            let Some(joined) = set.join_next().await else { break };
+            let Some(joined) = set.join_next().await else {
+                break;
+            };
             let outcome = match joined {
                 Ok(o) => o,
                 Err(e) => {
@@ -299,11 +322,7 @@ impl Scheduler {
 
             // 动态扩图（裁决节点等）
             for extra in outcome.appends {
-                graph.add_node(
-                    extra,
-                    None,
-                    std::slice::from_ref(&outcome.node_id),
-                );
+                graph.add_node(extra, None, std::slice::from_ref(&outcome.node_id));
             }
             on_change(graph);
 

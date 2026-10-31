@@ -7,7 +7,13 @@ use std::time::Duration;
 fn find_workspace_root() -> anyhow::Result<std::path::PathBuf> {
     let mut dir = std::env::current_dir()?;
     loop {
-        if dir.join("agents").join("groups").join("default").join("group.json").exists() {
+        if dir
+            .join("agents")
+            .join("groups")
+            .join("default")
+            .join("group.json")
+            .exists()
+        {
             return Ok(dir);
         }
         if !dir.pop() {
@@ -40,12 +46,23 @@ async fn main() -> anyhow::Result<()> {
                     let brief = match evt.kind.as_str() {
                         "orchestrator.token" => format!(
                             "orchestrator.token({}B)",
-                            evt.payload.get("delta").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0)
+                            evt.payload
+                                .get("delta")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.len())
+                                .unwrap_or(0)
                         ),
                         "unit.token" => format!(
                             "unit.token({}: {}B)",
-                            evt.payload.get("agentId").and_then(|v| v.as_str()).unwrap_or("?"),
-                            evt.payload.get("delta").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0)
+                            evt.payload
+                                .get("agentId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?"),
+                            evt.payload
+                                .get("delta")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.len())
+                                .unwrap_or(0)
                         ),
                         other => other.to_string(),
                     };
@@ -79,7 +96,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(g) = core.store.latest_graph(&session.id)? {
         println!("[6] 图节点：");
         for n in g.nodes {
-            println!("      {} {} ({}) -> {}", n.id, n.title, n.agent_identifier, n.status.label());
+            println!(
+                "      {} {} ({}) -> {}",
+                n.id,
+                n.title,
+                n.agent_identifier,
+                n.status.label()
+            );
         }
     }
     println!("[7] 记忆统计: {}", core.memory_stats()?);

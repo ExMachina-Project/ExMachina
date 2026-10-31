@@ -139,11 +139,11 @@ export function AutomationsView(): React.ReactElement {
                 return (
                   <Space direction="vertical" size={2}>
                     {kind === "queue" ? (
-                      <Tag color="gold">{t("cron.kind.queue")}</Tag>
+                      <Tag>{t("cron.kind.queue")}</Tag>
                     ) : kind === "at" ? (
-                      <Tag color="purple">{t("cron.oneOff", { at: j.at ?? "" })}</Tag>
+                      <Tag>{t("cron.oneOff", { at: j.at ?? "" })}</Tag>
                     ) : (
-                      <Tag color="cyan">cron[{j.cron ?? ""}]</Tag>
+                      <Tag>cron[{j.cron ?? ""}]</Tag>
                     )}
                     {kind === "queue" && j.steps && j.steps.length > 0 && (
                       <span className="mono dim">

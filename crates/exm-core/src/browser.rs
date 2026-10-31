@@ -121,7 +121,9 @@ fn free_port() -> u16 {
 /// 浏览器会话：进程 + 浏览器级 CDP 连接（页面会话经 Target.attachToTarget 展平）
 pub struct BrowserSession {
     child: Child,
-    ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     next_id: u64,
     timeout_secs: u64,
     user_data_dir: PathBuf,
@@ -160,7 +162,9 @@ impl BrowserSession {
         let child = cmd.spawn().context("启动浏览器进程失败")?;
 
         // 等待调试端口就绪（拿到浏览器级 WS 地址）
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build()?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
         let base = format!("http://127.0.0.1:{port}");
         let mut browser_ws: Option<String> = None;
         for _ in 0..60 {
@@ -193,7 +197,10 @@ impl BrowserSession {
         };
         // 建页面目标并展平附加（现代 CDP 方式；旧的 /json/new 已被新版 Chrome 移除）
         let created = session
-            .command("Target.createTarget", serde_json::json!({ "url": "about:blank" }))
+            .command(
+                "Target.createTarget",
+                serde_json::json!({ "url": "about:blank" }),
+            )
             .await
             .context("创建页面目标失败")?;
         let target_id = created
@@ -246,10 +253,14 @@ impl BrowserSession {
             let msg = tokio::time::timeout(remaining, self.ws.next())
                 .await
                 .map_err(|_| anyhow::anyhow!("CDP 命令超时（{method}，{}s）", self.timeout_secs))?;
-            let Some(msg) = msg else { bail!("CDP 连接已断开") };
+            let Some(msg) = msg else {
+                bail!("CDP 连接已断开")
+            };
             let msg = msg.context("CDP 读取失败")?;
             let Message::Text(t) = msg else { continue };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
+                continue;
+            };
             if v.get("id").and_then(|x| x.as_u64()) != Some(id) {
                 continue; // 事件或旧响应
             }
@@ -262,7 +273,8 @@ impl BrowserSession {
 
     /// 导航并等待加载完成（readyState=complete，超时则返回当前状态）
     pub async fn navigate(&mut self, url: &str) -> anyhow::Result<()> {
-        self.command("Page.navigate", serde_json::json!({ "url": url })).await?;
+        self.command("Page.navigate", serde_json::json!({ "url": url }))
+            .await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(self.timeout_secs);
         // 连续命令超时计数：单次瞬时超时（CI runner 偶发 / 浏览器短暂无响应）吸收后重试，
         // 连续两次仍无响应才判定浏览器实例僵死（真断连会快速连败，不会白等）
@@ -326,18 +338,31 @@ impl BrowserSession {
     }
 
     /// 截图落盘：返回工作区相对路径
-    pub async fn screenshot(&mut self, workspace_root: &Path, name: &str) -> anyhow::Result<String> {
+    pub async fn screenshot(
+        &mut self,
+        workspace_root: &Path,
+        name: &str,
+    ) -> anyhow::Result<String> {
         let r = self
-            .command("Page.captureScreenshot", serde_json::json!({ "format": "png" }))
+            .command(
+                "Page.captureScreenshot",
+                serde_json::json!({ "format": "png" }),
+            )
             .await?;
-        let b64 = r.get("data").and_then(|d| d.as_str()).context("截图数据缺失")?;
+        let b64 = r
+            .get("data")
+            .and_then(|d| d.as_str())
+            .context("截图数据缺失")?;
         let bytes = b64_decode(b64).context("截图 base64 解码失败")?;
         let dir = workspace_root.join(".exmachina").join("screenshots");
         std::fs::create_dir_all(&dir)?;
         let stem: String = if name.trim().is_empty() {
             crate::types::now_iso().replace([':', '-'], "")
         } else {
-            name.trim().chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect()
+            name.trim()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .collect()
         };
         let file = dir.join(format!("{stem}.png"));
         std::fs::write(&file, bytes)?;

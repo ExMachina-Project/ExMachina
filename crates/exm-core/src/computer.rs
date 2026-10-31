@@ -66,7 +66,9 @@ impl ComputerSession {
         anyhow::ensure!(!monitors.is_empty(), "未检测到可用显示器");
         let idx = index.min(monitors.len() - 1);
         let mon = &monitors[idx];
-        let img = mon.capture_image().context("截屏失败（无交互桌面会话？）")?;
+        let img = mon
+            .capture_image()
+            .context("截屏失败（无交互桌面会话？）")?;
         let (w, h) = (img.width(), img.height());
 
         // 等比缩放：视觉模型侧控制 token 消耗
@@ -81,12 +83,20 @@ impl ComputerSession {
 
         let _ = std::fs::create_dir_all(out_dir);
         let file = out_dir.join(format!("{name}.png"));
-        scaled.save_with_format(&file, image::ImageFormat::Png).context("截图写盘失败")?;
+        scaled
+            .save_with_format(&file, image::ImageFormat::Png)
+            .context("截图写盘失败")?;
         Ok(Screenshot {
             path: file.display().to_string(),
             width: scaled.width(),
             height: scaled.height(),
-            monitor: format!("#{} {}（原始 {}x{}）", idx, mon.name().unwrap_or_default(), w, h),
+            monitor: format!(
+                "#{} {}（原始 {}x{}）",
+                idx,
+                mon.name().unwrap_or_default(),
+                w,
+                h
+            ),
         })
     }
 
@@ -178,7 +188,10 @@ impl ComputerSession {
                         enigo::Key::Insert
                     }
                 }
-                f if f.len() >= 2 && f.starts_with('f') && f[1..].chars().all(|c| c.is_ascii_digit()) => {
+                f if f.len() >= 2
+                    && f.starts_with('f')
+                    && f[1..].chars().all(|c| c.is_ascii_digit()) =>
+                {
                     let n: u8 = f[1..].parse().context("无效功能键：{f}")?;
                     anyhow::ensure!((1..=12).contains(&n), "仅支持 F1-F12：{f}");
                     match n {
@@ -205,7 +218,10 @@ impl ComputerSession {
 
         // 组合键：修饰键按住 → 末键单击 → 修饰键释放；单键即直接单击
         let (modifiers, last) = if parts.len() > 1 {
-            (parts[..parts.len() - 1].to_vec(), parts[parts.len() - 1].clone())
+            (
+                parts[..parts.len() - 1].to_vec(),
+                parts[parts.len() - 1].clone(),
+            )
         } else {
             (vec![], parts[0].clone())
         };
@@ -230,12 +246,24 @@ pub fn b64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }

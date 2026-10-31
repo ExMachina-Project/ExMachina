@@ -297,6 +297,64 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
         },
     );
 
+    // 插件系统：装载计数 / 失败原因 / 形态分布（进程健康在网关运行时看管理页）
+    {
+        let plugins_dir = cfg.workspace_root.join("plugins");
+        let pm = exm_core::plugin::PluginManager::new(&plugins_dir);
+        // CLI 诊断无法拿到 gateway 的 builtin 注册（video 等），只扫目录面——口径注明
+        let (ok, rejected) = pm.load_all(&cfg.plugins.state);
+        let entries = pm.list();
+        let enabled = entries.iter().filter(|e| e.enabled).count();
+        let forms: Vec<String> = {
+            let mut v: Vec<String> = entries
+                .iter()
+                .map(|e| format!("{}×{}", e.form, entries.iter().filter(|x| x.form == e.form).count()))
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        if rejected == 0 {
+            d.check(
+                "插件",
+                Ok(format!(
+                    "目录装载 {ok} 个（启用 {enabled}）；形态：{}；builtin（video 等）随网关运行时注册",
+                    forms.join("、")
+                )),
+            );
+        } else {
+            let reasons: Vec<String> = entries
+                .iter()
+                .filter(|e| e.error.is_some())
+                .map(|e| format!("{}：{}", e.manifest.id, e.error.clone().unwrap_or_default()))
+                .collect();
+            d.check(
+                "插件",
+                Err(format!(
+                    "装载 {ok} 个、拒绝 {rejected} 个（{}）；详见 plugins/<id>/plugin.json",
+                    reasons.join("；")
+                )),
+            );
+        }
+        // 启停覆盖悬空提示：state 里指向不存在插件的键
+        let dangling: Vec<String> = cfg
+            .plugins
+            .state
+            .keys()
+            .filter(|k| !entries.iter().any(|e| &e.manifest.id == *k))
+            .cloned()
+            .collect();
+        if !dangling.is_empty() {
+            d.soft(
+                "插件启停覆盖",
+                Err(format!(
+                    "config.plugins.state 引用不存在的插件：{}（卸载残留，可清理）",
+                    dangling.join(", ")
+                )),
+            );
+        }
+    }
+
     println!();
     println!(
         "{} 通过 {}｜警告 {}｜失败 {}",

@@ -19,20 +19,21 @@ use std::sync::Arc;
 pub mod channel_test;
 pub mod channel_util;
 
+pub mod discord;
 pub mod identity;
 pub mod limits;
 pub mod llm_admin;
-pub mod singles;
-pub mod discord;
 pub mod matrix;
 pub mod napcat;
 pub mod nexus_api;
 pub mod platform;
+pub mod plugin_admin;
+pub mod plugins;
 pub mod qqbot;
+pub mod singles;
 pub mod slack;
 pub mod telegram;
 pub mod triggers;
-pub mod video;
 pub mod worker_hub;
 
 /// 提取器拒绝（请求体 / 查询串解析失败）统一成全站错误契约：400 + {"error": 可读中文}。
@@ -63,7 +64,9 @@ async fn normalize_rejection(
         return resp;
     }
     let (mut parts, body) = resp.into_parts();
-    let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
     let raw = String::from_utf8_lossy(&bytes);
     let msg = match status {
         StatusCode::UNPROCESSABLE_ENTITY => format!("请求体字段有误：{}", serde_hint(&raw)),
@@ -83,7 +86,11 @@ async fn normalize_rejection(
 /// 从 serde 的拒绝文案里摘出「缺哪个字段 / 类型不对」那段：去掉固定前缀与行号定位噪音
 fn serde_hint(text: &str) -> String {
     let msg = text.split_once(": ").map(|(_, r)| r).unwrap_or(text);
-    msg.split(" at line ").next().unwrap_or(msg).trim().to_string()
+    msg.split(" at line ")
+        .next()
+        .unwrap_or(msg)
+        .trim()
+        .to_string()
 }
 
 /// 首启密钥设置引导的进程内状态：「下次再说」置位；网关重启自然清零 → 下次启动恢复提醒
@@ -108,7 +115,11 @@ async fn auth_middleware(
     // 前置校验查询参数密钥（缺失/错误同样 401，安全口径不降级）。MCP HTTP 挂载（10.3）启用时纳入守卫。
     let mcp_path = {
         let c = st.core.config();
-        if c.mcp_serve.enabled { format!("/{}", c.mcp_serve.http_path.trim_matches('/')) } else { String::new() }
+        if c.mcp_serve.enabled {
+            format!("/{}", c.mcp_serve.http_path.trim_matches('/'))
+        } else {
+            String::new()
+        }
     };
     let guarded = path.starts_with("/api/") || (!mcp_path.is_empty() && path == mcp_path);
     if !required || path.starts_with("/api/auth/") || !guarded {
@@ -124,9 +135,14 @@ async fn auth_middleware(
     // 通道入站豁免（保守口径）：webhook 通道配置了自有凭据（secret 非空）时放行，
     // 凭据真伪由 inbound handler 自行校验（不符返回 401）；无自有凭据的通道仍被全局鉴权拦截
     if let Some(id) = inbound_channel_id(path, req.method()) {
-        let has_own_secret = crate::platform::load_channels(&st.core)
-            .iter()
-            .any(|c| c.id == id && c.enabled && c.secret.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false));
+        let has_own_secret = crate::platform::load_channels(&st.core).iter().any(|c| {
+            c.id == id
+                && c.enabled
+                && c.secret
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+        });
         if has_own_secret {
             return next.run(req).await;
         }
@@ -148,7 +164,12 @@ async fn auth_middleware(
             let limits = st.core.config().limits.clone();
             if limits.enabled && limits.max_requests > 0 {
                 let now = exm_core::types::now_ms();
-                if !crate::limits::RateLimiter::check("api", limits.window_secs * 1000, limits.max_requests, now) {
+                if !crate::limits::RateLimiter::check(
+                    "api",
+                    limits.window_secs * 1000,
+                    limits.max_requests,
+                    now,
+                ) {
                     return (
                         StatusCode::TOO_MANY_REQUESTS,
                         Json(json!({ "error": "请求过于频繁", "retrySecs": limits.window_secs })),
@@ -158,7 +179,11 @@ async fn auth_middleware(
             }
             next.run(req).await
         }
-        _ => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "需要访问密钥" }))).into_response(),
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "需要访问密钥" })),
+        )
+            .into_response(),
     }
 }
 
@@ -181,7 +206,11 @@ async fn verify_auth(State(st): State<AppState>, Json(b): Json<Value>) -> impl I
     if key == st.core.config().security.auth_key {
         Json(json!({ "ok": true, "required": true })).into_response()
     } else {
-        (StatusCode::UNAUTHORIZED, Json(json!({ "ok": false, "error": "密钥错误" }))).into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "ok": false, "error": "密钥错误" })),
+        )
+            .into_response()
     }
 }
 
@@ -200,7 +229,11 @@ async fn auth_status(State(st): State<AppState>) -> impl IntoResponse {
 /// 「下次再说」：本次进程内不再提示（网关重启后恢复提醒）。已配置密钥时拒绝。
 async fn auth_snooze(State(st): State<AppState>) -> impl IntoResponse {
     if !st.core.config().security.auth_key.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "已配置密钥" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "已配置密钥" })),
+        )
+            .into_response();
     }
     KEY_SETUP_SNOOZED.store(true, std::sync::atomic::Ordering::SeqCst);
     Json(json!({ "ok": true })).into_response()
@@ -209,13 +242,21 @@ async fn auth_snooze(State(st): State<AppState>) -> impl IntoResponse {
 /// 「不再提醒」：持久化关闭首启设置引导（config.security.keySetupDismissed）。已配置密钥时拒绝。
 async fn auth_dismiss(State(st): State<AppState>) -> impl IntoResponse {
     if !st.core.config().security.auth_key.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "已配置密钥" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "已配置密钥" })),
+        )
+            .into_response();
     }
     let mut next = (*st.core.config()).clone();
     next.security.key_setup_dismissed = true;
     match st.core.apply_config(next) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "ok": false, "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -229,7 +270,11 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/sessions/:id/chat", post(chat))
         .route("/api/sessions/:id/graph", get(get_graph))
         .route("/api/sessions/:id/evidence", get(get_evidence))
-        .route("/api/sessions/:id/title", axum::routing::put(rename_session))
+        .route(
+            "/api/sessions/:id/title",
+            axum::routing::put(rename_session),
+        )
+        .route("/api/sessions/:id/pin", axum::routing::put(pin_session))
         // 会话历史管控（组 9）：撤销 / 编辑重发 / 分支派生 / 归档与快照视图
         .route("/api/sessions/:id/undo", post(session_undo))
         .route("/api/sessions/:id/edit", post(session_edit))
@@ -241,8 +286,14 @@ pub fn build_router(core: Arc<Core>) -> Router {
             "/api/agents/:identifier",
             get(get_agent).put(update_agent).delete(remove_agent),
         )
-        .route("/api/agents/:identifier/model", axum::routing::put(set_agent_model))
-        .route("/api/agents/:identifier/persona", get(get_persona).put(put_persona).delete(reset_persona))
+        .route(
+            "/api/agents/:identifier/model",
+            axum::routing::put(set_agent_model),
+        )
+        .route(
+            "/api/agents/:identifier/persona",
+            get(get_persona).put(put_persona).delete(reset_persona),
+        )
         .route("/api/groups", get(list_groups).post(create_group))
         .route("/api/templates", get(list_templates))
         .route("/api/version", get(version_info))
@@ -275,10 +326,14 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/memory/md", get(get_memory_md).put(put_memory_md))
         .route(
             "/ws",
-            get(ws_handler).layer(axum::middleware::from_fn_with_state(state.clone(), ws_auth_guard)),
+            get(ws_handler).layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                ws_auth_guard,
+            )),
         )
         .merge(platform::routes())
         .merge(llm_admin::routes())
+        .merge(plugin_admin::routes())
         .merge(identity::routes())
         .merge(limits::routes())
         .merge(singles::routes())
@@ -298,7 +353,10 @@ pub fn build_router(core: Arc<Core>) -> Router {
         // 工具审计聚合（ops-visibility）
         .route("/api/audit", get(list_audit))
         // 通道连通测试（integration-ux）
-        .route("/api/channels/:id/test", post(crate::channel_test::test_channel))
+        .route(
+            "/api/channels/:id/test",
+            post(crate::channel_test::test_channel),
+        )
         .route("/api/auth/verify", post(verify_auth))
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/snooze", post(auth_snooze))
@@ -312,7 +370,10 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .merge(mcp_mount(core.clone()))
         // 工作区资产（截图 / 工具输出落盘）：沙箱内只读，聊天工具卡内联预览
         .route("/api/asset", get(get_asset))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         // 提取器拒绝归一为全站错误契约（放在鉴权之内：拒绝体不含数据，但口径一致优先）
         .layer(axum::middleware::from_fn(normalize_rejection))
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -322,32 +383,34 @@ pub fn build_router(core: Arc<Core>) -> Router {
     let dist = core.config().webui_dist.clone();
     if dist.exists() {
         let index = tower_http::services::ServeFile::new(dist.join("index.html"));
-        router = router.fallback_service(
-            tower_http::services::ServeDir::new(dist).not_found_service(index),
-        );
+        router = router
+            .fallback_service(tower_http::services::ServeDir::new(dist).not_found_service(index));
         // 静态资源缓存语义（SW 换版可靠性）：
         // - sw.js / index.html：no-cache（每次回源验证）——sw.js 被浏览器/旧 SW 缓存会阻塞新版接管，
         //   v1 cache-first 时代的 SW 尤其顽固；index.html 引用 hash 资产，同样必须每次回源
         // - /assets/：immutable 长缓存（内容 hash 文件名，内容变则名变）
-        router = router.layer(axum::middleware::from_fn(|req: axum::extract::Request, next: axum::middleware::Next| async move {
-            let is_static = !req.uri().path().starts_with("/api") && !req.uri().path().starts_with("/ws");
-            let path = req.uri().path().to_string();
-            let mut resp = next.run(req).await;
-            if !is_static {
-                return resp;
-            }
-            let cc = if path.starts_with("/assets/") {
-                "public, max-age=31536000, immutable"
-            } else {
-                // sw.js / index.html / 文档 / 其余：每次回源验证
-                "no-cache"
-            };
-            resp.headers_mut().insert(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static(cc),
-            );
-            resp
-        }));
+        router = router.layer(axum::middleware::from_fn(
+            |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                let is_static =
+                    !req.uri().path().starts_with("/api") && !req.uri().path().starts_with("/ws");
+                let path = req.uri().path().to_string();
+                let mut resp = next.run(req).await;
+                if !is_static {
+                    return resp;
+                }
+                let cc = if path.starts_with("/assets/") {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    // sw.js / index.html / 文档 / 其余：每次回源验证
+                    "no-cache"
+                };
+                resp.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static(cc),
+                );
+                resp
+            },
+        ));
     }
     router
 }
@@ -399,7 +462,11 @@ async fn get_asset(State(st): State<AppState>, Query(q): Query<AssetQuery>) -> i
             if bytes.len() > 8 * 1024 * 1024 {
                 return (StatusCode::PAYLOAD_TOO_LARGE, "资产超过 8MB").into_response();
             }
-            (AppendHeaders([(axum::http::header::CONTENT_TYPE, mime)]), bytes).into_response()
+            (
+                AppendHeaders([(axum::http::header::CONTENT_TYPE, mime)]),
+                bytes,
+            )
+                .into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "资产不存在").into_response(),
     }
@@ -451,6 +518,7 @@ async fn get_config(State(st): State<AppState>) -> impl IntoResponse {
             "authKey": if cfg.security.auth_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "terminalTimeoutSecs": cfg.security.terminal_timeout_secs,
             "toolOutputSpillChars": cfg.security.tool_output_spill_chars,
+            "approvalWaitSecs": cfg.security.approval_wait_secs,
             "keySetupDismissed": cfg.security.key_setup_dismissed,
         },
         "automation": {
@@ -487,6 +555,10 @@ async fn get_config(State(st): State<AppState>) -> impl IntoResponse {
         },
         "tools": {
             "custom": cfg.tools.custom,
+        },
+        "trash": {
+            "retentionDays": cfg.trash.retention_days,
+            "maxBytes": cfg.trash.max_bytes,
         },
         "experiments": {
             "dynamicCompaction": cfg.experiments.dynamic_compaction,
@@ -530,6 +602,9 @@ struct ConfigBody {
     /// 工具面（声明式自定义工具；custom 接受数组或 JSON 字符串两种形态）
     #[serde(default)]
     tools: Option<PartialTools>,
+    /// 回收站保留契约（保留期 + 容量上限）
+    #[serde(default)]
+    trash: Option<PartialTrash>,
     /// 实验性功能开关（动态压缩 / 组共享上下文）
     #[serde(default)]
     experiments: Option<PartialExperiments>,
@@ -550,6 +625,16 @@ struct PartialExperiments {
     dynamic_compaction: Option<bool>,
     #[serde(default)]
     group_shared_context: Option<bool>,
+}
+
+/// 回收站保留契约（部分更新：缺省沿用旧值；0 视为未提供回默认）
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct PartialTrash {
+    #[serde(default)]
+    retention_days: Option<u64>,
+    #[serde(default)]
+    max_bytes: Option<u64>,
 }
 
 /// 自定义工具清单归一：JSON 数组（程序化）或 JSON 字符串（设置页文本框）；解析失败返回 None（沿用旧值）
@@ -756,8 +841,14 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
             next
         }
     };
-    let sandbox = body.sandbox.clone().unwrap_or_else(|| current.sandbox.clone());
-    let browser = body.browser.clone().unwrap_or_else(|| current.browser.clone());
+    let sandbox = body
+        .sandbox
+        .clone()
+        .unwrap_or_else(|| current.sandbox.clone());
+    let browser = body
+        .browser
+        .clone()
+        .unwrap_or_else(|| current.browser.clone());
     // 自定义工具：数组或 JSON 字符串；非法 JSON 保留旧清单（设置页文本框手滑不至于清空工具面）
     let tools = match &body.tools {
         None => current.tools.clone(),
@@ -771,14 +862,18 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
     };
     let mut next = ExmConfig {
         llm: LlmConfig {
-            base_url: partial.base_url.unwrap_or_else(|| current.llm.base_url.clone()),
+            base_url: partial
+                .base_url
+                .unwrap_or_else(|| current.llm.base_url.clone()),
             api_key,
             api_keys: current.llm.api_keys.clone(),
             api_format: current.llm.api_format.clone(),
             model: partial.model.unwrap_or_else(|| current.llm.model.clone()),
         },
         max_concurrency: body.max_concurrency.unwrap_or(current.max_concurrency),
-        max_session_tokens: body.max_session_tokens.unwrap_or(current.max_session_tokens),
+        max_session_tokens: body
+            .max_session_tokens
+            .unwrap_or(current.max_session_tokens),
         memory_md_max_chars: mem.md_max_chars.unwrap_or(current.memory_md_max_chars),
         memory_enabled: mem.enabled.unwrap_or(current.memory_enabled),
         memory_recall_limit: mem.recall_limit.unwrap_or(current.memory_recall_limit),
@@ -788,7 +883,9 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
             .unwrap_or_else(|| current.memory_semantic_model.clone()),
         use_mock: false,
         security: exm_core::config::SecurityConfig {
-            exec_approval: sec.exec_approval.unwrap_or_else(|| current.security.exec_approval.clone()),
+            exec_approval: sec
+                .exec_approval
+                .unwrap_or_else(|| current.security.exec_approval.clone()),
             // 白名单：逗号分隔字符串 / 字符串数组双形态归一（设置页 schema kind=string）
             exec_allowlist: to_hook_list(sec.exec_allowlist)
                 .unwrap_or_else(|| current.security.exec_allowlist.clone()),
@@ -822,30 +919,56 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
             enabled: computer.enabled.unwrap_or(current.computer.enabled),
             approval: computer.approval.unwrap_or(current.computer.approval),
             max_edge: computer.max_edge.unwrap_or(current.computer.max_edge),
-            action_interval_ms: computer.action_interval_ms.unwrap_or(current.computer.action_interval_ms),
+            action_interval_ms: computer
+                .action_interval_ms
+                .unwrap_or(current.computer.action_interval_ms),
         },
         automation: exm_core::config::AutomationConfig {
-            heartbeat_enabled: auto.heartbeat_enabled.unwrap_or(current.automation.heartbeat_enabled),
+            heartbeat_enabled: auto
+                .heartbeat_enabled
+                .unwrap_or(current.automation.heartbeat_enabled),
             heartbeat_interval_minutes: auto
                 .heartbeat_interval_minutes
                 .unwrap_or(current.automation.heartbeat_interval_minutes),
-            heartbeat_prompt: auto.heartbeat_prompt.unwrap_or_else(|| current.automation.heartbeat_prompt.clone()),
+            heartbeat_prompt: auto
+                .heartbeat_prompt
+                .unwrap_or_else(|| current.automation.heartbeat_prompt.clone()),
             // 个体目标：显式空串 = 清除（回到全局巡检）；缺省 = 沿用旧值
             heartbeat_agent: match auto.heartbeat_agent {
                 Some(s) => {
                     let t = s.trim().to_string();
-                    if t.is_empty() { None } else { Some(t) }
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
                 }
                 None => current.automation.heartbeat_agent.clone(),
             },
             auto_adapt: auto.auto_adapt.unwrap_or(current.automation.auto_adapt),
-            unit_max_steps: auto.unit_max_steps.unwrap_or(current.automation.unit_max_steps),
+            unit_max_steps: auto
+                .unit_max_steps
+                .unwrap_or(current.automation.unit_max_steps),
         },
         search,
         hooks,
         sandbox,
         browser,
         tools,
+        trash: {
+            let t = body.trash.clone().unwrap_or_default();
+            exm_core::config::TrashConfig {
+                // 0 = 恢复默认（与设置页「留空回默认」口径一致）
+                retention_days: t
+                    .retention_days
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.trash.retention_days),
+                max_bytes: t
+                    .max_bytes
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.trash.max_bytes),
+            }
+        },
         experiments: {
             let e = body.experiments.clone().unwrap_or_default();
             exm_core::config::ExperimentsConfig {
@@ -861,33 +984,65 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
     };
     // 测试替身状态由运行期/环境决定，配置载荷不改变它（设置页的 llm 修改只在"真实通道"语义内生效）
     next.use_mock = st.core.is_mock() || exm_core::config::mock_enabled_from_env();
-    // 设置页对 llm 的修改同步回生效档案（避免档案切换时被旧值回退）
-    if let Some(slot) = next.llm_profiles.iter_mut().find(|p| p.id == next.active_profile) {
+    // 设置页对 llm 的修改同步回生效档案（避免档案切换时被旧值回退）。
+    // Key 池污染修复：运行时池可能是「activate 时池空补主 Key」的产物（Key 轮换需要
+    // 非空池），整体回写会把主 Key 复制进档案池（曾致 pb9a743 档案主 Key == 池[0]）。
+    // 回写时剔除「与主 Key 同串且来自运行时补位」的键：档案池本身为空时只回写主 Key
+    // 与空池，运行时补位键不落档案。
+    if let Some(slot) = next
+        .llm_profiles
+        .iter_mut()
+        .find(|p| p.id == next.active_profile)
+    {
+        let profile_pool_was_empty = slot.api_keys.iter().all(|k| k.trim().is_empty());
+        let mut runtime_pool = next.llm.api_keys.clone();
+        if profile_pool_was_empty && runtime_pool.len() == 1 && runtime_pool[0] == next.llm.api_key {
+            // 运行时池只是主 Key 补位：档案池保持空（激活/加载时会再补位，不丢功能）
+            runtime_pool.clear();
+        }
         slot.base_url = next.llm.base_url.clone();
         slot.api_key = next.llm.api_key.clone();
-        slot.api_keys = next.llm.api_keys.clone();
+        slot.api_keys = runtime_pool;
         slot.model = next.llm.model.clone();
     }
 
     match st.core.apply_config(next) {
         Ok(_) => Json(json!({ "ok": true, "mock": st.core.is_mock() })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 // ---------------------------------------------------------------- 会话
 
-async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -> impl IntoResponse {
+async fn create_session(
+    State(st): State<AppState>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
     let title = body
-        .and_then(|Json(v)| v.get("title").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .and_then(|Json(v)| {
+            v.get("title")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| "新会话".to_string());
     match st.core.create_session(&title) {
         Ok(s) => Json(serde_json::to_value(s).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-async fn list_sessions(State(st): State<AppState>, Query(q): Query<SessionListQuery>) -> impl IntoResponse {
+async fn list_sessions(
+    State(st): State<AppState>,
+    Query(q): Query<SessionListQuery>,
+) -> impl IntoResponse {
     // 组是交互对象：会话列表归属激活组（?all=1 管理视角看全部）
     let result = if q.all.unwrap_or(false) {
         st.core.list_sessions()
@@ -896,7 +1051,11 @@ async fn list_sessions(State(st): State<AppState>, Query(q): Query<SessionListQu
     };
     match result {
         Ok(list) => Json(serde_json::to_value(list).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -910,22 +1069,38 @@ struct SessionListQuery {
 async fn delete_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.delete_session(&id) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 async fn get_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.store.get_session(&id) {
         Ok(Some(s)) => Json(serde_json::to_value(s).unwrap_or(Value::Null)).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "会话不存在" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 async fn list_messages(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.store.list_messages(&id, 200) {
         Ok(msgs) => Json(serde_json::to_value(msgs).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -969,14 +1144,21 @@ async fn put_workspace(
     State(st): State<AppState>,
     Json(body): Json<WorkspaceBody>,
 ) -> impl IntoResponse {
-    let path = body.path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let path = body
+        .path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
     match st.core.registry().set_active_workspace(path.as_deref()) {
         Ok(()) => {
             let global = st.core.config().workspace_root.clone();
             let eff = st.core.registry().effective_workspace(&global);
             Json(json!({ "ok": true, "workspace": eff.to_string_lossy() })).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -994,12 +1176,24 @@ struct ChatBody {
     agent: Option<String>,
 }
 
-async fn chat(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<ChatBody>) -> impl IntoResponse {
+async fn chat(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ChatBody>,
+) -> impl IntoResponse {
     if body.text.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "text 不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text 不能为空" })),
+        )
+            .into_response();
     }
     if st.core.store.get_session(&id).ok().flatten().is_none() {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "会话不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
     }
     // 202 受理，运行过程经 WS 推流（core.chat：会话串行 + followup/collect）
     let core = st.core.clone();
@@ -1033,7 +1227,11 @@ async fn get_graph(State(st): State<AppState>, Path(id): Path<String>) -> impl I
     match st.core.store.latest_graph(&id) {
         Ok(Some(g)) => Json(serde_json::to_value(g).unwrap_or(Value::Null)).into_response(),
         Ok(None) => Json(json!({ "nodes": [] })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1049,11 +1247,40 @@ async fn rename_session(
 ) -> impl IntoResponse {
     let title = b.title.trim().to_string();
     if title.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "标题不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "标题不能为空" })),
+        )
+            .into_response();
     }
     match st.core.store.update_session_title(&id, &title) {
         Ok(_) => Json(json!({ "ok": true, "title": title })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PinSessionBody {
+    pinned: bool,
+}
+
+/// 会话置顶切换（PUT /api/sessions/:id/pin）
+async fn pin_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<PinSessionBody>,
+) -> impl IntoResponse {
+    match st.core.toggle_session_pin(&id, b.pinned) {
+        Ok(_) => Json(json!({ "ok": true, "pinned": b.pinned })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1072,9 +1299,17 @@ struct AuditQuery {
 }
 
 async fn list_audit(State(st): State<AppState>, Query(q): Query<AuditQuery>) -> impl IntoResponse {
-    match st.core.store.list_tool_audit_filtered(q.agent.as_deref(), q.tool.as_deref(), q.limit.unwrap_or(200).min(1000)) {
+    match st.core.store.list_tool_audit_filtered(
+        q.agent.as_deref(),
+        q.tool.as_deref(),
+        q.limit.unwrap_or(200).min(1000),
+    ) {
         Ok(items) => Json(json!({ "items": items })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1084,7 +1319,11 @@ async fn stop_session(State(st): State<AppState>, Path(id): Path<String>) -> imp
         Ok(tools) => Json(json!({ "ok": true, "toolsExecuted": tools })).into_response(),
         Err(e) => {
             let idle = e.to_string().contains("没有运行中的任务");
-            let code = if idle { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
+            let code = if idle {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             (code, Json(json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -1093,7 +1332,11 @@ async fn stop_session(State(st): State<AppState>, Path(id): Path<String>) -> imp
 async fn get_evidence(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.store.list_evidence(&id) {
         Ok(v) => Json(Value::Array(v)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1115,11 +1358,19 @@ async fn session_undo(
     Path(id): Path<String>,
     Json(b): Json<UndoBody>,
 ) -> impl IntoResponse {
-    match st.core.undo_session(&id, b.turn, b.restore_files.unwrap_or(true)).await {
+    match st
+        .core
+        .undo_session(&id, b.turn, b.restore_files.unwrap_or(true))
+        .await
+    {
         Ok(info) => Json(info).into_response(),
         Err(e) => {
             let busy = e.to_string().contains("处理中");
-            let code = if busy { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
+            let code = if busy {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             (code, Json(json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -1141,13 +1392,21 @@ async fn session_edit(
     Json(b): Json<EditResendBody>,
 ) -> impl IntoResponse {
     if b.text.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "text 不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text 不能为空" })),
+        )
+            .into_response();
     }
     match st.core.edit_resend(&id, b.turn, &b.text).await {
         Ok(info) => (StatusCode::ACCEPTED, Json(info)).into_response(),
         Err(e) => {
             let busy = e.to_string().contains("处理中");
-            let code = if busy { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
+            let code = if busy {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             (code, Json(json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -1161,14 +1420,22 @@ struct ForkBody {
 }
 
 /// 分支派生（POST /api/sessions/:id/fork）：原会话不变，返回新会话
-async fn session_fork(State(st): State<AppState>, Path(id): Path<String>, Json(b): Json<ForkBody>) -> impl IntoResponse {
+async fn session_fork(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<ForkBody>,
+) -> impl IntoResponse {
     match st.core.fork_session(&id, b.turn) {
         Ok(s) => (
             StatusCode::CREATED,
             Json(serde_json::to_value(s).unwrap_or(Value::Null)),
         )
             .into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1176,15 +1443,26 @@ async fn session_fork(State(st): State<AppState>, Path(id): Path<String>, Json(b
 async fn session_archive(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.store.list_archived_messages(&id) {
         Ok(msgs) => Json(serde_json::to_value(msgs).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// 轮次快照清单（GET /api/sessions/:id/snapshots）：undo / fork 的可选轮次与游标
-async fn session_snapshots(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn session_snapshots(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.store.list_turn_snapshots(&id) {
         Ok(snaps) => Json(serde_json::to_value(snaps).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1252,17 +1530,33 @@ impl AgentUpdateBody {
             // 语义映射：None（未传）= 不动；Some("")（空串）= 解绑；Some(id) = 绑定
             link: self.link.map(|v| {
                 let t = v.trim();
-                if t.is_empty() { None } else { Some(t.to_string()) }
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
             }),
         }
     }
 }
 
-async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>) -> impl IntoResponse {
+async fn create_agent(
+    State(st): State<AppState>,
+    Json(b): Json<CreateAgentBody>,
+) -> impl IntoResponse {
     // 模板创建:工具面/能力/提示词由模板提供,仅 identifier 必填(name/description 缺省用模板默认)
-    if let Some(tpl) = b.template.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    if let Some(tpl) = b
+        .template
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
         let Some(gid) = b.group.clone() else {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "模板创建必须指定目标组 group" }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "模板创建必须指定目标组 group" })),
+            )
+                .into_response();
         };
         let was_empty = st.core.registry().group_agent_count(&gid) == 0;
         let result = st
@@ -1276,7 +1570,11 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
             });
         return match result {
             Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
         };
     }
     let def = exm_core::types::AgentDefinition {
@@ -1323,7 +1621,11 @@ async fn create_agent(State(st): State<AppState>, Json(b): Json<CreateAgentBody>
     };
     match result {
         Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1334,14 +1636,25 @@ async fn remove_agent_from_group(
 ) -> impl IntoResponse {
     match st.core.registry().remove_agent(&gid, &identifier) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-async fn remove_agent(State(st): State<AppState>, Path(identifier): Path<String>) -> impl IntoResponse {
+async fn remove_agent(
+    State(st): State<AppState>,
+    Path(identifier): Path<String>,
+) -> impl IntoResponse {
     match st.core.remove_agent(&identifier) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1383,9 +1696,17 @@ async fn update_agent(
                 .into_response();
         }
     }
-    match st.core.registry().update_agent(&identifier, &b.into_patch()) {
+    match st
+        .core
+        .registry()
+        .update_agent(&identifier, &b.into_patch())
+    {
         Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1449,11 +1770,17 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$branch" "$remote" "$head_sha" "$up_sha" "$up
 "#;
     let exec = tokio::time::timeout(
         std::time::Duration::from_secs(12),
-        tokio::process::Command::new("sh").arg("-c").arg(script).output(),
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output(),
     )
     .await;
     let lines: Vec<String> = match exec {
-        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim().to_string()).collect(),
+        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .collect(),
         Ok(Err(e)) => {
             out["note"] = serde_json::json!(format!("仓库视图不可用:{e}"));
             return Json(out);
@@ -1524,7 +1851,11 @@ async fn version_apply() -> impl IntoResponse {
         }))).into_response();
     }
     if update_job_running() {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "更新任务已在进行中" }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "更新任务已在进行中" })),
+        )
+            .into_response();
     }
     #[cfg(unix)]
     {
@@ -1537,12 +1868,20 @@ async fn version_apply() -> impl IntoResponse {
             .spawn();
         match spawned {
             Ok(_) => (StatusCode::ACCEPTED, Json(json!({ "started": true }))).into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("任务启动失败:{e}") }))).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("任务启动失败:{e}") })),
+            )
+                .into_response(),
         }
     }
     #[cfg(not(unix))]
     {
-        (StatusCode::BAD_REQUEST, Json(json!({ "error": "一键更新仅支持 Linux 部署(依赖 /host 挂载与 sh 脚本)" }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "一键更新仅支持 Linux 部署(依赖 /host 挂载与 sh 脚本)" })),
+        )
+            .into_response()
     }
 }
 
@@ -1563,21 +1902,41 @@ async fn list_templates(State(st): State<AppState>) -> impl IntoResponse {
     Json(json!({ "templates": st.core.registry().list_templates() }))
 }
 
-async fn create_group(State(st): State<AppState>, Json(b): Json<CreateGroupBody>) -> impl IntoResponse {
+async fn create_group(
+    State(st): State<AppState>,
+    Json(b): Json<CreateGroupBody>,
+) -> impl IntoResponse {
     // 模板创建:附加模板 SOUL(组人格骨架)
-    if let Some(tpl) = b.template.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        return match st
-            .core
-            .registry()
-            .create_group_from_template(tpl, b.id, &b.name, b.description.as_deref().unwrap_or(""))
-        {
+    if let Some(tpl) = b
+        .template
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        return match st.core.registry().create_group_from_template(
+            tpl,
+            b.id,
+            &b.name,
+            b.description.as_deref().unwrap_or(""),
+        ) {
             Ok(meta) => Json(serde_json::to_value(meta).unwrap_or(Value::Null)).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
         };
     }
-    match st.core.create_group(b.id, &b.name, b.description.as_deref().unwrap_or("")) {
+    match st
+        .core
+        .create_group(b.id, &b.name, b.description.as_deref().unwrap_or(""))
+    {
         Ok(meta) => Json(serde_json::to_value(meta).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1590,10 +1949,17 @@ struct SwitchGroupBody {
     id: String,
 }
 
-async fn switch_group(State(st): State<AppState>, Json(b): Json<SwitchGroupBody>) -> impl IntoResponse {
+async fn switch_group(
+    State(st): State<AppState>,
+    Json(b): Json<SwitchGroupBody>,
+) -> impl IntoResponse {
     match st.core.switch_group(&b.id) {
         Ok(_) => Json(json!({ "ok": true, "active": b.id })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1604,14 +1970,25 @@ async fn activate_group(State(st): State<AppState>, Path(id): Path<String>) -> i
 async fn delete_group(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.delete_group(&id) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-async fn get_agent(State(st): State<AppState>, Path(identifier): Path<String>) -> impl IntoResponse {
+async fn get_agent(
+    State(st): State<AppState>,
+    Path(identifier): Path<String>,
+) -> impl IntoResponse {
     match st.core.agent(&identifier) {
         Some(a) => Json(serde_json::to_value(a).unwrap_or(Value::Null)).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "个体不存在" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "个体不存在" })),
+        )
+            .into_response(),
     }
 }
 
@@ -1624,12 +2001,24 @@ async fn get_agent_prompt(
     State(st): State<AppState>,
     Path((gid, identifier)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let Some(def) = st.core.registry().agents_in_group(&gid).into_iter().find(|a| a.identifier == identifier)
+    let Some(def) = st
+        .core
+        .registry()
+        .agents_in_group(&gid)
+        .into_iter()
+        .find(|a| a.identifier == identifier)
     else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "个体不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "个体不存在" })),
+        )
+            .into_response();
     };
     match st.core.registry().load_group_prompt(&gid, &def.prompt_file) {
-        Ok(prompt) => Json(json!({ "identifier": identifier, "promptFile": def.prompt_file, "prompt": prompt })).into_response(),
+        Ok(prompt) => Json(
+            json!({ "identifier": identifier, "promptFile": def.prompt_file, "prompt": prompt }),
+        )
+        .into_response(),
         Err(_) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "提示词文件不存在", "promptFile": def.prompt_file })),
@@ -1644,20 +2033,54 @@ async fn put_agent_prompt(
     Path((gid, identifier)): Path<(String, String)>,
     Json(b): Json<crate::singles::PromptBody>,
 ) -> impl IntoResponse {
-    let Some(def) = st.core.registry().agents_in_group(&gid).into_iter().find(|a| a.identifier == identifier)
+    let Some(def) = st
+        .core
+        .registry()
+        .agents_in_group(&gid)
+        .into_iter()
+        .find(|a| a.identifier == identifier)
     else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "个体不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "个体不存在" })),
+        )
+            .into_response();
     };
     if b.prompt.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "提示词不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "提示词不能为空" })),
+        )
+            .into_response();
     }
-    match st.core.registry().write_group_prompt(&gid, &def.prompt_file, &b.prompt) {
-        Ok(_) => Json(json!({ "ok": true, "identifier": identifier })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    match st
+        .core
+        .registry()
+        .write_group_prompt(&gid, &def.prompt_file, &b.prompt)
+    {
+        Ok(final_name) => {
+            // 旧名 → 新名：def 回写（读/导出/语言变体解析都走 promptFile）
+            if final_name != def.prompt_file {
+                let mut updated = def.clone();
+                updated.prompt_file = final_name.clone();
+                let _ = st.core.registry().upsert_agent(&gid, updated, None);
+            }
+            Json(json!({ "ok": true, "identifier": identifier, "promptFile": final_name }))
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-async fn get_persona(State(st): State<AppState>, Path(identifier): Path<String>) -> impl IntoResponse {    match st.core.persona(&identifier) {
+async fn get_persona(
+    State(st): State<AppState>,
+    Path(identifier): Path<String>,
+) -> impl IntoResponse {
+    match st.core.persona(&identifier) {
         Ok(persona) => {
             let custom = st.core.persona_is_custom(&identifier).unwrap_or(false);
             Json(json!({
@@ -1668,7 +2091,11 @@ async fn get_persona(State(st): State<AppState>, Path(identifier): Path<String>)
             }))
             .into_response()
         }
-        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1684,21 +2111,36 @@ async fn put_persona(
 ) -> impl IntoResponse {
     match st.core.set_persona(&identifier, &b.persona) {
         Ok(_) => Json(json!({ "ok": true, "custom": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-async fn reset_persona(State(st): State<AppState>, Path(identifier): Path<String>) -> impl IntoResponse {
+async fn reset_persona(
+    State(st): State<AppState>,
+    Path(identifier): Path<String>,
+) -> impl IntoResponse {
     match st.core.reset_persona(&identifier) {
         Ok(_) => Json(json!({ "ok": true, "custom": false })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 async fn list_playbooks(State(st): State<AppState>) -> impl IntoResponse {
     match st.core.playbooks() {
         Ok(p) => Json(serde_json::to_value(p).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1726,33 +2168,56 @@ async fn voice_transcribe(
             match field.bytes().await {
                 Ok(b) => audio = Some((b.to_vec(), name)),
                 Err(e) => {
-                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("读取音频失败: {e}") }))).into_response()
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": format!("读取音频失败: {e}") })),
+                    )
+                        .into_response()
                 }
             }
         }
     }
     let Some((bytes, name)) = audio else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 audio 字段" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺少 audio 字段" })),
+        )
+            .into_response();
     };
     match st.core.transcribe(&bytes, &name).await {
         Ok(text) => Json(json!({ "text": text })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// 语音合成：{text} → mp3 字节（audio/mpeg）
-async fn voice_speak(State(st): State<AppState>, Json(b): Json<serde_json::Value>) -> impl IntoResponse {
-    let text = b.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+async fn voice_speak(
+    State(st): State<AppState>,
+    Json(b): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let text = b
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
     if text.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "text 不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text 不能为空" })),
+        )
+            .into_response();
     }
     match st.core.speak(&text).await {
-        Ok(mp3) => (
-            [(axum::http::header::CONTENT_TYPE, "audio/mpeg")],
-            mp3,
+        Ok(mp3) => ([(axum::http::header::CONTENT_TYPE, "audio/mpeg")], mp3).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }
 
@@ -1793,10 +2258,17 @@ struct RestoreBody {
 }
 
 /// 回滚某文件到检查点版本（date 缺省 = 最近一份）
-async fn restore_checkpoint(State(st): State<AppState>, Json(b): Json<RestoreBody>) -> impl IntoResponse {
+async fn restore_checkpoint(
+    State(st): State<AppState>,
+    Json(b): Json<RestoreBody>,
+) -> impl IntoResponse {
     match st.core.restore_checkpoint(b.date.as_deref(), &b.path) {
         Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1816,10 +2288,20 @@ async fn list_memory(
     State(st): State<AppState>,
     Query(q): Query<MemoryQuery>,
 ) -> impl IntoResponse {
-    let kind = q.kind.as_deref().and_then(exm_core::memory::MemoryKind::parse);
-    match st.core.memory_list_filtered(kind, q.agent.as_deref(), q.limit.unwrap_or(30)) {
+    let kind = q
+        .kind
+        .as_deref()
+        .and_then(exm_core::memory::MemoryKind::parse);
+    match st
+        .core
+        .memory_list_filtered(kind, q.agent.as_deref(), q.limit.unwrap_or(30))
+    {
         Ok(items) => Json(serde_json::to_value(items).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1873,7 +2355,11 @@ async fn add_memory(State(st): State<AppState>, Json(b): Json<MemoryBody>) -> im
     if let Some(aid) = &b.agent_id {
         draft.agent_id = Some(aid.clone());
     }
-    let result = if b.global { st.core.memory_remember_global(draft) } else { st.core.memory_remember(draft) };
+    let result = if b.global {
+        st.core.memory_remember_global(draft)
+    } else {
+        st.core.memory_remember(draft)
+    };
     match result {
         Ok(entry) => {
             if b.pin {
@@ -1881,7 +2367,11 @@ async fn add_memory(State(st): State<AppState>, Json(b): Json<MemoryBody>) -> im
             }
             Json(serde_json::to_value(entry).unwrap_or(Value::Null)).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1910,7 +2400,11 @@ async fn search_memory(State(st): State<AppState>, Json(b): Json<SearchBody>) ->
             })).collect::<Vec<_>>()
         }))
         .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1920,21 +2414,33 @@ async fn memory_stats(State(st): State<AppState>) -> impl IntoResponse {
             let stats = st.core.memory.agent_stats(20).unwrap_or_default();
             Json(json!({ "memory": s, "agentStats": stats })).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 async fn memory_reindex(State(st): State<AppState>) -> impl IntoResponse {
     match st.core.memory_reindex() {
         Ok(n) => Json(json!({ "ok": true, "reindexed": n })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 async fn memory_decay(State(st): State<AppState>) -> impl IntoResponse {
     match st.core.memory_decay(0.05) {
         Ok(n) => Json(json!({ "ok": true, "changed": n })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1950,13 +2456,24 @@ async fn get_memory_md(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 /// 保存 memory.md
-async fn put_memory_md(State(st): State<AppState>, Json(b): Json<serde_json::Value>) -> impl IntoResponse {
+async fn put_memory_md(
+    State(st): State<AppState>,
+    Json(b): Json<serde_json::Value>,
+) -> impl IntoResponse {
     let Some(content) = b.get("content").and_then(|c| c.as_str()) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 content" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺少 content" })),
+        )
+            .into_response();
     };
     let path = st.core.config().memory_md_path.clone();
     if let Err(e) = std::fs::write(&path, content) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("写入失败: {e}") }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("写入失败: {e}") })),
+        )
+            .into_response();
     }
     // 超限自主压缩：后台执行（LLM 简略 + 旧文归档），写入立即返回
     let over = content.chars().count() > st.core.config().memory_md_max_chars;
@@ -1974,14 +2491,22 @@ async fn put_memory_md(State(st): State<AppState>, Json(b): Json<serde_json::Val
 async fn memory_render(State(st): State<AppState>) -> impl IntoResponse {
     match st.core.render_memory_md() {
         Ok(n) => Json(json!({ "ok": true, "pinned": n })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 async fn forget_memory(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.memory_forget(&id) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1998,7 +2523,11 @@ async fn pin_memory(
 ) -> impl IntoResponse {
     match st.core.memory_pin(&id, b.pinned) {
         Ok(_) => Json(json!({ "ok": true, "pinned": b.pinned })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -2031,15 +2560,12 @@ async fn ws_auth_guard(
     if cfg.security.auth_key.is_empty() {
         return next.run(req).await;
     }
-    let provided = req
-        .uri()
-        .query()
-        .and_then(|q| {
-            q.split('&').find_map(|kv| {
-                let (k, v) = kv.split_once('=')?;
-                (k == "key").then(|| percent_decode(v))
-            })
-        });
+    let provided = req.uri().query().and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == "key").then(|| percent_decode(v))
+        })
+    });
     if provided.as_deref() != Some(cfg.security.auth_key.as_str()) {
         return (StatusCode::UNAUTHORIZED, "需要访问密钥").into_response();
     }
@@ -2096,8 +2622,12 @@ async fn ws_loop(mut socket: WebSocket, core: Arc<Core>, session_filter: Option<
             evt = rx.recv() => {
                 match evt {
                     Ok(e) => {
+                        // 审批事件绕过会话过滤直推：审批常发生在 spawn 子会话，用户停在
+                        // 主会话时若按过滤器丢弃，内联审批卡永不出现（只能去独立页面裁决，
+                        // 阻塞等待窗内错过即工具受阻）。审批是全局关注事件，须跨会话可见。
+                        let approval_evt = e.kind == "approval.required" || e.kind == "approval.resolved";
                         if let Some(sid) = &session_filter {
-                            if &e.session_id != sid {
+                            if &e.session_id != sid && !approval_evt {
                                 continue;
                             }
                         }
@@ -2129,7 +2659,12 @@ fn mcp_mount(core: Arc<Core>) -> Router<AppState> {
     if !core.config().mcp_serve.enabled {
         return Router::new();
     }
-    let path = core.config().mcp_serve.http_path.trim_matches('/').to_string();
+    let path = core
+        .config()
+        .mcp_serve
+        .http_path
+        .trim_matches('/')
+        .to_string();
     if path.is_empty() {
         return Router::new();
     }
@@ -2152,7 +2687,12 @@ pub async fn mcp_http_endpoint(
     let limits = st.core.config().limits.clone();
     if limits.enabled && limits.max_requests > 0 {
         let now = exm_core::types::now_ms();
-        if !crate::limits::RateLimiter::check("api", limits.window_secs * 1000, limits.max_requests, now) {
+        if !crate::limits::RateLimiter::check(
+            "api",
+            limits.window_secs * 1000,
+            limits.max_requests,
+            now,
+        ) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({ "error": "请求过于频繁", "retrySecs": limits.window_secs })),
@@ -2186,13 +2726,35 @@ pub async fn mcp_http_endpoint(
 ///   可通过 `EXM_HOST` 环境变量覆盖；显式传 `None` 时读取环境变量，传 `Some(s)` 时强制使用 `s`。
 pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Result<()> {
     platform::spawn_cron_scheduler(core.clone());
+    // 回收站周期清理（spec: trash-retention；1h 间隔 + 启动错峰，supervisor 同款模式）
+    {
+        let core_for_trash = core.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await; // 启动错峰
+            loop {
+                exm_core::trash::cleanup_once(&core_for_trash);
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
     telegram::spawn_supervisor(core.clone());
     napcat::spawn_supervisor(core.clone());
     qqbot::spawn_supervisor(core.clone());
     discord::spawn_supervisor(core.clone());
     slack::spawn_supervisor(core.clone());
     matrix::spawn_supervisor(core.clone());
-    video::spawn_supervisor(core.clone());
+    // 插件装载面：builtin 插件注册 + watcher 拉起（video 走新路径，行为等价）
+    plugins::spawn_all(core.clone());
+    // 视频互动审批代发执行器（video__act approval=always 批准后的 [video] 回调）
+    {
+        let core_for_act = core.clone();
+        core.register_video_act_executor(Arc::new(move |payload| {
+            let core = core_for_act.clone();
+            Box::pin(
+                async move { plugins::video::tools::execute_act_payload(&core, &payload).await },
+            )
+        }));
+    }
     // 事件触发器（7.1）：文件监听（配置启用时才启动）
     triggers::spawn_file_watcher(core.clone());
     // 分布式执行：工作者池注入（有工作者在线即自动路由远程，失败回落本地）
@@ -2231,11 +2793,12 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
         Some(s) => s.to_string(),
         None => std::env::var("EXM_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
     };
-    let bind_addr: std::net::IpAddr = host_str.parse().map_err(|e| {
-        anyhow::anyhow!("invalid --host/EXM_HOST value {host_str:?}: {e}")
-    })?;
+    let bind_addr: std::net::IpAddr = host_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --host/EXM_HOST value {host_str:?}: {e}"))?;
     let addr = std::net::SocketAddr::from((bind_addr, port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;    println!("[gateway] EXMACHINA Gateway 已启动");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    println!("[gateway] EXMACHINA Gateway 已启动");
     println!("[gateway]   REST  http://{addr}/api");
     println!("[gateway]   WS    ws://{addr}/ws?sessionId=<id>");
     println!(
@@ -2246,17 +2809,33 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             let c = core.config();
             let configured = !c.llm.api_key.trim().is_empty() || !c.llm.api_keys.is_empty();
             if configured {
-                format!("{}（{}）", if c.active_profile.is_empty() { "全局通道" } else { c.active_profile.as_str() }, c.llm.base_url)
+                format!(
+                    "{}（{}）",
+                    if c.active_profile.is_empty() {
+                        "全局通道"
+                    } else {
+                        c.active_profile.as_str()
+                    },
+                    c.llm.base_url
+                )
             } else {
                 "未配置 —— 请在「提供商」页填写端点与 API Key".to_string()
             }
         }
     );
-    println!("[gateway]   个体  {}（1 指挥体 + {} 子个体）", core.registry.count(), core.registry.units().len());
+    println!(
+        "[gateway]   个体  {}（1 指挥体 + {} 子个体）",
+        core.registry.count(),
+        core.registry.units().len()
+    );
     let dist = core.config().webui_dist.clone();
     println!(
         "[gateway]   WebUI {}",
-        if dist.exists() { format!("{}", dist.display()) } else { "未构建（运行 npm run build:webui 后可由本网关托管）".to_string() }
+        if dist.exists() {
+            format!("{}", dist.display())
+        } else {
+            "未构建（运行 npm run build:webui 后可由本网关托管）".to_string()
+        }
     );
     axum::serve(
         listener,

@@ -18,16 +18,18 @@ import {
   ClockCircleOutlined,
   TeamOutlined,
   CloudUploadOutlined,
+  AppstoreAddOutlined,
   DeploymentUnitOutlined,
 } from "@ant-design/icons";
 import { api } from "./api";
 import { useExm } from "./store";
-import { LANGS, useLang, useT, type TKey } from "./i18n/core";
+import { useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
 import { DataStream } from "./components/DataStream";
 import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
+import { OrbitRings } from "./components/OrbitRings";
 import { TelemetryBar } from "./components/TelemetryBar";
 /* 视图懒加载（React.lazy + 动态 import）：按视图切分 chunk，首屏只拉 shell + 当前视图，
  * 其余视图在导航到时才加载（vendor 三方库另行在 vite.config.ts 的 manualChunks 分组缓存） */
@@ -43,6 +45,7 @@ const GroupsView = lazy(() => import("./views/GroupsView").then((m) => ({ defaul
 const NexusView = lazy(() => import("./views/NexusView").then((m) => ({ default: m.NexusView })));
 const SinglesView = lazy(() => import("./views/SinglesView").then((m) => ({ default: m.SinglesView })));
 const SkillsView = lazy(() => import("./views/SkillsView").then((m) => ({ default: m.SkillsView })));
+const PluginsView = lazy(() => import("./views/PluginsView").then((m) => ({ default: m.PluginsView })));
 const AutomationsView = lazy(() => import("./views/AutomationsView").then((m) => ({ default: m.AutomationsView })));
 const ApprovalsView = lazy(() => import("./views/ApprovalsView").then((m) => ({ default: m.ApprovalsView })));
 const ChannelsView = lazy(() => import("./views/ChannelsView").then((m) => ({ default: m.ChannelsView })));
@@ -71,6 +74,7 @@ type ViewKey =
   | "groups"
   | "nexus"
   | "skills"
+  | "plugins"
   | "models"
   | "automations"
   | "approvals"
@@ -83,7 +87,7 @@ type ViewKey =
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
   "chat", "agent", "groups", "nexus", "graph", "automations",
-  "skills", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
+  "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
 ];
 
 /** 从 hash 解析视图：#/chat/<sessionId> → { view: chat, session }; 非法回落 chat */
@@ -112,6 +116,7 @@ export const NAV_ITEMS: {
   { key: "graph", en: "DAG", labelKey: "nav.dag", icon: <ApartmentOutlined /> },
   { key: "automations", en: "CRON", labelKey: "nav.cron", icon: <ClockCircleOutlined /> },
   { key: "skills", en: "SKILLS", labelKey: "nav.skills", icon: <DeploymentUnitOutlined /> },
+  { key: "plugins", en: "PLUGINS", labelKey: "nav.plugins", icon: <AppstoreAddOutlined /> },
   { key: "models", en: "MODELS", labelKey: "nav.models", icon: <ApiOutlined /> },
   { key: "approvals", en: "APPROVALS", labelKey: "nav.approvals", icon: <BellOutlined /> },
   { key: "channels", en: "CHANNELS", labelKey: "nav.channels", icon: <CloudUploadOutlined /> },
@@ -125,6 +130,15 @@ export default function App(): React.ReactElement {
   const config = useExm((s) => s.config);
   const wsConnected = useExm((s) => s.wsConnected);
   const init = useExm((s) => s.init);
+  const pendingApprovals = useExm((s) => s.pendingApprovals);
+  const refreshPendingApprovals = useExm((s) => s.refreshPendingApprovals);
+  // 审批待办轮询（60s 兜底）：WS 丢事件/页面刷新后角标仍可恢复——
+  // 审批等待窗内（approvalWaitSecs）错过提示 = 工具受阻，必须有可靠提醒面
+  useEffect(() => {
+    void refreshPendingApprovals();
+    const h = setInterval(() => void refreshPendingApprovals(), 60000);
+    return () => clearInterval(h);
+  }, [refreshPendingApprovals]);
   const accent = useTheme((s) => s.accent);
   const setAccent = useTheme((s) => s.setAccent);
   const preset = useTheme((s) => s.preset);
@@ -160,12 +174,10 @@ export default function App(): React.ReactElement {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
-  const [openMenu, setOpenMenu] = useState<"theme" | "accent" | "lang" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"theme" | "accent" | null>(null);
   /** 移动端侧栏抽屉（≤860px 时侧栏覆盖呈现） */
   const [navOpen, setNavOpen] = useState(false);
   const t = useT();
-  const lang = useLang((s) => s.lang);
-  const setLang = useLang((s) => s.setLang);
   // 登录门：checking = 鉴权中；setup = 首启未设密钥（引导设置）；locked = 未解锁；open = 已进入
   const [gate, setGate] = useState<"checking" | "setup" | "locked" | "open">("checking");
   /** 通道就绪 = 全局端点已配置密钥（apiKey 由服务端掩码回显，非空即已配置） */
@@ -205,6 +217,7 @@ export default function App(): React.ReactElement {
   if (gate === "checking") {
     return (
       <div className="login-wrap">
+        <OrbitRings />
         <DataStream side="left" />
         <DataStream side="right" />
         <div className="login-core">
@@ -272,6 +285,9 @@ export default function App(): React.ReactElement {
             label: (
               <>
                 <span>{t(it.labelKey)}</span> <span className="label-en">[{it.en}]</span>
+                {it.key === "approvals" && pendingApprovals > 0 && (
+                  <span className="nav-badge" title={`${pendingApprovals}`}>{pendingApprovals > 99 ? "99+" : pendingApprovals}</span>
+                )}
               </>
             ),
           }))}
@@ -335,28 +351,7 @@ export default function App(): React.ReactElement {
             ))}
           </div>
         </div>
-        <div className={`theme-switcher ${openMenu === "lang" ? "open" : ""}`}>
-          <button className="theme-toggle" onClick={() => setOpenMenu(openMenu === "lang" ? null : "lang")}>
-            <span className="theme-label">{t("lang.label")}</span>
-            <span className="theme-current">{LANGS.find((l) => l.code === lang)?.name ?? lang}</span>
-            <span className={`theme-caret ${openMenu === "lang" ? "up" : ""}`}>▸</span>
-          </button>
-          <div className="theme-panel">
-            {LANGS.map((l) => (
-              <button
-                key={l.code}
-                className={`theme-option ${lang === l.code ? "active" : ""}`}
-                onClick={() => {
-                  setLang(l.code);
-                  setOpenMenu(null);
-                }}
-              >
-                <span>{l.name}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-        {/* 界面偏好（数据流等）在「设置」页维护，侧栏只留主题与语言 */}
+        {/* 界面偏好（数据流/语言等）在「设置」页维护，侧栏只留主题与强调色 */}
         <div className="nav-footer">
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} />
           <span className="status-text">{wsConnected ? t("status.connected") : t("status.reconnecting")}</span>
@@ -376,6 +371,7 @@ export default function App(): React.ReactElement {
             {view === "groups" && <GroupsView />}
             {view === "nexus" && <NexusView />}
             {view === "skills" && <SkillsView />}
+            {view === "plugins" && <PluginsView />}
             {view === "models" && <ModelsView />}
             {view === "automations" && <AutomationsView />}
             {view === "approvals" && <ApprovalsView />}

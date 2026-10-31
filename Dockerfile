@@ -38,6 +38,7 @@ WORKDIR /app
 RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git libxdo3 libx11-6 libxcb1 libxext6 libxinerama1 libxtst6 libxkbcommon0 \
+      python3 jq sqlite3 xxd \
     && rm -rf /var/lib/apt/lists/*
 # 一键更新工具链:docker cli + compose 插件由 compose 从宿主机只读挂载(零构建期下载,版本与宿主引擎一致)
 COPY --from=rust-builder /build/target/release/exm /usr/local/bin/exm
@@ -45,7 +46,6 @@ COPY --from=rust-builder /build/target/release/exmachina /usr/local/bin/exmachin
 COPY --from=rust-builder /build/target/release/exm-gateway /usr/local/bin/exm-gateway
 COPY --from=webui-builder /build/dist ./webui/dist
 COPY entities ./entities
-COPY skills ./skills
 ENV EXM_LANG=zh
 ENV RUST_LOG=info
 # git 短哈希:runtime 阶段才注入(进程运行时读取)——若放 builder 阶段,每个 commit 都会作废整条 Rust 编译缓存
