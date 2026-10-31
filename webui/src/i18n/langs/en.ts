@@ -203,6 +203,9 @@ export const en: Partial<Dict> = {
 
   // ── 提供商页 ──
   "models.desc": "Add providers and configure each provider's model list: mark vision / audio capabilities per model, then pick capability models for speech synthesis, speech recognition, vision relay and embedding. Agents / groups without an explicit model follow the global default.",
+  "models.tabProviders": "Providers",
+  "models.tabCaps": "Capabilities",
+  "models.capDesc": "Assign global capability models for speech synthesis, speech recognition, vision relay and embedding; active-group overrides in group settings take precedence.",
   "models.modelList": "Model list",
   "models.addModel": "Add model",
   "models.fetchModels": "Fetch models",

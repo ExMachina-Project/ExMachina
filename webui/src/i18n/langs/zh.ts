@@ -201,6 +201,9 @@ export const zh = {
 
   // ── 模型设置页 ──
   "models.desc": "添加提供商并为其配置模型清单：勾选每个模型的视觉 / 语音能力，再指定语音合成、语音识别、视觉转述、嵌入等能力模型。未单独指定模型的智能体 / 组跟随「全局默认」。",
+  "models.tabProviders": "提供商",
+  "models.tabCaps": "功能分配",
+  "models.capDesc": "为语音合成、语音识别、视觉转述、嵌入等全局能力槽位指定模型；激活组在组设置里单独覆盖时优先按组配置执行。",
   "models.modelList": "模型清单",
   "models.addModel": "添加模型",
   "models.fetchModels": "获取可用模型",
