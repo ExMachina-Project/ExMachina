@@ -36,7 +36,7 @@ exit /b %RC%
 :write_ps1
 >> "%PS1%" echo param([int]$Port = 4173)
 >> "%PS1%" echo $ErrorActionPreference = 'Stop'
->> "%PS1%" echo $repo = 'KurohaneKaoruko/ExMachina'
+>> "%PS1%" echo $repo = 'ExMachina-Project/ExMachina'
 >> "%PS1%" echo $dir = 'exmachina'
 >> "%PS1%" echo $tag = $env:EXM_VERSION
 >> "%PS1%" echo $t0 = Get-Date
