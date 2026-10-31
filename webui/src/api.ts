@@ -102,6 +102,8 @@ export interface GatewayConfig {
   hooks?: { preTool: string[]; postTool: string[]; onRunEnd: string[] };
   /** 工具面（声明式自定义工具） */
   tools?: { custom: Array<Record<string, unknown>> };
+  /** 回收站保留契约（保留期 + 容量上限） */
+  trash?: { retentionDays: number; maxBytes: number };
   mock: boolean;
 }
 
