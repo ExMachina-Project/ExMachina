@@ -1,6 +1,9 @@
 # EXMACHINA 部署编排
 #   部署语言：EXM_LANG=zh（默认）| en —— en 时默认智能体提示词装载英文变体
 #   模型接入：首次启动后访问 http://localhost:4173 提供商 [PROVIDERS] 页配置（或挂载已有 .exmachina/config.json）
+#   版本追溯：GIT_HASH 烘进镜像（/api/version 的 gitHash）。直连构建务必带当前哈希：
+#     GIT_HASH=$(git rev-parse --short HEAD) docker compose build && docker compose up -d
+#     （省略时回落 dev，生产版本将不可追溯；scripts/apply-update.sh 已自动带上）
 services:
   exmachina:
     build:

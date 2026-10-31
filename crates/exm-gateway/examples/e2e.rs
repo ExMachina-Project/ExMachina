@@ -234,6 +234,16 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let sid = session["id"].as_str().unwrap_or_default().to_string();
     c.check("会话创建", !sid.is_empty());
+    // 空标题校验：显式空/纯空白 → 400；缺省（无 body 字段）仍兜底「新会话」
+    let blank_title: reqwest::Response = client
+        .post(format!("{base}/sessions"))
+        .json(&serde_json::json!({"title": "   "}))
+        .send()
+        .await?;
+    c.check(
+        "空标题会话被拒 400",
+        blank_title.status().as_u16() == 400,
+    );
 
     // 技能包：写入后热装载，任务目标命中触发词即随派发携带
     // 技能目录口径 = entities/skills（见 LocalRegistry::skills_dir），SKILL.md 格式
@@ -865,6 +875,15 @@ async fn main() -> anyhow::Result<()> {
     c.check(
         "技能清单可查",
         skills.as_array().map(|a| !a.is_empty()).unwrap_or(false),
+    );
+    // 技能 DELETE 幂等语义（对齐 sessions）：不存在的 id 也 200——重复/并发删除安全
+    let skill_del: reqwest::Response = client
+        .delete(format!("{base}/skills/never-existed"))
+        .send()
+        .await?;
+    c.check(
+        "技能删除幂等（不存在也 200）",
+        skill_del.status().as_u16() == 200,
     );
 
     let cron_job: serde_json::Value = client
@@ -2509,9 +2528,41 @@ async fn main() -> anyhow::Result<()> {
         cfg_raw.contains("\"keySetupDismissed\": true"),
     );
 
+    // ---- 请求体上限（审计补面）：全局 2MB，超限 413 ----
+    {
+        let big_ok: reqwest::Response = client
+            .post(format!("{base}/sessions"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({"title": "x".repeat(1024 * 1024)}))
+            .send()
+            .await?;
+        c.check(
+            "1MB 请求体放行（200/400 均非 413）",
+            big_ok.status().as_u16() != 413,
+        );
+        let big_rej: reqwest::Response = client
+            .post(format!("{base}/sessions"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({"title": "x".repeat(3 * 1024 * 1024)}))
+            .send()
+            .await?;
+        let rej_code = big_rej.status().as_u16();
+        let rej_body = big_rej.text().await.unwrap_or_default();
+        c.check(
+            &format!("3MB 请求体 413 拒绝（实得 {rej_code}）"),
+            rej_code == 413,
+        );
+        if rej_code != 413 {
+            println!("  ↳ 3MB 拒绝响应体：{}", &rej_body[..rej_body.len().min(200)]);
+        }
+    }
+
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {
+        // process::exit 不跑 Drop——FileGuard 快照(config.json/active_group/出厂人格)必须先手动还原，
+        // 否则失败一次就把生产工作树留在改写态（实测：SOUL.md 曾被留在「e2e 临时改写出厂人格」）
+        drop(_guards);
         std::process::exit(1);
     }
     println!("e2e 全部通过。");

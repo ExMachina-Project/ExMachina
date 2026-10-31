@@ -48,6 +48,17 @@ echo "== 主链路：会话 + 聊天往返 =="
 SID=$(curl -s -X POST "$BASE/api/sessions" -H "X-Auth-Key: $KEY" \
   -H 'Content-Type: application/json' -d '{"title":"部署巡检"}' -m 20 \
   | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
+# 巡检会话用完即删（无论成败）——不留垃圾：曾长期只建不删，生产堆积数十个「部署巡检」
+cleanup_inspect() {
+  if [ -n "$SID" ]; then
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/sessions/$SID" \
+      -H "X-Auth-Key: $KEY" -m 20 2>/dev/null || true)
+    if [ "$CODE" = "200" ]; then echo "  ok  巡检会话已清理 $SID"; else
+      echo "  !   巡检会话清理失败（$CODE）: $SID —— 请手动删除"
+    fi
+  fi
+}
+trap cleanup_inspect EXIT
 if [ -n "$SID" ]; then
   PASS=$((PASS + 1)); echo "  ok  会话创建 $SID"
   check "POST /api/sessions/$SID/chat（受理）" 202 "$(req POST "sessions/$SID/chat" '{"text":"巡检健康检查：请直接回复「正常」两个字。不要调用任何工具，不要执行任何命令——本项只验证聊天链路往返。"}')"
