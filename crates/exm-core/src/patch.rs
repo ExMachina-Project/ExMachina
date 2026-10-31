@@ -92,7 +92,13 @@ fn parse_hunk_header(line: &str) -> Option<Hunk> {
             _ => return None,
         }
     }
-    Some(Hunk { old_start, new_start, old_count, new_count, lines: Vec::new() })
+    Some(Hunk {
+        old_start,
+        new_start,
+        old_count,
+        new_count,
+        lines: Vec::new(),
+    })
 }
 
 /// 解析统一 diff 文本为逐文件补丁；无法识别任何文件段时报错
@@ -137,7 +143,10 @@ pub fn parse_unified_diff(text: &str) -> Result<Vec<FilePatch>> {
                 match kind {
                     Some((kind, old_step, new_step)) => {
                         if let Some(h) = cur_hunk.as_mut() {
-                            h.lines.push(HunkLine { kind, text: raw[1..].to_string() });
+                            h.lines.push(HunkLine {
+                                kind,
+                                text: raw[1..].to_string(),
+                            });
                         }
                         seen.old_seen += old_step;
                         seen.new_seen += new_step;
@@ -255,7 +264,8 @@ pub fn simple_unified_diff(old: &str, new: &str, path: &str, context: usize) -> 
     }
     // 公共后缀（不与前缀重叠）
     let mut suffix = 0usize;
-    while suffix < a.len() - prefix && suffix < b.len() - prefix
+    while suffix < a.len() - prefix
+        && suffix < b.len() - prefix
         && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
     {
         suffix += 1;
@@ -269,7 +279,9 @@ pub fn simple_unified_diff(old: &str, new: &str, path: &str, context: usize) -> 
     let old_count = ctx + old_mid.len() + ctx;
     let new_count = ctx + new_mid.len() + ctx;
 
-    let mut out = format!("--- a/{path}\n+++ b/{path}\n@@ -{old_start},{old_count} +{new_start},{new_count} @@\n");
+    let mut out = format!(
+        "--- a/{path}\n+++ b/{path}\n@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+    );
     for line in &a[prefix - ctx..prefix] {
         out.push_str(&format!(" {line}\n"));
     }
@@ -315,32 +327,30 @@ pub fn apply_file(old: &str, fp: &FilePatch) -> std::result::Result<String, Stri
         }
         for hl in &hunk.lines {
             match hl.kind {
-                LineKind::Context | LineKind::Del => {
-                    match lines.get(cursor) {
-                        Some(actual) if lines_match(&hl.text, actual) => {
-                            if hl.kind == LineKind::Context {
-                                result.push(actual.clone());
-                            }
-                            cursor += 1;
+                LineKind::Context | LineKind::Del => match lines.get(cursor) {
+                    Some(actual) if lines_match(&hl.text, actual) => {
+                        if hl.kind == LineKind::Context {
+                            result.push(actual.clone());
                         }
-                        Some(actual) => {
-                            return Err(format!(
-                                "{} 第 {} 行上下文不匹配：补丁期望 {:?}，实际 {:?}",
-                                fp.path,
-                                cursor + 1,
-                                hl.text,
-                                actual
-                            ));
-                        }
-                        None => {
-                            return Err(format!(
-                                "{} 上下文行超出文件末尾（文件共 {} 行）",
-                                fp.path,
-                                lines.len()
-                            ));
-                        }
+                        cursor += 1;
                     }
-                }
+                    Some(actual) => {
+                        return Err(format!(
+                            "{} 第 {} 行上下文不匹配：补丁期望 {:?}，实际 {:?}",
+                            fp.path,
+                            cursor + 1,
+                            hl.text,
+                            actual
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "{} 上下文行超出文件末尾（文件共 {} 行）",
+                            fp.path,
+                            lines.len()
+                        ));
+                    }
+                },
                 LineKind::Add => result.push(hl.text.clone()),
             }
         }
@@ -399,7 +409,10 @@ diff --git a/src/b.rs b/src/b.rs
         let b_old = "// b header\nconst B: u8 = 1;\n";
         let a_new = apply_file(a_old, &patches[0]).unwrap();
         let b_new = apply_file(b_old, &patches[1]).unwrap();
-        assert_eq!(a_new, "fn main() {\n    println!(\"a changed\");\n    println!(\"a added\");\n}\n");
+        assert_eq!(
+            a_new,
+            "fn main() {\n    println!(\"a changed\");\n    println!(\"a added\");\n}\n"
+        );
         assert_eq!(b_new, "// b header\nconst B: u8 = 2;\n");
         // 顺序应用：第二个文件不受第一个文件影响（互相独立）
         let b_again = apply_file(b_old, &patches[1]).unwrap();

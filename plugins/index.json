@@ -1,0 +1,15 @@
+[
+  {
+    "id": "demo",
+    "name": "示例进程插件",
+    "version": "0.1.0",
+    "description": "开发指南配套的最小进程插件（python3 stdio JSON-RPC）：hello 工具 + 凭据内存态 + watcher 通知应答",
+    "exmMin": "0.5.3",
+    "source": {
+      "kind": "git",
+      "url": "https://github.com/ExMachina-Project/ExMachina",
+      "subdir": "plugins/demo",
+      "ref": "dev"
+    }
+  }
+]

@@ -9,27 +9,6 @@ import "./styles.css";
 /** antd 原生 token 表：与 styles.css 的色阶同源，避免 antd 件与自绘面板两种底色。
  *  antd token 无法直接读 CSS 变量，因此这里按主题硬编码一份（与 CSS 里的色阶保持一致）。 */
 const ANTD_TOKENS: Record<ThemeKey, Record<string, string>> = {
-  midnight: {
-    colorBgBase: "#0a0b0f",
-    colorBgContainer: "#101218",
-    colorBgElevated: "#171a22",
-    colorBgLayout: "#0a0b0f",
-    colorBorder: "#232936",
-    colorBorderSecondary: "#1e222c",
-    colorText: "#d4dae5",
-    colorTextSecondary: "#8b95a7",
-    colorTextTertiary: "#79839a",
-    colorTextQuaternary: "#79839a",
-    colorTextPlaceholder: "#79839a", // 默认 alpha 0.25 在暗底上仅 ~2.2:1，且承载真实信息（如「未配置」）
-    // 语义标签底色：antd 派生值偏浑浊（warning 底 rgb(209,200,188)），压低文字对比
-    colorSuccessBg: "#0e2a1f",
-    colorWarningBg: "#2c2109",
-    colorErrorBg: "#2d1417",
-    colorInfoBg: "#141c33",
-    colorSuccess: "#34d399",
-    colorWarning: "#fbbf24",
-    colorError: "#f87171",
-  },
   minimal: {
     colorBgBase: "#fafafa",
     colorBgContainer: "#ffffff",

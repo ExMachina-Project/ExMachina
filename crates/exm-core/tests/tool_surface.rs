@@ -17,11 +17,36 @@ fn keys(list: &[ToolName]) -> Vec<&'static str> {
 fn 编成白名单_提示词教到的工具全部在面() {
     let cases: &[(&str, &[&str])] = &[
         // coding-agent：提示词「优先 edit 精确替换」「先 grep/glob 摸清调用方」
-        ("coding-agent", &["read", "grep", "glob", "filesystem", "terminal", "edit", "patch"]),
+        (
+            "coding-agent",
+            &[
+                "read",
+                "grep",
+                "glob",
+                "filesystem",
+                "terminal",
+                "edit",
+                "patch",
+            ],
+        ),
         // orchestrator：编码工作流整节都在教 edit/grep/glob
-        ("orchestrator", &["read", "grep", "glob", "filesystem", "terminal", "edit", "web_search"]),
+        (
+            "orchestrator",
+            &[
+                "read",
+                "grep",
+                "glob",
+                "filesystem",
+                "terminal",
+                "edit",
+                "web_search",
+            ],
+        ),
         // frontend-agent：同属实作域
-        ("frontend-agent", &["read", "grep", "glob", "filesystem", "terminal", "edit"]),
+        (
+            "frontend-agent",
+            &["read", "grep", "glob", "filesystem", "terminal", "edit"],
+        ),
     ];
     for (id, need) in cases {
         let path = repo_root().join(format!("entities/groups/exmachina/agents/{id}.json"));
@@ -51,13 +76,29 @@ fn 单聊智能体_machina_工具面含编辑检索() {
 
 #[test]
 fn specs_下发面_含全部开发工具() {
-    let allowlist: Vec<ToolName> = ["read", "grep", "glob", "filesystem", "terminal", "edit", "patch"]
-        .iter()
-        .filter_map(|k| ToolName::parse(k))
-        .collect();
+    let allowlist: Vec<ToolName> = [
+        "read",
+        "grep",
+        "glob",
+        "filesystem",
+        "terminal",
+        "edit",
+        "patch",
+    ]
+    .iter()
+    .filter_map(|k| ToolName::parse(k))
+    .collect();
     let specs = ToolGateway::tool_specs(&allowlist, false, false, false);
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    for n in ["read", "grep", "glob", "filesystem", "terminal", "edit", "patch"] {
+    for n in [
+        "read",
+        "grep",
+        "glob",
+        "filesystem",
+        "terminal",
+        "edit",
+        "patch",
+    ] {
         assert!(names.contains(&n), "specs 未下发 {n}（现有 {names:?}）");
     }
 }

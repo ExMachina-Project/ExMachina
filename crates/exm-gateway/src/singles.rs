@@ -48,9 +48,16 @@ pub struct TargetBody {
 }
 
 /// 切换交互目标：mode=group 回到激活组；mode=single 切到指定智能体
-pub async fn set_target(State(st): State<AppState>, Json(b): Json<TargetBody>) -> impl IntoResponse {
+pub async fn set_target(
+    State(st): State<AppState>,
+    Json(b): Json<TargetBody>,
+) -> impl IntoResponse {
     let result = match b.mode.as_str() {
-        "group" => st.core.registry().set_active_single(None).map(|_| json!({ "mode": "group" })),
+        "group" => st
+            .core
+            .registry()
+            .set_active_single(None)
+            .map(|_| json!({ "mode": "group" })),
         "single" => {
             let id = b.id.clone().unwrap_or_default();
             st.core
@@ -67,7 +74,11 @@ pub async fn set_target(State(st): State<AppState>, Json(b): Json<TargetBody>) -
             }
             Json(v).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -105,14 +116,19 @@ pub struct SingleBody {
     pub link: Option<String>,
 }
 
-pub async fn create_single(State(st): State<AppState>, Json(b): Json<SingleBody>) -> impl IntoResponse {
+pub async fn create_single(
+    State(st): State<AppState>,
+    Json(b): Json<SingleBody>,
+) -> impl IntoResponse {
     // 连结体代理绑定校验：link_id 必须指向已存在的连结体
     let link = match b.link.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
         Some(id) => {
             if !st.core.config().nexus.links.iter().any(|l| l.id == id) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("连结体不存在: {id}（先在「智能连结」页添加）") })),
+                    Json(
+                        json!({ "error": format!("连结体不存在: {id}（先在「智能连结」页添加）") }),
+                    ),
                 )
                     .into_response();
             }
@@ -127,7 +143,11 @@ pub async fn create_single(State(st): State<AppState>, Json(b): Json<SingleBody>
         tier: exm_core::types::Tier::Orchestrator,
         description: b.description,
         capabilities: vec![],
-        tools: vec![exm_core::types::ToolName::Read, exm_core::types::ToolName::Filesystem, exm_core::types::ToolName::Terminal],
+        tools: vec![
+            exm_core::types::ToolName::Read,
+            exm_core::types::ToolName::Filesystem,
+            exm_core::types::ToolName::Terminal,
+        ],
         when_to_call: String::new(),
         dependencies: vec![],
         composable_with: vec![],
@@ -140,15 +160,30 @@ pub async fn create_single(State(st): State<AppState>, Json(b): Json<SingleBody>
     };
     match st.core.registry().upsert_single(def, b.prompt) {
         Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn delete_single(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn delete_single(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.registry().remove_single(&id) {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({ "error": "智能体不存在" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "智能体不存在" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -171,7 +206,11 @@ pub async fn update_single(
     }
     match st.core.registry().update_agent(&id, &b.into_patch()) {
         Ok(saved) => Json(serde_json::to_value(saved).unwrap_or(Value::Null)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -182,10 +221,17 @@ pub struct SinglePersonaBody {
 }
 
 /// 智能体人设读取（与组内个体同语义；无自定义文件回落默认人设）
-pub async fn get_single_persona(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn get_single_persona(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.registry().single_persona(&id) {
         Ok(persona) => {
-            let custom = st.core.registry().single_persona_is_custom(&id).unwrap_or(false);
+            let custom = st
+                .core
+                .registry()
+                .single_persona_is_custom(&id)
+                .unwrap_or(false);
             Json(json!({
                 "identifier": id,
                 "persona": persona,
@@ -194,7 +240,11 @@ pub async fn get_single_persona(State(st): State<AppState>, Path(id): Path<Strin
             }))
             .into_response()
         }
-        Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -206,15 +256,26 @@ pub async fn put_single_persona(
 ) -> impl IntoResponse {
     match st.core.registry().single_set_persona(&id, &b.persona) {
         Ok(_) => Json(json!({ "ok": true, "custom": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// 重置智能体人设为默认
-pub async fn delete_single_persona(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn delete_single_persona(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.registry().single_reset_persona(&id) {
         Ok(_) => Json(json!({ "ok": true, "custom": false })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -228,7 +289,9 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/singles/:id/persona",
-            get(get_single_persona).put(put_single_persona).delete(delete_single_persona),
+            get(get_single_persona)
+                .put(put_single_persona)
+                .delete(delete_single_persona),
         )
         .route(
             "/api/singles/:id/prompt",
@@ -239,12 +302,22 @@ pub fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------- 系统提示词（PROMPT.md）读写
 
 /// 智能体系统提示词读取（GET /api/singles/:id/prompt）
-pub async fn get_single_prompt(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub async fn get_single_prompt(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     let Some(def) = st.core.registry().single(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "智能体不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "智能体不存在" })),
+        )
+            .into_response();
     };
     match st.core.registry().load_single_prompt(&def.prompt_file) {
-        Ok(prompt) => Json(json!({ "identifier": id, "promptFile": def.prompt_file, "prompt": prompt })).into_response(),
+        Ok(prompt) => {
+            Json(json!({ "identifier": id, "promptFile": def.prompt_file, "prompt": prompt }))
+                .into_response()
+        }
         Err(_) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "提示词文件不存在", "promptFile": def.prompt_file })),
@@ -258,20 +331,45 @@ pub struct PromptBody {
     pub prompt: String,
 }
 
-/// 智能体系统提示词保存（PUT /api/singles/:id/prompt）：热生效，下一轮对话即装载
+/// 智能体系统提示词保存（PUT /api/singles/:id/prompt）：热生效，下一轮对话即装载。
+/// 保存即迁移：存量 AGENTS.md 落盘为 PROMPT.md 并回写 def.promptFile（正式名）
 pub async fn put_single_prompt(
     State(st): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<PromptBody>,
 ) -> impl IntoResponse {
     let Some(def) = st.core.registry().single(&id) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "智能体不存在" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "智能体不存在" })),
+        )
+            .into_response();
     };
     if b.prompt.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "提示词不能为空" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "提示词不能为空" })),
+        )
+            .into_response();
     }
-    match st.core.registry().write_single_prompt(&def.prompt_file, &b.prompt) {
-        Ok(_) => Json(json!({ "ok": true, "identifier": id })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    match st
+        .core
+        .registry()
+        .write_single_prompt(&def.prompt_file, &b.prompt)
+    {
+        Ok(final_name) => {
+            // 旧名 → 新名：def 回写（读/导出/语言变体解析都走 promptFile）
+            if final_name != def.prompt_file {
+                let mut updated = def.clone();
+                updated.prompt_file = final_name.clone();
+                let _ = st.core.registry().upsert_single(updated, None);
+            }
+            Json(json!({ "ok": true, "identifier": id, "promptFile": final_name })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }

@@ -1,0 +1,16 @@
+{
+  "id": "demo",
+  "name": "示例进程插件",
+  "version": "0.1.0",
+  "description": "开发指南配套的最小进程插件（python3 stdio JSON-RPC）：hello 工具 + 凭据内存态 + watcher 通知应答",
+  "exmMin": "0.5.3",
+  "process": {
+    "command": ["python3", "plugin.py"],
+    "handshakeSecs": 15,
+    "callTimeoutSecs": 60,
+    "maxConcurrency": 4
+  },
+  "watch": {
+    "intervalMinutes": 10
+  }
+}

@@ -119,7 +119,11 @@ mod inline_think_tests {
         let mut buf = String::new();
         let mut thinking = String::new();
         let mut text = String::new();
-        for (is_think, part) in inline_think::route(&mut state, &mut buf, "<think>用户在问\n我是谁？</think>我是 Machina。") {
+        for (is_think, part) in inline_think::route(
+            &mut state,
+            &mut buf,
+            "<think>用户在问\n我是谁？</think>我是 Machina。",
+        ) {
             if is_think {
                 thinking.push_str(&part);
             } else {
@@ -220,17 +224,45 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, name: None, images: Vec::new() }
+        ChatMessage {
+            role: "system".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            images: Vec::new(),
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, name: None, images: Vec::new() }
+        ChatMessage {
+            role: "user".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            images: Vec::new(),
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, name: None, images: Vec::new() }
+        ChatMessage {
+            role: "assistant".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            images: Vec::new(),
+        }
     }
     /// 工具结果消息（openai 形态 role=tool；anthropic/gemini 在请求映射时转换）
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: Some(call_id.into()), name: None, images: Vec::new() }
+        ChatMessage {
+            role: "tool".into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+            name: None,
+            images: Vec::new(),
+        }
     }
 
     /// data URL 拆解：(mime, base64)；非 data URL 返回 None
@@ -260,7 +292,15 @@ pub struct ChatRequest {
 
 impl ChatRequest {
     pub fn new(model: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
-        ChatRequest { model: model.into(), messages, temperature: 0.2, max_tokens: None, key_hint: None, tools: Vec::new(), reasoning: None }
+        ChatRequest {
+            model: model.into(),
+            messages,
+            temperature: 0.2,
+            max_tokens: None,
+            key_hint: None,
+            tools: Vec::new(),
+            reasoning: None,
+        }
     }
 
     pub fn with_key_hint(mut self, hint: impl Into<String>) -> Self {
@@ -338,7 +378,9 @@ impl ModelPool {
     /// None = 清单为空或模型不在清单里（能力未知，调用方保持直通行为）。
     pub fn capability(&self, pid: &str, model: &str, vision: bool) -> Option<bool> {
         let list = self.models.get(pid)?;
-        list.iter().find(|m| m.model == model).map(|m| if vision { m.vision } else { m.audio })
+        list.iter()
+            .find(|m| m.model == model)
+            .map(|m| if vision { m.vision } else { m.audio })
     }
 
     /// 模型上下文窗口（token 数）；档案/模型未登记或登记 0 = 未知 None
@@ -363,7 +405,8 @@ impl ModelPool {
         if next.trim().is_empty() {
             self.fallbacks.remove(id);
         } else {
-            self.fallbacks.insert(id.to_string(), next.trim().to_string());
+            self.fallbacks
+                .insert(id.to_string(), next.trim().to_string());
         }
     }
 
@@ -372,7 +415,9 @@ impl ModelPool {
         let mut out = vec![start.to_string()];
         let mut cur = start.to_string();
         for _ in 0..16 {
-            let Some(next) = self.fallbacks.get(&cur).cloned() else { break };
+            let Some(next) = self.fallbacks.get(&cur).cloned() else {
+                break;
+            };
             if next == start || out.contains(&next) || next.is_empty() {
                 break;
             }
@@ -432,7 +477,9 @@ pub struct FailoverState {
 
 impl Default for FailoverState {
     fn default() -> Self {
-        FailoverState { until: parking_lot::Mutex::new(std::collections::HashMap::new()) }
+        FailoverState {
+            until: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 }
 
@@ -451,9 +498,10 @@ impl FailoverState {
 
     /// 标记冷却（秒）
     pub fn cool(&self, id: &str, secs: u64) {
-        self.until
-            .lock()
-            .insert(id.to_string(), std::time::Instant::now() + std::time::Duration::from_secs(secs));
+        self.until.lock().insert(
+            id.to_string(),
+            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        );
     }
 
     /// 成功即解除冷却
@@ -477,7 +525,12 @@ pub trait LlmProvider: Send + Sync {
         anyhow::bail!("该通道不支持嵌入")
     }
     /// 语音转写（音频字节 → 文本）；默认不支持，openai/azure 协议实现
-    async fn transcribe(&self, _model: &str, _audio: &[u8], _filename: &str) -> anyhow::Result<String> {
+    async fn transcribe(
+        &self,
+        _model: &str,
+        _audio: &[u8],
+        _filename: &str,
+    ) -> anyhow::Result<String> {
         anyhow::bail!("该通道不支持语音转写")
     }
     /// 语音合成（文本 → mp3 字节）；默认不支持，openai/azure 协议实现
@@ -553,21 +606,31 @@ impl OpenAiCompatibleProvider {
         match self.api_format.as_str() {
             "anthropic" => format!("{base}/v1/messages"),
             // Azure：部署名入 URL，鉴权用 api-key 头
-            "azure" => format!("{base}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"),
+            "azure" => {
+                format!("{base}/openai/deployments/{model}/chat/completions?api-version=2024-10-21")
+            }
             // Gemini 原生：generateContent / streamGenerateContent(alt=sse)，模型入 URL
-            "gemini" if stream => format!("{base}/v1beta/models/{model}:streamGenerateContent?alt=sse"),
+            "gemini" if stream => {
+                format!("{base}/v1beta/models/{model}:streamGenerateContent?alt=sse")
+            }
             "gemini" => format!("{base}/v1beta/models/{model}:generateContent"),
             _ => format!("{base}/chat/completions"),
         }
     }
 
-    fn auth_header(&self, key: &str) -> (reqwest::header::HeaderName, reqwest::header::HeaderValue) {
+    fn auth_header(
+        &self,
+        key: &str,
+    ) -> (reqwest::header::HeaderName, reqwest::header::HeaderValue) {
         let val = reqwest::header::HeaderValue::from_str(key)
             .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(""));
         match self.api_format.as_str() {
             "anthropic" => (reqwest::header::HeaderName::from_static("x-api-key"), val),
             "azure" => (reqwest::header::HeaderName::from_static("api-key"), val),
-            "gemini" => (reqwest::header::HeaderName::from_static("x-goog-api-key"), val),
+            "gemini" => (
+                reqwest::header::HeaderName::from_static("x-goog-api-key"),
+                val,
+            ),
             _ => (
                 reqwest::header::AUTHORIZATION,
                 reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
@@ -584,7 +647,10 @@ impl OpenAiCompatibleProvider {
         body: serde_json::Value,
     ) -> reqwest::RequestBuilder {
         let (name, value) = self.auth_header(key);
-        let rb = self.client.post(self.url(model, stream)).header(name, value);
+        let rb = self
+            .client
+            .post(self.url(model, stream))
+            .header(name, value);
         match self.api_format.as_str() {
             "anthropic" => rb.header("anthropic-version", "2023-06-01").json(&body),
             _ => rb.json(&body),
@@ -600,7 +666,9 @@ impl OpenAiCompatibleProvider {
     fn pick_index(&self, hint: &str) -> usize {
         let mut m = self.sticky.lock().unwrap();
         *m.entry(hint.to_string()).or_insert_with(|| {
-            let seed: u32 = hint.bytes().fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
+            let seed: u32 = hint
+                .bytes()
+                .fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
             seed as usize % self.keys.len().max(1)
         })
     }
@@ -641,8 +709,10 @@ impl OpenAiCompatibleProvider {
                     .filter(|m| m.role == "system")
                     .map(|m| m.content.clone())
                     .collect::<Vec<_>>()
-                    .join("
-");
+                    .join(
+                        "
+",
+                    );
                 let messages: Vec<serde_json::Value> = req
                     .messages
                     .iter()
@@ -681,7 +751,8 @@ impl OpenAiCompatibleProvider {
                     "generationConfig": { "temperature": req.temperature },
                 });
                 if !system.is_empty() {
-                    body["systemInstruction"] = serde_json::json!({ "parts": [{ "text": system }] });
+                    body["systemInstruction"] =
+                        serde_json::json!({ "parts": [{ "text": system }] });
                 }
                 if let Some(mt) = req.max_tokens {
                     body["generationConfig"]["maxOutputTokens"] = serde_json::json!(mt);
@@ -689,11 +760,8 @@ impl OpenAiCompatibleProvider {
                 body
             }
             _ => {
-                let messages: Vec<serde_json::Value> = req
-                    .messages
-                    .iter()
-                    .map(|m| self.map_message(m))
-                    .collect();
+                let messages: Vec<serde_json::Value> =
+                    req.messages.iter().map(|m| self.map_message(m)).collect();
                 let mut body = serde_json::json!({
                     "model": req.model, "messages": messages,
                     "temperature": req.temperature, "stream": stream,
@@ -715,15 +783,28 @@ impl OpenAiCompatibleProvider {
             match self.api_format.as_str() {
                 "anthropic" => {
                     // extended thinking：budget 需 >1024 且 < max_tokens，故 max_tokens 相应抬升
-                    let budget: u32 = match effort.as_str() { "low" => 2048, "high" => 16384, _ => 8192 };
-                    base["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget });
-                    let mt = base["max_tokens"].as_u64().unwrap_or(1024).max((budget + 1024) as u64);
+                    let budget: u32 = match effort.as_str() {
+                        "low" => 2048,
+                        "high" => 16384,
+                        _ => 8192,
+                    };
+                    base["thinking"] =
+                        serde_json::json!({ "type": "enabled", "budget_tokens": budget });
+                    let mt = base["max_tokens"]
+                        .as_u64()
+                        .unwrap_or(1024)
+                        .max((budget + 1024) as u64);
                     base["max_tokens"] = serde_json::json!(mt);
                 }
                 "gemini" => {
                     // Gemini 2.5 thinkingConfig：0=关闭，-1=动态；此处按档位给固定预算
-                    let budget: i64 = match effort.as_str() { "low" => 2048, "high" => 24576, _ => 8192 };
-                    base["generationConfig"]["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
+                    let budget: i64 = match effort.as_str() {
+                        "low" => 2048,
+                        "high" => 24576,
+                        _ => 8192,
+                    };
+                    base["generationConfig"]["thinkingConfig"] =
+                        serde_json::json!({ "thinkingBudget": budget });
                 }
                 _ => {
                     // OpenAI 兼容：reasoning_effort（GPT-5 / o 系；不识别该字段的兼容端点通常忽略）
@@ -801,7 +882,11 @@ impl OpenAiCompatibleProvider {
                         .collect();
                     serde_json::json!({ "role": "model", "parts": parts })
                 } else if m.role == "tool" {
-                    let name = m.name.clone().or_else(|| m.tool_call_id.clone()).unwrap_or_default();
+                    let name = m
+                        .name
+                        .clone()
+                        .or_else(|| m.tool_call_id.clone())
+                        .unwrap_or_default();
                     serde_json::json!({
                         "role": "user",
                         "parts": [{ "functionResponse": { "name": name, "response": { "result": m.content } } }],
@@ -816,10 +901,18 @@ impl OpenAiCompatibleProvider {
                             parts.push(serde_json::json!({ "inline_data": { "mime_type": mime, "data": data } }));
                         }
                     }
-                    let role = if m.role == "assistant" { "model" } else { m.role.as_str() };
+                    let role = if m.role == "assistant" {
+                        "model"
+                    } else {
+                        m.role.as_str()
+                    };
                     serde_json::json!({ "role": role, "parts": parts })
                 } else {
-                    let role = if m.role == "assistant" { "model" } else { m.role.as_str() };
+                    let role = if m.role == "assistant" {
+                        "model"
+                    } else {
+                        m.role.as_str()
+                    };
                     serde_json::json!({ "role": role, "parts": [{ "text": m.content }] })
                 }
             }
@@ -829,7 +922,11 @@ impl OpenAiCompatibleProvider {
                         "id": c.id, "type": "function",
                         "function": { "name": c.name, "arguments": serde_json::to_string(&c.arguments).unwrap_or_default() },
                     })).collect();
-                    let content = if m.content.is_empty() { serde_json::Value::Null } else { serde_json::json!(m.content) };
+                    let content = if m.content.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(m.content)
+                    };
                     serde_json::json!({ "role": "assistant", "content": content, "tool_calls": calls })
                 } else if m.role == "tool" {
                     serde_json::json!({
@@ -843,7 +940,9 @@ impl OpenAiCompatibleProvider {
                         parts.push(serde_json::json!({ "type": "text", "text": m.content }));
                     }
                     for img in &m.images {
-                        parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": img } }));
+                        parts.push(
+                            serde_json::json!({ "type": "image_url", "image_url": { "url": img } }),
+                        );
                     }
                     serde_json::json!({ "role": m.role, "content": parts })
                 } else {
@@ -856,32 +955,81 @@ impl OpenAiCompatibleProvider {
     /// 非流式响应中的工具调用（各协议）
     fn parse_tool_calls(&self, v: &serde_json::Value) -> Vec<ToolCall> {
         match self.api_format.as_str() {
-            "anthropic" => v.get("content").and_then(|c| c.as_array()).map(|arr| arr.iter()
-                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                .enumerate()
-                .map(|(i, b)| ToolCall {
-                    id: b.get("id").and_then(|x| x.as_str()).map(String::from).unwrap_or_else(|| format!("call_{i}")),
-                    name: b.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-                    arguments: b.get("input").cloned().unwrap_or_else(|| serde_json::json!({})),
-                }).collect()).unwrap_or_default(),
-            "gemini" => v.pointer("/candidates/0/content/parts").and_then(|p| p.as_array()).map(|arr| arr.iter()
-                .enumerate()
-                .filter_map(|(i, part)| part.get("functionCall").map(|fc| ToolCall {
-                    id: format!("call_{i}"),
-                    name: fc.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
-                    arguments: fc.get("args").cloned().unwrap_or_else(|| serde_json::json!({})),
-                })).collect()).unwrap_or_default(),
-            _ => v.pointer("/choices/0/message/tool_calls").and_then(|c| c.as_array()).map(|arr| arr.iter()
-                .enumerate()
-                .filter_map(|(i, tc)| {
-                    let name = tc.pointer("/function/name").and_then(|n| n.as_str())?;
-                    let raw = tc.pointer("/function/arguments").and_then(|a| a.as_str()).unwrap_or("{}");
-                    Some(ToolCall {
-                        id: tc.get("id").and_then(|x| x.as_str()).map(String::from).unwrap_or_else(|| format!("call_{i}")),
-                        name: name.to_string(),
-                        arguments: serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({})),
-                    })
-                }).collect()).unwrap_or_default(),
+            "anthropic" => v
+                .get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                        .enumerate()
+                        .map(|(i, b)| ToolCall {
+                            id: b
+                                .get("id")
+                                .and_then(|x| x.as_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| format!("call_{i}")),
+                            name: b
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            arguments: b
+                                .get("input")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({})),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            "gemini" => v
+                .pointer("/candidates/0/content/parts")
+                .and_then(|p| p.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .enumerate()
+                        .filter_map(|(i, part)| {
+                            part.get("functionCall").map(|fc| ToolCall {
+                                id: format!("call_{i}"),
+                                name: fc
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                arguments: fc
+                                    .get("args")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({})),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => v
+                .pointer("/choices/0/message/tool_calls")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .enumerate()
+                        .filter_map(|(i, tc)| {
+                            let name = tc.pointer("/function/name").and_then(|n| n.as_str())?;
+                            let raw = tc
+                                .pointer("/function/arguments")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("{}");
+                            Some(ToolCall {
+                                id: tc
+                                    .get("id")
+                                    .and_then(|x| x.as_str())
+                                    .map(String::from)
+                                    .unwrap_or_else(|| format!("call_{i}")),
+                                name: name.to_string(),
+                                arguments: serde_json::from_str(raw)
+                                    .unwrap_or_else(|_| serde_json::json!({})),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -899,7 +1047,9 @@ impl OpenAiCompatibleProvider {
                     .join("")
             }),
             "gemini" => Self::gemini_parts(v, false),
-            _ => v.get("choices").and_then(|c| c.get(0))
+            _ => v
+                .get("choices")
+                .and_then(|c| c.get(0))
                 .and_then(|c| c.pointer("/message/content"))
                 .and_then(|t| t.as_str())
                 .map(String::from),
@@ -918,8 +1068,13 @@ impl OpenAiCompatibleProvider {
             }),
             "gemini" => Self::gemini_parts(v, true),
             // DeepSeek 系 reasoning_content / OpenRouter reasoning / GLM reasoning_content
-            _ => v.get("choices").and_then(|c| c.get(0))
-                .and_then(|c| c.pointer("/message/reasoning_content").or_else(|| c.pointer("/message/reasoning")))
+            _ => v
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| {
+                    c.pointer("/message/reasoning_content")
+                        .or_else(|| c.pointer("/message/reasoning"))
+                })
                 .and_then(|t| t.as_str())
                 .map(String::from),
         }
@@ -931,14 +1086,26 @@ impl OpenAiCompatibleProvider {
             // Anthropic thinking 块：content_block_delta 且 delta.type == thinking_delta
             "anthropic" => {
                 if v.pointer("/delta/type").and_then(|t| t.as_str()) == Some("thinking_delta") {
-                    (None, v.pointer("/delta/thinking").and_then(|t| t.as_str()).map(String::from))
+                    (
+                        None,
+                        v.pointer("/delta/thinking")
+                            .and_then(|t| t.as_str())
+                            .map(String::from),
+                    )
                 } else {
-                    (v.pointer("/delta/text").and_then(|t| t.as_str()).map(String::from), None)
+                    (
+                        v.pointer("/delta/text")
+                            .and_then(|t| t.as_str())
+                            .map(String::from),
+                        None,
+                    )
                 }
             }
             // Gemini：part.thought == true 的是思维链
             "gemini" => {
-                let parts = v.pointer("/candidates/0/content/parts").and_then(|p| p.as_array());
+                let parts = v
+                    .pointer("/candidates/0/content/parts")
+                    .and_then(|p| p.as_array());
                 let mut text = String::new();
                 let mut think = String::new();
                 if let Some(arr) = parts {
@@ -959,11 +1126,18 @@ impl OpenAiCompatibleProvider {
             }
             _ => {
                 // DeepSeek 系：delta.reasoning_content；OpenRouter：delta.reasoning
-                let reasoning = v.get("choices").and_then(|c| c.get(0))
-                    .and_then(|c| c.pointer("/delta/reasoning_content").or_else(|| c.pointer("/delta/reasoning")))
+                let reasoning = v
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| {
+                        c.pointer("/delta/reasoning_content")
+                            .or_else(|| c.pointer("/delta/reasoning"))
+                    })
                     .and_then(|t| t.as_str())
                     .map(String::from);
-                let text = v.get("choices").and_then(|c| c.get(0))
+                let text = v
+                    .get("choices")
+                    .and_then(|c| c.get(0))
                     .and_then(|c| c.pointer("/delta/content"))
                     .and_then(|t| t.as_str())
                     .map(String::from);
@@ -975,11 +1149,16 @@ impl OpenAiCompatibleProvider {
     /// Gemini：candidates[0].content.parts[*].text 拼接（非流式与流式分片同构）。
     /// `thought` = true 时取思维链部分，否则取正文部分。
     fn gemini_parts(v: &serde_json::Value, thought: bool) -> Option<String> {
-        v.get("candidates").and_then(|c| c.get(0)).and_then(|c| c.get("content"))
-            .and_then(|c| c.get("parts")).and_then(|p| p.as_array())
+        v.get("candidates")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter(|b| b.get("thought").and_then(|x| x.as_bool()).unwrap_or(false) == thought)
+                    .filter(|b| {
+                        b.get("thought").and_then(|x| x.as_bool()).unwrap_or(false) == thought
+                    })
                     .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
                     .collect::<Vec<_>>()
                     .join("")
@@ -1017,7 +1196,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let status = resp.status().as_u16();
         let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
         if !(200..300).contains(&status) {
-            anyhow::bail!("嵌入失败 {status}: {}", body.to_string().chars().take(200).collect::<String>());
+            anyhow::bail!(
+                "嵌入失败 {status}: {}",
+                body.to_string().chars().take(200).collect::<String>()
+            );
         }
         let mut out: Vec<(usize, Vec<f32>)> = body
             .get("data")
@@ -1027,7 +1209,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     .filter_map(|d| {
                         let idx = d.get("index").and_then(|i| i.as_u64())? as usize;
                         let vec = d.get("embedding")?.as_array()?;
-                        let v: Vec<f32> = vec.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
+                        let v: Vec<f32> = vec
+                            .iter()
+                            .filter_map(|x| x.as_f64().map(|f| f as f32))
+                            .collect();
                         Some((idx, v))
                     })
                     .collect()
@@ -1042,7 +1227,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     /// 语音转写：openai 协议 /audio/transcriptions；azure deployments/{model}/audio/transcriptions
-    async fn transcribe(&self, model: &str, audio: &[u8], filename: &str) -> anyhow::Result<String> {
+    async fn transcribe(
+        &self,
+        model: &str,
+        audio: &[u8],
+        filename: &str,
+    ) -> anyhow::Result<String> {
         if self.keys.is_empty() {
             anyhow::bail!("未配置 API Key（转写不可用）");
         }
@@ -1082,9 +1272,16 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let status = resp.status().as_u16();
         let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
         if !(200..300).contains(&status) {
-            anyhow::bail!("转写失败 {status}: {}", body.to_string().chars().take(200).collect::<String>());
+            anyhow::bail!(
+                "转写失败 {status}: {}",
+                body.to_string().chars().take(200).collect::<String>()
+            );
         }
-        Ok(body.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string())
+        Ok(body
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string())
     }
 
     /// 语音合成：openai /audio/speech；azure deployments/{model}/audio/speech（mp3）
@@ -1118,9 +1315,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("合成失败 {status}: {}", body.chars().take(200).collect::<String>());
+            anyhow::bail!(
+                "合成失败 {status}: {}",
+                body.chars().take(200).collect::<String>()
+            );
         }
-        let bytes = resp.bytes().await.map_err(|e| anyhow::anyhow!("读取音频失败: {e}"))?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| anyhow::anyhow!("读取音频失败: {e}"))?;
         Ok(bytes.to_vec())
     }
 
@@ -1154,7 +1357,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     self.rotate_index(&hint);
                     continue; // 限额 → 切换下一把 Key 并粘住
                 }
-                anyhow::bail!("LLM 请求失败 {status}: {}", text.chars().take(300).collect::<String>());
+                anyhow::bail!(
+                    "LLM 请求失败 {status}: {}",
+                    text.chars().take(300).collect::<String>()
+                );
             }
             let parsed: serde_json::Value = resp.json().await?;
             let content = self.parse_response(&parsed).unwrap_or_default();
@@ -1177,7 +1383,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 })
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            return Ok(ChatResponse { content, reasoning, prompt_tokens: pt, completion_tokens: ct, tool_calls });
+            return Ok(ChatResponse {
+                content,
+                reasoning,
+                prompt_tokens: pt,
+                completion_tokens: ct,
+                tool_calls,
+            });
         }
         anyhow::bail!("全部 API Key 均不可用：{last_err}")
     }
@@ -1215,7 +1427,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     self.rotate_index(&hint);
                     continue; // 限额 → 切换下一把 Key 并粘住
                 }
-                anyhow::bail!("LLM 流式请求失败 {status}: {}", text.chars().take(300).collect::<String>());
+                anyhow::bail!(
+                    "LLM 流式请求失败 {status}: {}",
+                    text.chars().take(300).collect::<String>()
+                );
             }
             match ok {
                 Some(r) => r,
@@ -1233,7 +1448,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let mut done = false;
         let mut stream = resp.bytes_stream();
         while !done {
-            let Some(chunk) = stream.next().await else { break };
+            let Some(chunk) = stream.next().await else {
+                break;
+            };
             let bytes = chunk?;
             for line in sse.feed(&bytes) {
                 if !line.starts_with("data:") {
@@ -1313,10 +1530,19 @@ impl<'a> StreamAssembler<'a> {
                         if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                             let idx = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                             while self.call_frags.len() <= idx {
-                                self.call_frags.push((String::new(), String::new(), String::new()));
+                                self.call_frags
+                                    .push((String::new(), String::new(), String::new()));
                             }
-                            self.call_frags[idx].0 = block.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                            self.call_frags[idx].1 = block.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            self.call_frags[idx].0 = block
+                                .get("id")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            self.call_frags[idx].1 = block
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
                         }
                     }
                 } else if ty == "content_block_delta" {
@@ -1324,33 +1550,53 @@ impl<'a> StreamAssembler<'a> {
                         if d.get("type").and_then(|t| t.as_str()) == Some("input_json_delta") {
                             let idx = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                             while self.call_frags.len() <= idx {
-                                self.call_frags.push((String::new(), String::new(), String::new()));
+                                self.call_frags
+                                    .push((String::new(), String::new(), String::new()));
                             }
-                            let partial = d.get("partial_json").and_then(|p| p.as_str()).unwrap_or("");
+                            let partial =
+                                d.get("partial_json").and_then(|p| p.as_str()).unwrap_or("");
                             self.call_frags[idx].2.push_str(partial);
                         }
                     }
                 }
             }
             "gemini" => {
-                if let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(|p| p.as_array()) {
+                if let Some(parts) = v
+                    .pointer("/candidates/0/content/parts")
+                    .and_then(|p| p.as_array())
+                {
                     for part in parts {
                         if let Some(fc) = part.get("functionCall") {
                             self.gemini_calls.push(ToolCall {
                                 id: format!("gem_{}", self.gemini_calls.len()),
-                                name: fc.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
-                                arguments: fc.get("args").cloned().unwrap_or_else(|| serde_json::json!({})),
+                                name: fc
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                arguments: fc
+                                    .get("args")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({})),
                             });
                         }
                     }
                 }
             }
             _ => {
-                if let Some(fcs) = v.pointer("/choices/0/delta/tool_calls").and_then(|c| c.as_array()) {
+                if let Some(fcs) = v
+                    .pointer("/choices/0/delta/tool_calls")
+                    .and_then(|c| c.as_array())
+                {
                     for tc in fcs {
-                        let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(self.call_frags.len() as u64) as usize;
+                        let idx = tc
+                            .get("index")
+                            .and_then(|i| i.as_u64())
+                            .unwrap_or(self.call_frags.len() as u64)
+                            as usize;
                         while self.call_frags.len() <= idx {
-                            self.call_frags.push((String::new(), String::new(), String::new()));
+                            self.call_frags
+                                .push((String::new(), String::new(), String::new()));
                         }
                         if let Some(id) = tc.get("id").and_then(|x| x.as_str()) {
                             self.call_frags[idx].0 = id.to_string();
@@ -1358,7 +1604,8 @@ impl<'a> StreamAssembler<'a> {
                         if let Some(nm) = tc.pointer("/function/name").and_then(|x| x.as_str()) {
                             self.call_frags[idx].1 = nm.to_string();
                         }
-                        if let Some(a) = tc.pointer("/function/arguments").and_then(|x| x.as_str()) {
+                        if let Some(a) = tc.pointer("/function/arguments").and_then(|x| x.as_str())
+                        {
                             self.call_frags[idx].2.push_str(a);
                         }
                     }
@@ -1403,7 +1650,10 @@ impl<'a> StreamAssembler<'a> {
                 self.usage_completion = c;
             }
         }
-        if let Some(p) = v.pointer("/message/usage/input_tokens").and_then(|x| x.as_u64()) {
+        if let Some(p) = v
+            .pointer("/message/usage/input_tokens")
+            .and_then(|x| x.as_u64())
+        {
             self.usage_prompt = p;
         }
         if let Some(u) = v.get("usageMetadata") {
@@ -1435,7 +1685,11 @@ impl<'a> StreamAssembler<'a> {
             .enumerate()
             .filter(|(_, (_, name, _))| !name.is_empty())
             .map(|(i, (id, name, args))| ToolCall {
-                id: if id.is_empty() { format!("call_{i}") } else { id },
+                id: if id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    id
+                },
                 name,
                 // 分片 JSON 拼装失败（模型产出残缺参数）不应让整次响应报废：
                 // 回退空对象，调用方按「参数不全」走工具侧报错，循环可继续自纠
@@ -1465,7 +1719,9 @@ pub struct UnconfiguredProvider {
 
 impl UnconfiguredProvider {
     pub fn new(label: impl Into<String>) -> Self {
-        UnconfiguredProvider { label: label.into() }
+        UnconfiguredProvider {
+            label: label.into(),
+        }
     }
 
     fn hint(&self) -> String {
@@ -1499,7 +1755,12 @@ impl LlmProvider for UnconfiguredProvider {
         anyhow::bail!("{}", self.hint())
     }
 
-    async fn transcribe(&self, _model: &str, _audio: &[u8], _filename: &str) -> anyhow::Result<String> {
+    async fn transcribe(
+        &self,
+        _model: &str,
+        _audio: &[u8],
+        _filename: &str,
+    ) -> anyhow::Result<String> {
         anyhow::bail!("{}", self.hint())
     }
 
@@ -1520,8 +1781,14 @@ fn mock_embedding(text: &str) -> Vec<f32> {
     let mut v = vec![0f32; 64];
     let chars: Vec<char> = text.chars().collect();
     for i in 0..chars.len() {
-        let gram: String = if i + 1 < chars.len() { chars[i..i + 2].iter().collect() } else { chars[i].to_string() };
-        let h: u32 = gram.bytes().fold(2166136261u32, |a, b| a.wrapping_mul(16777619).wrapping_add(b as u32));
+        let gram: String = if i + 1 < chars.len() {
+            chars[i..i + 2].iter().collect()
+        } else {
+            chars[i].to_string()
+        };
+        let h: u32 = gram.bytes().fold(2166136261u32, |a, b| {
+            a.wrapping_mul(16777619).wrapping_add(b as u32)
+        });
         v[(h as usize) % 64] += 1.0;
     }
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
@@ -1535,7 +1802,13 @@ impl LlmProvider for MockLlmProvider {
     }
 
     async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
-        Ok(ChatResponse { content: respond(&req), reasoning: String::new(), prompt_tokens: 100, completion_tokens: 200, tool_calls: Vec::new() })
+        Ok(ChatResponse {
+            content: respond(&req),
+            reasoning: String::new(),
+            prompt_tokens: 100,
+            completion_tokens: 200,
+            tool_calls: Vec::new(),
+        })
     }
 
     async fn embed(&self, _model: &str, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
@@ -1550,14 +1823,22 @@ impl LlmProvider for MockLlmProvider {
         let content = respond(&req);
         // 思维链分轨：先流一段确定性思考（与真实推理模型同形状：思考 → 正文），
         // 让过程轨迹（有序步骤）在 Mock 联调/验收环境同样有数据可走。
-        let _ = tx.send(StreamDelta::Thinking("（模拟思维链）先读契约与上下文，再产出确定性结果。".to_string()));
+        let _ = tx.send(StreamDelta::Thinking(
+            "（模拟思维链）先读契约与上下文，再产出确定性结果。".to_string(),
+        ));
         // 按字符边界切块（每块 ≈48 字节）：此前按字节切，边界落在多字节字符中间时
         // from_utf8_lossy 会把残字替换成 U+FFFD——中文模拟输出满屏「���」。
         for piece in char_chunks(&content, 48) {
             let _ = tx.send(StreamDelta::Text(piece));
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
-        Ok(ChatResponse { content, reasoning: String::new(), prompt_tokens: 100, completion_tokens: 200, tool_calls: Vec::new() })
+        Ok(ChatResponse {
+            content,
+            reasoning: String::new(),
+            prompt_tokens: 100,
+            completion_tokens: 200,
+            tool_calls: Vec::new(),
+        })
     }
 }
 
@@ -1593,7 +1874,11 @@ fn respond(req: &ChatRequest) -> String {
         .find(|m| m.role == "system")
         .map(|m| m.content.clone())
         .unwrap_or_default();
-    let user = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let user = req
+        .messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
 
     if system.contains("记忆压缩") {
         let kept: String = user.chars().take(120).collect();
@@ -1659,7 +1944,9 @@ fn parse_dispatchable(system: &str) -> Vec<String> {
         if !in_block {
             continue;
         }
-        let Some(rest) = line.strip_prefix("- ") else { continue };
+        let Some(rest) = line.strip_prefix("- ") else {
+            continue;
+        };
         let ident: String = rest
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -1692,7 +1979,10 @@ fn plan_json(system: &str, user: &str) -> String {
                 { "tag": "观测", "text": "当前组仅有主智能体；可要求主智能体创建子个体后再分发任务。" }
             ]
         });
-        return format!("```json\n{}\n```", serde_json::to_string_pretty(&l0).unwrap_or_default());
+        return format!(
+            "```json\n{}\n```",
+            serde_json::to_string_pretty(&l0).unwrap_or_default()
+        );
     }
 
     let a = |i: usize| agents.get(i).cloned().unwrap_or_else(|| agents[0].clone());
@@ -1750,7 +2040,10 @@ fn plan_json(system: &str, user: &str) -> String {
         "acceptance": ["产出带证据等级的结论", "残余未知显式保留"],
         "nodes": nodes
     });
-    format!("```json\n{}\n```", serde_json::to_string_pretty(&plan).unwrap_or_default())
+    format!(
+        "```json\n{}\n```",
+        serde_json::to_string_pretty(&plan).unwrap_or_default()
+    )
 }
 
 fn sync_json(system: &str, user: &str) -> String {
@@ -1768,7 +2061,10 @@ fn sync_json(system: &str, user: &str) -> String {
 
     let (node_id, objective) = if let Some(v) = crate::parse::extract_json(user) {
         (
-            v.get("taskNodeId").and_then(|x| x.as_str()).unwrap_or("T?").to_string(),
+            v.get("taskNodeId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("T?")
+                .to_string(),
             v.get("objective")
                 .and_then(|x| x.as_str())
                 .unwrap_or("未解析到目标")
@@ -1804,7 +2100,10 @@ fn sync_json(system: &str, user: &str) -> String {
         "nextSuggestion": {},
         "confidence": 0.82
     });
-    format!("```json\n{}\n```", serde_json::to_string_pretty(&report).unwrap_or_default())
+    format!(
+        "```json\n{}\n```",
+        serde_json::to_string_pretty(&report).unwrap_or_default()
+    )
 }
 
 fn converge_text(user: &str) -> String {
@@ -1864,7 +2163,10 @@ mod reasoning_effort_tests {
         let body = p.body(&req, false);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 8192);
-        assert!(body["max_tokens"].as_u64().unwrap() > 8192, "max_tokens 必须大于 thinking 预算");
+        assert!(
+            body["max_tokens"].as_u64().unwrap() > 8192,
+            "max_tokens 必须大于 thinking 预算"
+        );
         // low 档预算
         req.reasoning = Some("low".into());
         assert_eq!(p.body(&req, false)["thinking"]["budget_tokens"], 2048);
@@ -1875,7 +2177,10 @@ mod reasoning_effort_tests {
         let p = OpenAiCompatibleProvider::with_format("http://x", vec![], "gemini");
         let mut req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
         req.reasoning = Some("high".into());
-        assert_eq!(p.body(&req, false)["generationConfig"]["thinkingConfig"]["thinkingBudget"], 24576);
+        assert_eq!(
+            p.body(&req, false)["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            24576
+        );
         // 非法值归一为 medium 而非透传（防不支持的自定义档位打 400）
         assert_eq!(normalize_effort("ultrathink"), "medium");
         assert_eq!(normalize_effort(" HIGH "), "high");
@@ -1893,7 +2198,8 @@ mod stream_tests {
     #[test]
     fn sse_解码器_多字节字符跨块不损坏() {
         // 正文含中文、emoji、四字节字符：覆盖 2/3/4 字节 UTF-8 序列
-        let frame = "data: {\"choices\":[{\"delta\":{\"content\":\"中文🦀emoji𝄞与英文 mixed\"}}]}\n\n";
+        let frame =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"中文🦀emoji𝄞与英文 mixed\"}}]}\n\n";
         let payload: String = frame
             .split("content\":\"")
             .nth(1)
@@ -1911,7 +2217,10 @@ mod stream_tests {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(
                     line.trim_start_matches("data:").trim(),
                 ) {
-                    if let Some(t) = v.pointer("/choices/0/delta/content").and_then(|t| t.as_str()) {
+                    if let Some(t) = v
+                        .pointer("/choices/0/delta/content")
+                        .and_then(|t| t.as_str())
+                    {
                         content.push_str(t);
                     }
                 }
@@ -1987,7 +2296,8 @@ mod stream_tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         // 双 Key 池：两把都指向恒定 429 的端点
-        let p = OpenAiCompatibleProvider::new(format!("http://{addr}"), vec!["k1".into(), "k2".into()]);
+        let p =
+            OpenAiCompatibleProvider::new(format!("http://{addr}"), vec!["k1".into(), "k2".into()]);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let started = std::time::Instant::now();
         let err = p
@@ -1996,9 +2306,19 @@ mod stream_tests {
             .expect_err("全部 Key 限额应报错");
         let elapsed = started.elapsed();
 
-        assert_eq!(hits.load(Ordering::SeqCst), 2, "应恰好尝试 2 次（每把 Key 一次）而非无限轮转");
-        assert!(err.to_string().contains("限额"), "错误应可诊断（说明全部 Key 限额）: {err}");
-        assert!(elapsed < std::time::Duration::from_secs(10), "应快速失败而非挂死，实际 {elapsed:?}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "应恰好尝试 2 次（每把 Key 一次）而非无限轮转"
+        );
+        assert!(
+            err.to_string().contains("限额"),
+            "错误应可诊断（说明全部 Key 限额）: {err}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "应快速失败而非挂死，实际 {elapsed:?}"
+        );
     }
 
     /// 流式正常路径：SSE 帧解析 + 正文/思考分轨 + usage 统计（经字节级解码器）

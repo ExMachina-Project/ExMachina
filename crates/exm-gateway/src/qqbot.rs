@@ -12,7 +12,9 @@
 //! 监督循环每 5 秒对账：新增账号拉起会话，删除/停用/凭证变更的账号回收任务。
 
 use crate::channel_util::{builtin_command, first_seen, media_placeholder};
-use crate::platform::{admit, report_status, spawn_reply, GateDecision, Channel, ChannelRun, InboundCtx, MediaItem};
+use crate::platform::{
+    admit, report_status, spawn_reply, Channel, ChannelRun, GateDecision, InboundCtx, MediaItem,
+};
 use exm_core::Core;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
@@ -21,8 +23,8 @@ use std::collections::HashMap;
 use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 
 const TOKEN_HOST: &str = "https://api.bot.qq.com";
 const OPENAPI: &str = "https://api.bot.qq.com";
@@ -41,7 +43,12 @@ fn sessions() -> &'static Mutex<HashMap<String, Sess>> {
 }
 
 fn fingerprint(ch: &Channel) -> String {
-    format!("{}|{}|{}", ch.cfg("appId").unwrap_or_default(), ch.cfg("appSecret").unwrap_or_default(), ch.cfg("sandbox").unwrap_or_default())
+    format!(
+        "{}|{}|{}",
+        ch.cfg("appId").unwrap_or_default(),
+        ch.cfg("appSecret").unwrap_or_default(),
+        ch.cfg("sandbox").unwrap_or_default()
+    )
 }
 
 pub fn spawn_supervisor(core: Arc<Core>) {
@@ -56,17 +63,20 @@ pub fn spawn_supervisor(core: Arc<Core>) {
 async fn reconcile(core: &Arc<Core>) {
     let desired: Vec<Channel> = crate::platform::load_channels(core)
         .into_iter()
-        .filter(|c| c.kind == "qqbot" && c.enabled && c.cfg("appId").is_some() && c.cfg("appSecret").is_some())
+        .filter(|c| {
+            c.kind == "qqbot"
+                && c.enabled
+                && c.cfg("appId").is_some()
+                && c.cfg("appSecret").is_some()
+        })
         .collect();
 
     let mut guards = sessions().lock();
     let stale: Vec<String> = guards
         .iter()
-        .filter(|(id, s)| {
-            match desired.iter().find(|d| &d.id == *id) {
-                Some(d) => s.fingerprint != fingerprint(d) || s.handle.is_finished(),
-                None => true,
-            }
+        .filter(|(id, s)| match desired.iter().find(|d| &d.id == *id) {
+            Some(d) => s.fingerprint != fingerprint(d) || s.handle.is_finished(),
+            None => true,
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -83,7 +93,13 @@ async fn reconcile(core: &Arc<Core>) {
         let ch_task = ch.clone();
         let fp = fingerprint(ch);
         let handle = tokio::spawn(async move { session_loop(core, ch_task).await });
-        guards.insert(ch.id.clone(), Sess { handle, fingerprint: fp });
+        guards.insert(
+            ch.id.clone(),
+            Sess {
+                handle,
+                fingerprint: fp,
+            },
+        );
     }
 }
 
@@ -120,7 +136,10 @@ impl BotCreds {
         let token = resp.get("access_token")?.as_str()?.to_string();
         let ttl: u64 = resp
             .get("expires_in")
-            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .unwrap_or(7200);
         let exp = Instant::now() + Duration::from_secs(ttl.saturating_sub(300));
         *self.cache.lock() = Some((token.clone(), exp));
@@ -131,15 +150,27 @@ impl BotCreds {
 // ---------------------------------------------------------------- 会话循环
 
 async fn session_loop(core: Arc<Core>, ch: Channel) {
-    let Some(app_id) = ch.cfg("appId") else { return };
-    let Some(secret) = ch.cfg("appSecret") else { return };
+    let Some(app_id) = ch.cfg("appId") else {
+        return;
+    };
+    let Some(secret) = ch.cfg("appSecret") else {
+        return;
+    };
     let sandbox = ch.cfg("sandbox").as_deref() == Some("true");
     let base = if sandbox { OPENAPI_SANDBOX } else { OPENAPI };
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(30)).build() else {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    else {
         eprintln!("[qqbot:{}] HTTP 客户端构建失败", ch.id);
         return;
     };
-    let creds = Arc::new(BotCreds { app_id, secret, client: client.clone(), cache: Mutex::new(None) });
+    let creds = Arc::new(BotCreds {
+        app_id,
+        secret,
+        client: client.clone(),
+        cache: Mutex::new(None),
+    });
     // (session_id, seq)：断线优先 Resume 补发
     let mut session: Option<(String, i64)> = None;
     // 断线退避：连续失败按 3→6→12…（封顶 300s）指数退避；成功连结（READY/RESUMED）即复位。
@@ -211,8 +242,12 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
 
         // 鉴权：有 session 走 Resume 补发，否则 Identify
         let auth = match &session {
-            Some((sid, seq)) => json!({ "op": 6, "d": { "token": format!("QQBot {token}"), "session_id": sid, "seq": seq } }),
-            None => json!({ "op": 2, "d": { "token": format!("QQBot {token}"), "intents": INTENTS, "shard": [0, 1] } }),
+            Some((sid, seq)) => {
+                json!({ "op": 6, "d": { "token": format!("QQBot {token}"), "session_id": sid, "seq": seq } })
+            }
+            None => {
+                json!({ "op": 2, "d": { "token": format!("QQBot {token}"), "intents": INTENTS, "shard": [0, 1] } })
+            }
         };
         if write.send(Message::text(auth.to_string())).await.is_err() {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -480,10 +515,21 @@ async fn handle_message(
     let Some((run, rx)) = ChannelRun::begin(core, ch, peer.key()).await else {
         return;
     };
-    core.stamp_session_origin(&run.session_id, external_id, core.identity_of(&ch.id, external_id).map(|i| i.id).unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id)).as_str());
+    core.stamp_session_origin(
+        &run.session_id,
+        external_id,
+        core.identity_of(&ch.id, external_id)
+            .map(|i| i.id)
+            .unwrap_or_else(|| format!("ch:{}:{}", ch.id, external_id))
+            .as_str(),
+    );
     // 入站媒体注入（组 6.4）
     let note = crate::platform::stage_inbound_media(core, &run.session_id, &media);
-    let text = if note.is_empty() { text.to_string() } else { format!("{text}{note}") };
+    let text = if note.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}{note}")
+    };
     // 回复任务：被动回复须带原消息 msg_id + 递增 msg_seq
     let seq = Arc::new(AtomicU64::new(0));
     let max_chars = peer.max_chars();
@@ -510,7 +556,14 @@ async fn handle_message(
     let _ = reply.await;
 }
 
-async fn send_passive(creds: &BotCreds, base: &str, peer: &Peer, msg_id: &str, msg_seq: u64, content: &str) {
+async fn send_passive(
+    creds: &BotCreds,
+    base: &str,
+    peer: &Peer,
+    msg_id: &str,
+    msg_seq: u64,
+    content: &str,
+) {
     let Some(token) = creds.token().await else {
         eprintln!("[qqbot] 回复失败：access_token 获取失败");
         return;
@@ -574,7 +627,10 @@ mod tests {
             &json!({ "id": "m2", "user_openid": "U9", "content": "帮我查天气" }),
         )
         .expect("单聊事件应可解析");
-        assert!(matches!(peer, Peer::C2C(_)), "C2C 应识别为私聊（门控豁免依据）");
+        assert!(
+            matches!(peer, Peer::C2C(_)),
+            "C2C 应识别为私聊（门控豁免依据）"
+        );
         assert_eq!(content, "帮我查天气");
 
         // 公域频道：channel_id
@@ -598,7 +654,11 @@ mod tests {
         assert_eq!(strip_mentions("<@!abc123>在吗"), "在吗");
         assert_eq!(strip_mentions("前缀<@x>中缀<@y>后缀"), "前缀中缀后缀");
         assert_eq!(strip_mentions("没有提及"), "没有提及");
-        assert_eq!(strip_mentions("未闭合<@abc"), "未闭合<@abc", "找不到 > 时不再吞后面正文");
+        assert_eq!(
+            strip_mentions("未闭合<@abc"),
+            "未闭合<@abc",
+            "找不到 > 时不再吞后面正文"
+        );
     }
 
     /// 回复上限：群/单聊文本限 2000 字节（CJK 按 650 字符收敛），公域频道走常规上限
@@ -615,7 +675,10 @@ mod tests {
         assert!(is_image_name("shot.png"));
         assert!(is_image_name("IMG_0001.JPG"), "大小写不敏感");
         assert!(is_image_name("a.jpeg") && is_image_name("b.gif") && is_image_name("c.webp"));
-        assert!(!is_image_name("a.png.txt"), "中间含 .png 不算图片（曾用 contains 误判）");
+        assert!(
+            !is_image_name("a.png.txt"),
+            "中间含 .png 不算图片（曾用 contains 误判）"
+        );
         assert!(!is_image_name("report.pdf"));
         assert!(!is_image_name("noext"), "无扩展名不算图片");
     }

@@ -36,12 +36,32 @@ pub trait RemoteExecutor: Send + Sync {
 // 却让所有小帧付出间接寻址；帧量级低，按最大变体占内存可接受）
 #[allow(clippy::large_enum_variant)]
 pub enum WorkerFrame {
-    Hello { id: String, agents: Vec<String> },
-    Dispatch { did: String, def: AgentDefinition, order: DispatchOrder, #[serde(default)] attach_images: bool },
+    Hello {
+        id: String,
+        agents: Vec<String>,
+    },
+    Dispatch {
+        did: String,
+        def: AgentDefinition,
+        order: DispatchOrder,
+        #[serde(default)]
+        attach_images: bool,
+    },
     /// delta 增量帧：kind 缺省 = 正文；"thinking" = 思维链（双轨传输，渠道分别渲染）
-    Tokens { did: String, delta: String, #[serde(default)] kind: String },
-    Report { did: String, report: SyncReport },
-    Error { did: String, message: String },
+    Tokens {
+        did: String,
+        delta: String,
+        #[serde(default)]
+        kind: String,
+    },
+    Report {
+        did: String,
+        report: SyncReport,
+    },
+    Error {
+        did: String,
+        message: String,
+    },
 }
 
 /// 工作者会话（客户端）：连接网关 /worker，收派发 → 本地执行 → 回流
@@ -58,7 +78,11 @@ impl WorkerSession {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::Message;
 
-        let full = if token.is_empty() { url.to_string() } else { format!("{url}?key={token}") };
+        let full = if token.is_empty() {
+            url.to_string()
+        } else {
+            format!("{url}?key={token}")
+        };
         let (ws, _) = tokio_tungstenite::connect_async(full).await?;
         let (sink, mut stream) = ws.split();
         // 发送通道：读循环与执行任务共用（写端由独立任务独占）
@@ -73,9 +97,10 @@ impl WorkerSession {
                 }
             }
         });
-        let _ = out_tx.send(Message::Text(
-            serde_json::to_string(&WorkerFrame::Hello { id: worker_id.to_string(), agents: vec![] })?,
-        ));
+        let _ = out_tx.send(Message::Text(serde_json::to_string(&WorkerFrame::Hello {
+            id: worker_id.to_string(),
+            agents: vec![],
+        })?));
         eprintln!("[worker:{worker_id}] 已接入 {url}，等待派发（Ctrl+C 退出）");
         while let Some(msg) = stream.next().await {
             let text = match msg {
@@ -87,7 +112,15 @@ impl WorkerSession {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let WorkerFrame::Dispatch { did, def, order, attach_images } = frame else { continue };
+            let WorkerFrame::Dispatch {
+                did,
+                def,
+                order,
+                attach_images,
+            } = frame
+            else {
+                continue;
+            };
             let out = out_tx.clone();
             let core = core.clone();
             tokio::spawn(async move {
@@ -98,7 +131,11 @@ impl WorkerSession {
                     let out = out.clone();
                     tokio::spawn(async move {
                         while let Some((kind, delta)) = rx.recv().await {
-                            if let Ok(t) = serde_json::to_string(&WorkerFrame::Tokens { did: did.clone(), delta, kind }) {
+                            if let Ok(t) = serde_json::to_string(&WorkerFrame::Tokens {
+                                did: did.clone(),
+                                delta,
+                                kind,
+                            }) {
                                 if out.send(Message::Text(t)).is_err() {
                                     break;
                                 }
@@ -119,7 +156,10 @@ impl WorkerSession {
                 pump.abort();
                 let frame = match result {
                     Ok(report) => WorkerFrame::Report { did, report },
-                    Err(e) => WorkerFrame::Error { did, message: e.to_string() },
+                    Err(e) => WorkerFrame::Error {
+                        did,
+                        message: e.to_string(),
+                    },
                 };
                 if let Ok(t) = serde_json::to_string(&frame) {
                     let _ = out.send(Message::Text(t));
