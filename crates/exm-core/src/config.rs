@@ -495,6 +495,26 @@ impl Default for LimitsConfig {
     }
 }
 
+/// 回收站保留契约（filesystem delete 的 .exmachina/trash/）：按保留期与容量
+/// 上限自动清理，防无限膨胀拖垮磁盘。双约束并存，先到先清。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashConfig {
+    /// 保留期（天）：超期日期目录在周期巡检时删除
+    pub retention_days: u64,
+    /// 容量上限（字节）：超限按最旧日期目录优先淘汰，直至回到上限内
+    pub max_bytes: u64,
+}
+
+impl Default for TrashConfig {
+    fn default() -> Self {
+        TrashConfig {
+            retention_days: 7,
+            max_bytes: 512 * 1024 * 1024, // 512MB
+        }
+    }
+}
+
 /// 实验性功能开关（未稳定的行为面；默认全关，开启即自担体验波动）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -844,6 +864,8 @@ pub struct ExmConfig {
     pub identity: IdentityConfig,
     /// 用量治理（速率限制与周期配额）
     pub limits: LimitsConfig,
+    /// 回收站保留契约（保留期 + 容量上限自动清理）
+    pub trash: TrashConfig,
     /// MCP 服务端（工具面对外暴露；默认关闭）
     pub mcp_serve: McpServeConfig,
     /// 推送（定时任务结果通道订阅）
@@ -901,6 +923,8 @@ struct ConfigFile {
     identity: Option<IdentityConfig>,
     #[serde(default)]
     limits: Option<LimitsConfig>,
+    #[serde(default)]
+    trash: Option<TrashConfig>,
     #[serde(default)]
     mcp_serve: Option<McpServeConfig>,
     #[serde(default)]
@@ -1399,6 +1423,7 @@ impl ExmConfig {
             triggers: file.triggers.clone().unwrap_or_default(),
             identity: file.identity.clone().unwrap_or_default(),
             limits: file.limits.clone().unwrap_or_default(),
+            trash: file.trash.clone().unwrap_or_default(),
             mcp_serve: file.mcp_serve.clone().unwrap_or_default(),
             notify: file.notify.clone().unwrap_or_default(),
             nexus: file.nexus.clone().unwrap_or_default(),
@@ -1480,6 +1505,7 @@ impl ExmConfig {
             triggers: Some(self.triggers.clone()),
             identity: Some(self.identity.clone()),
             limits: Some(self.limits.clone()),
+            trash: Some(self.trash.clone()),
             mcp_serve: Some(self.mcp_serve.clone()),
             notify: Some(self.notify.clone()),
             nexus: Some(self.nexus.clone()),
@@ -1760,6 +1786,18 @@ pub fn config_schema() -> serde_json::Value {
                     { "key": "tools.custom", "label": "声明式工具清单（JSON 数组）", "kind": "string",
                       "default": "", "required": false,
                       "help": "把 HTTP 接口或命令模板包成模型可调用的工具，免写 MCP 服务器。JSON 数组，元素字段：name（字母开头）、description、kind（http|shell）、target（{参数名} 占位）、method（GET|POST，默认 POST）、headers、parameters（JSON Schema）、agents（可见个体，空=全部）。例：[{\"name\":\"weather\",\"description\":\"查天气\",\"kind\":\"http\",\"method\":\"GET\",\"target\":\"https://api.example.com/now?city={city}\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}]" }
+                ]
+            },
+            {
+                "key": "trash",
+                "label": "回收站",
+                "fields": [
+                    { "key": "trash.retentionDays", "label": "保留期（天）", "kind": "number",
+                      "default": "7", "required": false, "min": 1, "max": 365,
+                      "help": "文件删除进回收站后的保留天数；超期目录在每小时巡检时自动清理" },
+                    { "key": "trash.maxBytes", "label": "容量上限（字节）", "kind": "number",
+                      "default": "536870912", "required": false, "min": 10485760, "max": 1073741824,
+                      "help": "回收站总大小上限（默认 512MB）；超限按最旧日期目录优先淘汰" }
                 ]
             },
             {

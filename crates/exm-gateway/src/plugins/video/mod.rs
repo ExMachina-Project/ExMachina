@@ -518,7 +518,11 @@ fn build_prompt(s: &Settings, candidates: &[VideoItem]) -> String {
             ),
         ];
         if s.dry_run {
-            parts.push("注意：通道处于 dry-run 模式，act 只记录拟发内容，不会真正发出。".into());
+            parts.push(
+                "注意：通道处于 dry-run 模式，act 只记录拟发内容，不会真正发出。\
+                 最终观感里若提及该评论，必须标注「（dry-run，未实际发送）」。"
+                    .into(),
+            );
         }
         parts.join("")
     } else {
@@ -1739,6 +1743,19 @@ mod tests {
                 "{n} 应已注册"
             );
         }
+        // 点播纪律段随注册注入（评论边界 + dry-run 转述口径），与工具面同生命周期
+        for n in ["video__summary", "video__act"] {
+            let (s, _) = core.orchestrator().tools.dynamic_tool(n).unwrap();
+            assert!(
+                s.description.contains("评论必须经 video__act"),
+                "{n} 描述应含点播纪律段：{}",
+                s.description
+            );
+            assert!(
+                s.description.contains("未实际发送"),
+                "{n} 描述应含 dry-run 转述口径"
+            );
+        }
         // 全体可见（agents 空列表）
         let specs = core.orchestrator().tools.custom_specs_for("machina");
         assert!(specs.iter().any(|s| s.name == "video__summary"));
@@ -1870,6 +1887,7 @@ mod tests {
         assert!(!p.contains("评论区摘录"));
     }
 
+    #[test]
     #[test]
     fn 任务框架prompt_互动开启与dry_run标注() {
         let ch = Channel {

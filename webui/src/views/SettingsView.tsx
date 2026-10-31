@@ -4,7 +4,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Input, InputNumber, message, Select, Switch, Card, Tag } from "antd";
-import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
+import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DeleteOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import { useExm } from "../store";
 import { useTheme } from "../theme";
 import { useT, type TKey } from "../i18n/core";
@@ -32,6 +32,7 @@ const SECTIONS: Record<string, { icon: React.ReactNode; titleKey: TKey; descKey:
   notify: { icon: <NotificationOutlined />, titleKey: "sec.notify", descKey: "sec.notify.desc" },
   experiments: { icon: <ThunderboltOutlined />, titleKey: "sec.experiments", descKey: "sec.experiments.desc" },
   tools: { icon: <ToolOutlined />, titleKey: "sec.tools", descKey: "sec.tools.desc" },
+  trash: { icon: <DeleteOutlined />, titleKey: "sec.trash", descKey: "sec.trash.desc" },
   ui: { icon: <BgColorsOutlined />, titleKey: "sec.ui", descKey: "sec.ui.desc" },
   version: { icon: <CloudDownloadOutlined />, titleKey: "sec.version", descKey: "sec.version.desc" },
 };
@@ -153,6 +154,10 @@ function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
       return cfg.memory.mdMaxChars;
     case "tools.custom":
       return JSON.stringify(cfg.tools?.custom ?? [], null, 2);
+    case "trash.retentionDays":
+      return cfg.trash?.retentionDays;
+    case "trash.maxBytes":
+      return cfg.trash?.maxBytes;
     case "security.execApproval":
       return cfg.security.execApproval;
     case "security.execAllowlist":
@@ -273,7 +278,7 @@ export function SettingsView(): React.ReactElement {
     setSaving(true);
     try {
       const body: Record<string, unknown> = {};
-      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "experiments"];
+      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "trash", "experiments"];
       for (const [k, v] of Object.entries(values)) {
         if (v === undefined) continue;
         const dot = k.indexOf(".");

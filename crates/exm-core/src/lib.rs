@@ -34,6 +34,7 @@ pub mod store_sqlite;
 pub mod task;
 pub mod todo;
 pub mod tools;
+pub mod trash;
 pub mod types;
 
 use crate::bus::{InProcessBus, MessageBus};

@@ -337,7 +337,16 @@ pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
         gateway.unregister_dynamic_tool(name);
     }
     for ch in by_kind.values() {
-        for (spec, exec) in build_injections(core, ch) {
+        for (mut spec, exec) in build_injections(core, ch) {
+            // 点播纪律段（spec.md「点播评论真实发送边界」）：随工具面注册注入，
+            // 与通道启停同生命周期——评论必须经 video__act 真实发送或如实报告失败，
+            // 禁止把评论文本写进最终回复冒充已发布；dry-run 结果转述时必须标注未发送。
+            spec.description = format!(
+                "{desc}\n\n[使用纪律] 评论必须经 video__act 提交才算完成评论任务；\
+                 video__* 工具结果里的拟发文案若标注 [dry-run] 即未实际发送，转述时必须\
+                 告知用户「未实际发送」；本工具组不可用时如实报告无法评论，不得以文本交差。",
+                desc = spec.description
+            );
             gateway.register_dynamic_tool(spec, exec);
         }
     }

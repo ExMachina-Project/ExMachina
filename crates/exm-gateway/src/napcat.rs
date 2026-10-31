@@ -31,6 +31,81 @@ fn conns() -> &'static Mutex<HashMap<String, Conn>> {
     CONNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// ---------------- 事件管道自检（spec: agent-terminal-tools D6） ----------------
+// NapCat 侧 bug：WS 连结但事件面不挂（@ 无响应）。连接状态无法反映事件管道健康，
+// 用「最近事件时间」对账：连结后长时间零事件 → degraded 告警（限频每小时一条），
+// 事件恢复 → 自动回 ok。首次连结前不告警（还没有基线）。
+
+/// 每通道最近事件时间戳（ms；连结成功时初始化，post_type=message 事件刷新）
+fn last_event_at() -> &'static Mutex<HashMap<String, u64>> {
+    static T: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 每通道上次 degraded 告警时间（ms；限频用，避免夜间静默刷屏）
+fn last_degraded_log() -> &'static Mutex<HashMap<String, u64>> {
+    static T: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 事件到达打点（on_text 收到 message 事件时调用）
+fn note_event(ch_id: &str) {
+    let now = exm_core::types::now_ms();
+    let mut m = last_event_at().lock().unwrap();
+    let was_silent = m
+        .get(ch_id)
+        .map(|t| now.saturating_sub(*t) > 30 * 60 * 1000)
+        .unwrap_or(false);
+    m.insert(ch_id.to_string(), now);
+    if was_silent {
+        // 事件恢复：状态回 ok（此前若因零事件标过 degraded）
+        report_status(ch_id, "ok", "事件管道已恢复（收到新消息事件）");
+    }
+}
+
+/// 连结成功初始化基线（此后 30min 零事件才视为可疑）
+fn note_connected(ch_id: &str) {
+    last_event_at()
+        .lock()
+        .unwrap()
+        .insert(ch_id.to_string(), exm_core::types::now_ms());
+    last_degraded_log().lock().unwrap().remove(ch_id);
+}
+
+/// 连接回收时清打点（通道删除/停用/重建）
+fn note_conn_reset(ch_id: &str) {
+    last_event_at().lock().unwrap().remove(ch_id);
+    last_degraded_log().lock().unwrap().remove(ch_id);
+}
+
+/// supervisor 对账环的事件面检查：连结后 30min 零事件 → degraded（限频每小时一条日志）。
+/// 首次连结前（无基线）与刚连结 30min 内不告警。
+fn check_event_silence(ch_id: &str) {
+    let Some(t0) = last_event_at().lock().unwrap().get(ch_id).copied() else {
+        return; // 未连结过：无基线不告警
+    };
+    let now = exm_core::types::now_ms();
+    if now.saturating_sub(t0) <= 30 * 60 * 1000 {
+        return; // 窗口内：正常
+    }
+    let mut logs = last_degraded_log().lock().unwrap();
+    if let Some(last) = logs.get(ch_id) {
+        if now.saturating_sub(*last) < 60 * 60 * 1000 {
+            return; // 一小时内已告警过：限频
+        }
+    }
+    logs.insert(ch_id.to_string(), now);
+    eprintln!(
+        "[napcat:{ch_id}] 事件管道自检：连结后 30 分钟零消息事件（NapCat 侧事件面可能未挂载）。\
+         建议重启 NapCat 容器：docker restart napcat-exm"
+    );
+    report_status(
+        ch_id,
+        "degraded",
+        "连结但 30 分钟无消息事件（NapCat 事件面疑似未挂载）；建议重启 NapCat 容器",
+    );
+}
+
 fn fingerprint(ch: &Channel) -> String {
     format!(
         "{}|{}",
@@ -66,10 +141,14 @@ async fn reconcile(core: &Arc<Core>) {
     for id in &stale {
         if let Some(c) = guards.remove(id) {
             c.handle.abort();
+            // 事件自检打点随连接回收（重建时 note_connected 重新建基线）
+            note_conn_reset(id);
         }
     }
     for ch in &desired {
         if guards.contains_key(&ch.id) {
+            // 事件管道自检：已连结通道的对账检查（零事件超窗 → degraded 限频告警）
+            check_event_silence(&ch.id);
             continue;
         }
         let core = core.clone();
@@ -118,6 +197,8 @@ async fn connect_loop(core: Arc<Core>, ch: Channel) {
             Ok((ws, _)) => {
                 println!("[napcat:{}] 已连结 {url}", ch.id);
                 report_status(&ch.id, "ok", format!("已连结 {url}"));
+                // 事件自检基线初始化：连结成功才有「零事件」的对账起点
+                note_connected(&ch.id);
                 // 复位退避：连上即视为恢复（连上后立刻断开属对端不稳，5s 基线重试可接受）
                 fail_streak = 0;
                 ws
@@ -201,6 +282,8 @@ async fn on_text(
     if post != "message" {
         return; // meta_event / request / notice 忽略
     }
+    // 事件管道自检打点：message 事件到达 = 事件面活着（连结后零事件会 degraded）
+    note_event(&ch.id);
     let group_id = v.get("group_id").and_then(|x| x.as_i64());
     let user_id = v.get("user_id").and_then(|x| x.as_i64());
     // 机器人自己的消息不回环处理（NapCat 开启 reportSelfMessage 时会上报自己说的话）
@@ -557,6 +640,51 @@ async fn handle_message(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 事件管道自检（D6）：连结正常 + 超窗零事件 → degraded；事件到达 → ok。
+    /// 时间面用打点表直接操纵（不对表 mock 时钟）。
+    #[test]
+    fn 事件自检_超窗零事件降级_事件到达恢复() {
+        let id = format!("napcat-selftest-{}", exm_core::types::new_id());
+        // 未连结：无基线不告警
+        check_event_silence(&id);
+        assert_eq!(crate::platform::status_of(&id).map(|s| s.state), None);
+
+        // 连结建基线：窗口内不告警
+        note_connected(&id);
+        check_event_silence(&id);
+        assert_ne!(
+            crate::platform::status_of(&id).map(|s| s.state),
+            Some("degraded".into())
+        );
+
+        // 基线拨回 31 分钟前：超窗 → degraded
+        last_event_at()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
+        check_event_silence(&id);
+        assert_eq!(
+            crate::platform::status_of(&id).map(|s| s.state),
+            Some("degraded".into()),
+            "超窗零事件应降级"
+        );
+
+        // 限频：一小时内重复检查不再重复刷状态（detail 不变即未重报——此处只验不恐慌）
+        check_event_silence(&id);
+
+        // 事件到达 → 恢复 ok
+        note_event(&id);
+        assert_eq!(
+            crate::platform::status_of(&id).map(|s| s.state),
+            Some("ok".into()),
+            "事件到达应恢复"
+        );
+
+        // 回收清打点（不残留到下个同名通道）
+        note_conn_reset(&id);
+        assert!(last_event_at().lock().unwrap().get(&id).is_none());
+    }
 
     /// 文本提取：数组段拼接 text，其余类型（图/文件/AT）不混入正文
     #[test]
