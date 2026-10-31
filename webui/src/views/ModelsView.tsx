@@ -8,7 +8,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Spin, Switch,
+  Button, Card, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch,
   Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
@@ -54,6 +54,9 @@ const PRESET_LABEL: Partial<Record<string, TKey>> = {
 
 const CUSTOM = "__custom__";
 
+/** 页内分页：提供商 ↔ 功能分配（能力模型拆开，两件事不再混排一页） */
+type Tab = "providers" | "caps";
+
 /** API 协议选项的显示名走 i18n（值为协议标识，与后端契约） */
 const API_FORMAT_KEYS: { value: string; key: TKey }[] = [
   { value: "openai", key: "models.fmt.openai" },
@@ -89,6 +92,8 @@ export function ModelsView(): React.ReactElement {
   const [info, setInfo] = useState<LlmProfilesInfo | null>(null);
   const [caps, setCaps] = useState<LlmCapabilities>({ speech: "", transcribe: "", visionRelay: "", embedding: "" });
   const [capSaving, setCapSaving] = useState(false);
+  /** 页内分页：providers = 提供商与模型清单；caps = 功能分配（能力模型） */
+  const [tab, setTab] = useState<Tab>("providers");
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState<LlmProfile | null>(null);
@@ -421,15 +426,36 @@ export function ModelsView(): React.ReactElement {
       <PageHeader
         en="MODELS"
         title={t("nav.models")}
-        desc={t("models.desc")}
+        desc={tab === "caps" ? t("models.capDesc") : t("models.desc")}
         actions={
           <>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              {t("models.add")}
-            </Button>
-            <Button icon={<ApiOutlined />} onClick={() => void test(undefined)} loading={testing === "__resolved__"}>
-              {t("models.testGlobal")}
-            </Button>
+            <Segmented
+              value={tab}
+              onChange={(v) => setTab(v as Tab)}
+              options={[
+                { value: "providers", label: t("models.tabProviders") },
+                { value: "caps", label: t("models.tabCaps") },
+              ]}
+            />
+            {tab === "providers" && (
+              <>
+                <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+                  {t("models.add")}
+                </Button>
+                <Button icon={<ApiOutlined />} onClick={() => void test(undefined)} loading={testing === "__resolved__"}>
+                  {t("models.testGlobal")}
+                </Button>
+              </>
+            )}
+            {tab === "caps" && (
+              <Button
+                type="primary"
+                loading={capSaving}
+                onClick={() => void saveCaps()}
+              >
+                {t("common.save")}
+              </Button>
+            )}
             <Button icon={<ReloadOutlined />} onClick={() => void load()}>
               {t("common.refresh")}
             </Button>
@@ -437,6 +463,7 @@ export function ModelsView(): React.ReactElement {
         }
       />
 
+      {tab === "providers" && (
       <Spin spinning={loading}>
         <div className="skill-grid">
           {profiles.map((p) => {
@@ -525,25 +552,28 @@ export function ModelsView(): React.ReactElement {
         </div>
         {!loading && profiles.length === 0 && <BrandEmpty description={t("models.none")} className="pane-empty" />}
       </Spin>
+      )}
 
-      <Card
-        size="small"
-        className="hud cap-card"
-        title={t("models.capTitle")}
-        extra={
-          <Button size="small" type="primary" loading={capSaving} onClick={() => void saveCaps()}>
-            {t("common.save")}
-          </Button>
-        }
-      >
-        <div className="dim cap-hint" style={{ marginBottom: 10 }}>{t("models.capGlobalHint")}</div>
-        <div className="cap-grid">
-          {capField("speech", t("models.capSpeech"), t("models.capSpeechHint"), t("models.capUnset"))}
-          {capField("transcribe", t("models.capStt"), t("models.capSttHint"), t("models.capUnset"))}
-          {capField("visionRelay", t("models.capVisionRelay"), t("models.capVisionHint"), t("models.capUnset"))}
-          {capField("embedding", t("models.capEmbed"), t("models.capEmbedHint"), t("models.capEmbedPh"))}
-        </div>
-      </Card>
+      {tab === "caps" && (
+        <Card
+          size="small"
+          className="hud cap-card"
+          title={t("models.capTitle")}
+          extra={
+            <Button size="small" type="primary" loading={capSaving} onClick={() => void saveCaps()}>
+              {t("common.save")}
+            </Button>
+          }
+        >
+          <div className="dim cap-hint" style={{ marginBottom: 10 }}>{t("models.capGlobalHint")}</div>
+          <div className="cap-grid">
+            {capField("speech", t("models.capSpeech"), t("models.capSpeechHint"), t("models.capUnset"))}
+            {capField("transcribe", t("models.capStt"), t("models.capSttHint"), t("models.capUnset"))}
+            {capField("visionRelay", t("models.capVisionRelay"), t("models.capVisionHint"), t("models.capUnset"))}
+            {capField("embedding", t("models.capEmbed"), t("models.capEmbedHint"), t("models.capEmbedPh"))}
+          </div>
+        </Card>
+      )}
 
       <Modal
         open={modal}
