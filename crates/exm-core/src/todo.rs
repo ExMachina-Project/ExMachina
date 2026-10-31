@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn 渲染_空清单None_非空含状态符号() {
+    fn 渲染_空清单none_非空含状态符号() {
         let sid = "todo-test-3";
         assert!(render(sid).is_none());
         write(

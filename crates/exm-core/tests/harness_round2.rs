@@ -16,8 +16,8 @@ fn mock_dir(tag: &str) -> std::path::PathBuf {
 }
 
 /// 在临时目录建 Core（数据落临时库），返回 strict 沙箱形态的网关
-fn gateway(dir: &std::path::PathBuf, sandbox_net: bool) -> ToolGateway {
-    let cfg = ExmConfig::load(&dir);
+fn gateway(dir: &std::path::Path, sandbox_net: bool) -> ToolGateway {
+    let cfg = ExmConfig::load(dir);
     let core = Core::with_config(cfg).expect("创建 Core 失败");
     let (events, _rx) = tokio::sync::broadcast::channel(64);
     // 审批等待压到 2s：联网拦截测试走「等待超时受阻回流」路径，不等 120s
