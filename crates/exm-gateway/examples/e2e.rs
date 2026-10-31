@@ -120,6 +120,9 @@ async fn main() -> anyhow::Result<()> {
     // 鉴权闸门：验收全程由尾部「后台密钥鉴权」段自持开关；本机 config 若残留 authKey
     // （局域网部署等），会把该段之前的所有 REST 断言挡成 401 → 整轮飘红。起始必须为关。
     cfg.security.auth_key.clear();
+    // 首启引导断言自持：本机 config 若已 dismiss 过引导（keySetupDismissed=true），
+    // 会把「初始均为假」断言带挂——验收环境必须回到首启原态
+    cfg.security.key_setup_dismissed = false;
     // 关键：provider 只在「未配置端点」时才落到测试替身（见 Core::provider 的通道选择）。
     // 本地 config 若残留 baseUrl/apiKey（脚本自己上一次跑就会留下指向临时 fake 服务的端点），
     // 则会绕过 use_mock 去连那个已消失的端口 → 整轮 run.error → 事件流断言全线飘红。
@@ -232,19 +235,13 @@ async fn main() -> anyhow::Result<()> {
     let sid = session["id"].as_str().unwrap_or_default().to_string();
     c.check("会话创建", !sid.is_empty());
 
-    // 技能包（docs/10）：写入后热装载，任务目标命中触发词即随派发携带
-    // 技能目录口径 = agents_dir 的父目录/skills（见 LocalRegistry::skills_dir），
-    // 即 agents_dir=entities/ 时落在仓库根的 skills/
-    let skills_dir = root.join("skills");
-    let _ = std::fs::create_dir_all(&skills_dir);
+    // 技能包：写入后热装载，任务目标命中触发词即随派发携带
+    // 技能目录口径 = entities/skills（见 LocalRegistry::skills_dir），SKILL.md 格式
+    let skills_dir = root.join("entities").join("skills");
+    let _ = std::fs::create_dir_all(skills_dir.join("e2e-skill"));
     let _ = std::fs::write(
-        skills_dir.join("e2e-skill.json"),
-        serde_json::json!({
-            "id": "e2e-skill", "name": "E2E 技能", "description": "验收用",
-            "triggers": ["调度"], "instructions": "E2E 技能注入标记：调度任务需说明并发池与拓扑排序。",
-            "agents": [], "createdAt": "2026-09-12T00:00:00.000Z"
-        })
-        .to_string(),
+        skills_dir.join("e2e-skill").join("SKILL.md"),
+        "---\nid: e2e-skill\nname: E2E 技能\ndescription: 验收用\ntriggers: [调度]\n---\n\nE2E 技能注入标记：调度任务需说明并发池与拓扑排序。\n",
     );
 
     let resp = client
@@ -1000,11 +997,13 @@ async fn main() -> anyhow::Result<()> {
     c.check("通道回调送达（运行结果推送）", delivered);
 
     let sessions: serde_json::Value = client
-        .get(format!("{base}/sessions"))
+        .get(format!("{base}/sessions?all=true"))
         .send()
         .await?
         .json()
         .await?;
+    // machina 单智能体在编后，通道默认绑定 single:machina——入站会话归属
+    // single scope 而非激活组；断言用全局视角（复用语义与归属 scope 无关）
     c.check(
         "通道会话按 key 复用创建",
         sessions
