@@ -64,6 +64,8 @@ npm install && npm run build:webui
 cargo run -p exm-gateway --release        # http://127.0.0.1:4173
 ```
 
+**Terminal workbench** (`exm` with no subcommand): a fullscreen ratatui TUI (message stream / input / status bar) with Chat, Approvals and plan pages — native coding on the terminal. `exm chat` keeps the classic readline panel.
+
 ## One Agent, or a Team
 
 EXMACHINA gives you two interaction targets, chosen by task weight — both share the same memory, model, and tool foundations.
@@ -122,9 +124,23 @@ EXMACHINA gives you two interaction targets, chosen by task weight — both shar
 - stdio + Streamable HTTP transports, lazy initialize, per-agent tool visibility
 - Tools mounted as `mcp:server:tool` into native function calling
 
+**Chat as coding**
+- No separate coding workbench: reference workspace files with `@` right in the chat composer
+- `patch` unified-diff tool (atomic apply — any file failing validation rejects the whole patch), per-line diff coloring on tool cards with one-click rollback (checkpoint-linked), terminal output panel
+- Destructive git operations go through the in-chat approval gate
+
+**Computer Use**
+- `computer` tool: screenshots fed back to vision models + mouse/keyboard control of the local desktop
+- Off by default; input actions pass the approval gate, action throttling prevents runaway clicks
+
+**Plugin system**
+- `plugins/` directory as the universal capability package: declarative plugins (inline HTTP tools in a manifest — zero code, credential variable injection, two-level response trimming), process plugins (any language via stdio JSON-RPC, handshake version negotiation, crash back-off restart), built-in plugins (Rust trait; video/rss as references)
+- Ecosystem: one-command install/update from tar.gz / git / index sources (CLI `exm plugin` and the WebUI plugin catalog share the pipeline); end-to-end masked credential management
+- WebUI plugin page: enable/disable, uninstall, catalog install, health at a glance; tool namespace `<plugin>__<tool>`, audit entries carry plugin attribution
+
 ## WebUI Console
 
-14 panels, 3 theme presets × 5 accents: Chat (target switching, streaming, images, TTS), Agents (roster, persona, adaptation), Groups (roster + default model), Nexus (experimental links), Task Graph (session-labeled DAG), Three Ledgers, Models (providers, key pools, capability models), Memory (deep db or memory.md file mode), Skills, Automations (cron / one-off / queue), Approvals, Channels, Events (timeline + tool audit), Settings (backend-schema driven).
+14 panels, 2 theme presets × 5 accents: Chat (target switching, streaming, images, TTS), Agents (roster, persona, adaptation), Groups (roster + default model), Nexus (experimental links), Task Graph (session-labeled DAG), Three Ledgers, Models (providers, key pools, capability models), Memory (deep db or memory.md file mode), Skills, Automations (cron / one-off / queue), Approvals, Channels, Events (timeline + tool audit), Settings (backend-schema driven).
 
 ## Documentation
 

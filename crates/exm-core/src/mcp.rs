@@ -82,11 +82,25 @@ struct HttpClient {
 
 impl HttpClient {
     fn new(url: &str) -> Self {
-        HttpClient { url: url.to_string(), client: reqwest::Client::new(), session_id: std::sync::Mutex::new(None) }
+        HttpClient {
+            url: url.to_string(),
+            client: reqwest::Client::new(),
+            session_id: std::sync::Mutex::new(None),
+        }
     }
 
-    async fn call_raw(&self, id: u64, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let body = serde_json::to_value(RpcRequest { jsonrpc: "2.0", id, method, params })?;
+    async fn call_raw(
+        &self,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let body = serde_json::to_value(RpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method,
+            params,
+        })?;
         let mut rb = self
             .client
             .post(&self.url)
@@ -95,15 +109,30 @@ impl HttpClient {
         if let Some(sid) = self.session_id.lock().unwrap().clone() {
             rb = rb.header("mcp-session-id", sid);
         }
-        let resp = rb.send().await.map_err(|e| anyhow::anyhow!("MCP HTTP 请求失败: {e}"))?;
-        if let Some(sid) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP HTTP 请求失败: {e}"))?;
+        if let Some(sid) = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
             *self.session_id.lock().unwrap() = Some(sid.to_string());
         }
         let status = resp.status().as_u16();
-        let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let text = resp.text().await.unwrap_or_default();
         if !(200..300).contains(&status) {
-            anyhow::bail!("MCP HTTP {status}: {}", text.chars().take(200).collect::<String>());
+            anyhow::bail!(
+                "MCP HTTP {status}: {}",
+                text.chars().take(200).collect::<String>()
+            );
         }
         // 响应可能是 JSON，或 SSE（data: 单帧）
         let payload = if ctype.contains("event-stream") {
@@ -118,7 +147,12 @@ impl HttpClient {
         };
         let v: serde_json::Value = serde_json::from_str(payload.trim())?;
         if let Some(err) = v.get("error") {
-            anyhow::bail!("MCP 错误: {}", err.get("message").and_then(|m| m.as_str()).unwrap_or("未知"));
+            anyhow::bail!(
+                "MCP 错误: {}",
+                err.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("未知")
+            );
         }
         Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
     }
@@ -132,8 +166,8 @@ struct StdioClient {
     reader: tokio::sync::Mutex<BufReader<tokio::process::ChildStdout>>,
 }
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::pin::Pin;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 impl StdioClient {
     async fn spawn(cfg: &McpServerConfig) -> anyhow::Result<Self> {
@@ -142,20 +176,46 @@ impl StdioClient {
             anyhow::bail!("stdio 服务器缺少 command: {}", cfg.id);
         }
         let mut command = tokio::process::Command::new(&cmd);
-        command.args(&cfg.args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+        command
+            .args(&cfg.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
         for (k, v) in &cfg.env {
             command.env(k, v);
         }
-        let mut child = command.spawn().map_err(|e| anyhow::anyhow!("MCP 进程拉起失败（{}/{}）: {e}", cfg.id, cmd))?;
-        let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("无 stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("无 stdout"))?;
+        let mut child = command
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("MCP 进程拉起失败（{}/{}）: {e}", cfg.id, cmd))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("无 stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("无 stdout"))?;
         use tokio::io::AsyncWriteExt;
         stdin.flush().await.ok(); // 探活
-        Ok(StdioClient { child, stdin: Box::pin(stdin), reader: tokio::sync::Mutex::new(BufReader::new(stdout)) })
+        Ok(StdioClient {
+            child,
+            stdin: Box::pin(stdin),
+            reader: tokio::sync::Mutex::new(BufReader::new(stdout)),
+        })
     }
 
-    async fn call_raw(&mut self, id: u64, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let body = serde_json::to_string(&RpcRequest { jsonrpc: "2.0", id, method, params })?;
+    async fn call_raw(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let body = serde_json::to_string(&RpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method,
+            params,
+        })?;
         {
             let mut w = self.stdin.as_mut();
             w.write_all(body.as_bytes()).await?;
@@ -173,12 +233,19 @@ impl StdioClient {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
             if v.get("id").and_then(|x| x.as_u64()) != Some(id) {
                 continue; // 通知或别人的响应
             }
             if let Some(err) = v.get("error") {
-                anyhow::bail!("MCP 错误: {}", err.get("message").and_then(|m| m.as_str()).unwrap_or("未知"));
+                anyhow::bail!(
+                    "MCP 错误: {}",
+                    err.get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("未知")
+                );
             }
             return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
         }
@@ -244,7 +311,11 @@ impl McpConnection {
         }
     }
 
-    async fn call_raw(&mut self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    async fn call_raw(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
         match &mut self.transport {
@@ -312,8 +383,16 @@ impl McpConnection {
             .iter()
             .map(|t| ToolSpec {
                 name: format!("mcp:{}:{}", self.cfg.id, t.name),
-                description: if t.description.is_empty() { format!("MCP 工具 {}/{}", self.cfg.id, t.name) } else { t.description.clone() },
-                parameters: if t.input_schema.is_null() { serde_json::json!({ "type": "object", "properties": {} }) } else { t.input_schema.clone() },
+                description: if t.description.is_empty() {
+                    format!("MCP 工具 {}/{}", self.cfg.id, t.name)
+                } else {
+                    t.description.clone()
+                },
+                parameters: if t.input_schema.is_null() {
+                    serde_json::json!({ "type": "object", "properties": {} })
+                } else {
+                    t.input_schema.clone()
+                },
             })
             .collect();
         // 资源读取（MCP resources）：把服务器暴露的文档/数据纳入可调用工具面
@@ -322,7 +401,13 @@ impl McpConnection {
                 .resources
                 .iter()
                 .take(30)
-                .map(|(uri, name)| if name.is_empty() { format!("- {uri}") } else { format!("- {uri}（{name}）") })
+                .map(|(uri, name)| {
+                    if name.is_empty() {
+                        format!("- {uri}")
+                    } else {
+                        format!("- {uri}（{name}）")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             specs.push(ToolSpec {
@@ -344,12 +429,21 @@ impl McpConnection {
                 .prompts
                 .iter()
                 .take(30)
-                .map(|(n, d)| if d.is_empty() { format!("- {n}") } else { format!("- {n}：{d}") })
+                .map(|(n, d)| {
+                    if d.is_empty() {
+                        format!("- {n}")
+                    } else {
+                        format!("- {n}：{d}")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             specs.push(ToolSpec {
                 name: format!("mcp:{}:__prompt__", self.cfg.id),
-                description: format!("取回 MCP 服务器 {} 的提示词模板正文。可用模板：\n{list}", self.cfg.id),
+                description: format!(
+                    "取回 MCP 服务器 {} 的提示词模板正文。可用模板：\n{list}",
+                    self.cfg.id
+                ),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -373,9 +467,15 @@ impl McpConnection {
         if name == "__resource__" {
             let uri = arguments.get("uri").and_then(|v| v.as_str()).unwrap_or("");
             if uri.trim().is_empty() {
-                return McpToolResult { ok: false, text: "缺少 uri".into() };
+                return McpToolResult {
+                    ok: false,
+                    text: "缺少 uri".into(),
+                };
             }
-            return match self.call_raw("resources/read", serde_json::json!({ "uri": uri })).await {
+            return match self
+                .call_raw("resources/read", serde_json::json!({ "uri": uri }))
+                .await
+            {
                 Ok(v) => {
                     let text = v
                         .get("contents")
@@ -390,13 +490,19 @@ impl McpConnection {
                         .unwrap_or_else(|| serde_json::to_string(&v).unwrap_or_default());
                     McpToolResult { ok: true, text }
                 }
-                Err(e) => McpToolResult { ok: false, text: format!("读取资源失败: {e}") },
+                Err(e) => McpToolResult {
+                    ok: false,
+                    text: format!("读取资源失败: {e}"),
+                },
             };
         }
         if name == "__prompt__" {
             let pname = arguments.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if pname.trim().is_empty() {
-                return McpToolResult { ok: false, text: "缺少 name".into() };
+                return McpToolResult {
+                    ok: false,
+                    text: "缺少 name".into(),
+                };
             }
             let params = serde_json::json!({
                 "name": pname,
@@ -410,7 +516,9 @@ impl McpConnection {
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|m| {
-                                    m.pointer("/content/text").and_then(|t| t.as_str()).map(String::from)
+                                    m.pointer("/content/text")
+                                        .and_then(|t| t.as_str())
+                                        .map(String::from)
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n")
@@ -419,20 +527,29 @@ impl McpConnection {
                         .unwrap_or_else(|| serde_json::to_string(&v).unwrap_or_default());
                     McpToolResult { ok: true, text }
                 }
-                Err(e) => McpToolResult { ok: false, text: format!("取回提示词失败: {e}") },
+                Err(e) => McpToolResult {
+                    ok: false,
+                    text: format!("取回提示词失败: {e}"),
+                },
             };
         }
         if !self.find_tool(name) {
             // 清单可能过期：刷新一次再试
             let _ = self.refresh_tools().await;
             if !self.find_tool(name) {
-                return McpToolResult { ok: false, text: format!("MCP 工具不存在: {}/{}", self.cfg.id, name) };
+                return McpToolResult {
+                    ok: false,
+                    text: format!("MCP 工具不存在: {}/{}", self.cfg.id, name),
+                };
             }
         }
         let params = serde_json::json!({ "name": name, "arguments": arguments });
         match self.call_raw("tools/call", params).await {
             Ok(result) => {
-                let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+                let is_error = result
+                    .get("isError")
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false);
                 let text = result
                     .get("content")
                     .and_then(|c| c.as_array())
@@ -449,9 +566,15 @@ impl McpConnection {
                             .join("\n")
                     })
                     .unwrap_or_else(|| serde_json::to_string(&result).unwrap_or_default());
-                McpToolResult { ok: !is_error, text }
+                McpToolResult {
+                    ok: !is_error,
+                    text,
+                }
             }
-            Err(e) => McpToolResult { ok: false, text: e.to_string() },
+            Err(e) => McpToolResult {
+                ok: false,
+                text: e.to_string(),
+            },
         }
     }
 }
@@ -479,7 +602,9 @@ impl McpRegistry {
     }
 
     fn sync_snapshot(&self, id: &str, cfg: &McpServerConfig, tools: Vec<ToolSpec>) {
-        self.snapshot.lock().insert(id.to_string(), (cfg.clone(), tools));
+        self.snapshot
+            .lock()
+            .insert(id.to_string(), (cfg.clone(), tools));
     }
 
     /// apply_config 时重建（配置未变的服务器保留连接）。
@@ -495,7 +620,9 @@ impl McpRegistry {
             if !cfg.enabled {
                 continue;
             }
-            let mut conn = drained.remove(&cfg.id).unwrap_or_else(|| McpConnection::new(cfg.clone()));
+            let mut conn = drained
+                .remove(&cfg.id)
+                .unwrap_or_else(|| McpConnection::new(cfg.clone()));
             let unchanged = conn.cfg.command == cfg.command
                 && conn.cfg.args == cfg.args
                 && conn.cfg.url == cfg.url
@@ -521,7 +648,9 @@ impl McpRegistry {
         let mut out = Vec::new();
         let ids: Vec<String> = conns.keys().cloned().collect();
         for id in ids {
-            let Some(c) = conns.get_mut(&id) else { continue };
+            let Some(c) = conns.get_mut(&id) else {
+                continue;
+            };
             let r = c.refresh_tools().await;
             let specs = c.tool_snapshot();
             self.sync_snapshot(&id, &c.cfg.clone(), specs);
@@ -535,20 +664,30 @@ impl McpRegistry {
         self.snapshot
             .lock()
             .values()
-            .filter(|(cfg, _)| cfg.allowed_agents.is_empty() || cfg.allowed_agents.iter().any(|a| a == agent_id))
+            .filter(|(cfg, _)| {
+                cfg.allowed_agents.is_empty() || cfg.allowed_agents.iter().any(|a| a == agent_id)
+            })
             .flat_map(|(_, specs)| specs.clone())
             .collect()
     }
 
     /// 调用 MCP 工具（全名 mcp:server:tool）
-    pub async fn call(&self, full_name: &str, agent_id: &str, arguments: &serde_json::Value) -> Option<McpToolResult> {
+    pub async fn call(
+        &self,
+        full_name: &str,
+        agent_id: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<McpToolResult> {
         let rest = full_name.strip_prefix("mcp:")?;
         let (sid, tool) = rest.split_once(':')?;
         let allowed = {
             let snap = self.snapshot.lock();
             let (cfg, _) = snap.get(sid)?;
             if !cfg.allowed_agents.is_empty() && !cfg.allowed_agents.iter().any(|a| a == agent_id) {
-                return Some(McpToolResult { ok: false, text: format!("MCP 服务器 {sid} 未对个体 {agent_id} 开放") });
+                return Some(McpToolResult {
+                    ok: false,
+                    text: format!("MCP 服务器 {sid} 未对个体 {agent_id} 开放"),
+                });
             }
             true
         };

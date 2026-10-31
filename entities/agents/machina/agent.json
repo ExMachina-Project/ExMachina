@@ -16,10 +16,23 @@
     "filesystem",
     "terminal",
     "edit",
+    "todo",
+    "spawn",
     "patch",
     "web_search",
     "web_fetch"
   ],
   "whenToCall": "用户直接与智能体对话时",
-  "promptFile": "machina/PROMPT.md"
+  "dependencies": [],
+  "composableWith": [],
+  "inputSchema": {
+    "required": [],
+    "optional": []
+  },
+  "outputSchema": {
+    "required": [],
+    "optional": []
+  },
+  "promptFile": "machina/PROMPT.md",
+  "modelHint": "default"
 }

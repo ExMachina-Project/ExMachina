@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/exm-core", "crates/exm-gateway", "crates/exm-cli"]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 
@@ -25,6 +25,10 @@ axum = { version = "0.7", features = ["ws", "json", "multipart"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 # 工作者节点 / 平台适配器 WS 客户端（napcat 局域网纯 WS；qqbot 走 native-tls 的 wss）
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "native-tls"] }
+# 插件生态（plugin-ecosystem）：tar.gz 安装包解包（tar + flate2）、RSS/Atom 解析（quick-xml）
+tar = "0.4"
+flate2 = "1"
+quick-xml = "0.36"
 
 # 低性能设备友好：LTO + 单元编译 + 符号剥离 → 更小的单文件二进制与更高运行吞吐
 [profile.release]
