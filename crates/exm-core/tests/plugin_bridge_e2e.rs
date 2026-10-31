@@ -5,7 +5,7 @@
 
 use exm_core::plugin::bridge::{PluginState, PluginSupervisor};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// mock 插件脚本：把自身 pid 写入 pid 文件（孤儿检测用），全协议应答
@@ -62,7 +62,7 @@ unsafe fn libc_kill(_pid: u32) -> bool {
     false
 }
 
-fn read_pid(dir: &PathBuf) -> Option<u32> {
+fn read_pid(dir: &Path) -> Option<u32> {
     std::fs::read_to_string(dir.join("pid"))
         .ok()?
         .trim()
@@ -111,7 +111,7 @@ async fn 场景2_宿主关闭无孤儿进程() {
     let pid = read_pid(&dir).expect("mock 应写入 pid");
     assert!(pid_alive(pid), "运行中进程应存活");
     // 宿主关闭：全量回收
-    exm_core::plugin::bridge::shutdown_all(&[s.clone()]).await;
+    exm_core::plugin::bridge::shutdown_all(std::slice::from_ref(&s)).await;
     // 给 OS 一点时间收尸
     for _ in 0..20 {
         if !pid_alive(pid) {

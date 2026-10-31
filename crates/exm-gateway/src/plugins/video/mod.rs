@@ -1888,7 +1888,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn 任务框架prompt_互动开启与dry_run标注() {
         let ch = Channel {
             id: "bili".into(),
@@ -2043,7 +2042,7 @@ mod watch_loop_tests {
 
     /// 已看去重沿用 VideoState：seen/mark_video 环路 + 上限滚动
     #[test]
-    fn 候选去重_VideoState环路() {
+    fn 候选去重_video_state环路() {
         let mut st = VideoState::default();
         assert!(!st.seen(&video_key(&item("BV1"))));
         st.mark_video(&video_key(&item("BV1")));

@@ -7188,6 +7188,13 @@ mod timeout_output_tests {
 mod terminal_gate_tests {
     use super::*;
 
+    /// 测试执行器闭包形态（spawn 白名单断言用；长类型起别名避免 clippy type_complexity）
+    type SpawnExec = Arc<
+        dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+            + Send
+            + Sync,
+    >;
+
     /// filesystem delete/rename（spec: filesystem-ops）回归
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fs删除_跨设备fallback用copy_tree() {
@@ -7581,17 +7588,7 @@ mod terminal_gate_tests {
     async fn spawn工具_白名单强制剔除spawn与agent_manage() {
         let gw = gw_with_approval("off", 0);
         // 未装配执行器时先到"未装配"错误（白名单校验在其之前）——装个空执行器测过滤
-        let exec: Arc<
-            dyn Fn(
-                    &str,
-                    &str,
-                    &str,
-                    Vec<ToolName>,
-                )
-                    -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(|_a, _s, _t, tools| {
+        let exec: SpawnExec = Arc::new(|_a, _s, _t, tools| {
             Box::pin(async move {
                 assert!(
                     !tools.contains(&ToolName::Spawn) && !tools.contains(&ToolName::AgentManage),
@@ -7631,17 +7628,7 @@ mod terminal_gate_tests {
     #[tokio::test]
     async fn spawn工具_子任务超时终止() {
         let gw = gw_with_approval("off", 0);
-        let exec: Arc<
-            dyn Fn(
-                    &str,
-                    &str,
-                    &str,
-                    Vec<ToolName>,
-                )
-                    -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(|_, _, _, _| {
+        let exec: SpawnExec = Arc::new(|_, _, _, _| {
             Box::pin(async {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 Ok("不该到这".into())
@@ -7667,17 +7654,7 @@ mod terminal_gate_tests {
         // 信号量是进程级 OnceLock：并发测试与其他测试互相干扰，用独立子进程语义不可行；
         // 此处改为验证「上限拒绝路径」——直接耗尽后触发。先并发占满（4 张许可）：
         let gw = Arc::new(gw_with_approval("off", 0));
-        let exec: Arc<
-            dyn Fn(
-                    &str,
-                    &str,
-                    &str,
-                    Vec<ToolName>,
-                )
-                    -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(|_, _, _, _| {
+        let exec: SpawnExec = Arc::new(|_, _, _, _| {
             Box::pin(async {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 Ok("done".into())
@@ -8339,7 +8316,7 @@ mod terminal_gate_tests {
     }
 
     #[test]
-    fn 响应治理_非JSON忽略select() {
+    fn 响应治理_非json忽略select() {
         let body = "纯文本响应".repeat(20);
         let r = shape_response(&shaped(Some(50), Some("$.a"), &body), &body);
         assert!(r.ok, "非 JSON 应忽略 select 仅截断");

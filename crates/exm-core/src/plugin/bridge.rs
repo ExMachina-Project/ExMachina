@@ -1086,7 +1086,7 @@ mod supervisor_tests {
     async fn 治理_宿主关闭无孤儿() {
         let (s, dir) = mock_sup("reap").await;
         s.start().await.unwrap();
-        shutdown_all(&[s.clone()]).await;
+        shutdown_all(std::slice::from_ref(&s)).await;
         assert_eq!(s.state(), PluginState::Stopped);
         // 进程句柄已回收（is_dead 需 process 已置 None；这里验证状态即可——
         // 无孤儿由 kill_on_drop + 显式 kill 双保险保证）
@@ -1200,7 +1200,7 @@ for line in sys.stdin:
 
     /// 协商成功：exmMin 满足 → 握手通过 + 快照可取
     #[tokio::test]
-    async fn 协商_exmMin满足通过并快照() {
+    async fn 协商_exm_min满足通过并快照() {
         let (s, dir) = mock_sup_with_script("ok", &mock_script_with_min("0.1.0"));
         s.start().await.expect("低 exmMin 应通过");
         let snap = s.tools_snapshot();
@@ -1212,7 +1212,7 @@ for line in sys.stdin:
 
     /// 协商拒绝：exmMin 高于宿主版本 → 握手失败（错误含两侧版本）
     #[tokio::test]
-    async fn 协商_exmMin过高拒绝() {
+    async fn 协商_exm_min过高拒绝() {
         let (s, dir) = mock_sup_with_script("hi", &mock_script_with_min("999.0.0"));
         let err = s.start().await.expect_err("高 exmMin 应拒绝");
         let msg = err.to_string();

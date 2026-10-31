@@ -1054,7 +1054,7 @@ mod tests {
 
     /// Core 级安装往返（plugin-ecosystem 2.2）：installation 持久化 + 声明式工具回接
     #[tokio::test]
-    async fn 安装_Core级往返与来源持久化() {
+    async fn 安装_core级往返与来源持久化() {
         let d = tmp("coreflow");
         let tgz = make_pkg(&d, &[("pkg/plugin.json", MANIFEST)]);
         let mut cfg = crate::config::ExmConfig::load(&d);
@@ -1100,7 +1100,7 @@ mod tests {
         // 卸载：目录删除 + 记录清理
         assert!(core2.plugin_uninstall("hello").unwrap());
         assert!(!d.join("plugins/hello").exists());
-        assert!(core2.config().plugins.installations.get("hello").is_none());
+        assert!(!core2.config().plugins.installations.contains_key("hello"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
