@@ -457,7 +457,7 @@ mod tests {
                 kind: "created".into(),
             });
         }
-        for (_, slot) in p.map.iter_mut() {
+        for slot in p.map.values_mut() {
             slot.1 = Instant::now() - Duration::from_secs(3600);
         }
         let due = p.drain_due(Duration::from_secs(60));
