@@ -264,7 +264,7 @@ export function SinglesView(): React.ReactElement {
                       <UserOutlined />
                       <span>{s.name}</span>
                       <span className="mono dim">{s.identifier}</span>
-                      {activeSingle === s.identifier && <Tag color="processing">{t("singles.activeTag")}</Tag>}
+                      {activeSingle === s.identifier && <Tag className="tag-ok">{t("singles.activeTag")}</Tag>}
                     </Space>
                   }
                   extra={
@@ -276,7 +276,7 @@ export function SinglesView(): React.ReactElement {
                   <div className="dim">{s.description}</div>
                   <div className="skill-line">{t("singles.domain", { domain: s.domain || t("singles.solo") })}</div>
                   <div className="skill-line">
-                    {t("singles.model")}<Tag color="geekblue">{modelLabel(s.modelHint, profiles)}</Tag>
+                    {t("singles.model")}<Tag>{modelLabel(s.modelHint, profiles)}</Tag>
                   </div>
                 </Card>
               ))}
@@ -387,7 +387,7 @@ export function SinglesView(): React.ReactElement {
           {soulInfo && (
             <div className="persona-status">
               {soulInfo.custom ? (
-                <Tag color="gold">{t("agents.customPersona")}</Tag>
+                <Tag color="purple">{t("agents.customPersona")}</Tag>
               ) : (
                 <Tag>{t("agents.defaultPersona")}</Tag>
               )}
