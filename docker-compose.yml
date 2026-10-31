@@ -28,7 +28,6 @@ services:
       - exmachina-plugins:/app/plugins
       # 编成数据挂载（组/智能体/技能/提示词可持久化编辑）
       - ./entities:/app/entities
-      - ./skills:/app/skills
       # 一键更新:仓库根(读写,git pull 用)+ 宿主 docker 引擎
       - ./:/host
       - /var/run/docker.sock:/var/run/docker.sock
