@@ -316,7 +316,7 @@ export function GroupsView(): React.ReactElement {
               </Button>
               <span className="mono dim">{groupIdEn(meta.id)}</span>
               {meta.builtin ? <Tag>{t("groups.builtinProtected")}</Tag> : <Tag color="purple">{t("groups.customGroup")}</Tag>}
-              {meta.id === activeGroup && <Tag color="cyan">{t("groups.activeTag")}</Tag>}
+              {meta.id === activeGroup && <Tag>{t("groups.activeTag")}</Tag>}
             </Space>
           }
           actions={
@@ -387,7 +387,7 @@ export function GroupsView(): React.ReactElement {
                       <span className="member-cell">
                         <span className="member-line1">
                           <b>{a.name}</b>
-                          {meta.primary === a.identifier && <Tag color="blue">{t("agents.primaryTag")}</Tag>}
+                          {meta.primary === a.identifier && <Tag>{t("agents.primaryTag")}</Tag>}
                         </span>
                         <code className="member-id">{a.identifier}</code>
                       </span>
@@ -406,8 +406,7 @@ export function GroupsView(): React.ReactElement {
                     key: "state",
                     width: 72,
                     render: (_, a: AgentDefinition) =>
-                      busyAgents.has(a.identifier) ? <Tag color="processing">{t("agents.busy")}</Tag> : <Tag>{t("agents.idle")}</Tag>,
-                  },
+                      busyAgents.has(a.identifier) ? <Tag color="processing">{t("agents.busy")}</Tag> : <Tag>{t("agents.idle")}</Tag>,                  },
                   {
                     title: t("agents.colOps"),
                     key: "ops",
@@ -575,7 +574,7 @@ export function GroupsView(): React.ReactElement {
         >
           {personaInfo && (
             <div style={{ marginBottom: 8 }}>
-              {personaInfo.custom ? <Tag color="gold">{t("agents.soulCustom")}</Tag> : <Tag>{t("agents.soulDefault")}</Tag>}
+              {personaInfo.custom ? <Tag color="purple">{t("agents.soulCustom")}</Tag> : <Tag>{t("agents.soulDefault")}</Tag>}
             </div>
           )}
           {personaProtected && <div className="persona-hint">{t("agents.soulProtectedHint")}</div>}
@@ -649,8 +648,8 @@ export function GroupsView(): React.ReactElement {
             >
               <div className="group-card-meta">
                 {g.builtin ? <Tag>{t("groups.builtin")}</Tag> : <Tag color="purple">{t("groups.custom")}</Tag>}
-                {g.id === activeGroup && <Tag color="cyan">{t("groups.activeTag")}</Tag>}
-                {g.primary && <Tag color="blue">{t("groups.primaryShort")}: {g.primary}</Tag>}
+                {g.id === activeGroup && <Tag>{t("groups.activeTag")}</Tag>}
+                {g.primary && <Tag>{t("groups.primaryShort")}: {g.primary}</Tag>}
               </div>
               {g.description && <div className="group-card-desc">{g.description}</div>}
             </Card>

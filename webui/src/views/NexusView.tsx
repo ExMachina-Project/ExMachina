@@ -7,12 +7,13 @@ import { api, type NexusLink } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { useT } from "../i18n/core";
 
-const KIND_COLORS: Record<string, string> = {
-  exmachina: "cyan",
+// 连结体类别 → 资产灰阶语汇：仅 opencode（自研外部连结）保留品牌紫点缀，其余中性
+const KIND_COLORS: Record<string, string | undefined> = {
+  exmachina: undefined,
   opencode: "purple",
-  codex: "geekblue",
-  claude: "gold",
-  custom: "default",
+  codex: undefined,
+  claude: undefined,
+  custom: undefined,
 };
 
 const CLI_DEFAULTS: Record<string, string> = {
@@ -122,7 +123,7 @@ export function NexusView(): React.ReactElement {
               {links.map((l) => (
                 <Card key={l.id} size="small" className="hud nexus-link-card">
                   <div className="nexus-link-row">
-                    <Tag color={l.enabled ? KIND_COLORS[l.kind] ?? "default" : "default"}>{t("nexus.kind." + l.kind)}</Tag>
+                    <Tag color={l.enabled ? KIND_COLORS[l.kind] : undefined}>{t("nexus.kind." + l.kind)}</Tag>
                     <b>{l.name}</b>
                     <span className="mono dim">{l.id}</span>
                     {(l.endpoint || l.command || CLI_DEFAULTS[l.kind]) && (
