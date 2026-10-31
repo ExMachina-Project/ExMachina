@@ -103,6 +103,8 @@ interface ExmState {
   toggleSessionPin: (sessionId: string, pinned: boolean) => Promise<void>;
   /** 清会话未读（进入会话时） */
   clearUnread: (sessionId: string) => void;
+  /** 全部已读（清 unreadCounts 全表） */
+  markAllRead: () => void;
   saveConfig: (body: Record<string, unknown>) => Promise<void>;
   decideApproval: (id: string, approve: boolean) => Promise<void>;
   handleEvent: (evt: WsEvent) => void;
@@ -649,6 +651,12 @@ export const useExm = create<ExmState>((set, get) => ({
         delete next[sessionId];
         return { unreadCounts: next };
       });
+    }
+  },
+  /** 全部已读：清空未读表（内存态，无需服务端对账） */
+  markAllRead: () => {
+    if (Object.keys(get().unreadCounts).length > 0) {
+      set({ unreadCounts: {} });
     }
   },
   /** 会话置顶切换：乐观更新 + 服务端落库（失败回滚） */

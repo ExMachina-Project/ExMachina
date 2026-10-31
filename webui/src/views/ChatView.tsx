@@ -149,7 +149,7 @@ export function ChatView(): React.ReactElement {
     timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
-    toggleSessionPin, unreadCounts,
+    toggleSessionPin, unreadCounts, markAllRead,
     refreshAgents,
     loadGroups,
     sessionsLoaded,
@@ -554,7 +554,8 @@ export function ChatView(): React.ReactElement {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}.md`;
+      const day = new Date().toISOString().slice(0, 10);
+      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-${day}.md`;
       a.click();
       URL.revokeObjectURL(url);
       message.success(t("chat.exportDone"));
@@ -699,18 +700,31 @@ export function ChatView(): React.ReactElement {
                   </span>
                   {/* 新建入口跟着第一段走：省一整行控制条，也符合移动端列表的惯例 */}
                   {gi === 0 && (
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<PlusOutlined />}
-                      className="rail-new-session"
-                      onClick={() => {
-                        void newSession();
-                        setScreen("thread"); // 竖屏：新建后直接进会话页
-                      }}
-                    >
-                      {t("session.new")}
-                    </Button>
+                    <span className="session-group-actions">
+                      {/* 全部已读：有未读才亮（无未读时不占视觉噪音） */}
+                      {Object.keys(unreadCounts).length > 0 && (
+                        <Button
+                          type="text"
+                          size="small"
+                          className="rail-mark-read"
+                          onClick={() => markAllRead()}
+                        >
+                          {t("chat.markAllRead")}
+                        </Button>
+                      )}
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<PlusOutlined />}
+                        className="rail-new-session"
+                        onClick={() => {
+                          void newSession();
+                          setScreen("thread"); // 竖屏：新建后直接进会话页
+                        }}
+                      >
+                        {t("session.new")}
+                      </Button>
+                    </span>
                   )}
                 </header>
                 {g.items.map((s) => (

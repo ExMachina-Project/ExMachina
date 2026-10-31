@@ -30,13 +30,21 @@ pub struct ToolCallRecord {
 
 /// 有序过程步骤：思考段落与工具调用按发生顺序交错（「按调用顺序显示每一次」数据源）。
 /// 连续思考增量在采集时合并进同一段落，避免逐字成条。
+/// 序列化陷阱：enum 的 rename_all 只作用于变体名（tag 值），**变体字段**必须各自带
+/// rename_all（serde 语义）——此前写在容器级导致 call_id 落库为蛇形键，前端 camelCase
+/// 读取失配、刷新后工具卡全部消失。alias 保留旧蛇形键的读取兼容（存量消息零迁移）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TraceStep {
     /// 思考段落（连续增量已合并）
     Thinking { text: String },
-    /// 一次工具调用（callId 关联 ToolCallRecord）
-    Tool { call_id: String },
+    /// 一次工具调用（callId 关联 ToolCallRecord）。
+    /// 字段级 rename/alias：rename_all 不适用于 enum 变体字段，且会把 alias 目标
+    /// 一并变形——必须逐字段写死 camelCase 键名 + 蛇形旧键别名（存量消息零迁移）
+    Tool {
+        #[serde(rename = "callId", alias = "call_id")]
+        call_id: String,
+    },
 }
 
 #[derive(Default)]
@@ -133,4 +141,46 @@ pub fn tool_count(session_id: &str) -> usize {
         .get(session_id)
         .map(|st| st.tools.len())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod serde_contract_tests {
+    use super::*;
+
+    /// 序列化契约回归（P0 修复）：工具步骤键名 MUST 为 camelCase（callId），
+    /// 且读取兼容旧蛇形键（call_id）——存量消息零迁移。
+    /// 此前容器级 rename_all 对 enum 变体字段不生效，落库蛇形键导致
+    /// 前端 callId 关联全失配、刷新后工具卡消失。
+    #[test]
+    fn 工具步骤_序列化键名契约() {
+        // 1) 序列化：出 callId，不出蛇形 call_id
+        let j = serde_json::to_string(&TraceStep::Tool {
+            call_id: "t1".into(),
+        })
+        .unwrap();
+        assert!(j.contains("\"callId\""), "序列化应含 callId：{j}");
+        assert!(!j.contains("call_id"), "序列化不应含蛇形键：{j}");
+        // tag 值维持小写（前端按 kind=tool 分支渲染）
+        assert!(j.contains("\"kind\":\"tool\""), "tag 值应为 tool：{j}");
+
+        // 2) 反序列化：吃 camelCase（新数据）
+        let v: TraceStep = serde_json::from_str(r#"{"kind":"tool","callId":"t2"}"#).unwrap();
+        match v {
+            TraceStep::Tool { call_id } => assert_eq!(call_id, "t2"),
+            other => panic!("应解析为 Tool：{other:?}"),
+        }
+
+        // 3) 反序列化：吃蛇形旧键（存量消息兼容）
+        let v: TraceStep = serde_json::from_str(r#"{"kind":"tool","call_id":"t3"}"#).unwrap();
+        match v {
+            TraceStep::Tool { call_id } => assert_eq!(call_id, "t3"),
+            other => panic!("应解析为 Tool：{other:?}"),
+        }
+
+        // 4) 思考段落序列化形态不受影响
+        let j = serde_json::to_string(&TraceStep::Thinking { text: "hi".into() }).unwrap();
+        assert!(j.contains("\"kind\":\"thinking\""), "思考 tag：{j}");
+        let v: TraceStep = serde_json::from_str(&j).unwrap();
+        assert!(matches!(v, TraceStep::Thinking { ref text } if text == "hi"));
+    }
 }

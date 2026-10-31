@@ -556,6 +556,10 @@ async fn get_config(State(st): State<AppState>) -> impl IntoResponse {
         "tools": {
             "custom": cfg.tools.custom,
         },
+        "trash": {
+            "retentionDays": cfg.trash.retention_days,
+            "maxBytes": cfg.trash.max_bytes,
+        },
         "experiments": {
             "dynamicCompaction": cfg.experiments.dynamic_compaction,
             "groupSharedContext": cfg.experiments.group_shared_context,
@@ -598,6 +602,9 @@ struct ConfigBody {
     /// 工具面（声明式自定义工具；custom 接受数组或 JSON 字符串两种形态）
     #[serde(default)]
     tools: Option<PartialTools>,
+    /// 回收站保留契约（保留期 + 容量上限）
+    #[serde(default)]
+    trash: Option<PartialTrash>,
     /// 实验性功能开关（动态压缩 / 组共享上下文）
     #[serde(default)]
     experiments: Option<PartialExperiments>,
@@ -618,6 +625,16 @@ struct PartialExperiments {
     dynamic_compaction: Option<bool>,
     #[serde(default)]
     group_shared_context: Option<bool>,
+}
+
+/// 回收站保留契约（部分更新：缺省沿用旧值；0 视为未提供回默认）
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct PartialTrash {
+    #[serde(default)]
+    retention_days: Option<u64>,
+    #[serde(default)]
+    max_bytes: Option<u64>,
 }
 
 /// 自定义工具清单归一：JSON 数组（程序化）或 JSON 字符串（设置页文本框）；解析失败返回 None（沿用旧值）
@@ -938,6 +955,20 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
         sandbox,
         browser,
         tools,
+        trash: {
+            let t = body.trash.clone().unwrap_or_default();
+            exm_core::config::TrashConfig {
+                // 0 = 恢复默认（与设置页「留空回默认」口径一致）
+                retention_days: t
+                    .retention_days
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.trash.retention_days),
+                max_bytes: t
+                    .max_bytes
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.trash.max_bytes),
+            }
+        },
         experiments: {
             let e = body.experiments.clone().unwrap_or_default();
             exm_core::config::ExperimentsConfig {
@@ -953,15 +984,25 @@ async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) ->
     };
     // 测试替身状态由运行期/环境决定，配置载荷不改变它（设置页的 llm 修改只在"真实通道"语义内生效）
     next.use_mock = st.core.is_mock() || exm_core::config::mock_enabled_from_env();
-    // 设置页对 llm 的修改同步回生效档案（避免档案切换时被旧值回退）
+    // 设置页对 llm 的修改同步回生效档案（避免档案切换时被旧值回退）。
+    // Key 池污染修复：运行时池可能是「activate 时池空补主 Key」的产物（Key 轮换需要
+    // 非空池），整体回写会把主 Key 复制进档案池（曾致 pb9a743 档案主 Key == 池[0]）。
+    // 回写时剔除「与主 Key 同串且来自运行时补位」的键：档案池本身为空时只回写主 Key
+    // 与空池，运行时补位键不落档案。
     if let Some(slot) = next
         .llm_profiles
         .iter_mut()
         .find(|p| p.id == next.active_profile)
     {
+        let profile_pool_was_empty = slot.api_keys.iter().all(|k| k.trim().is_empty());
+        let mut runtime_pool = next.llm.api_keys.clone();
+        if profile_pool_was_empty && runtime_pool.len() == 1 && runtime_pool[0] == next.llm.api_key {
+            // 运行时池只是主 Key 补位：档案池保持空（激活/加载时会再补位，不丢功能）
+            runtime_pool.clear();
+        }
         slot.base_url = next.llm.base_url.clone();
         slot.api_key = next.llm.api_key.clone();
-        slot.api_keys = next.llm.api_keys.clone();
+        slot.api_keys = runtime_pool;
         slot.model = next.llm.model.clone();
     }
 
@@ -2685,6 +2726,17 @@ pub async fn mcp_http_endpoint(
 ///   可通过 `EXM_HOST` 环境变量覆盖；显式传 `None` 时读取环境变量，传 `Some(s)` 时强制使用 `s`。
 pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Result<()> {
     platform::spawn_cron_scheduler(core.clone());
+    // 回收站周期清理（spec: trash-retention；1h 间隔 + 启动错峰，supervisor 同款模式）
+    {
+        let core_for_trash = core.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await; // 启动错峰
+            loop {
+                exm_core::trash::cleanup_once(&core_for_trash);
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
     telegram::spawn_supervisor(core.clone());
     napcat::spawn_supervisor(core.clone());
     qqbot::spawn_supervisor(core.clone());
