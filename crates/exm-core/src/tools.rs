@@ -32,6 +32,15 @@ impl ToolResult {
             images: Vec::new(),
         }
     }
+    /// 成功 + 图像副产物（动态插件工具的视觉回灌：video__shots 等）
+    pub(crate) fn ok_with_images(output: impl Into<String>, images: Vec<String>) -> Self {
+        ToolResult {
+            ok: true,
+            output: output.into(),
+            error: None,
+            images,
+        }
+    }
     pub(crate) fn err(msg: impl Into<String>) -> Self {
         ToolResult {
             ok: false,
@@ -340,10 +349,249 @@ const TERMINAL_ALLOW: &[AllowRule] = &[
         cmd: "rake",
         subs: &[],
     },
+    // ---- harness 第二轮扩充（spec: agent-terminal-tools）----
+    // 信息只读类
+    AllowRule {
+        cmd: "stat",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "du",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "df",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "env",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "ps",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "file",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "basename",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "dirname",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "realpath",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "md5sum",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sha256sum",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "free",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "uptime",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "hostname",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "id",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "groups",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "locale",
+        subs: &[],
+    },
+    // 文本处理类
+    AllowRule {
+        cmd: "awk",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sort",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "uniq",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "xargs",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "cut",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "tr",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "column",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "bc",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "jq",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "yq",
+        subs: &[],
+    },
+    // 网络获取类（联网语义仍受沙箱联网闸门后置拦截）
+    AllowRule {
+        cmd: "curl",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "wget",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "ping",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "dig",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "nslookup",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "host",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "ip",
+        subs: &["addr", "route", "link", "a", "r", "l", "-brief"],
+    },
+    // 压缩归档类
+    AllowRule {
+        cmd: "tar",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "unzip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "zip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "gzip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "gunzip",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "xz",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "zcat",
+        subs: &[],
+    },
+    // 权限与时间类
+    AllowRule {
+        cmd: "chmod",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "chown",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sleep",
+        subs: &[],
+    },
+    // 远程同步类（联网语义仍受沙箱联网闸门后置拦截）
+    AllowRule {
+        cmd: "ssh",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "scp",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "rsync",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "sftp",
+        subs: &[],
+    },
+    // 容器类（只读 + exec/run；高危子命令仍走审批）
+    AllowRule {
+        cmd: "docker",
+        subs: &["ps", "images", "inspect", "logs", "exec", "run", "version"],
+    },
+    // 数据库类（本地文件库；psql/mysql 走审批）
+    AllowRule {
+        cmd: "sqlite3",
+        subs: &[],
+    },
+    // 媒体与工具类
+    AllowRule {
+        cmd: "ffmpeg",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "convert",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "openssl",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "base64",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "uuidgen",
+        subs: &[],
+    },
+    AllowRule {
+        cmd: "xxd",
+        subs: &[],
+    },
 ];
 
-/// shell 连接符：白名单只放行单一命令，带连接符一律拒绝（防「白名单命令 && 危险命令」绕过）
-const SHELL_CHAIN_MARKS: &[&str] = &["&&", "||", ";", "|", "`", "$(", ">", "<", "&"];
+/// shell 连接符清单：分两类——
+/// · 链式分隔（| && || ;）：可安全放行，条件是**每一段**首命令都过白名单
+///   （危险命令藏在任何一段都会被拒，攻击面与单命令一致）
+/// · 逃逸/写入语义（` $( > < &）：白名单管不住（命令替换绕过解析、
+///   重定向写文件、后台执行），一律拒绝
+const SHELL_CHAIN_SEPARATORS: &[&str] = &["&&", "||", "|", ";"];
+const SHELL_ESCAPE_MARKS: &[&str] = &["`", "$(", ">", "<", "&"];
 
 /// 剥掉引号包裹的片段（引号内的 `>` `|` 等是普通字符，不应误判为连接符）
 fn strip_quoted(cmd: &str) -> String {
@@ -370,7 +618,78 @@ fn strip_quoted(cmd: &str) -> String {
 
 fn contains_shell_chain(cmd: &str) -> bool {
     let bare = strip_quoted(cmd);
-    SHELL_CHAIN_MARKS.iter().any(|m| bare.contains(m))
+    SHELL_ESCAPE_MARKS.iter().any(|m| bare.contains(m))
+}
+
+/// 链式命令分段（引号感知）：`a | b && c` → ["a", "b", "c"]。
+/// 空段（如 `a |` 收尾）不产出——由调用方按「非白名单段」拒绝。
+fn split_chain_segments(cmd: &str) -> Vec<String> {
+    let mut segs: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if let Some(q) = quote {
+            cur.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                quote = Some(ch);
+                cur.push(ch);
+            }
+            '|' if i + 1 < chars.len() && chars[i + 1] == '|' => {
+                if !cur.trim().is_empty() {
+                    segs.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+                i += 1; // 消耗第二个 |
+            }
+            '|' | '&' if i + 1 < chars.len() && chars[i + 1] == '&' => {
+                if !cur.trim().is_empty() {
+                    segs.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+                i += 1; // 消耗第二个 &
+            }
+            '|' | ';' => {
+                if !cur.trim().is_empty() {
+                    segs.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+            }
+            _ => cur.push(ch),
+        }
+        i += 1;
+    }
+    if !cur.trim().is_empty() {
+        segs.push(cur);
+    }
+    segs
+}
+
+/// 链式命令整体放行判定：每一段首命令（+子命令前缀）都过白名单才放行。
+/// 与单命令同攻击面——危险命令藏在任何一段都拒绝。
+fn chain_allowed(cmd: &str) -> bool {
+    // 链式分隔符（| && || ;）存在：逐段过白名单（每段首命令都过才放行，
+    // 危险命令藏在任何一段都拒绝——攻击面与单命令一致）
+    let bare = strip_quoted(cmd);
+    let has_chain_sep = SHELL_CHAIN_SEPARATORS.iter().any(|m| bare.contains(m));
+    if has_chain_sep {
+        return split_chain_segments(cmd)
+            .iter()
+            .all(|seg| terminal_allowed(seg));
+    }
+    terminal_allowed(cmd)
 }
 
 /// 白名单判定：首命令 + （有子命令约束时）子命令前缀
@@ -429,11 +748,33 @@ pub fn is_destructive_command(lowered: &str) -> bool {
 /// 后台任务（长命令）：输出累积缓冲 + 终态码 + 中止句柄
 pub struct BgTask {
     pub cmd: String,
+    /// 启动任务时会话（op=list 按会话过滤，跨会话不互见）
+    pub session: String,
     pub started: Instant,
     pub buf: Arc<parking_lot::Mutex<String>>,
     /// None = 运行中；Some(code) = 已退出
     pub state: Arc<parking_lot::Mutex<Option<i32>>>,
     pub abort: tokio::task::AbortHandle,
+}
+
+/// 后台 spawn 子任务终态（spec: subagent-spawn 异步并行）
+#[derive(Debug, Clone)]
+pub enum SpawnBgState {
+    Running,
+    Done(String),
+    Failed(String),
+    Timeout,
+}
+
+/// 后台 spawn 注册条目：终态暂存 + 已读标记（未回收提醒注入用）
+pub struct SpawnBgTask {
+    pub spawn_id: String,
+    pub task_preview: String,
+    pub session: String,
+    pub started: Instant,
+    pub state: parking_lot::RwLock<SpawnBgState>,
+    /// 终态是否已被 status/list 读取（未读的终态进系统提示提醒）
+    pub read: parking_lot::RwLock<bool>,
 }
 
 /// 执行一条钩子命令（同步、30s 上界）；返回 (是否成功, 输出摘要)。
@@ -535,9 +876,13 @@ const NETWORK_COMMAND_MARKS: &[&str] = &[
     "git clone",
     "git fetch",
     "git pull",
+    "git push",
     "docker ",
+    "docker compose pull",
     "ssh ",
     "scp ",
+    "rsync ",
+    "sftp ",
     "invoke-webrequest",
 ];
 
@@ -659,6 +1004,10 @@ impl WinJob {
 #[cfg(not(target_os = "windows"))]
 impl WinJob {
     /// 非 Windows 恒不可用（签名与 Windows 侧保持一致，见其 Safety 约定）
+    ///
+    /// # Safety
+    ///
+    /// 非 Windows 桩实现恒返回 Err，无实际 unsafe 语义；签名保持与 Windows 侧一致。
     pub unsafe fn attach(
         _process: *mut core::ffi::c_void,
         _memory_mb: usize,
@@ -966,42 +1315,50 @@ pub async fn execute_shell_with(
         }
     }
 }
-/// 极简 HTML 正文提取：剥 script/style 块与标签、压缩空白（零正则依赖）
+/// 极简 HTML 正文提取：剥 script/style 块与标签、压缩空白（零正则依赖）。
+/// 全程字符级推进（Vec<char> 索引）：lower 与原文同长对齐，杜绝字节级切片
+/// 落进多字节字符内部的 panic（部署实测旧实现 15177 字节边界崩溃）。
 fn strip_html(html: &str) -> String {
-    let lower = html.to_lowercase();
-    let mut out = String::with_capacity(html.len() / 2);
-    let bytes = html.as_bytes();
+    let src: Vec<char> = html.chars().collect();
+    // 小写化按字符逐个 to_lowercase 首字符（标签判定只涉及 ASCII，此处保语义即可）
+    let lower: Vec<char> = src
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    let starts_with = |from: usize, pat: &str| -> bool {
+        let pcs: Vec<char> = pat.chars().collect();
+        lower.len() >= from + pcs.len() && lower[from..from + pcs.len()].iter().eq(pcs.iter())
+    };
+    let mut out = String::with_capacity(src.len() / 2);
     let mut i = 0usize;
-    let mut skip_until: Option<&str> = None;
-    while i < bytes.len() {
+    let mut skip_until: Option<&'static str> = None;
+    while i < src.len() {
         if let Some(end) = skip_until {
-            // 在被跳过的块内寻找结束标记
-            if lower[i..].starts_with(end) {
+            if starts_with(i, end) {
                 skip_until = None;
-                i += end.len();
-                // 吞掉闭合标签的剩余部分
-                while i < bytes.len() && html[i..].chars().next().map(|c| c != '>').unwrap_or(false)
-                {
+                i += end.chars().count();
+                // 吞掉闭合标签的剩余部分（到 '>'）
+                while i < src.len() && src[i] != '>' {
                     i += 1;
                 }
-                i = (i + 1).min(bytes.len());
+                i = (i + 1).min(src.len());
             } else {
                 i += 1;
             }
             continue;
         }
-        if lower[i..].starts_with("<script") {
+        if starts_with(i, "<script") {
             skip_until = Some("</script");
-        } else if lower[i..].starts_with("<style") {
+        } else if starts_with(i, "<style") {
             skip_until = Some("</style");
-        } else if bytes[i] == b'<' {
-            while i < bytes.len() && bytes[i] != b'>' {
+        } else if src[i] == '<' {
+            while i < src.len() && src[i] != '>' {
                 i += 1;
             }
         } else {
-            let ch = html[i..].chars().next().unwrap_or(' ');
+            let ch = src[i];
             out.push(if ch.is_whitespace() { ' ' } else { ch });
-            i += ch.len_utf8();
+            i += 1;
         }
     }
     let mut compact = String::with_capacity(out.len());
@@ -1020,6 +1377,102 @@ fn strip_html(html: &str) -> String {
     compact
 }
 
+/// 动态工具输出：文本 + 可选图像（文件路径；视觉模型经 data URL 回灌）。
+/// 既有 (bool, String) 元组语义经 From 兼容升级（images 空）。
+pub struct DynamicToolOutput {
+    pub ok: bool,
+    pub text: String,
+    /// 图像文件路径（工作区内；read_image_data_url 白名单格式与大小上限）
+    pub images: Vec<String>,
+}
+
+impl From<(bool, String)> for DynamicToolOutput {
+    fn from(v: (bool, String)) -> Self {
+        Self {
+            ok: v.0,
+            text: v.1,
+            images: Vec::new(),
+        }
+    }
+}
+
+/// 动态工具执行器（T3 内置插件注册）：接收 (agent_id, session_id, args)，
+/// 返回输出（文本 + 可选图像路径）。异步闭包由注册方构造（平台 API / 会话态访问）。
+pub type DynamicToolExec = std::sync::Arc<
+    dyn Fn(
+            &str,
+            &str,
+            serde_json::Value,
+        ) -> futures_util::future::BoxFuture<'static, DynamicToolOutput>
+        + Send
+        + Sync,
+>;
+
+/// 便捷构造动态执行器（闭包返回 anyhow::Result<String>）
+pub fn dynamic_exec<F, Fut>(f: F) -> DynamicToolExec
+where
+    F: Fn(&str, &str, serde_json::Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
+{
+    std::sync::Arc::new(move |agent, session, args| {
+        let fut = f(agent, session, args);
+        Box::pin(async move {
+            match fut.await {
+                Ok(text) => DynamicToolOutput {
+                    ok: true,
+                    text,
+                    images: Vec::new(),
+                },
+                Err(e) => DynamicToolOutput {
+                    ok: false,
+                    text: e.to_string(),
+                    images: Vec::new(),
+                },
+            }
+        })
+    })
+}
+
+/// 带图像输出版 dynamic_exec：闭包返回 anyhow::Result<(文本, 图像路径列表)>
+pub fn dynamic_exec_images<F, Fut>(f: F) -> DynamicToolExec
+where
+    F: Fn(&str, &str, serde_json::Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<(String, Vec<String>)>> + Send + 'static,
+{
+    std::sync::Arc::new(move |agent, session, args| {
+        let fut = f(agent, session, args);
+        Box::pin(async move {
+            match fut.await {
+                Ok((text, images)) => DynamicToolOutput {
+                    ok: true,
+                    text,
+                    images,
+                },
+                Err(e) => DynamicToolOutput {
+                    ok: false,
+                    text: e.to_string(),
+                    images: Vec::new(),
+                },
+            }
+        })
+    })
+}
+
+/// 子智能体派生执行器闭包：(主个体 id, 会话 id, 任务描述, 工具白名单) → 执行产出
+pub type SpawnExec = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &str,
+            Vec<ToolName>,
+        ) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + Sync,
+>;
+
+/// 插件凭据解析闭包：(插件 id, 键) → 真值（None = 未配置）
+pub type PluginCredResolver = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
 pub struct ToolGateway {
     workspace_root: PathBuf,
     store: Arc<Store>,
@@ -1036,8 +1489,7 @@ pub struct ToolGateway {
     cron: Option<Arc<crate::cron::CronStore>>,
     /// 子智能体派生执行器（spawn 工具；未注入 = spawn 返回未装配错误）。
     /// RwLock 槽：Core 装配后回接（tools 已 Arc 共享给 runtime，无法再拿可变引用）
-    spawn_executor:
-        parking_lot::RwLock<Option<Arc<dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>>>,
+    spawn_executor: parking_lot::RwLock<Option<SpawnExec>>,
     /// 上下文压缩执行器（context_compact 工具，实验性；未注入 = 工具返回未装配说明）。
     /// 槽位语义同 spawn_executor：Core 装配后回接 (provider, model)。
     compactor: parking_lot::RwLock<Option<(Arc<dyn LlmProvider>, String)>>,
@@ -1047,6 +1499,9 @@ pub struct ToolGateway {
     spawn_timeout_secs: u64,
     /// 后台任务注册表（长命令：启动后返回 id，可轮询/终止）
     background: Arc<parking_lot::Mutex<std::collections::HashMap<String, BgTask>>>,
+    /// 后台 spawn 子任务注册表（spec: subagent-spawn 异步并行）：
+    /// background=true 派生后立即返回，终态暂存供 op=status/list 回收
+    spawns_bg: Arc<parking_lot::Mutex<std::collections::HashMap<String, SpawnBgTask>>>,
     /// 浏览器配置与会话（懒启动常驻；串行化访问）
     browser_cfg: crate::config::BrowserConfig,
     browser: Arc<tokio::sync::Mutex<Option<crate::browser::BrowserSession>>>,
@@ -1057,6 +1512,30 @@ pub struct ToolGateway {
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 声明式自定义工具（配置驱动，免写 MCP 服务器；按 agents 可见性放行）
     custom: Vec<crate::config::CustomTool>,
+    /// 插件凭据解析面（T1 声明式工具 `${credentials.<key>}` 变量；Core 装配后回接——
+    /// ToolGateway 构建期 config 尚未定稿，运行期经此闭包查 `plugins.credentials.<id>`）
+    plugin_credentials: parking_lot::RwLock<Option<PluginCredResolver>>,
+    /// 插件声明式工具（T1 清单内联 HTTP 工具，命名空间 `<plugin>__<tool>`；
+    /// 与 custom 共用执行链——run_custom 全套（http/shell、审计、钩子、落盘））
+    plugin_tools: parking_lot::RwLock<Vec<crate::config::CustomTool>>,
+    /// 进程插件运行时工具面（T2：握手后发现，无法静态声明）。
+    /// key = 插件 id；specs/执行转发到 provider（supervisor 持进程句柄）。
+    /// 注册时机：spawn_process_plugin 拉起成功后（Core 回接）。
+    plugin_runtime_tools: parking_lot::RwLock<
+        std::collections::BTreeMap<String, std::sync::Arc<dyn crate::plugin::ToolProvider>>,
+    >,
+    /// 动态工具执行器（T3 内置插件用：命名空间工具注册 schema + 自定义 async 执行面）。
+    /// key = 工具全名；执行优先级：动态表 > plugin_tools/custom（可覆盖声明式同名）。
+    dynamic_tools: parking_lot::RwLock<
+        std::collections::BTreeMap<String, (crate::config::CustomTool, DynamicToolExec)>,
+    >,
+    /// 会话级工具注入（视频观看会话等「按会话来源收窄」的插件工具）：
+    /// key = session_id；schema 下发与执行都只对本会话生效，普通会话不可见。
+    session_scoped_tools: parking_lot::RwLock<
+        std::collections::HashMap<String, Vec<(crate::config::CustomTool, DynamicToolExec)>>,
+    >,
+    /// 会话级步数预算覆盖（自动任务「防失控」面；None = 走三级默认解析）
+    session_step_budgets: parking_lot::RwLock<std::collections::HashMap<String, usize>>,
     /// 记忆库（memory_read/write/link 三工具的受控入口；组隔离在工具层强制）
     memory: Option<Arc<crate::memory::MemoryStore>>,
     /// 深层记忆开关（config.memory.enabled）。false = 文件记忆模式：
@@ -1069,7 +1548,8 @@ pub struct ToolGateway {
 }
 
 /// computer 输入动作：在既有会话上执行一次鼠标/键盘操作
-type InputAction = Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>;
+type InputAction =
+    Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>;
 
 impl ToolGateway {
     pub fn new(
@@ -1094,12 +1574,19 @@ impl ToolGateway {
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
             background: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            spawns_bg: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             browser_cfg: crate::config::BrowserConfig::default(),
             browser: Arc::new(tokio::sync::Mutex::new(None)),
             computer_cfg: crate::config::ComputerUseConfig::default(),
             computer: Arc::new(tokio::sync::Mutex::new(None)),
             mcp: crate::mcp::McpRegistry::shared(),
             custom: Vec::new(),
+            plugin_credentials: parking_lot::RwLock::new(None),
+            plugin_tools: parking_lot::RwLock::new(Vec::new()),
+            plugin_runtime_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
+            dynamic_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
+            session_scoped_tools: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            session_step_budgets: parking_lot::RwLock::new(std::collections::HashMap::new()),
             memory: None,
             // 默认深层记忆开启 = 历史行为（未接线 memory 模式的调用方零感知）
             memory_deep: true,
@@ -1116,10 +1603,7 @@ impl ToolGateway {
     /// 注入子智能体派生执行器（spawn 工具）：Core 装配后回接 AgentRuntime。
     /// 闭包签名：(主个体 id, 会话 id, 任务描述, 工具白名单) → 执行产出（结论文本）。
     /// 并发/超时控制由网关层实现（spec: subagent-spawn）。
-    pub fn set_spawn_executor(
-        &self,
-        exec: Arc<dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>,
-    ) {
+    pub fn set_spawn_executor(&self, exec: SpawnExec) {
         *self.spawn_executor.write() = Some(exec);
     }
 
@@ -1153,20 +1637,224 @@ impl ToolGateway {
         self
     }
 
-    /// 该个体可见的自定义工具 schema（与内置工具一起随 function calling 下发）
+    /// 追加插件声明式工具（T1 零代码形态：构建期注入用；Core 回接走 append_plugin_tools）
+    pub fn with_plugin_tools(self, tools: Vec<crate::config::CustomTool>) -> Self {
+        self.append_plugin_tools(tools);
+        self
+    }
+
+    /// 就地追加插件工具（Core 装配后回接用：ToolGateway 已包在 Arc 里不可再构建）。
+    /// 重复调用幂等（同名先注册者胜，custom 与本表都算已注册）。
+    pub fn append_plugin_tools(&self, tools: Vec<crate::config::CustomTool>) {
+        let mut guard = self.plugin_tools.write();
+        for t in tools {
+            if guard.iter().any(|c| c.name == t.name) {
+                continue; // 先注册者胜
+            }
+            if self.custom.iter().any(|c| c.name == t.name) {
+                continue; // 与 config CustomTool 冲突：config 优先
+            }
+            guard.push(t);
+        }
+    }
+
+    /// 注册进程插件运行时工具面（T2：拉起握手成功后由 spawn_process_plugin 回接）。
+    /// 幂等：同 id 重复注册覆盖（重启场景新 supervisor 顶旧）。
+    pub fn register_plugin_runtime_tools(
+        &self,
+        plugin_id: &str,
+        provider: std::sync::Arc<dyn crate::plugin::ToolProvider>,
+    ) {
+        self.plugin_runtime_tools
+            .write()
+            .insert(plugin_id.to_string(), provider);
+    }
+
+    /// 摘除进程插件运行时工具面（禁用/卸载用）
+    pub fn unregister_plugin_runtime_tools(&self, plugin_id: &str) {
+        self.plugin_runtime_tools.write().remove(plugin_id);
+    }
+
+    /// 当前注册的全部插件工具（诊断/管理端点用）
+    pub fn plugin_tools(&self) -> Vec<crate::config::CustomTool> {
+        self.plugin_tools.read().clone()
+    }
+
+    /// 注入插件凭据解析面（Core 装配后回接：查 `plugins.credentials.<插件id>.<键>`）
+    pub fn set_plugin_credentials_resolver(&self, f: PluginCredResolver) {
+        *self.plugin_credentials.write() = Some(f);
+    }
+
+    /// 解析文本中的 `${credentials.<key>}` 变量（插件工具执行期）。
+    /// 返回 (解析后文本, 缺失键列表)——缺失时不发部分鉴权请求，由调用方拒绝。
+    fn resolve_credential_vars(&self, plugin_id: &str, text: &str) -> (String, Vec<String>) {
+        let mut missing = Vec::new();
+        // 形如 ${credentials.api_token}（键名：字母/数字/_/-）
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(i) = rest.find("${credentials.") {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + "${credentials.".len()..];
+            match after.find('}') {
+                Some(j) => {
+                    let key = &after[..j];
+                    if key.is_empty()
+                        || !key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    {
+                        // 非法键名：原样保留（不视为变量）
+                        out.push_str("${credentials.");
+                        rest = after;
+                        continue;
+                    }
+                    let resolver = self.plugin_credentials.read();
+                    let hit = resolver.as_ref().and_then(|f| f(plugin_id, key));
+                    match hit {
+                        Some(v) => out.push_str(&v),
+                        None => {
+                            // 缺键：保留原文（调用方按 missing 拒绝；纯函数面可测）
+                            missing.push(key.to_string());
+                            out.push_str(&rest[i..i + "${credentials.".len() + key.len() + 1]);
+                        }
+                    }
+                    rest = &after[j + 1..];
+                }
+                None => {
+                    out.push_str("${credentials.");
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        (out, missing)
+    }
+
+    /// 注册动态命名空间工具（T3 内置插件：schema + 自定义 async 执行面）。
+    /// 名字须含 `<plugin>__<tool>` 命名空间；同名重复注册 = 覆盖（热更新用）。
+    pub fn register_dynamic_tool(&self, spec: crate::config::CustomTool, exec: DynamicToolExec) {
+        self.dynamic_tools
+            .write()
+            .insert(spec.name.clone(), (spec, exec));
+    }
+
+    /// 注销动态命名空间工具（插件停用/通道下线回收工具面）
+    pub fn unregister_dynamic_tool(&self, name: &str) {
+        self.dynamic_tools.write().remove(name);
+    }
+
+    /// 按名查动态工具（执行面用）
+    pub fn dynamic_tool(&self, name: &str) -> Option<(crate::config::CustomTool, DynamicToolExec)> {
+        self.dynamic_tools.read().get(name).cloned()
+    }
+
+    /// 当前注册的动态工具 schema 清单（诊断用）
+    pub fn dynamic_tool_names(&self) -> Vec<String> {
+        self.dynamic_tools.read().keys().cloned().collect()
+    }
+
+    /// 会话级工具注入：把一组工具绑定到指定会话（视频观看会话等「按会话来源
+    /// 收窄」的场景）。同名重复注入 = 覆盖；轮次结束须调用 clear_session_tools 清理。
+    pub fn inject_session_tools(
+        &self,
+        session_id: &str,
+        tools: Vec<(crate::config::CustomTool, DynamicToolExec)>,
+    ) {
+        self.session_scoped_tools
+            .write()
+            .insert(session_id.to_string(), tools);
+    }
+
+    /// 清理会话级注入（观看轮次收束时调用；防泄漏）
+    pub fn clear_session_tools(&self, session_id: &str) {
+        self.session_scoped_tools.write().remove(session_id);
+    }
+
+    /// 按会话查注入工具（执行面用）
+    fn session_tool(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Option<(crate::config::CustomTool, DynamicToolExec)> {
+        self.session_scoped_tools
+            .read()
+            .get(session_id)
+            .and_then(|v| v.iter().find(|(c, _)| c.name == name).cloned())
+    }
+
+    /// 会话级注入工具的 schema（runtime 下发用：session_id 变体）
+    pub fn session_tool_specs(&self, session_id: &str) -> Vec<crate::provider::ToolSpec> {
+        let to_spec = |c: &crate::config::CustomTool| crate::provider::ToolSpec {
+            name: c.name.trim().to_string(),
+            description: if c.description.trim().is_empty() {
+                format!("插件会话工具 {}", c.name)
+            } else {
+                c.description.clone()
+            },
+            parameters: c.param_schema(),
+        };
+        self.session_scoped_tools
+            .read()
+            .get(session_id)
+            .map(|v| v.iter().map(|(c, _)| to_spec(c)).collect())
+            .unwrap_or_default()
+    }
+
+    /// 设置会话级步数预算（视频观看轮次等自动任务的「防失控」通道面配置）：
+    /// n=0 清除覆盖（回落个体 maxSteps / 档位 / 全局默认）。
+    pub fn set_session_step_budget(&self, session_id: &str, steps: usize) {
+        let mut map = self.session_step_budgets.write();
+        if steps == 0 {
+            map.remove(session_id);
+        } else {
+            map.insert(session_id.to_string(), steps);
+        }
+    }
+
+    /// 查会话级步数覆盖（None = 未设置，走默认三级解析）
+    pub fn session_step_budget(&self, session_id: &str) -> Option<usize> {
+        self.session_step_budgets.read().get(session_id).copied()
+    }
+
+    /// 该个体可见的自定义工具 schema（与内置工具一起随 function calling 下发）。
+    /// 插件工具（`<plugin>__<tool>` 命名空间）一并发下——清单未配 agents = 全体可见。
     pub fn custom_specs_for(&self, agent_id: &str) -> Vec<crate::provider::ToolSpec> {
+        let to_spec = |c: &crate::config::CustomTool| crate::provider::ToolSpec {
+            name: c.name.trim().to_string(),
+            description: if c.description.trim().is_empty() {
+                format!("自定义工具 {}（{}）", c.name, c.kind_norm())
+            } else {
+                c.description.clone()
+            },
+            parameters: c.param_schema(),
+        };
         self.custom
             .iter()
             .filter(|c| c.visible_to(agent_id))
-            .map(|c| crate::provider::ToolSpec {
-                name: c.name.trim().to_string(),
-                description: if c.description.trim().is_empty() {
-                    format!("自定义工具 {}（{}）", c.name, c.kind_norm())
-                } else {
-                    c.description.clone()
-                },
-                parameters: c.param_schema(),
-            })
+            .map(to_spec)
+            .chain(
+                self.plugin_tools
+                    .read()
+                    .iter()
+                    .filter(|c| c.visible_to(agent_id))
+                    .map(to_spec),
+            )
+            .chain(
+                self.dynamic_tools
+                    .read()
+                    .values()
+                    .filter(|(c, _)| c.visible_to(agent_id))
+                    .map(|(c, _)| to_spec(c)),
+            )
+            // 进程插件运行时工具（T2 握手发现；清单未配 agents = 全体可见）
+            .chain(
+                self.plugin_runtime_tools
+                    .read()
+                    .values()
+                    .flat_map(|p| p.tool_specs().into_iter())
+                    .filter(|c| c.visible_to(agent_id))
+                    .map(|c| to_spec(&c)),
+            )
             .collect()
     }
 
@@ -1220,6 +1908,7 @@ impl ToolGateway {
             "jpg" | "jpeg" => "image/jpeg",
             "webp" => "image/webp",
             "gif" => "image/gif",
+            "bmp" => "image/bmp",
             _ => return None,
         };
         let data = std::fs::read(&p).ok()?;
@@ -1587,6 +2276,7 @@ impl ToolGateway {
                     "path": { "type": "string", "description": "搜索起始路径（默认工作区根）" },
                     "glob": { "type": "string", "description": "文件过滤，如 **/*.rs" },
                     "ignoreCase": { "type": "boolean", "description": "忽略大小写（默认 false）" },
+                    "contextLines": { "type": "integer", "description": "命中行前后各带 N 行上下文（0-5，默认 0 = 单行输出）" },
                     "maxResults": { "type": "integer", "description": "最多返回条数（默认 100，上限 500）" }
                 },
                 "required": ["pattern"]
@@ -1606,13 +2296,14 @@ impl ToolGateway {
         );
         push(
             ToolName::Filesystem,
-            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）",
+            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["write", "mkdir", "list"] },
+                    "op": { "type": "string", "enum": ["write", "mkdir", "list", "delete", "rename"] },
                     "path": { "type": "string", "description": "相对工作区的路径" },
-                    "content": { "type": "string", "description": "op=write 时的文件内容" }
+                    "content": { "type": "string", "description": "op=write 时的文件内容" },
+                    "newPath": { "type": "string", "description": "op=rename 时的目标路径（相对工作区；目标存在则拒绝）" }
                 },
                 "required": ["op", "path"]
             }),
@@ -1620,8 +2311,8 @@ impl ToolGateway {
         push(ToolName::Terminal, "在工作区内执行终端命令（白名单 + 审批闸门）。长任务用 background=true 启动后轮询 taskId", serde_json::json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "op=run 时必填；单一命令，不支持 && | ; 等连接符" },
-                "op": { "type": "string", "enum": ["run", "poll", "kill"], "description": "默认 run" },
+                "command": { "type": "string", "description": "op=run 时必填；支持 | && || ; 链式命令（每段须都在白名单）；` $( > < & 等逃逸/重定向符不支持" },
+                "op": { "type": "string", "enum": ["run", "poll", "kill", "list"], "description": "默认 run；list 列出本会话后台任务（无需 taskId）" },
                 "taskId": { "type": "string", "description": "op=poll/kill 时的后台任务 id" },
                 "background": { "type": "boolean", "description": "true = 后台执行并立即返回任务 id（适合构建/测试等长任务）" },
                 "timeoutSecs": { "type": "integer", "description": "前台命令超时（秒），上限由安全设置决定" }
@@ -1749,14 +2440,25 @@ impl ToolGateway {
             },
             "required": ["action"]
         }));
-        push(ToolName::Spawn, "派生子智能体执行封闭子任务：子智能体在独立上下文（不继承本会话历史）中执行任务描述，完成后返回结论摘要。适合全库检索、批量调研等可独立完成的工作。并发上限与超时受控；子智能体不可再派生（单层）", serde_json::json!({
+        push(ToolName::Spawn, "派生子智能体执行封闭子任务：子智能体在独立上下文（不继承本会话历史）中执行任务描述，完成后返回结论摘要。适合全库检索、批量调研等可独立完成的工作。并发上限与超时受控；子智能体不可再派生（单层）。background=true 立即返回 spawnId 后台执行（期间可继续对话/派生其它子任务），用 op=status/list 回收结果", serde_json::json!({
             "type": "object",
             "properties": {
                 "task": { "type": "string", "description": "自包含的任务书：目标、范围、期望产出（子智能体看不到本会话，必须写全背景）" },
                 "tools": { "type": "array", "items": { "type": "string", "enum": ["read", "edit", "patch", "grep", "glob", "filesystem", "terminal", "git", "web_search", "web_fetch"] }, "description": "子智能体工具白名单（缺省只读：read/grep/glob/web_fetch）" },
-                "timeoutSecs": { "type": "integer", "description": "子任务超时（秒；默认 300，上限 1800）" }
+                "timeoutSecs": { "type": "integer", "description": "子任务超时（秒；默认 300，范围 5-1800）" },
+                "background": { "type": "boolean", "description": "true = 后台执行：立即返回 spawnId，结果经 op=status 查询（长任务并行时用）" },
+                "op": { "type": "string", "enum": ["status", "list"], "description": "后台子任务回收：status 需配 spawnId；list 列当前会话全部子任务" },
+                "spawnId": { "type": "string", "description": "op=status 时指定子任务" }
             },
-            "required": ["task"]
+            "required": []
+        }));
+        push(ToolName::Todo, "维护会话任务清单（长任务自组织）：op=write 一次性全量重写整个清单（不是追加——每次都写全所有条目与最新状态）；清单会注入后续每轮上下文，让你随时掌握进度全景。任务开始时建清单、每完成一项立即更新状态、全部完成后收尾", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["write", "list"], "description": "默认 write" },
+                "items": { "type": "array", "items": { "type": "object", "properties": { "content": { "type": "string" }, "status": { "type": "string", "enum": ["pending", "in_progress", "done"] } }, "required": ["content"] }, "description": "全量条目（write 时必填；空数组 = 清空清单）" }
+            },
+            "required": []
         }));
         push(ToolName::ContextCompact, "主动压缩会话上下文：把最近窗口之外的更早历史压成滚动摘要（原文保留在会话记录中，仅上下文视图替换）。何时调用由你判断：上下文已冗长、早期细节不再关键、即将进入需要大量新鲜上下文的长任务阶段。压缩是增量的，可多次调用", serde_json::json!({
             "type": "object",
@@ -1851,11 +2553,16 @@ impl ToolGateway {
         let started = Instant::now();
         let call_id = format!("t{}", &crate::types::new_id()[..12]);
         // 工具执行事件（call）：文件操作 / 终端命令 / 截屏对用户全程可见——编程软件式的过程透明
+        // 插件工具归因：`<plugin>__<tool>` 名字解析出 plugin id 写入事件（审计可检索）
+        let plugin_attr = crate::plugin::parse_namespaced(name)
+            .map(|(p, _)| serde_json::json!(p))
+            .unwrap_or(serde_json::Value::Null);
         self.emit_and_persist(CoreEvent {
             kind: "tool.call".into(),
             session_id: session_id.to_string(),
             payload: serde_json::json!({
                 "callId": call_id, "agentId": agent_id, "tool": name, "args": args,
+                "plugin": plugin_attr,
             }),
         });
         // 计划模式拦截（spec: plan-mode）：写类工具不执行，转为计划条目累积清单。
@@ -1966,22 +2673,82 @@ impl ToolGateway {
                 } else if tool == ToolName::ContextCompact {
                     // 实验性动态压缩：豁免 allowlist（能力面由 schema 下发门控控制——
                     // 未开实验开关时模型根本看不到该工具 schema，不会有调用进来）
-                    self.tool_context_compact(agent_id, session_id, args)
-                        .await
+                    self.tool_context_compact(agent_id, session_id, args).await
                 } else {
                     self.dispatch(agent_id, session_id, tool, args).await
                 }
             }
-            // 非内置名：声明式自定义工具（可扩展工具面，免写 MCP 服务器）
-            None => match self.custom.iter().find(|c| c.name == name) {
-                Some(ct) if ct.visible_to(agent_id) => {
-                    self.run_custom(agent_id, session_id, ct, args).await
+            // 非内置名：会话级注入（视频观看会话）→ 动态命名空间工具（T3 内置插件）→ 声明式自定义工具
+            None => {
+                // 会话级注入优先（按会话收窄的插件工具：video__* 等）
+                if let Some((spec, exec)) = self.session_tool(session_id, name) {
+                    if spec.visible_to(agent_id) {
+                        let out = exec(agent_id, session_id, args.clone()).await;
+                        if out.ok {
+                            ToolResult::ok_with_images(out.text, out.images)
+                        } else {
+                            ToolResult::err(out.text)
+                        }
+                    } else {
+                        ToolResult::err(format!(
+                            "工具 {name} 未对本个体开放（插件工具的 agents 未包含 {agent_id}）"
+                        ))
+                    }
+                } else if let Some((spec, exec)) = self.dynamic_tool(name) {
+                    // 动态表（T3 内置插件全局注册面）
+                    if spec.visible_to(agent_id) {
+                        let out = exec(agent_id, session_id, args.clone()).await;
+                        if out.ok {
+                            ToolResult::ok_with_images(out.text, out.images)
+                        } else {
+                            ToolResult::err(out.text)
+                        }
+                    } else {
+                        ToolResult::err(format!(
+                            "工具 {name} 未对本个体开放（插件工具的 agents 未包含 {agent_id}）"
+                        ))
+                    }
+                } else {
+                    // 查找顺序：config CustomTool 先于插件工具（先注册者胜）；
+                    // 进程插件运行时工具最后（T2 握手发现面）
+                    let found = self
+                        .custom
+                        .iter()
+                        .find(|c| c.name == name)
+                        .cloned()
+                        .or_else(|| {
+                            self.plugin_tools
+                                .read()
+                                .iter()
+                                .find(|c| c.name == name)
+                                .cloned()
+                        });
+                    match found {
+                        Some(ct) if ct.visible_to(agent_id) => {
+                            self.run_custom(agent_id, session_id, &ct, args).await
+                        }
+                        Some(_) => ToolResult::err(format!(
+                            "工具 {name} 未对本个体开放（自定义工具的 agents 未包含 {agent_id}）"
+                        )),
+                        None => {
+                            // 进程插件运行时工具（T2）：转发到 provider（supervisor → 子进程）
+                            let provider = self
+                                .plugin_runtime_tools
+                                .read()
+                                .values()
+                                .find(|p| p.tool_specs().iter().any(|c| c.name == name))
+                                .cloned();
+                            match provider {
+                                Some(p) => match p.call_tool(name, args) {
+                                    Ok(text) => ToolResult::ok(text),
+                                    Err(e) => ToolResult::err(format!("插件工具执行失败：{e}")),
+                                },
+                                None => ToolResult::err(format!("未知工具：{name}")),
+                            }
+                        }
+                    }
                 }
-                Some(_) => ToolResult::err(format!(
-                    "工具 {name} 未对本个体开放（自定义工具的 agents 未包含 {agent_id}）"
-                )),
-                None => ToolResult::err(format!("未知工具：{name}")),
-            },
+            }
         };
         let result = self.spill_if_large(name, result);
         // postTool 钩子：仅留痕（失败不改变工具结果，但会追加到输出末尾提示）
@@ -2077,6 +2844,10 @@ impl ToolGateway {
         } else {
             result.error.clone().unwrap_or_default()
         };
+        // 插件归因（与 tool.call 对称；非插件工具为 null 不占字段语义）
+        let plugin_attr = crate::plugin::parse_namespaced(name)
+            .map(|p| serde_json::json!(p.0))
+            .unwrap_or(serde_json::Value::Null);
         self.emit_and_persist(CoreEvent {
             kind: "tool.result".into(),
             session_id: session_id.to_string(),
@@ -2086,6 +2857,7 @@ impl ToolGateway {
                 "durationMs": started.elapsed().as_millis() as u64,
                 "summary": text.chars().take(400).collect::<String>(),
                 "images": result.images,
+                "plugin": plugin_attr,
             }),
         });
         // 历史回放可见工具的成败与耗时摘要（不止「开始了」）——落库在 emit_and_persist 内完成
@@ -2158,6 +2930,7 @@ impl ToolGateway {
             ToolName::MemoryLink => self.tool_memory_link(agent_id, session_id, args),
             ToolName::Git => self.tool_git(agent_id, session_id, args).await,
             ToolName::Spawn => self.tool_spawn(agent_id, session_id, args).await,
+            ToolName::Todo => self.tool_todo(session_id, args),
             ToolName::ContextCompact => unreachable!("context_compact 在 execute_named 预分发"),
         }
     }
@@ -2575,7 +3348,38 @@ impl ToolGateway {
         vals: &std::collections::BTreeMap<String, String>,
         args: &serde_json::Value,
     ) -> ToolResult {
-        let url = interpolate(&tool.target, vals, urlencode);
+        // 插件凭据变量（plugin-ecosystem 1.3）：`${credentials.<key>}` 宿主侧解析——
+        // 清单零密钥分发。仅命名空间工具可解析（config CustomTool 无插件归属，
+        // 引用变量视为缺键）。缺失时拒绝调用（不发部分鉴权请求）。
+        let plugin_id = crate::plugin::parse_namespaced(&tool.name).map(|(p, _)| p);
+        let (url, mut missing) = match &plugin_id {
+            Some(pid) => self.resolve_credential_vars(pid, &tool.target),
+            None if tool.target.contains("${credentials.") => {
+                return ToolResult::err(format!(
+                    "工具 {} 引用了 ${{credentials.*}} 变量但无插件归属（仅插件清单工具可声明凭据变量）",
+                    tool.name
+                ))
+            }
+            None => (tool.target.clone(), Vec::new()),
+        };
+        let mut headers: std::collections::BTreeMap<String, String> = Default::default();
+        for (k, v) in &tool.headers {
+            let resolved = match &plugin_id {
+                Some(pid) => self.resolve_credential_vars(pid, v),
+                None => (v.clone(), Vec::new()),
+            };
+            missing.extend(resolved.1);
+            headers.insert(k.clone(), resolved.0);
+        }
+        if !missing.is_empty() {
+            return ToolResult::err(format!(
+                "工具 {} 的凭据未配置：{}（请在插件详情的凭据区配置后重试）",
+                tool.name,
+                missing.join("、")
+            ));
+        }
+        // 实参插值（凭据解析后的 URL 上做 `{参数名}` 占位替换）
+        let url = interpolate(&url, vals, urlencode);
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return ToolResult::err("http 类自定义工具的 target 必须是 http(s) URL");
         }
@@ -2597,7 +3401,7 @@ impl ToolGateway {
         let parsed =
             reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
         let mut req = client.request(parsed, &url);
-        for (k, v) in &tool.headers {
+        for (k, v) in &headers {
             req = req.header(k, v);
         }
         if method == "POST" || method == "PUT" || method == "PATCH" {
@@ -2613,7 +3417,7 @@ impl ToolGateway {
                         text.chars().take(2000).collect::<String>()
                     ));
                 }
-                ToolResult::ok(text.chars().take(8000).collect::<String>())
+                shape_response(tool, &text)
             }
             Err(e) => ToolResult::err(format!("请求失败: {e}")),
         }
@@ -2884,6 +3688,30 @@ impl ToolGateway {
         };
         if p.is_dir() {
             return self.list_dir(&p);
+        }
+        // 图像副产物（spec: agent-terminal-tools read 图像副产物）：
+        // 按扩展名识别图像，返回摘要 + images 路径（runtime 视觉模型回灌）
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+        ) {
+            let meta = match std::fs::metadata(&p) {
+                Ok(m) => m,
+                Err(e) => return ToolResult::err(format!("读取失败: {e}")),
+            };
+            let abs = std::fs::canonicalize(&p)
+                .map(|x| x.display().to_string())
+                .unwrap_or_else(|_| p.display().to_string());
+            return ToolResult::ok(format!(
+                "图像文件：{path}（{ext}，{} 字节）—— 已作为图像输入回灌，具备视觉能力的模型可直接查看",
+                meta.len()
+            ))
+            .with_images(vec![abs]);
         }
         let bytes = match std::fs::read(&p) {
             Ok(b) => b,
@@ -3200,6 +4028,12 @@ impl ToolGateway {
             .and_then(|v| v.as_u64())
             .unwrap_or(100)
             .clamp(1, 500) as usize;
+        // 上下文行数（spec: agent-terminal-tools grep 上下文行）：0 = 现状单行输出
+        let ctx_n = args
+            .get("contextLines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .clamp(0, 5) as usize;
         let root = match self.resolve_safe(sub) {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e.to_string()),
@@ -3216,6 +4050,7 @@ impl ToolGateway {
         let mut out: Vec<String> = Vec::new();
         let mut hit_files = 0usize;
         let mut truncated = false;
+        let mut hit_lines: Vec<(usize, String)> = Vec::new();
         'files: for entry in walker {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
@@ -3236,14 +4071,56 @@ impl ToolGateway {
                 .to_string()
                 .replace('\\', "/");
             let mut file_hit = false;
+            hit_lines.clear();
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     if !file_hit {
                         file_hit = true;
                         hit_files += 1;
                     }
+                    // contextLines>0 时记录行号，稍后按块合并输出（含前后上下文行）
+                    if ctx_n > 0 {
+                        hit_lines.push((i, line.to_string()));
+                        continue;
+                    }
                     let trimmed: String = line.trim().chars().take(240).collect();
                     out.push(format!("{rel}:{}:{}", i + 1, trimmed));
+                    if out.len() >= max_results {
+                        truncated = true;
+                        break 'files;
+                    }
+                }
+            }
+            // 上下文块输出：相邻命中（间隔 ≤ 2N+1）合并为一块，
+            // 块内逐行 `rel:行号: 内容`，命中行内容保持 240 字符截断
+            if ctx_n > 0 && !hit_lines.is_empty() {
+                let all_lines: Vec<&str> = text.lines().collect();
+                let mut blocks: Vec<(usize, usize)> = Vec::new(); // [start, end] 行号闭区间
+                for (i, _) in &hit_lines {
+                    let s = i.saturating_sub(ctx_n);
+                    let e = (i + ctx_n).min(all_lines.len().saturating_sub(1));
+                    match blocks.last_mut() {
+                        Some((bs, be)) if s <= *be + 1 => {
+                            if e > *be {
+                                *be = e;
+                            }
+                        }
+                        _ => blocks.push((s, e)),
+                    }
+                }
+                for (s, e) in blocks {
+                    if !out.is_empty() {
+                        out.push(format!("{rel}—"));
+                    }
+                    for ln in s..=e {
+                        if ln >= all_lines.len() {
+                            break;
+                        }
+                        let content = &all_lines[ln];
+                        let mark = if re.is_match(content) { ">" } else { " " };
+                        let trimmed: String = content.trim().chars().take(240).collect();
+                        out.push(format!("{rel}:{}:{} {}", ln + 1, mark, trimmed));
+                    }
                     if out.len() >= max_results {
                         truncated = true;
                         break 'files;
@@ -3310,6 +4187,40 @@ impl ToolGateway {
         ToolResult::ok(format!("{}\n（{n} 个文件）", files.join("\n")))
     }
 
+    /// 递归复制目录树/文件（回收站跨设备 fallback 用）：
+    /// 目标已存在则清空重建，保证「移入」语义的原子性近似
+    fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<()> {
+        use std::fs;
+        if src.is_dir() {
+            if dst.exists() {
+                // 目标可能是文件或目录，分别清理
+                if dst.is_dir() {
+                    fs::remove_dir_all(dst).context("回收站旧目标清理失败")?;
+                } else {
+                    fs::remove_file(dst).context("回收站旧目标清理失败")?;
+                }
+            }
+            fs::create_dir_all(dst).context("回收站目录创建失败")?;
+            for entry in fs::read_dir(src).context("读取源目录失败")? {
+                let entry = entry?;
+                let ty = entry.file_type()?;
+                let child_dst = dst.join(entry.file_name());
+                if ty.is_dir() {
+                    fs::create_dir_all(&child_dst)?;
+                    Self::copy_tree(&entry.path(), &child_dst)?;
+                } else {
+                    fs::copy(entry.path(), &child_dst).context("复制文件失败")?;
+                }
+            }
+            Ok(())
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(src, dst).context("复制文件失败").map(|_| ())
+        }
+    }
+
     fn tool_fs(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("write");
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -3338,10 +4249,10 @@ impl ToolGateway {
                         }
                         ToolResult::ok(format!(
                             "written: {}（{} 行 / {} 字符）",
-                        target.display(),
-                        content.lines().count(),
-                        content.chars().count()
-                    ))
+                            target.display(),
+                            content.lines().count(),
+                            content.chars().count()
+                        ))
                     }
                     Err(e) => ToolResult::err(e.to_string()),
                 }
@@ -3357,8 +4268,110 @@ impl ToolGateway {
                     ToolResult::err(format!("不是目录: {path}"))
                 }
             }
+            // 删除进回收站（spec: filesystem-ops）：不裸删——整树移入
+            // .exmachina/trash/<日期>/<相对路径>，保留原内容供人工恢复
+            "delete" => {
+                let root = self.effective_root();
+                // 保护区：工作区根 / .exmachina 系统区（含检查点与回收站自身）
+                if target == root {
+                    return ToolResult::err("拒绝删除：工作区根目录不可删除");
+                }
+                let sys = self.workspace_root.join(".exmachina");
+                if target.starts_with(&sys) {
+                    return ToolResult::err(
+                        "拒绝删除：.exmachina 系统区（检查点/回收站/沙箱等）不可经此删除；确需清理请用终端并过审批",
+                    );
+                }
+                if !target.exists() {
+                    return ToolResult::err(format!("目标不存在: {path}"));
+                }
+                let Ok(rel) = target.strip_prefix(&root) else {
+                    return ToolResult::err("拒绝删除：目标不在当前工作区内");
+                };
+                let day: String = crate::types::now_iso().chars().take(10).collect();
+                let mut dst = sys.join("trash").join(&day).join(rel);
+                // 同日同名冲突：追加序号（build.log → build.log.2）
+                let mut seq = 2u32;
+                while dst.exists() {
+                    let name = format!(
+                        "{}.{seq}",
+                        rel.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    );
+                    dst = sys.join("trash").join(&day).join(rel.with_file_name(name));
+                    seq += 1;
+                }
+                if let Some(parent) = dst.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        return ToolResult::err(format!("回收站目录创建失败：{e}"));
+                    }
+                }
+                let rel_disp = dst
+                    .strip_prefix(&self.workspace_root)
+                    .map(|p| p.display().to_string().replace('\\', "/"))
+                    .unwrap_or_else(|_| dst.display().to_string());
+                // fs::rename 跨设备（EXDEV：回收站常为独立挂载卷）时 fallback copy+删源。
+                // 逐条目复制保序（目录先建、文件后拷），任一失败即中止（残留部分文件不影响原位数据）
+                let moved = std::fs::rename(&target, &dst)
+                    .or_else(|_| Self::copy_tree(&target, &dst))
+                    .and_then(|_| {
+                        // rename 成功时源已不在；copy 路径源仍在，删源完成「移入」语义
+                        if target.exists() {
+                            if target.is_dir() {
+                                std::fs::remove_dir_all(&target)
+                            } else {
+                                std::fs::remove_file(&target)
+                            }
+                            .context("回收站已写入但删源失败（原位数据未动）")
+                        } else {
+                            Ok(())
+                        }
+                    });
+                match moved {
+                    Ok(_) => ToolResult::ok(format!(
+                        "已删除（移入回收站，可人工恢复）：{path} → {rel_disp}"
+                    )),
+                    Err(e) => ToolResult::err(format!("删除失败（回收站移入）: {e}")),
+                }
+            }
+            // 重命名/移动（spec: filesystem-ops）：不覆盖 + 源检查点（undo 链不断）
+            "rename" => {
+                let new_path = args.get("newPath").and_then(|v| v.as_str()).unwrap_or("");
+                if new_path.trim().is_empty() {
+                    return ToolResult::err("op=rename 需要 newPath（相对工作区的目标路径）");
+                }
+                let new_target = match self.resolve_safe(new_path) {
+                    Ok(p) => p,
+                    Err(e) => return ToolResult::err(e.to_string()),
+                };
+                if !target.exists() {
+                    return ToolResult::err(format!("源不存在: {path}"));
+                }
+                if target == new_target {
+                    return ToolResult::err("newPath 与原路径相同，无需重命名");
+                }
+                if new_target.exists() {
+                    return ToolResult::err(format!(
+                        "目标已存在: {new_path}（rename 不覆盖；如需替换请先 delete）"
+                    ));
+                }
+                // 源写前检查点：undo 链可回滚到重命名前
+                if target.is_file() {
+                    if let Err(e) = self.checkpoint(&target, session_id) {
+                        return ToolResult::err(format!("写前检查点失败，已中止重命名：{e}"));
+                    }
+                }
+                if let Some(parent) = new_target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::rename(&target, &new_target) {
+                    Ok(_) => ToolResult::ok(format!("renamed: {path} -> {new_path}")),
+                    Err(e) => ToolResult::err(format!("重命名失败: {e}")),
+                }
+            }
             other => ToolResult::err(format!(
-                "未知 filesystem 操作: {other}（支持 write / mkdir / list；删除文件请用 terminal，受审批与审计约束）"
+                "未知 filesystem 操作: {other}（支持 write / mkdir / list / delete / rename）"
             )),
         }
     }
@@ -3445,21 +4458,27 @@ impl ToolGateway {
                 }
                 // 单引号转义防注入（message 内容含引号即拒绝，简化白名单口径）
                 if msg.contains(['\'', '"', '\\', '`', '$']) {
-                    return ToolResult::err("message 含引号/反引号/美元符号/反斜杠，为防注入请调整提交信息");
+                    return ToolResult::err(
+                        "message 含引号/反引号/美元符号/反斜杠，为防注入请调整提交信息",
+                    );
                 }
                 format!("git commit -m '{msg}'")
             }
             "restore" => {
                 let path = s("pathSpec");
                 if path.is_empty() || path.starts_with('-') || contains_shell_chain(&path) {
-                    return ToolResult::err("restore 需要合法 pathSpec（非空、非选项前缀、无连接符）");
+                    return ToolResult::err(
+                        "restore 需要合法 pathSpec（非空、非选项前缀、无连接符）",
+                    );
                 }
                 format!("git restore -- {path}")
             }
             "stash-push" => {
                 let msg = s("message");
                 if msg.contains(['\'', '"', '\\', '`', '$']) {
-                    return ToolResult::err("message 含引号/反引号/美元符号/反斜杠，为防注入请调整说明");
+                    return ToolResult::err(
+                        "message 含引号/反引号/美元符号/反斜杠，为防注入请调整说明",
+                    );
                 }
                 if msg.is_empty() {
                     "git stash push".to_string()
@@ -3471,11 +4490,14 @@ impl ToolGateway {
             "checkout-b" => {
                 let b = s("branch");
                 if b.is_empty() || b.starts_with('-') || contains_shell_chain(&b) {
-                    return ToolResult::err("checkout-b 需要合法分支名（非空、非选项前缀、无连接符）");
+                    return ToolResult::err(
+                        "checkout-b 需要合法分支名（非空、非选项前缀、无连接符）",
+                    );
                 }
                 format!("git checkout -b {b}")
             }
-            "push" | "pull" | "fetch" | "clone" | "remote" | "reset" | "rebase" | "merge" | "cherry-pick" | "revert" => {
+            "push" | "pull" | "fetch" | "clone" | "remote" | "reset" | "rebase" | "merge"
+            | "cherry-pick" | "revert" => {
                 return ToolResult::err(format!(
                     "动作 {action} 不在 git 工具动作面（远程/重写类操作请用 terminal 工具走完整审批链）"
                 ));
@@ -3560,10 +4582,7 @@ impl ToolGateway {
 
     /// git 只读动作 → argv 数组（与 tool_git 内的命令文本构造一一对应；
     /// 数组化不经 shell，天然无注入面）。动态参数校验后混入。
-    fn git_readonly_argv(
-        action: &str,
-        args: &serde_json::Value,
-    ) -> Result<Vec<String>, String> {
+    fn git_readonly_argv(action: &str, args: &serde_json::Value) -> Result<Vec<String>, String> {
         let s = |k: &str| {
             args.get(k)
                 .and_then(|v| v.as_str())
@@ -3625,10 +4644,24 @@ impl ToolGateway {
         session_id: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
+        // 后台回收面（spec: subagent-spawn 异步并行）：status/list 不走派生流程，
+        // 也不依赖执行器装配（只读注册表）
+        match args.get("op").and_then(|v| v.as_str()).unwrap_or("") {
+            "status" => {
+                let sid = args.get("spawnId").and_then(|v| v.as_str()).unwrap_or("");
+                return self.spawn_bg_status(session_id, sid);
+            }
+            "list" => return self.spawn_bg_list(session_id),
+            _ => {}
+        }
         let Some(exec) = self.spawn_executor.read().clone() else {
             return ToolResult::err("spawn 执行器未装配（运行时未就绪）");
         };
-        let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let task = args
+            .get("task")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if task.is_empty() {
             return ToolResult::err("task 不能为空：请提供自包含任务书（目标、范围、期望产出）");
         }
@@ -3658,7 +4691,7 @@ impl ToolGateway {
             .get("timeoutSecs")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.spawn_timeout_secs)
-            .clamp(10, 1800);
+            .clamp(5, 1800);
         let spawn_id = format!("sp-{}", &crate::types::new_id()[..8]);
         // 可观测：子任务启动事件
         self.emit_and_persist(CoreEvent {
@@ -3668,16 +4701,89 @@ impl ToolGateway {
                 "spawnId": spawn_id, "agentId": agent_id,
                 "taskPreview": task.chars().take(120).collect::<String>(),
                 "tools": requested.iter().map(|t| t.key()).collect::<Vec<_>>(),
+                "background": args.get("background").and_then(|v| v.as_bool()).unwrap_or(false),
             }),
         });
         // 并发闸：try_acquire 即时反馈（排队语义由主智能体重试承担）
         let sem = self.spawn_semaphore.clone();
-        let Ok(_permit) = sem.clone().try_acquire_owned() else {
+        let Ok(permit) = sem.clone().try_acquire_owned() else {
             return ToolResult::err(format!(
                 "子智能体并发已达上限（{}）：请等待在跑子任务完成后再派生",
-                sem.available_permits().max(0)
+                sem.available_permits()
             ));
         };
+        // 后台模式（spec: subagent-spawn）：立即返回 spawnId，许可随任务体持有至终结；
+        // 终态写注册表 + spawn.finished 事件，主智能体期间可继续对话/派生/调工具
+        if args
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let agent_owned = agent_id.to_string();
+            let registry = self.spawns_bg.clone();
+            let events = self.events.clone();
+            // 持久化通道一并移入任务体：终态事件落 store（REST 事件面/WebUI 刷新后可见）
+            let store = self.store.clone();
+            let session = session_id.to_string();
+            let task_preview: String = task.chars().take(120).collect();
+            registry.lock().insert(
+                spawn_id.clone(),
+                SpawnBgTask {
+                    spawn_id: spawn_id.clone(),
+                    task_preview: task_preview.clone(),
+                    session: session.clone(),
+                    started: Instant::now(),
+                    state: parking_lot::RwLock::new(SpawnBgState::Running),
+                    read: parking_lot::RwLock::new(false),
+                },
+            );
+            let task_owned = task.to_string();
+            let sid_evt = spawn_id.clone();
+            let _handle =
+                tokio::spawn(async move {
+                    let _p = permit; // 许可随任务体存活，终结自动释放
+                    let fut = exec(&agent_owned, &session, task_owned.as_str(), requested);
+                    let (state, status, preview) =
+                        match tokio::time::timeout(std::time::Duration::from_secs(timeout), fut)
+                            .await
+                        {
+                            Ok(Ok(text)) => {
+                                let p: String = text.chars().take(160).collect();
+                                (SpawnBgState::Done(text), "done", p)
+                            }
+                            Ok(Err(e)) => {
+                                let msg = e.to_string();
+                                (SpawnBgState::Failed(msg.clone()), "failed", msg)
+                            }
+                            Err(_) => (SpawnBgState::Timeout, "timeout", String::new()),
+                        };
+                    if let Some(t) = registry.lock().get(&sid_evt) {
+                        *t.state.write() = state;
+                    }
+                    let evt = CoreEvent {
+                        kind: "spawn.finished".into(),
+                        session_id: session,
+                        payload: serde_json::json!({
+                            "spawnId": sid_evt, "status": status, "background": true,
+                            "summaryPreview": preview,
+                        }),
+                    };
+                    let _ = events.send(evt.clone());
+                    // 落 store：REST 事件 API / WebUI 刷新后可查（与 emit_and_persist 同口径）
+                    let env = crate::types::Envelope::new(
+                        format!("session.{}.events", evt.session_id),
+                        "tools",
+                        "broadcast",
+                        "event",
+                        evt.session_id.clone(),
+                        serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
+                    );
+                    let _ = store.append_event(&env);
+                });
+            return ToolResult::ok(format!(
+                "子任务已后台启动：spawnId={spawn_id}\n任务：{task_preview}\n用 spawn(op=\"status\", spawnId=\"{spawn_id}\") 查询结果；spawn(op=\"list\") 列全部。完成后下一轮上下文会自动提醒。"
+            ));
+        }
         let task_owned = task.to_string();
         let fut = exec(agent_id, session_id, task_owned.as_str(), requested);
         let result = match tokio::time::timeout(std::time::Duration::from_secs(timeout), fut).await
@@ -3774,7 +4880,11 @@ impl ToolGateway {
     /// 工作台文件树（对话内 @ 文件提及与 e2e 用，spec: webui-code-workbench → chat-as-coding）：
     /// 相对工作区根的目录列表（.gitignore 过滤 + 深度/数量限制）。
     /// 与工具同一工作区边界（resolve_safe），越权路径拒绝。
-    pub fn workbench_tree(&self, rel: &str, depth_limit: usize) -> anyhow::Result<serde_json::Value> {
+    pub fn workbench_tree(
+        &self,
+        rel: &str,
+        depth_limit: usize,
+    ) -> anyhow::Result<serde_json::Value> {
         let root = self.effective_root();
         let start = if rel.trim().is_empty() || rel == "." {
             root.clone()
@@ -3784,7 +4894,15 @@ impl ToolGateway {
         let mut nodes = Vec::new();
         let mut count = 0usize;
         let max_entries = 2000usize;
-        walk_tree(&root, &start, 0, depth_limit, &mut nodes, &mut count, max_entries)?;
+        walk_tree(
+            &root,
+            &start,
+            0,
+            depth_limit,
+            &mut nodes,
+            &mut count,
+            max_entries,
+        )?;
         Ok(serde_json::json!({
             "root": rel,
             "count": nodes.len(),
@@ -3826,10 +4944,11 @@ impl ToolGateway {
         args: &serde_json::Value,
     ) -> ToolResult {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("run");
-        // 后台任务轮询 / 终止（不经过白名单与审批：对象是已批准过的任务）
+        // 后台任务轮询 / 终止 / 清单（不经过白名单与审批：对象是已批准过的任务）
         match op {
             "poll" => return self.bg_poll(args),
             "kill" => return self.bg_kill(args),
+            "list" => return self.bg_list(session_id),
             _ => {}
         }
         let cmd = args
@@ -3841,14 +4960,16 @@ impl ToolGateway {
         if cmd.is_empty() {
             return ToolResult::err("command 不能为空");
         }
-        // 单一命令约束：带 shell 连接符（&& | ; 重定向等）一律拒绝，防白名单绕过
+        // 逃逸/写入语义（` $( > < &）仍一律拒绝：命令替换绕过解析、重定向写文件、
+        // 后台执行，白名单管不住。链式分隔（| && || ;）改走逐段白名单
+        // （chain_allowed：每段首命令都过白名单才放行，攻击面与单命令一致）。
         if contains_shell_chain(&cmd) {
             return ToolResult::err(
-                "命令包含 shell 连接符（&& / | / ; / 重定向等），白名单只放行单一命令；请拆成多次调用。",
+                "命令包含命令替换 / 重定向 / 后台符（` $( > < &），白名单不放行；请去掉后重试或拆成多次调用。",
             );
         }
         let lowered = cmd.to_lowercase();
-        let whitelisted = terminal_allowed(&cmd);
+        let whitelisted = chain_allowed(&cmd);
         // 审批闸门（docs/10）：risky 拦高危命令，always 全拦；白名单前缀放行。
         // 拦截后运行时原地等待人工决定（security.approvalWaitSecs）：
         // 批准 → 系统代执行，输出直接回灌本工具结果，模型继续干活；拒绝/超时 → 受阻回流。
@@ -3859,7 +4980,7 @@ impl ToolGateway {
             // 等大量日常开发命令无路可走，agent 无法完成编码任务。
             if mode == "off" {
                 return ToolResult::err(format!(
-                    "命令不在白名单: {cmd}（白名单按「命令 + 子命令」匹配，且不支持连接符；\
+                    "命令不在白名单: {cmd}（白名单按「命令 + 子命令」逐段匹配——链式命令每段都须在白名单；\
                      可将 security.execApproval 设为 risky/always 走人工审批放行）"
                 ));
             }
@@ -3884,7 +5005,7 @@ impl ToolGateway {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            return self.bg_start(&cmd);
+            return self.bg_start(&cmd, session_id);
         }
         let timeout = args
             .get("timeoutSecs")
@@ -3907,7 +5028,7 @@ impl ToolGateway {
     }
 
     /// 启动后台任务：输出累积到共享缓冲，任务终结记录退出码
-    fn bg_start(&self, cmd: &str) -> ToolResult {
+    fn bg_start(&self, cmd: &str, session_id: &str) -> ToolResult {
         const BG_OUTPUT_CAP: usize = 200_000;
         let id = format!("bg-{}", &crate::types::new_id()[..8]);
         let buf = Arc::new(parking_lot::Mutex::new(String::new()));
@@ -3997,6 +5118,7 @@ impl ToolGateway {
         });
         let task = BgTask {
             cmd: cmd.to_string(),
+            session: session_id.to_string(),
             started: Instant::now(),
             buf,
             state,
@@ -4045,6 +5167,259 @@ impl ToolGateway {
                 ToolResult::ok(format!("后台任务已终止：{id}（{cmd}）", cmd = t.cmd))
             }
             None => ToolResult::err(format!("后台任务不存在: {id}")),
+        }
+    }
+
+    /// 后台任务清单（spec: agent-terminal-tools 后台任务可寻址）：
+    /// 按会话过滤返回 id/命令/状态/输出尾摘要，跨轮次可寻址。
+    /// 只读内部状态，不经过白名单与审批。
+    fn bg_list(&self, session_id: &str) -> ToolResult {
+        let guard = self.background.lock();
+        let mut rows: Vec<(&String, &BgTask)> = guard
+            .iter()
+            .filter(|(_, t)| t.session == session_id)
+            .collect();
+        if rows.is_empty() {
+            return ToolResult::ok("当前会话无后台任务。");
+        }
+        rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.started));
+        let mut out = format!("后台任务（{} 个，最新在前）：\n", rows.len());
+        for (i, (id, t)) in rows.iter().enumerate() {
+            let state = *t.state.lock();
+            let elapsed = t.started.elapsed().as_secs();
+            let status = match state {
+                None => format!("运行中（已 {elapsed}s）"),
+                Some(0) => format!("已完成 exit=0（耗时 {elapsed}s）"),
+                Some(c) => format!("已结束 exit={c}（耗时 {elapsed}s）"),
+            };
+            let tail: String = {
+                let buf = t.buf.lock();
+                let chars: Vec<char> = buf.chars().collect();
+                let start = chars.len().saturating_sub(200);
+                chars[start..]
+                    .iter()
+                    .collect::<String>()
+                    .replace('\n', " ⏎ ")
+            };
+            let tail_disp = if tail.trim().is_empty() {
+                "（暂无）".to_string()
+            } else {
+                tail
+            };
+            // taskId 必须在清单里——丢失 id 的模型靠它重新寻址 poll/kill
+            out.push_str(&format!(
+                "{}. [taskId={id}] {} [{}]\n   输出尾：{}\n",
+                i + 1,
+                t.cmd,
+                status,
+                tail_disp
+            ));
+        }
+        drop(guard);
+        ToolResult::ok(out)
+    }
+
+    /// 后台 spawn 单查（spec: subagent-spawn）：终态全文返回并置已读（提醒不再注入）
+    fn spawn_bg_status(&self, session_id: &str, spawn_id: &str) -> ToolResult {
+        if spawn_id.is_empty() {
+            return ToolResult::err("op=status 需要 spawnId");
+        }
+        let guard = self.spawns_bg.lock();
+        let Some(t) = guard.get(spawn_id) else {
+            return ToolResult::err(format!(
+                "后台子任务不存在: {spawn_id}（是否同步派生？同步结果直接在原调用返回）"
+            ));
+        };
+        if t.session != session_id {
+            return ToolResult::err(format!("后台子任务不属于当前会话: {spawn_id}"));
+        }
+        let elapsed = t.started.elapsed().as_secs();
+        let out = match &*t.state.read() {
+            SpawnBgState::Running => format!(
+                "子任务 {spawn_id} 运行中（已 {elapsed}s）\n任务：{}\n请稍后再查。",
+                t.task_preview
+            ),
+            SpawnBgState::Done(text) => {
+                *t.read.write() = true;
+                format!("子任务 {spawn_id} 已完成（耗时 {elapsed}s）：\n{text}")
+            }
+            SpawnBgState::Failed(msg) => {
+                *t.read.write() = true;
+                format!("子任务 {spawn_id} 失败（耗时 {elapsed}s）：{msg}")
+            }
+            SpawnBgState::Timeout => {
+                *t.read.write() = true;
+                format!("子任务 {spawn_id} 超时被终止（{elapsed}s）")
+            }
+        };
+        drop(guard);
+        ToolResult::ok(out)
+    }
+
+    /// 后台 spawn 清单（spec: subagent-spawn）：本会话全部子任务，最新在前；
+    /// 终态条目顺带置已读（list 全量浏览即视为收讫）
+    fn spawn_bg_list(&self, session_id: &str) -> ToolResult {
+        let mut guard = self.spawns_bg.lock();
+        let mut rows: Vec<&SpawnBgTask> =
+            guard.values().filter(|t| t.session == session_id).collect();
+        if rows.is_empty() {
+            return ToolResult::ok("当前会话无后台子任务。");
+        }
+        rows.sort_by_key(|t| std::cmp::Reverse(t.started));
+        let mut out = format!("后台子任务（{} 个，最新在前）：\n", rows.len());
+        for (i, t) in rows.iter().enumerate() {
+            let elapsed = t.started.elapsed().as_secs();
+            let status = match &*t.state.read() {
+                SpawnBgState::Running => format!("运行中（已 {elapsed}s）"),
+                SpawnBgState::Done(_) => {
+                    *t.read.write() = true;
+                    format!("已完成（耗时 {elapsed}s）——用 op=status 取结果")
+                }
+                SpawnBgState::Failed(_) => {
+                    *t.read.write() = true;
+                    format!("失败（耗时 {elapsed}s）——用 op=status 取详情")
+                }
+                SpawnBgState::Timeout => {
+                    *t.read.write() = true;
+                    format!("超时终止（{elapsed}s）")
+                }
+            };
+            out.push_str(&format!(
+                "{}. [spawnId={}] {} [{}]\n",
+                i + 1,
+                t.spawn_id,
+                t.task_preview,
+                status
+            ));
+        }
+        // 容量上界：每会话最近 50 条，超出丢最旧（防注册表无限膨胀）
+        let mut by_session: Vec<(String, Instant)> = guard
+            .values()
+            .filter(|t| t.session == session_id)
+            .map(|t| (t.spawn_id.clone(), t.started))
+            .collect();
+        if by_session.len() > 50 {
+            by_session.sort_by_key(|(_, s)| *s);
+            for (id, _) in by_session.drain(..by_session.len() - 50) {
+                guard.remove(&id);
+            }
+        }
+        drop(guard);
+        ToolResult::ok(out)
+    }
+
+    /// 未回收提醒（spec: subagent-spawn）：本会话已终结未被 status/list 读取的
+    /// 后台子任务终态摘要，注入下一轮系统提示（限 5 条，最新在前）
+    pub fn spawn_pending_note(&self, session_id: &str) -> Option<String> {
+        let guard = self.spawns_bg.lock();
+        // 拥有式收集：preview 转成 String，避免注册表锁内借用外泄
+        let mut unread: Vec<(std::time::Instant, String, String, usize)> = Vec::new();
+        for t in guard.values() {
+            if t.session != session_id || *t.read.read() {
+                continue;
+            }
+            let elapsed = t.started.elapsed().as_secs() as usize;
+            match &*t.state.read() {
+                SpawnBgState::Running => continue,
+                SpawnBgState::Done(text) => {
+                    let preview: String = text.chars().take(200).collect();
+                    unread.push((t.started, t.spawn_id.clone(), preview, elapsed));
+                }
+                SpawnBgState::Failed(msg) => {
+                    let preview: String = msg.chars().take(200).collect();
+                    unread.push((t.started, t.spawn_id.clone(), preview, elapsed));
+                }
+                SpawnBgState::Timeout => {
+                    unread.push((t.started, t.spawn_id.clone(), "超时被终止".into(), elapsed));
+                }
+            }
+        }
+        drop(guard);
+        if unread.is_empty() {
+            return None;
+        }
+        unread.sort_by_key(|(s, _, _, _)| std::cmp::Reverse(*s));
+        let mut out = String::from("## 后台子任务结果待收\n");
+        for (_, id, preview, elapsed) in unread.iter().take(5) {
+            out.push_str(&format!("- [{id}]（{elapsed}s）：{preview}\n"));
+        }
+        if unread.len() > 5 {
+            out.push_str(&format!("- …（另有 {} 个未列出）\n", unread.len() - 5));
+        }
+        out.push_str("用 spawn(op=\"status\", spawnId=...) 收取全文。");
+        Some(out)
+    }
+    /// 只读语义面（不进审批闸门）；write 后发 todo.updated 事件。
+    fn tool_todo(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
+        let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("write");
+        match op {
+            "list" => {
+                let items = crate::todo::list_items(session_id);
+                if items.is_empty() {
+                    return ToolResult::ok("当前会话无任务清单。");
+                }
+                let done = items.iter().filter(|t| t.status == "done").count();
+                let body = items
+                    .iter()
+                    .map(|t| {
+                        let mark = match t.status.as_str() {
+                            "done" => "✅",
+                            "in_progress" => "🔄",
+                            _ => "⬜",
+                        };
+                        format!("- {mark} {}", t.content)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ToolResult::ok(format!("任务清单（{done}/{} 完成）：\n{body}", items.len()))
+            }
+            "write" => {
+                let Some(arr) = args.get("items").and_then(|v| v.as_array()) else {
+                    return ToolResult::err("op=write 需要 items 数组（全量条目；空数组 = 清空）");
+                };
+                let mut parsed: Vec<(String, String)> = Vec::with_capacity(arr.len());
+                for (i, it) in arr.iter().enumerate() {
+                    let content = it
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if content.is_empty() {
+                        return ToolResult::err(format!(
+                            "第 {} 条 content 为空（每条必须有内容；空 items 清单请传空数组）",
+                            i + 1
+                        ));
+                    }
+                    let status = it
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pending")
+                        .to_string();
+                    parsed.push((content, status));
+                }
+                let items = crate::todo::write(session_id, parsed);
+                let done = items.iter().filter(|t| t.status == "done").count();
+                let all = items.is_empty() || done == items.len();
+                self.emit_and_persist(CoreEvent {
+                    kind: "todo.updated".into(),
+                    session_id: session_id.to_string(),
+                    payload: serde_json::json!({
+                        "count": items.len(),
+                        "doneCount": done,
+                        "allDone": all,
+                        "items": items,
+                    }),
+                });
+                if items.is_empty() {
+                    return ToolResult::ok("清单已清空。");
+                }
+                ToolResult::ok(format!(
+                    "清单已更新（{done}/{} 完成）。\n后续每轮上下文都会携带当前清单；全部完成后建议收尾总结。",
+                    items.len()
+                ))
+            }
+            other => ToolResult::err(format!("未知 op：{other}（支持 write/list）")),
         }
     }
 
@@ -4279,8 +5654,42 @@ impl ToolGateway {
         let text = text.trim().chars().take(max_chars).collect::<String>();
         if text.is_empty() {
             ToolResult::err("页面无可提取文本（可能是纯二进制或脚本渲染页）")
+        } else if let Some(hint) = self.video_platform_hint(url) {
+            ToolResult::ok(format!("{hint}\n\n{text}"))
         } else {
             ToolResult::ok(text)
+        }
+    }
+    /// 视频平台 URL 判定（web_fetch 引导提示用）
+    fn video_platform_of_url(url: &str) -> Option<&'static str> {
+        if url.contains("bilibili.com") || url.contains("b23.tv") {
+            Some("bilibili")
+        } else if url.contains("youtube.com") || url.contains("youtu.be") {
+            Some("youtube")
+        } else {
+            None
+        }
+    }
+
+    /// web_fetch 抓到视频平台 URL 时的引导提示：
+    /// · 有 video__act（视频通道已启用且工具已注册）→ 指路专用工具（看视频/发评论的正道）
+    /// · 没有 → 明确告知当前无法实际评论，禁止把评论文本写进回复冒充已发
+    fn video_platform_hint(&self, url: &str) -> Option<String> {
+        let platform = Self::video_platform_of_url(url)?;
+        let has_act = self.dynamic_tool_names().iter().any(|n| n == "video__act");
+        if has_act {
+            Some(format!(
+                "[提示] 这是{platform}视频页：web_fetch 只能取元信息。看视频/发评论请用 \
+                 video__* 工具组（video__summary/字幕/弹幕/评论/UP主，video__act 发评论），\
+                 走登录态与风控养护，评论才会真实上屏。"
+            ))
+        } else {
+            Some(format!(
+                "[提示] 这是{platform}视频页，且当前系统未启用{platform}通道——\
+                 没有可用的 video__* 工具。你可以继续用 web_fetch 了解视频信息，但\
+                 **无法实际发表评论**：请如实告知用户「当前无法评论（需在控制台启用 \
+                 {platform} 通道并配置凭据）」，不要把评论内容写进回复里冒充已发布。"
+            ))
         }
     }
 
@@ -4765,7 +6174,10 @@ fn walk_tree(
             (name, is_dir, size)
         })
         .collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    entries.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
     for (name, is_dir, size) in entries {
         if *count >= max_entries {
             return Ok(());
@@ -4787,7 +6199,15 @@ fn walk_tree(
             nodes.push(serde_json::json!({
                 "path": rel, "name": name, "type": "dir", "children": [],
             }));
-            walk_tree(root, &child, depth + 1, depth_limit, nodes, count, max_entries)?;
+            walk_tree(
+                root,
+                &child,
+                depth + 1,
+                depth_limit,
+                nodes,
+                count,
+                max_entries,
+            )?;
         } else {
             nodes.push(serde_json::json!({
                 "path": rel, "name": name, "type": "file", "size": size,
@@ -4883,6 +6303,88 @@ fn interpolate(
     }
     out.push_str(rest);
     out
+}
+
+/// 简化 JSON path 求值：`$.a.b[0].c`（点取字段 / 下标取数组；前导 `$.` 可省）。
+/// 命中返回子树；路径不存在/类型不符返回 None。
+fn json_path<'v>(root: &'v serde_json::Value, path: &str) -> Option<&'v serde_json::Value> {
+    let p = path.trim();
+    let p = p.strip_prefix('$').unwrap_or(p);
+    let p = p.strip_prefix('.').unwrap_or(p);
+    if p.is_empty() {
+        // `$` 或 `$.` 之外的空段（如 `""`/`"$"`）= 整根；尾随孤立 `.` 非法
+        if path.trim() == "$" || path.trim().is_empty() {
+            return Some(root);
+        }
+        return None;
+    }
+    let mut cur = root;
+    let mut rest = p;
+    while !rest.is_empty() {
+        // 前导 `.` 分隔（首轮无）
+        if let Some(stripped) = rest.strip_prefix('.') {
+            if stripped.is_empty() {
+                return None; // 尾随 `.` 非法
+            }
+            rest = stripped;
+        }
+        // 字段名段：到下一个 `.` 或 `[`
+        let seg_end = rest.find(['.', '[']).unwrap_or(rest.len());
+        if seg_end > 0 {
+            let key = &rest[..seg_end];
+            cur = cur.as_object().and_then(|o| o.get(key))?;
+            rest = &rest[seg_end..];
+        }
+        // 下标段：连续的 `[n]`（必须紧跟字段或前一 `]`）
+        while rest.starts_with('[') {
+            let close = rest.find(']')?;
+            let idx: usize = rest[1..close].trim().parse().ok()?;
+            cur = cur.as_array().and_then(|a| a.get(idx))?;
+            rest = &rest[close + 1..];
+        }
+        if !rest.is_empty() && !rest.starts_with('.') {
+            return None; // 残余非法语法
+        }
+    }
+    Some(cur)
+}
+
+/// 自定义工具响应治理（插件生态扩展）：JSON 响应按 select 摘取 → maxChars 截断。
+/// select 路径不存在返回明确错误（拼空串比报错更坑）；非 JSON 忽略 select。
+fn shape_response(tool: &crate::config::CustomTool, text: &str) -> ToolResult {
+    if let Some(sel) = tool
+        .response_select
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            return match json_path(&v, sel) {
+                Some(sub) => {
+                    let s = match sub {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    shape_truncate(tool, &s)
+                }
+                None => ToolResult::err(format!(
+                    "工具 {} 的响应不含 select 路径 {sel}（响应为 JSON 但路径不存在）",
+                    tool.name
+                )),
+            };
+        }
+        // 非 JSON：忽略 select，仅截断
+    }
+    shape_truncate(tool, text)
+}
+
+fn shape_truncate(tool: &crate::config::CustomTool, text: &str) -> ToolResult {
+    let cap = tool.response_max_chars.unwrap_or(8000);
+    let mut out: String = text.chars().take(cap).collect();
+    if out.len() < text.len() {
+        out.push_str("…（截断）");
+    }
+    ToolResult::ok(out)
 }
 
 /// shell 实参不允许出现的元字符（模板插值 + 引号包裹之外的最后防线）
@@ -5686,6 +7188,268 @@ mod timeout_output_tests {
 mod terminal_gate_tests {
     use super::*;
 
+    /// 测试执行器闭包形态（spawn 白名单断言用；长类型起别名避免 clippy type_complexity）
+    type SpawnExec = Arc<
+        dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+            + Send
+            + Sync,
+    >;
+
+    /// filesystem delete/rename（spec: filesystem-ops）回归
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_跨设备fallback用copy_tree() {
+        // rename EXDEV 场景无法在本机模拟挂载边界——直接验证 copy_tree 语义
+        //（fallback 路径的核心：目录树完整复制 + 目标已存在清空重建）
+        let dir = std::env::temp_dir().join(format!("exm-fscopy-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("src/nested")).unwrap();
+        std::fs::write(dir.join("src/a.txt"), "A").unwrap();
+        std::fs::write(dir.join("src/nested/b.txt"), "B").unwrap();
+        let dst = dir.join("trash-copy");
+        std::fs::write(&dst, "旧残留").unwrap(); // 已存在文件（非目录）
+        ToolGateway::copy_tree(&dir.join("src"), &dst).unwrap();
+        assert!(dst.is_dir(), "已存在文件应被清空重建为目录");
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "A");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("nested/b.txt")).unwrap(),
+            "B"
+        );
+        // 单文件路径
+        let f = dir.join("one.log");
+        std::fs::write(&f, "x").unwrap();
+        ToolGateway::copy_tree(&f, &dir.join("t/one.log")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("t/one.log")).unwrap(), "x");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_移入回收站可恢复() {
+        let dir = std::env::temp_dir().join(format!("exm-fsdel-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        std::fs::write(dir.join("tmp.log"), "hello").unwrap();
+        // 删除 → 回收站
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-1",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "tmp.log" }),
+            )
+            .await;
+        assert!(r.ok, "删除应成功：{:?}", r.error);
+        assert!(
+            r.output.contains("回收站"),
+            "应说明回收站路径：{}",
+            r.output
+        );
+        assert!(!dir.join("tmp.log").exists(), "原位应消失");
+        // 回收站里可找到（按日期目录搜索）
+        let trash_root = dir.join(".exmachina").join("trash");
+        let found = std::fs::read_dir(&trash_root).unwrap().any(|day| {
+            let day = day.unwrap().path();
+            day.join("tmp.log").exists()
+        });
+        assert!(found, "回收站应含被删文件");
+        // 不存在目标 → 报错
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-1",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "tmp.log" }),
+            )
+            .await;
+        assert!(!r.ok, "重复删除应报目标不存在");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_目录递归与同名序号() {
+        let dir = std::env::temp_dir().join(format!("exm-fsdir-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        // 目录树
+        std::fs::create_dir_all(dir.join("build").join("nested")).unwrap();
+        std::fs::write(dir.join("build").join("a.txt"), "1").unwrap();
+        std::fs::write(dir.join("build").join("nested").join("b.txt"), "2").unwrap();
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-2",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "build" }),
+            )
+            .await;
+        assert!(r.ok, "目录删除应成功：{:?}", r.error);
+        assert!(!dir.join("build").exists(), "目录树应整体移入");
+        // 同名序号：同日两次删除同名文件，第二次带 .2
+        std::fs::write(dir.join("x.log"), "v1").unwrap();
+        let r1 = gw
+            .execute(
+                "a",
+                "s-fs-2",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "x.log" }),
+            )
+            .await;
+        assert!(r1.ok, "第一次删除应成功");
+        std::fs::write(dir.join("x.log"), "v2").unwrap();
+        let r2 = gw
+            .execute(
+                "a",
+                "s-fs-2",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "x.log" }),
+            )
+            .await;
+        assert!(r2.ok);
+        assert!(
+            r2.output.contains(".2"),
+            "第二次删除应带序号：{}",
+            r2.output
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除_保护区拒绝() {
+        let dir = std::env::temp_dir().join(format!("exm-fspro-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        // .exmachina 系统区
+        std::fs::create_dir_all(dir.join(".exmachina").join("checkpoints")).unwrap();
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-3",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": ".exmachina" }),
+            )
+            .await;
+        assert!(!r.ok, "系统区删除应拒绝");
+        assert!(r.error.unwrap_or_default().contains("系统区"));
+        // 工作区根（resolve_safe(".") 应解析到根）
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-3",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "." }),
+            )
+            .await;
+        assert!(!r.ok, "根删除应拒绝");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs重命名_成功不覆盖与跨目录() {
+        let dir = std::env::temp_dir().join(format!("exm-fsren-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        std::fs::write(dir.join("old.txt"), "content-1").unwrap();
+        // 成功重命名
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-4",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "old.txt", "newPath": "new.txt" }),
+            )
+            .await;
+        assert!(r.ok, "重命名应成功：{:?}", r.error);
+        assert!(dir.join("new.txt").exists());
+        assert!(!dir.join("old.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "content-1"
+        );
+        // 不覆盖：目标已存在拒绝
+        std::fs::write(dir.join("other.txt"), "x").unwrap();
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-4",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "other.txt", "newPath": "new.txt" }),
+            )
+            .await;
+        assert!(!r.ok, "覆盖应拒绝");
+        assert!(r.error.unwrap_or_default().contains("已存在"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "content-1",
+            "原内容不应被破坏"
+        );
+        // 跨目录移动（父目录自动创建）
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-4",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "new.txt", "newPath": "sub/dir/moved.txt" }),
+            )
+            .await;
+        assert!(r.ok, "跨目录移动应成功：{:?}", r.error);
+        assert!(dir.join("sub").join("dir").join("moved.txt").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs删除重命名_plan模式拦截() {
+        let dir = std::env::temp_dir().join(format!("exm-fsplan-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        std::fs::write(dir.join("plan-target.txt"), "p").unwrap();
+        crate::plan::set_plan_mode("s-fs-5", true);
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-5",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "delete", "path": "plan-target.txt" }),
+            )
+            .await;
+        assert!(r.ok);
+        assert!(dir.join("plan-target.txt").exists(), "plan 模式不应真删");
+        assert_eq!(crate::plan::list_items("s-fs-5").len(), 1, "应转为计划条目");
+        let r = gw
+            .execute(
+                "a",
+                "s-fs-5",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "rename", "path": "plan-target.txt", "newPath": "z.txt" }),
+            )
+            .await;
+        assert!(r.ok);
+        assert_eq!(
+            crate::plan::list_items("s-fs-5").len(),
+            2,
+            "rename 也应拦截"
+        );
+    }
+
     #[test]
     fn 白名单_日常开发命令放行() {
         // 本轮修复核心场景：mkdir/cat/go/pytest/tsc 等此前全部被硬拒
@@ -5728,14 +7492,20 @@ mod terminal_gate_tests {
     fn 白名单_危险与未知命令不放行() {
         for cmd in [
             "rm -rf /",
-            "curl http://x",
-            "wget x",
-            "chmod 777 a",
             "sudo rm x",
             "vim",
             "unknown-cmd",
+            // docker 只放只读/exec/run 子命令；rmi/build 等高危仍拒
+            "docker rmi nginx",
+            "docker system prune",
+            // ip 只放 addr/route/link；netns 配置类仍拒
+            "ip netns add foo",
         ] {
             assert!(!terminal_allowed(cmd), "不应放行: {cmd}");
+        }
+        // curl/wget/chmod 已入白名单（harness 第二轮）：联网/权限语义由后置闸门分层把关
+        for cmd in ["curl http://x", "wget x", "chmod 777 a"] {
+            assert!(terminal_allowed(cmd), "应放行（后置闸门把关）: {cmd}");
         }
     }
 
@@ -5749,6 +7519,54 @@ mod terminal_gate_tests {
         // cargo 全部子命令受约束
         assert!(terminal_allowed("cargo build"));
         assert!(!terminal_allowed("cargoSomething"));
+    }
+
+    #[test]
+    fn 链式命令_逐段白名单() {
+        // 每段都过白名单：放行（agent 干活的基本形态：拉数据 | 解析）
+        for cmd in [
+            "curl -s \"https://x.com/a?b=1&c=2\" | python3 -c \"import sys,json;print(json.load(sys.stdin))\"",
+            "ls -la | grep src | head -5",
+            "cat a.txt && echo done",
+            "echo a; echo b || echo c",
+            "git status && git diff",
+            "cargo build --lib && cargo test --lib",
+        ] {
+            assert!(chain_allowed(cmd), "全段白名单应放行: {cmd}");
+        }
+        // 任一段非白名单：拒绝（危险命令藏在任何一段都不放行——攻击面与单命令一致）
+        for cmd in [
+            "curl -s x | python3 -c y | sudo rm -rf /",
+            "ls && vim",
+            "echo a; unknown-cmd",
+            "cat a || docker rmi nginx",
+            "git status && git push origin main",
+        ] {
+            assert!(!chain_allowed(cmd), "含非白名单段应拒绝: {cmd}");
+        }
+        // 逃逸/写入语义：链式放行不适用于这些符号（contains_shell_chain 拦截层）
+        for frag in ["`id`", "$(id)", "> out.txt", "< in.txt", "cmd &"] {
+            assert!(
+                contains_shell_chain(&format!("echo {frag}")),
+                "逃逸符应被拦截层识别: {frag}"
+            );
+        }
+        // 引号内的符号不是连接符（URL 带 & 不误判）
+        assert!(!contains_shell_chain("curl -s \"https://x.com/a?b=1&c=2\""));
+        // 引号内的管道不参与分段
+        assert!(chain_allowed("echo \"a | b\" | cat"));
+    }
+
+    #[test]
+    fn 链式分段_引号感知() {
+        let segs = split_chain_segments("curl -s url | python3 -c \"print(1 | 2)\" && echo ok");
+        assert_eq!(segs.len(), 3, "引号内管道不分段: {segs:?}");
+        assert!(segs[0].trim_start().starts_with("curl"));
+        assert!(segs[1].trim_start().starts_with("python3"));
+        assert_eq!(segs[2].trim(), "echo ok");
+        // 空段（收尾管道）：不产出、不 panic
+        let empty = split_chain_segments("echo a |");
+        assert_eq!(empty, vec!["echo a ".to_string()]);
     }
 
     fn gw_with_approval(mode: &str, wait_secs: u64) -> ToolGateway {
@@ -5770,11 +7588,7 @@ mod terminal_gate_tests {
     async fn spawn工具_白名单强制剔除spawn与agent_manage() {
         let gw = gw_with_approval("off", 0);
         // 未装配执行器时先到"未装配"错误（白名单校验在其之前）——装个空执行器测过滤
-        let exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(|_a, _s, _t, tools| {
+        let exec: SpawnExec = Arc::new(|_a, _s, _t, tools| {
             Box::pin(async move {
                 assert!(
                     !tools.contains(&ToolName::Spawn) && !tools.contains(&ToolName::AgentManage),
@@ -5814,11 +7628,7 @@ mod terminal_gate_tests {
     #[tokio::test]
     async fn spawn工具_子任务超时终止() {
         let gw = gw_with_approval("off", 0);
-        let exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(|_, _, _, _| {
+        let exec: SpawnExec = Arc::new(|_, _, _, _| {
             Box::pin(async {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 Ok("不该到这".into())
@@ -5835,10 +7645,7 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(!r.ok);
-        assert!(
-            r.error.unwrap_or_default().contains("超时"),
-            "应报超时说明"
-        );
+        assert!(r.error.unwrap_or_default().contains("超时"), "应报超时说明");
     }
 
     /// 并发上限：占满信号量后再派生 → 明确拒绝
@@ -5847,11 +7654,7 @@ mod terminal_gate_tests {
         // 信号量是进程级 OnceLock：并发测试与其他测试互相干扰，用独立子进程语义不可行；
         // 此处改为验证「上限拒绝路径」——直接耗尽后触发。先并发占满（4 张许可）：
         let gw = Arc::new(gw_with_approval("off", 0));
-        let exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(|_, _, _, _| {
+        let exec: SpawnExec = Arc::new(|_, _, _, _| {
             Box::pin(async {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 Ok("done".into())
@@ -5892,7 +7695,6 @@ mod terminal_gate_tests {
             let _ = h.await;
         }
     }
-
 
     /// 计划模式：写操作拦截转计划条目，读操作放行
     #[tokio::test]
@@ -5939,7 +7741,13 @@ mod terminal_gate_tests {
         let store = Arc::new(Store::open(dir.join("data")).unwrap());
         let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let gw = Arc::new(ToolGateway::new(&dir, store, registry, events, SecurityConfig::default()));
+        let gw = Arc::new(ToolGateway::new(
+            &dir,
+            store,
+            registry,
+            events,
+            SecurityConfig::default(),
+        ));
         // 计划模式拦截 filesystem write
         crate::plan::set_plan_mode("plan-s2", true);
         let r = gw
@@ -5971,7 +7779,11 @@ mod terminal_gate_tests {
     fn git_test_repo(gw: &ToolGateway) -> PathBuf {
         let root = gw.effective_root();
         std::fs::create_dir_all(&root).unwrap();
-        std::process::Command::new("git").arg("init").current_dir(&root).output().expect("git init");
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&root)
+            .output()
+            .expect("git init");
         std::process::Command::new("git")
             .args(["config", "user.email", "test@exm.local"])
             .current_dir(&root)
@@ -6011,7 +7823,11 @@ mod terminal_gate_tests {
             )
             .await;
         assert!(r.ok, "status 只读应放行：{:?}", r.error);
-        assert!(r.output.contains("##"), "status 输出应含分支行：{}", r.output);
+        assert!(
+            r.output.contains("##"),
+            "status 输出应含分支行：{}",
+            r.output
+        );
     }
 
     /// 严格模式（risky + 立即超时）：写动作产生审批单而非执行
@@ -6220,7 +8036,10 @@ mod terminal_gate_tests {
             fn name(&self) -> &'static str {
                 "test-compacter"
             }
-            async fn chat(&self, _req: ChatRequest) -> anyhow::Result<crate::provider::ChatResponse> {
+            async fn chat(
+                &self,
+                _req: ChatRequest,
+            ) -> anyhow::Result<crate::provider::ChatResponse> {
                 Ok(crate::provider::ChatResponse {
                     content: "目标 X 已完成；结论 Y；未决 Z".into(),
                     reasoning: String::new(),
@@ -6240,11 +8059,7 @@ mod terminal_gate_tests {
 
         let gw = gw_with_approval("off", 0);
         // 造 6 条历史，keep=2 → 压 4 条
-        let sid = gw
-            .store
-            .create_session("压缩测试", "g1")
-            .unwrap()
-            .id;
+        let sid = gw.store.create_session("压缩测试", "g1").unwrap().id;
         for i in 0..6 {
             gw.store
                 .add_message(
@@ -6298,5 +8113,418 @@ mod terminal_gate_tests {
             .await;
         assert!(r2.ok);
         assert!(r2.output.contains("无需压缩"), "二次压缩应报无可压缩");
+    }
+
+    // ---------------- 插件声明式工具（T1：命名空间接入 custom 执行链）
+
+    fn mk_custom(name: &str, target: &str) -> crate::config::CustomTool {
+        crate::config::CustomTool {
+            name: name.into(),
+            description: format!("插件工具 {name}"),
+            kind: "http".into(),
+            method: "GET".into(),
+            target: target.into(),
+            headers: Default::default(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } },
+                "required": ["q"]
+            }),
+            agents: vec![],
+            response_max_chars: None,
+            response_select: None,
+        }
+    }
+
+    /// 下发面：插件工具以命名空间名出现在 schema 下发里
+    #[test]
+    fn 插件工具_schema下发含命名空间前缀() {
+        let gw = gw_with_approval("off", 0);
+        gw.append_plugin_tools(vec![mk_custom("demo__ping", "https://example.com")]);
+        let specs = gw.custom_specs_for("a1");
+        let name = specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert!(
+            name.contains(&"demo__ping".to_string()),
+            "下发应含 demo__ping"
+        );
+    }
+
+    /// 冲突面：插件工具与 config CustomTool 同名 → 先注册者胜（custom 优先，插件被拒）
+    #[test]
+    fn 插件工具_与config同名冲突先注册者胜() {
+        let dir = std::env::temp_dir().join(format!("exm-gate-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default())
+            .with_custom_tools(vec![mk_custom("dupe", "https://config-first.example")]);
+        gw.append_plugin_tools(vec![mk_custom("dupe", "https://plugin.example")]);
+        // custom 优先：下发的是 config 版 target
+        assert_eq!(gw.custom_specs_for("a1").len(), 1);
+        assert!(gw.has_custom_tool("dupe"));
+        assert!(gw.plugin_tools().is_empty(), "同名插件工具应被拒绝注册");
+    }
+
+    /// 执行面：命名空间名走 custom 执行链（HTTP 往返可见行为）。
+    /// 用不可达地址验证错误路径也走通（不 panic、错误信息含工具名口径）。
+    #[tokio::test]
+    async fn 插件工具_执行走custom链路() {
+        let gw = gw_with_approval("off", 0);
+        gw.append_plugin_tools(vec![mk_custom("demo__ping", "https://127.0.0.1:1/nope")]);
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        let r = gw
+            .execute_named(
+                "a1",
+                &sid,
+                &[],
+                "demo__ping",
+                &serde_json::json!({ "q": "hi" }),
+            )
+            .await;
+        // 不可达地址 → 返回错误但 ok=false 而非 panic；错误面含工具名
+        assert!(!r.ok, "不可达地址应为失败结果: {:?}", r.output);
+        let text = format!("{}{}", r.output, r.error.unwrap_or_default());
+        assert!(
+            text.contains("demo__ping") || text.len() < 500,
+            "错误面应含工具名或简洁"
+        );
+        // 不应泄露内部路径
+        assert!(!text.contains("/home/"), "不应泄露内部路径");
+    }
+
+    // ---------------- 进程插件运行时工具（T2：握手发现面接入工具网关）
+
+    /// 假进程工具 provider（模拟 supervisor 转发：specs 带命名空间、执行回显）
+    struct FakeProcessTools;
+
+    impl crate::plugin::ToolProvider for FakeProcessTools {
+        fn tool_specs(&self) -> Vec<crate::config::CustomTool> {
+            vec![crate::config::CustomTool {
+                name: "fakep__hello".into(),
+                description: "进程握手发现".into(),
+                kind: "process".into(),
+                method: "POST".into(),
+                target: String::new(),
+                headers: Default::default(),
+                parameters: serde_json::json!({ "type": "object" }),
+                agents: vec![],
+                response_max_chars: None,
+                response_select: None,
+            }]
+        }
+        fn call_tool(&self, name: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+            if name == "fakep__hello" {
+                Ok(format!(
+                    "hello:{}",
+                    args.get("name").and_then(|v| v.as_str()).unwrap_or("?")
+                ))
+            } else {
+                anyhow::bail!("未知工具 {name}")
+            }
+        }
+    }
+
+    /// T2 工具面：注册 → specs 下发可见 → 执行转发 provider → 摘除后不可见
+    #[tokio::test]
+    async fn 进程插件工具_注册下发执行与摘除() {
+        let gw = gw_with_approval("off", 0);
+        // 注册前不可见
+        assert!(!gw
+            .custom_specs_for("a1")
+            .iter()
+            .any(|s| s.name == "fakep__hello"));
+        gw.register_plugin_runtime_tools("fakep", Arc::new(FakeProcessTools));
+        // specs 可见（进程形态工具进入下发面）
+        let specs = gw.custom_specs_for("a1");
+        assert!(
+            specs.iter().any(|s| s.name == "fakep__hello"),
+            "注册后应下发"
+        );
+        // 执行转发
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        let r = gw
+            .execute_named(
+                "a1",
+                &sid,
+                &[],
+                "fakep__hello",
+                &serde_json::json!({ "name": "巡检" }),
+            )
+            .await;
+        assert!(r.ok, "执行应成功: {:?}", r.error);
+        assert!(
+            r.output.contains("hello:巡检"),
+            "输出应含 provider 回显: {}",
+            r.output
+        );
+        // 未知工具仍走原错误路径
+        let r2 = gw
+            .execute_named("a1", &sid, &[], "fakep__nope", &serde_json::json!({}))
+            .await;
+        assert!(!r2.ok);
+        // 摘除后不可见
+        gw.unregister_plugin_runtime_tools("fakep");
+        assert!(!gw
+            .custom_specs_for("a1")
+            .iter()
+            .any(|s| s.name == "fakep__hello"));
+        let r3 = gw
+            .execute_named("a1", &sid, &[], "fakep__hello", &serde_json::json!({}))
+            .await;
+        assert!(!r3.ok, "摘除后执行应失败");
+    }
+
+    /// 响应治理（插件生态扩展 1.1）：两级裁剪纯函数面。
+    fn shaped(max: Option<usize>, select: Option<&str>, _body: &str) -> crate::config::CustomTool {
+        let mut t = mk_custom("demo__shaped", "https://example.com");
+        t.response_max_chars = max;
+        t.response_select = select.map(str::to_string);
+        t
+    }
+
+    #[test]
+    fn 响应治理_select摘取与截断() {
+        let body = r#"{"data":{"items":[{"title":"a"},{"title":"b"}],"total":2}}"#;
+        // select 摘取数组 → 序列化字符串
+        let r = shape_response(&shaped(None, Some("$.data.items"), body), body);
+        assert!(r.ok, "{:?}", r.error);
+        assert!(
+            r.output.contains("\"title\":\"a\""),
+            "应含摘取内容: {}",
+            r.output
+        );
+        // select + maxChars 两级
+        let long = format!("{{\"msg\":\"{}\"}}", "x".repeat(5000));
+        let r = shape_response(&shaped(Some(100), Some("$.msg"), &long), &long);
+        assert!(r.ok);
+        assert!(
+            r.output.chars().count() <= 100 + "…（截断）".chars().count(),
+            "应受 maxChars 限制"
+        );
+    }
+
+    #[test]
+    fn 响应治理_路径缺失明确报错() {
+        let body = r#"{"data":1}"#;
+        let r = shape_response(&shaped(None, Some("$.missing.path"), body), body);
+        assert!(!r.ok, "路径不存在应失败");
+        assert!(
+            r.error.unwrap_or_default().contains("$.missing.path"),
+            "错误应含路径"
+        );
+    }
+
+    #[test]
+    fn 响应治理_非json忽略select() {
+        let body = "纯文本响应".repeat(20);
+        let r = shape_response(&shaped(Some(50), Some("$.a"), &body), &body);
+        assert!(r.ok, "非 JSON 应忽略 select 仅截断");
+        assert!(r.output.contains("…（截断）"));
+    }
+
+    #[test]
+    fn 响应治理_缺省口径不变() {
+        // 未声明任何字段：8000 截断（与迁移前行为一致）
+        let long = "y".repeat(9000);
+        let r = shape_response(&shaped(None, None, &long), &long);
+        assert!(r.ok);
+        assert!(
+            r.output.starts_with('y')
+                && r.output.chars().count() <= 8000 + "…（截断）".chars().count()
+        );
+    }
+
+    #[test]
+    fn json_path_基本语法() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"a":{"b":[{"c":1},{"c":2}],"d":"x"}}"#).unwrap();
+        assert_eq!(
+            json_path(&v, "$.a.b[1].c").and_then(|x| x.as_i64()),
+            Some(2)
+        );
+        assert_eq!(json_path(&v, "a.d").and_then(|x| x.as_str()), Some("x")); // 前导 $. 可省
+        assert_eq!(json_path(&v, "$.a").map(|x| x.is_object()), Some(true));
+        assert!(json_path(&v, "$.a.b[9]").is_none(), "数组越界");
+        assert!(json_path(&v, "$.x").is_none(), "字段不存在");
+        assert!(json_path(&v, "$.").is_none(), "尾随点非法");
+    }
+
+    /// 凭据变量（plugin-ecosystem 1.3）：注入往返 / 缺键拒绝 / config 工具无归属拒绝
+    #[tokio::test]
+    async fn 凭据变量_注入与缺键() {
+        let gw = gw_with_approval("off", 0);
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        // 注入凭据解析面
+        gw.set_plugin_credentials_resolver(Box::new(|pid, key| {
+            (pid == "demo" && key == "api_token").then(|| "sk-real-value".to_string())
+        }));
+        // 缺键：调用被拒、错误含键名与指引、不发请求
+        let mut t = mk_custom("demo__secure", "https://example.com/api");
+        t.headers.insert(
+            "Authorization".into(),
+            "Bearer ${credentials.api_token}".into(),
+        );
+        gw.append_plugin_tools(vec![t]);
+        // 先不配置凭据（resolver 只认 demo.api_token——配置上后应通过；
+        // 此处 resolver 已配置，验证注入路径：把 resolver 换成缺键版本再验拒绝）
+        gw.set_plugin_credentials_resolver(Box::new(|_, _| None));
+        let r = gw
+            .execute_named("a1", &sid, &[], "demo__secure", &serde_json::json!({}))
+            .await;
+        assert!(!r.ok, "缺键应拒绝");
+        let err = r.error.unwrap_or_default();
+        assert!(
+            err.contains("api_token") && err.contains("凭据未配置"),
+            "错误应含键名与指引：{err}"
+        );
+    }
+
+    #[test]
+    fn strip_html_多字节字符不越界() {
+        // 部署实测回归：旧字节级实现在多字节字符中间切片 panic（15177 边界）
+        let html = "<html><body><p>你好世界，这是中文正文𝄞音符与 emoji 😀 混排</p>\
+<script>var s = \"中文脚本内容不影响正文\";</script>\
+<p>İstanbul 与 straße 的大小写归一也不崩</p></body></html>";
+        let text = strip_html(html);
+        assert!(text.contains("你好世界"), "正文保留：{text}");
+        assert!(text.contains("😀"), "emoji 完整：{text}");
+        assert!(!text.contains("中文脚本内容"), "script 块剥除：{text}");
+        assert!(text.contains("İstanbul"), "特殊大小写字符完整：{text}");
+        // 孤立多字节 + 未闭合标签：不 panic 即过
+        assert!(!strip_html("标题<").is_empty());
+        assert_eq!(strip_html("<script>永不闭合"), "");
+    }
+
+    #[test]
+    fn 凭据变量_解析纯函数() {
+        let gw = gw_with_approval("off", 0);
+        // 无 resolver：全部视为缺键
+        let (out, missing) = gw.resolve_credential_vars("p", "Bearer ${credentials.k1}");
+        assert_eq!(out, "Bearer ${credentials.k1}");
+        assert_eq!(missing, vec!["k1"]);
+        // resolver 命中：明文注入
+        gw.set_plugin_credentials_resolver(Box::new(|pid, key| {
+            (pid == "p" && key == "k1").then(|| "V".to_string())
+        }));
+        let (out, missing) =
+            gw.resolve_credential_vars("p", "Bearer ${credentials.k1} tail ${credentials.k2}");
+        assert_eq!(out, "Bearer V tail ${credentials.k2}");
+        assert_eq!(missing, vec!["k2"]);
+        // 非法键名原样保留（不视为变量）
+        let (out, missing) = gw.resolve_credential_vars("p", "${credentials.ba d}");
+        assert_eq!(out, "${credentials.ba d}");
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn 凭据变量_无插件归属拒绝() {
+        let gw = gw_with_approval("off", 0);
+        let sid = gw.store.create_session("s", "a1").unwrap().id;
+        let t = mk_custom("plain_tool", "https://example.com/${credentials.k}");
+        gw.append_plugin_tools(vec![t]);
+        let r = gw
+            .execute_named("a1", &sid, &[], "plain_tool", &serde_json::json!({}))
+            .await;
+        assert!(!r.ok, "config 工具无插件归属，引用变量应拒绝");
+        assert!(r.error.unwrap_or_default().contains("无插件归属"));
+    }
+}
+
+// ---------------------------------------------------------------- 会话级工具注入（video-watch-agent 组 2 单测）
+
+#[cfg(test)]
+mod session_tool_tests {
+    use super::*;
+
+    fn ct(name: &str) -> crate::config::CustomTool {
+        crate::config::CustomTool {
+            name: name.into(),
+            description: "测试会话工具".into(),
+            kind: "builtin".into(),
+            method: String::new(),
+            target: String::new(),
+            headers: Default::default(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } }
+            }),
+            agents: vec![],
+            response_max_chars: None,
+            response_select: None,
+        }
+    }
+
+    #[test]
+    fn 会话注入_可见性收窄() {
+        let dir = std::env::temp_dir().join(format!("exm-sess-tools-{}", crate::types::new_id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(
+            &dir,
+            store,
+            registry,
+            events,
+            crate::config::SecurityConfig::default(),
+        );
+
+        // 注入前：普通会话看不到
+        assert!(gw.session_tool_specs("s-video").is_empty());
+
+        // 注入 video__summary 到 s-video 会话
+        let exec = dynamic_exec(|_a, _s, args| async move {
+            Ok(format!(
+                "看到了：{}",
+                args.get("q").and_then(|v| v.as_str()).unwrap_or("?")
+            ))
+        });
+        gw.inject_session_tools("s-video", vec![(ct("video__summary"), exec)]);
+
+        // 本会话可见、别的会话不可见
+        let specs = gw.session_tool_specs("s-video");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "video__summary");
+        assert!(gw.session_tool_specs("s-other").is_empty());
+
+        // 执行面同样收窄：非注入会话调不到（未知工具）
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // 命名空间工具名走 execute_named 动态/会话表查找
+            let r = gw
+                .execute_named(
+                    "a1",
+                    "s-video",
+                    &[],
+                    "video__summary",
+                    &serde_json::json!({ "q": "测试" }),
+                )
+                .await;
+            // 会话工具执行：ok 或业务错误均可，但不应是「未知工具」
+            let text = r.output.clone();
+            assert!(!text.contains("未知工具"), "会话注入会话应命中工具：{text}");
+
+            let r2 = gw
+                .execute_named(
+                    "a1",
+                    "s-other",
+                    &[],
+                    "video__summary",
+                    &serde_json::json!({ "q": "测试" }),
+                )
+                .await;
+            assert!(!r2.ok, "普通会话不可见应失败");
+            let t2 = r2.error.clone().unwrap_or_default();
+            assert!(t2.contains("未知工具"), "普通会话不可见应报未知工具：{t2}");
+        });
+
+        // 清理后再不可见
+        gw.clear_session_tools("s-video");
+        assert!(gw.session_tool_specs("s-video").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

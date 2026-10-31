@@ -1,0 +1,65 @@
+# subagent-spawn Specification
+
+## Purpose
+子智能体派生：spawn 工具语义、上下文隔离、并发与深度限制、摘要返回的行为契约，让主智能体能把封闭子任务外包给独立上下文的子智能体。
+
+## Requirements
+
+### Requirement: spawn 工具语义
+主智能体 MUST 可通过 spawn 工具派生子智能体：入参为任务描述、可选个体档案引用与工具白名单。子智能体 MUST 在独立上下文中执行（不继承主会话历史），完成后向调用方返回结构化结果（结论摘要 + 关键产出引用）。子智能体不得再派生子智能体（单层限制）。
+
+spawn MUST 支持两种回收模式：
+- **同步（缺省）**：调用阻塞至子任务完成/超时，结果直接返回——既有语义不变。
+- **后台（background=true）**：立即返回 spawnId，主智能体不等待；结果暂存注册表，经 `op=status`（指定 spawnId）或 `op=list`（当前会话全部）查询回收。后台子任务终结时 MUST 发出 `spawn.finished` 事件（含结果或失败原因），会话事件流可观测。
+
+#### Scenario: 派生检索子任务
+- **WHEN** 主智能体调用 spawn 派生"全库检索认证逻辑实现"的子任务
+- **THEN** 子智能体在空上下文中用检索工具执行，返回结论摘要与文件引用列表
+
+#### Scenario: 单层派生限制
+- **WHEN** 子智能体尝试调用 spawn 工具
+- **THEN** 该工具不在子智能体的可用工具列表中，调用被拒绝
+
+#### Scenario: 后台派生并行推进
+- **WHEN** 主智能体 `spawn(task=A, background=true)` 后立即继续其它工作
+- **THEN** 调用即时返回 spawnId；主智能体期间可继续对话/调工具/再派生其它后台子任务
+
+#### Scenario: 后台结果回收
+- **WHEN** 主智能体调用 `spawn(op=status, spawnId=X)` 且子任务 X 已完成
+- **THEN** 返回 finished 状态与结果摘要；list 返回当前会话全部子任务的状态清单
+
+#### Scenario: 后台超时
+- **WHEN** 后台子任务超过 timeoutSecs
+- **THEN** 子任务被终止，status 查询返回 timeout 失败说明
+
+### Requirement: 并发与资源限制
+spawn MUST 受全局并发上限约束（默认可配），超限时排队或拒绝并说明原因。子智能体执行 MUST 有独立超时，超时后终止并向主智能体返回失败说明。子智能体的工具调用 MUST 复用主智能体会话的审批闸门规则。后台模式 MUST 共用同一并发池（后台不占用额外并发额度，同步与后台合计不超上限）。
+
+#### Scenario: 并发上限拒绝
+- **WHEN** 已有 N 个子智能体在运行（N 为并发上限）且主智能体再次 spawn
+- **THEN** 新派生请求被拒绝，返回明确的并发上限说明
+
+#### Scenario: 子任务超时
+- **WHEN** 子智能体执行超过配置的超时时间
+- **THEN** 子智能体被终止，主智能体收到超时失败结果
+
+### Requirement: 执行可观测
+子智能体的启动、工具调用、完成/失败 MUST 作为事件进入主会话事件流，CLI/WebUI 呈现为可展开的子任务卡片。后台子任务的终结事件 MUST 携带 spawnId 与结果预览，主智能体在后续轮次可见（系统提示注入未回收的后台子任务状态，模型不必主动查询也知道有结果待收）。
+
+WebUI 会话视图 MUST 呈现后台子任务卡：spawn.started（含 background 标记）产生运行中条目（任务预览 + spinner），spawn.finished 更新为终态（done/failed/timeout 着色 + 结果预览，点击展开全文）。终态条目 MUST 提供手动清除入口；仅跟随当前会话（跨会话不互见）。
+
+#### Scenario: 子任务卡片
+- **WHEN** 子智能体执行期间调用工具
+- **THEN** 主会话事件流记录子任务工具调用，UI 呈现为可展开卡片
+
+#### Scenario: 未回收结果提醒
+- **WHEN** 后台子任务已终结但主智能体尚未 status 查询
+- **THEN** 下一轮系统提示包含该子任务的终态摘要（spawnId + 状态 + 结果预览）
+
+#### Scenario: WebUI 后台子任务卡
+- **WHEN** 后台子任务启动与终结
+- **THEN** WebUI 会话视图出现运行中条目并更新为终态卡（预览 + 展开全文 + 清除入口）
+
+#### Scenario: 后台事件跨端一致
+- **WHEN** CLI TUI 与 WebUI 同时观察同一会话
+- **THEN** 两端都呈现后台子任务的状态流转（CLI 事件行 / WebUI 卡片）

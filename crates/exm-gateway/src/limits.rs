@@ -34,7 +34,11 @@ impl RateLimiter {
         let store = store();
         let w = store.windows.lock().unwrap();
         w.get(key)
-            .map(|v| v.iter().filter(|t| now_ms.saturating_sub(**t) < window_ms).count())
+            .map(|v| {
+                v.iter()
+                    .filter(|t| now_ms.saturating_sub(**t) < window_ms)
+                    .count()
+            })
             .unwrap_or(0)
     }
 
@@ -47,12 +51,14 @@ impl RateLimiter {
             .map(|(k, v)| {
                 (
                     k.clone(),
-                    v.iter().filter(|t| now_ms.saturating_sub(**t) < window_ms).count(),
+                    v.iter()
+                        .filter(|t| now_ms.saturating_sub(**t) < window_ms)
+                        .count(),
                 )
             })
             .filter(|(_, c)| *c > 0)
             .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
         out
     }
 }
@@ -74,8 +80,13 @@ pub fn routes() -> Router<AppState> {
 
 // ---------------------------------------------------------------- 管理视图（4.4）
 
-use axum::{extract::State, response::{IntoResponse, Response}, routing::get, Json, Router};
-use serde_json::{Value, json};
+use axum::{
+    extract::State,
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
+use serde_json::{json, Value};
 
 use crate::AppState;
 
@@ -100,7 +111,6 @@ pub async fn stats(State(st): State<AppState>) -> Response {
     .into_response()
 }
 
-
 #[cfg(test)]
 mod limits_tests {
     use super::*;
@@ -110,7 +120,10 @@ mod limits_tests {
         let now = 1_000_000u64;
         assert!(RateLimiter::check("k", 1000, 2, now));
         assert!(RateLimiter::check("k", 1000, 2, now + 100));
-        assert!(!RateLimiter::check("k", 1000, 2, now + 200), "窗口内第 3 次应拒绝");
+        assert!(
+            !RateLimiter::check("k", 1000, 2, now + 200),
+            "窗口内第 3 次应拒绝"
+        );
         assert_eq!(RateLimiter::count("k", 1000, now + 300), 2);
         // 窗口滑过：最早命中的两条过期后恢复
         assert!(RateLimiter::check("k", 1000, 2, now + 1101));
@@ -121,8 +134,14 @@ mod limits_tests {
         let now = 2_000_000u64;
         assert!(RateLimiter::check("ch:a:u1", 1000, 1, now));
         assert!(!RateLimiter::check("ch:a:u1", 1000, 1, now + 10));
-        assert!(RateLimiter::check("ch:a:u2", 1000, 1, now + 20), "其他主体不受影响");
-        assert!(RateLimiter::check("api", 1000, 1, now + 30), "其他维度不受影响");
+        assert!(
+            RateLimiter::check("ch:a:u2", 1000, 1, now + 20),
+            "其他主体不受影响"
+        );
+        assert!(
+            RateLimiter::check("api", 1000, 1, now + 30),
+            "其他维度不受影响"
+        );
     }
 
     #[test]

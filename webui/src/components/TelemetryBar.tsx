@@ -47,6 +47,7 @@ export function TelemetryBar(): React.ReactElement {
         <span className={`tbar-v ${llmReady ? "" : "warn"}`}>{model}</span>
       </span>
       <span className="tbar-spacer" />
+      <span className="tbar-seg sys tbar-est">EST. 2026</span>
       <span className="tbar-seg sys">
         <span className="tbar-k">VER</span>
         <span className="tbar-v">{ver || "dev"}</span>

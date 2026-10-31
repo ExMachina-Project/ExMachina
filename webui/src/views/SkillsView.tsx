@@ -104,9 +104,7 @@ export function SkillsView(): React.ReactElement {
                 {t("skills.triggerLabel")}
                 {s.triggers.length ? (
                   s.triggers.map((tl) => (
-                    <Tag key={tl} color="cyan">
-                      {tl}
-                    </Tag>
+                    <Tag key={tl}>{tl}</Tag>
                   ))
                 ) : (
                   <span className="dim">—</span>

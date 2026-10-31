@@ -6,39 +6,43 @@
 //! 集群兼容：Bus / Registry / Scheduler 均为接口或可替换实现；
 //! 单体实现先行，替换为分布式实现时上层业务零改动。
 
-pub mod bus;
+pub mod browser;
 pub mod budget;
+pub mod bus;
 pub mod compaction;
+pub mod computer;
 pub mod config;
 pub mod cron;
-pub mod browser;
-pub mod computer;
 pub mod fsdb;
 pub mod image_stash;
 pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
+pub mod nexus;
 pub mod orchestrator;
 pub mod parse;
 pub mod patch;
 pub mod plan;
+pub mod plugin;
 pub mod provider;
-pub mod nexus;
 pub mod registry;
-pub mod store_sqlite;
 pub mod remote;
 pub mod round_trace;
 pub mod runtime;
 pub mod store;
+pub mod store_sqlite;
 pub mod task;
+pub mod todo;
 pub mod tools;
+pub mod trash;
 pub mod types;
 
 use crate::bus::{InProcessBus, MessageBus};
 use crate::config::ExmConfig;
 use crate::cron::CronStore;
 use crate::memory::{MemoryDraft, MemoryEntry, MemoryKind, MemoryStore, RecallHit};
-use crate::orchestrator::{Orchestrator, ORCHESTRATOR_ID};use crate::provider::{
+use crate::orchestrator::{Orchestrator, ORCHESTRATOR_ID};
+use crate::provider::{
     FailoverState, LlmProvider, MockLlmProvider, ModelPool, OpenAiCompatibleProvider,
     UnconfiguredProvider,
 };
@@ -65,8 +69,12 @@ pub struct Core {
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 远程执行器（工作者池；网关在 serve 时注入）
     remote: parking_lot::RwLock<Option<Arc<dyn crate::remote::RemoteExecutor>>>,
+    /// 插件管理器（plugins/ 目录装载 + 注册面）
+    plugins: parking_lot::RwLock<Arc<crate::plugin::PluginManager>>,
+    /// 视频动作代发执行器（video__act 审批批准后回调；网关侧注入）
+    video_act_executor: parking_lot::RwLock<Option<crate::types::VideoActExecutor>>,
     orchestrator: RwLock<Arc<Orchestrator>>,
-    config: RwLock<Arc<ExmConfig>>,
+    config: Arc<RwLock<Arc<ExmConfig>>>,
 }
 
 impl Core {
@@ -83,6 +91,17 @@ impl Core {
         let (events, _rx) = broadcast::channel(8192);
         let mcp_handle = crate::mcp::McpRegistry::shared();
         mcp_handle.configure(&cfg.mcp_servers);
+        // 插件装载：plugins/ 目录扫描 + builtin 静态注册（exm-gateway 在 create 后补 video）
+        let plugins = Arc::new(crate::plugin::PluginManager::new(
+            cfg.workspace_root.join("plugins"),
+        ));
+        plugins.load_all(&cfg.plugins.state);
+        // 收编既有机制为虚拟插件（管理面呈现；执行面零变化 = 零迁移）
+        plugins.register_virtual("custom-tools", !cfg.tools.custom.is_empty());
+        plugins.register_virtual(
+            "builtin-resources",
+            cfg.workspace_root.join("entities/skills").is_dir(),
+        );
         let orchestrator = Arc::new(build_orchestrator(
             &cfg,
             &store,
@@ -93,6 +112,39 @@ impl Core {
             None,
             Some(cron.clone()),
         )?);
+        // 回接：插件声明式工具并入工具网关（custom 执行链全套复用）。
+        // ToolGateway 构建在 build_orchestrator 内，此处经 orchestrator.tools 追加。
+        {
+            let plugin_tools: Vec<_> = plugins
+                .declarative_tools()
+                .into_iter()
+                .map(|(_, _, t)| t)
+                .collect();
+            if !plugin_tools.is_empty() {
+                let orch = orchestrator.clone();
+                let gateway = orch.tools.clone();
+                gateway.append_plugin_tools(plugin_tools);
+            }
+        }
+        // 插件凭据解析面回接（T1 `${credentials.<key>}` 变量：查 config.plugins.credentials）。
+        // config 真身 = 共享句柄：Core.config 字段与 gateway 闭包同源——
+        // apply_config 换 config 时两者同步看到新凭据（热更新即时生效，无循环引用）。
+        let config_shared: Arc<RwLock<Arc<ExmConfig>>> =
+            Arc::new(RwLock::new(Arc::new(cfg.clone())));
+        {
+            let orch = orchestrator.clone();
+            let gateway = orch.tools.clone();
+            let snapshot = config_shared.clone();
+            gateway.set_plugin_credentials_resolver(Box::new(move |pid, key| {
+                snapshot
+                    .read()
+                    .plugins
+                    .credentials
+                    .get(pid)
+                    .and_then(|m| m.get(key))
+                    .cloned()
+            }));
+        }
 
         Ok(Core {
             bus,
@@ -104,8 +156,10 @@ impl Core {
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             mcp: mcp_handle.clone(),
             remote: parking_lot::RwLock::new(None),
+            plugins: parking_lot::RwLock::new(plugins),
+            video_act_executor: parking_lot::RwLock::new(None),
             orchestrator: RwLock::new(orchestrator),
-            config: RwLock::new(Arc::new(cfg)),
+            config: config_shared,
         })
     }
 
@@ -113,10 +167,142 @@ impl Core {
     pub fn apply_config(&self, cfg: ExmConfig) -> anyhow::Result<()> {
         cfg.save()?;
         self.mcp.configure(&cfg.mcp_servers);
-        let orch = build_orchestrator(&cfg, &self.store, &self.registry, &self.events, &self.memory, Some(self.mcp.clone()), self.remote(), Some(self.cron.clone()))?;
+        // 插件状态热更新：重扫目录并应用启停覆盖（进程插件重启在桥接层处理）
+        self.plugins.read().load_all(&cfg.plugins.state);
+        // 虚拟插件跟随内容出现/消失（CustomTool 增删、skills 目录有无）
+        {
+            let pm = self.plugins.read().clone();
+            if cfg.tools.custom.is_empty() {
+                pm.remove_entry("custom-tools");
+            } else {
+                pm.register_virtual("custom-tools", true);
+            }
+            if cfg.workspace_root.join("entities/skills").is_dir() {
+                pm.register_virtual("builtin-resources", true);
+            } else {
+                pm.remove_entry("builtin-resources");
+            }
+        }
+        let orch = build_orchestrator(
+            &cfg,
+            &self.store,
+            &self.registry,
+            &self.events,
+            &self.memory,
+            Some(self.mcp.clone()),
+            self.remote(),
+            Some(self.cron.clone()),
+        )?;
+        // 回接：插件工具面（T1 声明式 + T2 进程运行时）挂到新 orchestrator
+        self.rebind_plugin_tools(&orch);
         *self.orchestrator.write() = Arc::new(orch);
         *self.config.write() = Arc::new(cfg);
         Ok(())
+    }
+
+    /// 插件管理器（注册面/管理端点共用）
+    pub fn plugins(&self) -> Arc<crate::plugin::PluginManager> {
+        self.plugins.read().clone()
+    }
+
+    // ---------------- 插件安装/更新（plugin-ecosystem；CLI 与 REST 共用面） ----------------
+
+    /// 安装插件：staging 校验 → 落盘 → 热装载 → installation 来源持久化 →
+    /// 声明式工具回接 ToolGateway。幂等冲突返回 Err（overwrite=true 走更新语义）。
+    pub async fn plugin_install(
+        &self,
+        source: &crate::plugin::install::InstallSource,
+        overwrite: bool,
+    ) -> anyhow::Result<crate::plugin::install::InstallOutcome> {
+        let plugins_dir = self.config().workspace_root.join("plugins");
+        let pm = self.plugins();
+        let host = crate::plugin::host_version_pub();
+        let out = crate::plugin::install::install_from_source(
+            &pm,
+            source,
+            &plugins_dir,
+            &host,
+            overwrite,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        // 来源记录 + 声明式工具回接
+        let mut cfg = (*self.config()).clone();
+        cfg.plugins
+            .installations
+            .insert(out.id.clone(), source.to_installation());
+        self.apply_config(cfg)?;
+        Ok(out)
+    }
+
+    /// 更新插件：来源取 installation 记录（缺记录报无法更新）；已是最新不落盘；
+    /// 更新保 data/ 与启用状态。返回 (是否更新, 消息)。
+    pub async fn plugin_update(&self, id: &str) -> anyhow::Result<(bool, String)> {
+        let cfg = self.config();
+        let Some(inst) = cfg.plugins.installations.get(id).cloned() else {
+            anyhow::bail!("插件 {id} 无安装来源记录（手工拷入的插件无法自动更新）");
+        };
+        let source = crate::plugin::install::installation_to_source(&inst);
+        let plugins_dir = cfg.workspace_root.join("plugins");
+        let pm = self.plugins();
+        let host = crate::plugin::host_version_pub();
+        // 本地版本
+        let local_v = pm
+            .get(id)
+            .map(|e| e.manifest.version.clone())
+            .unwrap_or_default();
+        // 来源版本探测（staging 只读，不落盘）
+        let remote_m = crate::plugin::install::probe_source_version(&source, &host)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let remote_v = remote_m.version.trim().to_string();
+        if !remote_v.is_empty()
+            && !local_v.trim().is_empty()
+            && !crate::plugin::version_newer(&remote_v, &local_v)
+        {
+            return Ok((false, format!("{id} 已是最新（{local_v}）")));
+        }
+        // 记录更新前启用状态（更新后保持）
+        let was_enabled = pm.get(id).map(|e| e.enabled).unwrap_or(true);
+        crate::plugin::install::update_from_source(&pm, &source, &plugins_dir, &host)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        // 启用状态保持 + 持久化
+        pm.set_enabled(id, was_enabled);
+        let mut cfg = (*self.config()).clone();
+        cfg.plugins.state.insert(id.to_string(), was_enabled);
+        cfg.plugins.installations.insert(id.to_string(), inst);
+        self.apply_config(cfg)?;
+        Ok((true, format!("{id} 已更新到 {remote_v}（原 {local_v}）")))
+    }
+
+    /// 卸载插件（与 REST DELETE 同语义，CLI 用）：禁用 → 终止进程（provider 摘除）→
+    /// 删目录 → 清 config 状态/来源/凭据。
+    pub fn plugin_uninstall(&self, id: &str) -> anyhow::Result<bool> {
+        let pm = self.plugins();
+        let Some(e) = pm.get(id) else {
+            anyhow::bail!("插件不存在：{id}");
+        };
+        if e.form == "builtin" || e.form == "virtual" {
+            anyhow::bail!("{} 插件随宿主发布或收编，不可卸载（可禁用）", e.form);
+        }
+        let Some(dir) = e.dir.clone() else {
+            anyhow::bail!("插件目录未知，无法卸载");
+        };
+        let plugins_root = self.config().workspace_root.join("plugins");
+        if !dir.starts_with(&plugins_root) || dir == plugins_root {
+            anyhow::bail!("插件目录越界，拒绝卸载");
+        }
+        pm.set_enabled(id, false);
+        pm.remove_provider(id);
+        pm.remove_entry(id);
+        std::fs::remove_dir_all(&dir)?;
+        let mut cfg = (*self.config()).clone();
+        cfg.plugins.state.remove(id);
+        cfg.plugins.installations.remove(id);
+        cfg.plugins.credentials.remove(id);
+        self.apply_config(cfg)?;
+        Ok(true)
     }
 
     // ---------------- 记忆系统便捷方法（组感知，docs/09 §6） ----------------
@@ -137,18 +323,35 @@ impl Core {
             .unwrap_or_else(|| self.active_group())
     }
 
-    pub fn memory_recall(&self, query: &str, limit: Option<usize>) -> anyhow::Result<Vec<RecallHit>> {
+    pub fn memory_recall(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<RecallHit>> {
         let cfg = self.config();
         let gid = self.registry.active_group();
-        self.memory
-            .recall(query, limit.unwrap_or(cfg.memory_recall_limit), None, Some(&gid), None)
+        self.memory.recall(
+            query,
+            limit.unwrap_or(cfg.memory_recall_limit),
+            None,
+            Some(&gid),
+            None,
+        )
     }
 
     /// 全量检索（管理视角：群体 + 所有个体私有；范围 = 激活组 + 全局条目）
-    pub fn memory_recall_all(&self, query: &str, limit: Option<usize>) -> anyhow::Result<Vec<RecallHit>> {
+    pub fn memory_recall_all(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<RecallHit>> {
         let gid = self.registry.active_group();
-        self.memory
-            .recall_all(query, limit.unwrap_or(self.config().memory_recall_limit), Some(&gid), None)
+        self.memory.recall_all(
+            query,
+            limit.unwrap_or(self.config().memory_recall_limit),
+            Some(&gid),
+            None,
+        )
     }
 
     /// 个体检索：该智能体私有 + 群体共享（范围 = 激活组 + 全局条目）
@@ -160,8 +363,13 @@ impl Core {
     ) -> anyhow::Result<Vec<RecallHit>> {
         let cfg = self.config();
         let gid = self.registry.active_group();
-        self.memory
-            .recall_for_agent(agent_id, query, limit.unwrap_or(cfg.memory_recall_limit), Some(&gid), None)
+        self.memory.recall_for_agent(
+            agent_id,
+            query,
+            limit.unwrap_or(cfg.memory_recall_limit),
+            Some(&gid),
+            None,
+        )
     }
 
     /// 写入记忆：自动归属激活组（组内可见，其他组不可见）
@@ -183,7 +391,11 @@ impl Core {
         Ok(entry)
     }
 
-    pub fn memory_list(&self, kind: Option<MemoryKind>, limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+    pub fn memory_list(
+        &self,
+        kind: Option<MemoryKind>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
         self.memory.list(kind, limit)
     }
 
@@ -235,14 +447,18 @@ impl Core {
         let gid = self.registry.active_group();
         for meta in self.registry.list_groups() {
             if let Some(dir) = self.registry.group_dir(&meta.id) {
-                let _ = self.memory.render_group_memory_md(&meta.id, dir.join("MEMORY.md"));
+                let _ = self
+                    .memory
+                    .render_group_memory_md(&meta.id, dir.join("MEMORY.md"));
             }
         }
         for s in self.registry.list_singles() {
             let dir = self.registry.singles_dir_pub().join(&s.identifier);
-            let _ = self
-                .memory
-                .render_agent_memory_md(&s.identifier, Some(&gid), dir.join("MEMORY.md"));
+            let _ = self.memory.render_agent_memory_md(
+                &s.identifier,
+                Some(&gid),
+                dir.join("MEMORY.md"),
+            );
         }
         Ok(n)
     }
@@ -296,7 +512,13 @@ impl Core {
             .list_messages(session_id, 500)
             .unwrap_or_default()
             .iter()
-            .map(|m| m.statements.iter().map(|s| s.text.chars().count() as u64).sum::<u64>() / 4)
+            .map(|m| {
+                m.statements
+                    .iter()
+                    .map(|s| s.text.chars().count() as u64)
+                    .sum::<u64>()
+                    / 4
+            })
             .sum()
     }
 
@@ -308,14 +530,19 @@ impl Core {
     // ---------------- 文件检查点（写前快照的回看与回滚） ----------------
 
     fn checkpoints_dir(&self) -> std::path::PathBuf {
-        self.config().workspace_root.join(".exmachina").join("checkpoints")
+        self.config()
+            .workspace_root
+            .join(".exmachina")
+            .join("checkpoints")
     }
 
     /// 检查点清单：(日期, 相对路径, 字节数)，按日期倒序
     pub fn list_checkpoints(&self) -> Vec<(String, String, u64)> {
         let root = self.checkpoints_dir();
         let mut out: Vec<(String, String, u64)> = Vec::new();
-        let Ok(days) = std::fs::read_dir(&root) else { return out };
+        let Ok(days) = std::fs::read_dir(&root) else {
+            return out;
+        };
         for day in days.flatten() {
             if !day.path().is_dir() {
                 continue;
@@ -323,7 +550,9 @@ impl Core {
             let date = day.file_name().to_string_lossy().to_string();
             let mut stack = vec![day.path()];
             while let Some(dir) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
                 for e in entries.flatten() {
                     let p = e.path();
                     if p.is_dir() {
@@ -361,7 +590,11 @@ impl Core {
         let target = root.join(&norm);
         if target.is_file() {
             let day: String = crate::types::now_iso().chars().take(10).collect();
-            let dst = root.join(".exmachina").join("checkpoints").join(&day).join(&norm);
+            let dst = root
+                .join(".exmachina")
+                .join("checkpoints")
+                .join(&day)
+                .join(&norm);
             if !dst.exists() {
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -380,7 +613,10 @@ impl Core {
             "编辑器保存",
             0,
         );
-        Ok(format!("已保存 {norm}（{} 字节，写前检查点已记录）", content.len()))
+        Ok(format!(
+            "已保存 {norm}（{} 字节，写前检查点已记录）",
+            content.len()
+        ))
     }
 
     // ---------------- 通道身份与配对码（gateway 身份闸门共用） ----------------
@@ -406,7 +642,23 @@ impl Core {
     }
 
     /// 签发一次性配对码（8 位短码，TTL 由调用方给）
-    pub fn issue_pairing_code(&self, note: &str, platform: Option<&str>, ttl_secs: u64) -> anyhow::Result<PairingCode> {
+    pub fn issue_pairing_code(
+        &self,
+        note: &str,
+        platform: Option<&str>,
+        ttl_secs: u64,
+    ) -> anyhow::Result<PairingCode> {
+        self.issue_pairing_code_role(note, platform, ttl_secs, "member")
+    }
+
+    /// 带预设角色签发（admin = 管理者配对码；兑换即落 admin）
+    pub fn issue_pairing_code_role(
+        &self,
+        note: &str,
+        platform: Option<&str>,
+        ttl_secs: u64,
+        role: &str,
+    ) -> anyhow::Result<PairingCode> {
         let code = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let c = PairingCode {
             code: code.clone(),
@@ -415,6 +667,11 @@ impl Core {
             created_by: "console".into(),
             created_at: now_iso(),
             expires_at_ms: now_ms() + ttl_secs * 1000,
+            role: if role == "admin" {
+                "admin".into()
+            } else {
+                "member".into()
+            },
         };
         self.store.put_pairing_code(&c)?;
         Ok(c)
@@ -456,7 +713,12 @@ impl Core {
             channel: channel.to_string(),
             external_id: external_id.to_string(),
             display_name: display_name.to_string(),
-            role: default_role.to_string(),
+            // 预设角色优先（签发时指定）；存量码无角色落 default_role（member）
+            role: if c.role.trim().is_empty() {
+                default_role.to_string()
+            } else {
+                c.role.clone()
+            },
             paired_at: now_iso(),
             note: c.note.clone(),
         };
@@ -475,7 +737,11 @@ impl Core {
 
     /// 回滚检查点：`date` 为空取最近一份；返回被覆盖的文件相对路径
     pub fn restore_checkpoint(&self, date: Option<&str>, rel: &str) -> anyhow::Result<String> {
-        let target = self.config().workspace_root.join(".exmachina").join("checkpoints");
+        let target = self
+            .config()
+            .workspace_root
+            .join(".exmachina")
+            .join("checkpoints");
         let day = match date {
             Some(d) if !d.trim().is_empty() => d.trim().to_string(),
             _ => self
@@ -493,7 +759,10 @@ impl Core {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(&src, &dst)?;
-        Ok(format!("已回滚 {} → {rel}（来自检查点 {day}）", dst.display()))
+        Ok(format!(
+            "已回滚 {} → {rel}（来自检查点 {day}）",
+            dst.display()
+        ))
     }
 
     // ---------------- 会话历史管控（undo / 编辑重发 / fork，组 9） ----------------
@@ -522,10 +791,17 @@ impl Core {
 
     /// 消息撤销（9.2）：空闲强校验 → 游标回退（截断部分归档可查）→ 上下文重建
     /// → 可选检查点联动回滚 → 审计事件。返回 {archived, restored, cursor}。
-    pub async fn undo_session(&self, session_id: &str, upto_turn: usize, restore_files: bool) -> anyhow::Result<serde_json::Value> {
+    pub async fn undo_session(
+        &self,
+        session_id: &str,
+        upto_turn: usize,
+        restore_files: bool,
+    ) -> anyhow::Result<serde_json::Value> {
         let lock = self.run_lock(session_id);
         // 空闲校验：处理中拒绝（spec 硬性要求）
-        let _guard = lock.try_lock().map_err(|_| anyhow::anyhow!("会话正在处理中，请等待当前任务完成后再撤销"))?;
+        let _guard = lock
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("会话正在处理中，请等待当前任务完成后再撤销"))?;
         self.store
             .get_session(session_id)?
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
@@ -549,10 +825,12 @@ impl Core {
                 .into_iter()
                 .filter(|s| s.turn > upto_turn && !s.checkpoint_ids.is_empty())
                 .collect();
-            later.sort_by(|a, b| b.turn.cmp(&a.turn)); // 后轮先回滚（后者覆盖前者的场景）
+            later.sort_by_key(|s| std::cmp::Reverse(s.turn)); // 后轮先回滚（后者覆盖前者的场景）
             for snap in later {
                 for cp in snap.checkpoint_ids.iter().rev() {
-                    let Some((date, rel)) = cp.split_once('/') else { continue };
+                    let Some((date, rel)) = cp.split_once('/') else {
+                        continue;
+                    };
                     match self.restore_checkpoint(Some(date), rel) {
                         Ok(_) => restored.push(cp.clone()),
                         Err(e) => eprintln!("[undo] 检查点恢复失败 {cp}: {e}"),
@@ -574,13 +852,22 @@ impl Core {
             "session": session_id, "uptoTurn": upto_turn, "cursor": cursor,
             "archived": archived, "restored": restored,
         });
-        let _ = self.events.send(CoreEvent { kind: "session.undo".into(), session_id: session_id.to_string(), payload: payload.clone() });
+        let _ = self.events.send(CoreEvent {
+            kind: "session.undo".into(),
+            session_id: session_id.to_string(),
+            payload: payload.clone(),
+        });
         Ok(payload)
     }
 
     /// 编辑重发（9.3）：撤销至该轮之前（原内容归档可查）后以新内容触发新一轮处理。
     /// `turn` 为被编辑的用户消息所在轮次。
-    pub async fn edit_resend(&self, session_id: &str, turn: usize, new_text: &str) -> anyhow::Result<serde_json::Value> {
+    pub async fn edit_resend(
+        &self,
+        session_id: &str,
+        turn: usize,
+        new_text: &str,
+    ) -> anyhow::Result<serde_json::Value> {
         if new_text.trim().is_empty() {
             anyhow::bail!("新内容不能为空");
         }
@@ -610,14 +897,17 @@ impl Core {
             summary_upto: None,
             parent_session: Some(src.id.clone()),
             parent_upto: Some(upto_turn),
-                last_message_preview: None,
-                last_active_at: None,
+            last_message_preview: None,
+            last_active_at: None,
+            pinned: false, // 置顶不继承分支
             ledger: src.ledger.clone(),
             created_at: now.clone(),
             updated_at: now,
         };
         self.store.insert_session(&fork)?;
-        let copied = self.store.copy_messages_prefix(session_id, &fork.id, cursor)?;
+        let copied = self
+            .store
+            .copy_messages_prefix(session_id, &fork.id, cursor)?;
         let _ = self.store.audit_tool(
             "webui",
             "session_fork",
@@ -635,7 +925,8 @@ impl Core {
 
     pub async fn chat(&self, session_id: &str, text: &str) -> anyhow::Result<()> {
         // 默认能力边界：完整工具面 + Computer（WebUI / CLI / 定时任务的既有行为）
-        self.chat_scoped(session_id, text, crate::types::ToolScope::Computer).await
+        self.chat_scoped(session_id, text, crate::types::ToolScope::Computer)
+            .await
     }
 
     /// 带能力边界执行一轮：外部通道据此限制「只聊天 / 工具调用 / 电脑操控」。
@@ -724,7 +1015,9 @@ impl Core {
         };
         let mut resumed = 0usize;
         for s in sessions {
-            let Some(mut graph) = self.store.latest_graph(&s.id).unwrap_or(None) else { continue };
+            let Some(mut graph) = self.store.latest_graph(&s.id).unwrap_or(None) else {
+                continue;
+            };
             if graph.status != crate::types::GraphStatus::Executing {
                 continue;
             }
@@ -740,7 +1033,11 @@ impl Core {
         resumed
     }
 
-    async fn resume_session_graph(&self, session_id: &str, graph: &mut crate::types::TaskGraph) -> anyhow::Result<()> {
+    async fn resume_session_graph(
+        &self,
+        session_id: &str,
+        graph: &mut crate::types::TaskGraph,
+    ) -> anyhow::Result<()> {
         use crate::task::{NodeOutcome, Scheduler, TaskGraphModel};
         use futures_util::future::BoxFuture;
         use std::sync::Arc;
@@ -826,7 +1123,8 @@ impl Core {
                         let evt = crate::types::CoreEvent {
                             kind: "graph.updated".into(),
                             session_id: sid.clone(),
-                            payload: serde_json::to_value(g.to_graph()).unwrap_or(serde_json::Value::Null),
+                            payload: serde_json::to_value(g.to_graph())
+                                .unwrap_or(serde_json::Value::Null),
                         };
                         let _ = events.send(evt);
                     },
@@ -836,15 +1134,16 @@ impl Core {
 
         // 4) 收束（复用指挥体收束路径）
         let final_reports = reports_shared.lock().await.clone();
-        let final_text = orch.converge(session_id, &plan, &final_reports, &model).await?;
+        let final_text = orch
+            .converge(session_id, &plan, &final_reports, &model)
+            .await?;
         let statements = crate::orchestrator::text_to_statements(&final_text);
-        self.store
-            .add_message(
-                session_id,
-                crate::types::MessageRole::Orchestrator,
-                Some(orch.orch_id().as_str()),
-                statements.clone(),
-            )?;
+        self.store.add_message(
+            session_id,
+            crate::types::MessageRole::Orchestrator,
+            Some(orch.orch_id().as_str()),
+            statements.clone(),
+        )?;
         let _ = self.events.send(crate::types::CoreEvent {
             kind: "run.finished".into(),
             session_id: session_id.to_string(),
@@ -861,9 +1160,46 @@ impl Core {
 
     fn rebuild_orchestrator(&self) -> anyhow::Result<()> {
         let cfg = self.config();
-        let orch = build_orchestrator(&cfg, &self.store, &self.registry, &self.events, &self.memory, Some(self.mcp.clone()), self.remote(), Some(self.cron.clone()))?;
+        let orch = build_orchestrator(
+            &cfg,
+            &self.store,
+            &self.registry,
+            &self.events,
+            &self.memory,
+            Some(self.mcp.clone()),
+            self.remote(),
+            Some(self.cron.clone()),
+        )?;
+        self.rebind_plugin_tools(&orch);
         *self.orchestrator.write() = Arc::new(orch);
         Ok(())
+    }
+
+    /// 把插件工具面（T1 声明式 + T2 进程运行时）重新挂到新 orchestrator。
+    /// 所有换 orchestrator 的路径（apply_config / set_remote 等）重建后必调——
+    /// 否则进程工具的会话面注册随旧 ToolGateway 一起丢失。
+    fn rebind_plugin_tools(&self, orch: &Orchestrator) {
+        let pm = self.plugins.read().clone();
+        // T1：声明式内联工具
+        let plugin_tools: Vec<_> = pm
+            .declarative_tools()
+            .into_iter()
+            .map(|(_, _, t)| t)
+            .collect();
+        if !plugin_tools.is_empty() {
+            orch.tools.append_plugin_tools(plugin_tools);
+        }
+        // T2：进程运行时工具（provider 持 supervisor 句柄，重挂即恢复会话面）
+        for e in pm.list() {
+            if e.form != "process" || !e.enabled {
+                continue;
+            }
+            if let Some(p) = pm.provider_of(&e.manifest.id) {
+                if let Some(tp) = p.tool_provider() {
+                    orch.tools.register_plugin_runtime_tools(&e.manifest.id, tp);
+                }
+            }
+        }
     }
 
     /// 暂存图片附件（随该会话下一轮对话注入规划；每轮取走即清）
@@ -895,11 +1231,17 @@ impl Core {
 
     /// 当前交互范围（组或智能体）的会话列表
     pub fn list_sessions_in_scope(&self) -> anyhow::Result<Vec<Session>> {
-        self.store.list_sessions_in_group(&self.registry.active_scope())
+        self.store
+            .list_sessions_in_group(&self.registry.active_scope())
     }
 
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
         self.store.delete_session(id)
+    }
+
+    /// 会话置顶切换（列表置顶分组数据源）
+    pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> anyhow::Result<()> {
+        self.store.toggle_session_pin(id, pinned)
     }
 
     pub fn create_session(&self, title: &str) -> anyhow::Result<Session> {
@@ -1002,7 +1344,11 @@ impl Core {
         self.registry.remove_skill(id)
     }
 
-    pub fn approval_list(&self, status: Option<&str>, limit: usize) -> anyhow::Result<Vec<ApprovalRequest>> {
+    pub fn approval_list(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ApprovalRequest>> {
         self.store.list_approvals(status, limit)
     }
 
@@ -1011,13 +1357,42 @@ impl Core {
     }
 
     /// 审批决定：批准即由系统代执行并记录输出；拒绝即关闭审批单
-    pub async fn approval_decide(&self, id: &str, approve: bool) -> anyhow::Result<ApprovalRequest> {
+    pub async fn approval_decide(
+        &self,
+        id: &str,
+        approve: bool,
+    ) -> anyhow::Result<ApprovalRequest> {
         let mut req = self
             .store
             .get_approval(id)?
             .ok_or_else(|| anyhow::anyhow!("审批单不存在: {id}"))?;
         if req.status != "pending" {
             anyhow::bail!("审批单已处理: {}", req.status);
+        }
+        // 视频动作审批单（[video] 前缀）：批准 = 回调代发执行器，拒绝 = 记录跳过
+        if req.command.starts_with("[video]") {
+            let payload = req.command.trim_start_matches("[video]").trim().to_string();
+            req.decided_at = Some(now_iso());
+            if !approve {
+                req.status = "denied".into();
+                req.result = Some("视频互动被拒绝（未发送）".into());
+                self.store.update_approval(&req)?;
+                self.emit_approval_resolved(&req);
+                return Ok(req);
+            }
+            match self.execute_video_act_approval(&payload).await {
+                Ok(out) => {
+                    req.status = "executed".into();
+                    req.result = Some(out.chars().take(4000).collect());
+                }
+                Err(e) => {
+                    req.status = "failed".into();
+                    req.result = Some(e.to_string());
+                }
+            }
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
         }
         // 计划审批单（[plan] 前缀）：转发计划通道——批准 = 回放清单，拒绝 = 保留清单
         if req.command.starts_with("[plan]") {
@@ -1055,8 +1430,16 @@ impl Core {
         }
         let workspace = self.config().workspace_root.clone();
         let out = crate::tools::execute_shell_command_timed(&workspace, &req.command, 300).await;
-        req.status = if out.ok { "executed".into() } else { "failed".into() };
-        let text = if out.ok { out.output } else { out.error.unwrap_or_default() };
+        req.status = if out.ok {
+            "executed".into()
+        } else {
+            "failed".into()
+        };
+        let text = if out.ok {
+            out.output
+        } else {
+            out.error.unwrap_or_default()
+        };
         req.result = Some(text.chars().take(4000).collect());
         self.store.update_approval(&req)?;
         self.emit_approval_resolved(&req);
@@ -1068,6 +1451,20 @@ impl Core {
         let _ = self.store.put_session_origin(session_id, external_id, role);
     }
 
+    // ---------------- 视频互动审批（video__act 批准代发） ----------------
+
+    pub fn register_video_act_executor(&self, exec: crate::types::VideoActExecutor) {
+        *self.video_act_executor.write() = Some(exec);
+    }
+
+    async fn execute_video_act_approval(&self, payload: &str) -> anyhow::Result<String> {
+        let exec = self.video_act_executor.read().clone();
+        let Some(exec) = exec else {
+            anyhow::bail!("视频动作代发执行器未注册（网关未启动？）");
+        };
+        exec(payload.to_string()).await
+    }
+
     // ---------------- 计划模式（spec: plan-mode） ----------------
 
     /// 工作台文件树（spec: webui-code-workbench）：.gitignore 口径过滤 + 越权拒绝
@@ -1076,8 +1473,16 @@ impl Core {
     }
 
     /// 工作台文件读取（read 工具同口径分页）
-    pub fn workbench_file(&self, path: &str, offset: u64, limit: u64) -> anyhow::Result<serde_json::Value> {
-        self.orchestrator.read().tools.workbench_file(path, offset, limit)
+    pub fn workbench_file(
+        &self,
+        path: &str,
+        offset: u64,
+        limit: u64,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.orchestrator
+            .read()
+            .tools
+            .workbench_file(path, offset, limit)
     }
 
     /// 设置/清除会话计划模式（true = 只读规划，写操作转计划条目）
@@ -1085,7 +1490,11 @@ impl Core {
         crate::plan::set_plan_mode(session_id, plan);
         self.orchestrator.read().emit(
             session_id,
-            if plan { "plan.enabled" } else { "plan.disabled" },
+            if plan {
+                "plan.enabled"
+            } else {
+                "plan.disabled"
+            },
             serde_json::json!({}),
         );
     }
@@ -1121,7 +1530,10 @@ impl Core {
     /// 批准计划：切 execute 并逐条回放执行（terminal 走 shell 执行器，
     /// 其余工具走网关 execute——此时已非 plan 模式，不再拦截），
     /// 每条执行结果广播 plan.applied 事件
-    pub async fn plan_approve(&self, session_id: &str) -> anyhow::Result<Vec<(crate::plan::PlanItem, crate::tools::ToolResult)>> {
+    pub async fn plan_approve(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<(crate::plan::PlanItem, crate::tools::ToolResult)>> {
         let items = crate::plan::approve(session_id);
         if items.is_empty() {
             anyhow::bail!("计划清单为空（无可批准条目）");
@@ -1197,7 +1609,8 @@ impl Core {
         Ok(req)
     }
 
-    fn emit_approval_resolved(&self, req: &ApprovalRequest) {        let _ = self.events.send(CoreEvent {
+    fn emit_approval_resolved(&self, req: &ApprovalRequest) {
+        let _ = self.events.send(CoreEvent {
             kind: "approval.resolved".into(),
             session_id: req.session_id.clone(),
             payload: serde_json::json!({ "approvalId": req.id, "status": req.status, "command": req.command }),
@@ -1221,7 +1634,11 @@ impl Core {
             }
         }
         let gid = self.registry.active_group();
-        let title = if title.trim().is_empty() { format!("event-{gid}") } else { title.to_string() };
+        let title = if title.trim().is_empty() {
+            format!("event-{gid}")
+        } else {
+            title.to_string()
+        };
         let result = async {
             let existing = self
                 .store
@@ -1266,9 +1683,7 @@ impl Core {
             .and_then(|list| list.into_iter().find(|s| s.title == title));
         let session = match existing {
             Some(s) => s,
-            None => self
-                .create_session(&title)
-                .expect("定时任务会话创建失败"),
+            None => self.create_session(&title).expect("定时任务会话创建失败"),
         };
         let result = self.chat(&session.id, &job.prompt).await;
         if switched {
@@ -1387,19 +1802,20 @@ pub fn build_orchestrator(
         if keys.is_empty() && !p.api_key.trim().is_empty() {
             keys.push(p.api_key.clone());
         }
-        let profile_provider: Arc<dyn LlmProvider> = if keys.is_empty() || p.base_url.trim().is_empty() {
-            if cfg.use_mock {
-                Arc::new(MockLlmProvider)
+        let profile_provider: Arc<dyn LlmProvider> =
+            if keys.is_empty() || p.base_url.trim().is_empty() {
+                if cfg.use_mock {
+                    Arc::new(MockLlmProvider)
+                } else {
+                    Arc::new(UnconfiguredProvider::new(format!("档案 {}", p.id)))
+                }
             } else {
-                Arc::new(UnconfiguredProvider::new(format!("档案 {}", p.id)))
-            }
-        } else {
-            Arc::new(OpenAiCompatibleProvider::with_format(
-                p.base_url.clone(),
-                keys,
-                &p.api_format,
-            ))
-        };
+                Arc::new(OpenAiCompatibleProvider::with_format(
+                    p.base_url.clone(),
+                    keys,
+                    &p.api_format,
+                ))
+            };
         pool.insert(p.id.clone(), profile_provider, p.model.clone());
         pool.set_models(p.id.clone(), p.models.clone());
         if let Some(fb) = &p.fallback {
@@ -1414,57 +1830,57 @@ pub fn build_orchestrator(
     {
         let runtime = unit_runtime.clone();
         let default_model = cfg.llm.model.clone();
-        let spawn_exec: Arc<
-            dyn Fn(&str, &str, &str, Vec<crate::types::ToolName>)
-                -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
-                + Send
-                + Sync,
-        > = Arc::new(move |agent_id: &str, session_id: &str, task: &str, tools: Vec<crate::types::ToolName>| {
-            let runtime = runtime.clone();
-            let default_model = default_model.clone();
-            let def = crate::types::AgentDefinition {
-                name: "派生子智能体".into(),
-                identifier: format!("spawn-of-{agent_id}"),
-                domain: "派生".into(),
-                tier: crate::types::Tier::Unit,
-                description: "封闭子任务执行（独立上下文）".into(),
-                capabilities: vec![],
-                tools,
-                when_to_call: String::new(),
-                dependencies: vec![],
-                composable_with: vec![],
-                input_schema: Default::default(),
-                output_schema: Default::default(),
-                prompt_file: String::new(),
-                model_hint: None,
-                link: None,
-                max_steps: None,
-            };
-            let system = format!(
+        let spawn_exec: crate::tools::SpawnExec = Arc::new(
+            move |agent_id: &str,
+                  session_id: &str,
+                  task: &str,
+                  tools: Vec<crate::types::ToolName>| {
+                let runtime = runtime.clone();
+                let default_model = default_model.clone();
+                let def = crate::types::AgentDefinition {
+                    name: "派生子智能体".into(),
+                    identifier: format!("spawn-of-{agent_id}"),
+                    domain: "派生".into(),
+                    tier: crate::types::Tier::Unit,
+                    description: "封闭子任务执行（独立上下文）".into(),
+                    capabilities: vec![],
+                    tools,
+                    when_to_call: String::new(),
+                    dependencies: vec![],
+                    composable_with: vec![],
+                    input_schema: Default::default(),
+                    output_schema: Default::default(),
+                    prompt_file: String::new(),
+                    model_hint: None,
+                    link: None,
+                    max_steps: None,
+                };
+                let system = format!(
                 "# 派生子智能体\n\n你是被派生出来执行封闭子任务的智能体。看不到主会话历史，\
                  以下任务书即全部背景；自主使用工具完成并输出结论摘要（含关键产出引用）。\n\n## 任务书\n{task}"
             );
-            let chain = crate::provider::ModelChain {
-                candidates: vec![(String::new(), runtime.provider_clone(), default_model)],
-                failover: Arc::new(crate::provider::FailoverState::default()),
-            };
-            let session = session_id.to_string();
-            Box::pin(async move {
-                runtime
-                    .chat_execute(
-                        &def,
-                        system,
-                        vec![],
-                        &session,
-                        &format!("{session}:spawn"),
-                        chain,
-                        false,
-                        crate::types::ToolScope::Tools,
-                        |_| {},
-                    )
-                    .await
-            })
-        });
+                let chain = crate::provider::ModelChain {
+                    candidates: vec![(String::new(), runtime.provider_clone(), default_model)],
+                    failover: Arc::new(crate::provider::FailoverState::default()),
+                };
+                let session = session_id.to_string();
+                Box::pin(async move {
+                    runtime
+                        .chat_execute(
+                            &def,
+                            system,
+                            vec![],
+                            &session,
+                            &format!("{session}:spawn"),
+                            chain,
+                            false,
+                            crate::types::ToolScope::Tools,
+                            |_| {},
+                        )
+                        .await
+                })
+            },
+        );
         tools.set_spawn_executor(spawn_exec);
     }
     Ok(Orchestrator {
@@ -1508,7 +1924,9 @@ mod history_tests {
         cfg.use_mock = true;
         cfg.memory_enabled = false; // 历史管控测试不关心记忆写入
         let core = Core::with_config(cfg).expect("创建 Core 失败");
-        core.registry().create_group(Some("t".into()), "历史测试组", "").unwrap();
+        core.registry()
+            .create_group(Some("t".into()), "历史测试组", "")
+            .unwrap();
         let def = AgentDefinition {
             name: "问答体".into(),
             identifier: "hist-orch".into(),
@@ -1553,7 +1971,12 @@ mod history_tests {
         // 游标单调不减且等于当前消息总数
         let total = core.store.list_messages(&s.id, 0).unwrap().len();
         assert_eq!(snaps.last().unwrap().message_count, total);
-        assert!(snaps.windows(2).all(|w| w[0].message_count <= w[1].message_count), "游标单调");
+        assert!(
+            snaps
+                .windows(2)
+                .all(|w| w[0].message_count <= w[1].message_count),
+            "游标单调"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -1565,16 +1988,31 @@ mod history_tests {
         let total = core.store.list_messages(&s.id, 0).unwrap().len();
 
         let info = core.undo_session(&s.id, 2, false).await.unwrap();
-        assert_eq!(info["archived"].as_u64().unwrap() as usize, total - snaps_at(&core, &s.id, 2), "归档数 = 第 2 轮之后的消息数");
+        assert_eq!(
+            info["archived"].as_u64().unwrap() as usize,
+            total - snaps_at(&core, &s.id, 2),
+            "归档数 = 第 2 轮之后的消息数"
+        );
         // 活跃流截断到第 2 轮游标
-        let cursor = core.store.list_turn_snapshots(&s.id).unwrap().last().unwrap().message_count;
+        let cursor = core
+            .store
+            .list_turn_snapshots(&s.id)
+            .unwrap()
+            .last()
+            .unwrap()
+            .message_count;
         let now_len = core.store.list_messages(&s.id, 0).unwrap().len();
         assert_eq!(now_len, cursor, "截断后游标一致");
         assert!(now_len < total, "确实发生了截断");
         // 归档可查：被截断内容保留
         let archive = core.store.list_archived_messages(&s.id).unwrap();
         assert_eq!(archive.len(), total - now_len);
-        assert!(archive.iter().any(|m| m.statements.iter().any(|st| st.text.contains("第三轮"))), "第三轮内容在归档中");
+        assert!(
+            archive
+                .iter()
+                .any(|m| m.statements.iter().any(|st| st.text.contains("第三轮"))),
+            "第三轮内容在归档中"
+        );
         // 孤儿快照已裁剪
         assert_eq!(snaps_len(&core, &s.id), 2);
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
@@ -1619,10 +2057,18 @@ mod history_tests {
         std::fs::write(&file, "v1").unwrap();
         let day: String = now_iso().chars().take(10).collect();
         // 检查点文件（写类工具写前快照的同款落点）+ 轮次链登记
-        let cp = core.config().workspace_root.join(".exmachina").join("checkpoints").join(&day).join("a.txt");
+        let cp = core
+            .config()
+            .workspace_root
+            .join(".exmachina")
+            .join("checkpoints")
+            .join(&day)
+            .join("a.txt");
         std::fs::create_dir_all(cp.parent().unwrap()).unwrap();
         std::fs::write(&cp, "v1").unwrap();
-        core.store.record_checkpoint_ref(&s.id, &day, "a.txt").unwrap();
+        core.store
+            .record_checkpoint_ref(&s.id, &day, "a.txt")
+            .unwrap();
         std::fs::write(&file, "v2").unwrap();
         core.store
             .put_turn_snapshot(&TurnSnapshot {
@@ -1638,7 +2084,12 @@ mod history_tests {
             })
             .unwrap();
         core.store
-            .add_message(&s.id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, "改文件")])
+            .add_message(
+                &s.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "改文件")],
+            )
             .unwrap();
         core.store
             .put_turn_snapshot(&TurnSnapshot {
@@ -1657,9 +2108,21 @@ mod history_tests {
         // 撤销到第 1 轮（保留）→ 第 2 轮无检查点；撤销到第 0 轮 → 第 1 轮的检查点回滚文件
         let info = core.undo_session(&s.id, 0, true).await.unwrap();
         let restored: Vec<String> = serde_json::from_value(info["restored"].clone()).unwrap();
-        assert_eq!(restored, vec![format!("{day}/a.txt")], "检查点引用被联动回滚");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v1", "文件内容回到检查点版本");
-        assert_eq!(core.store.list_messages(&s.id, 0).unwrap().len(), 0, "游标回退到 0");
+        assert_eq!(
+            restored,
+            vec![format!("{day}/a.txt")],
+            "检查点引用被联动回滚"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "v1",
+            "文件内容回到检查点版本"
+        );
+        assert_eq!(
+            core.store.list_messages(&s.id, 0).unwrap().len(),
+            0,
+            "游标回退到 0"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -1670,7 +2133,9 @@ mod history_tests {
         three_rounds(&core, &s.id).await;
         let before = core.store.list_messages(&s.id, 0).unwrap().len();
 
-        core.edit_resend(&s.id, 2, "第二轮问题（已修改）").await.unwrap();
+        core.edit_resend(&s.id, 2, "第二轮问题（已修改）")
+            .await
+            .unwrap();
         // 原内容归档可查
         let archive_text: String = core
             .store
@@ -1680,13 +2145,23 @@ mod history_tests {
             .flat_map(|m| m.statements.iter().map(|st| st.text.clone()))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(archive_text.contains("第二轮问题"), "原第 2 轮内容在归档中：{archive_text}");
+        assert!(
+            archive_text.contains("第二轮问题"),
+            "原第 2 轮内容在归档中：{archive_text}"
+        );
         assert!(archive_text.contains("第三轮问题"), "第 3 轮一并被回退归档");
         // 新内容重执行：活跃流 = 第 1 轮 + 新一轮，最后一条用户消息为新文本
         let msgs = core.store.list_messages(&s.id, 0).unwrap();
         assert!(msgs.len() < before + 2, "重发后活跃流短于原全程");
-        let last_user = msgs.iter().rev().find(|m| matches!(m.role, MessageRole::User)).unwrap();
-        assert!(last_user.statements[0].text.contains("已修改"), "以编辑后的内容重执行");
+        let last_user = msgs
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::User))
+            .unwrap();
+        assert!(
+            last_user.statements[0].text.contains("已修改"),
+            "以编辑后的内容重执行"
+        );
         // 新一轮也落了快照
         let snaps = core.store.list_turn_snapshots(&s.id).unwrap();
         assert_eq!(snaps.len(), 2, "第 1 轮保留 + 重发轮新快照");
@@ -1704,12 +2179,23 @@ mod history_tests {
 
         let fork = core.fork_session(&s.id, 2).unwrap();
         assert_ne!(fork.id, s.id);
-        assert_eq!(fork.parent_session.as_deref(), Some(s.id.as_str()), "派生来源标注");
+        assert_eq!(
+            fork.parent_session.as_deref(),
+            Some(s.id.as_str()),
+            "派生来源标注"
+        );
         assert_eq!(fork.parent_upto, Some(2));
         assert_eq!(fork.group_id, "t", "组归属继承");
         // 历史副本 = 截至第 2 轮
         let copied = core.store.list_messages(&fork.id, 0).unwrap();
-        let cursor = core.store.list_turn_snapshots(&s.id).unwrap().iter().find(|x| x.turn == 2).unwrap().message_count;
+        let cursor = core
+            .store
+            .list_turn_snapshots(&s.id)
+            .unwrap()
+            .iter()
+            .find(|x| x.turn == 2)
+            .unwrap()
+            .message_count;
         assert_eq!(copied.len(), cursor, "副本 = 前缀游标");
         assert!(copied.len() < src_msgs);
         // 原会话不变
@@ -1718,7 +2204,11 @@ mod history_tests {
         // 分支独立演进：新消息只进分支
         core.chat(&fork.id, "分支上的新问题").await.unwrap();
         assert!(core.store.list_messages(&fork.id, 0).unwrap().len() > copied.len());
-        assert_eq!(core.store.list_messages(&s.id, 0).unwrap().len(), src_msgs, "原会话不受分支影响");
+        assert_eq!(
+            core.store.list_messages(&s.id, 0).unwrap().len(),
+            src_msgs,
+            "原会话不受分支影响"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -1726,8 +2216,16 @@ mod history_tests {
     async fn undo_不存在的轮次与会话报错() {
         let core = mock_core();
         let s = core.create_session("边界").unwrap();
-        assert!(core.undo_session(&s.id, 5, false).await.is_err(), "无快照轮次拒绝");
-        assert!(core.undo_session("no-such-session", 1, false).await.is_err(), "不存在会话拒绝");
+        assert!(
+            core.undo_session(&s.id, 5, false).await.is_err(),
+            "无快照轮次拒绝"
+        );
+        assert!(
+            core.undo_session("no-such-session", 1, false)
+                .await
+                .is_err(),
+            "不存在会话拒绝"
+        );
         assert!(core.fork_session("no-such-session", 1).is_err());
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
@@ -1771,7 +2269,10 @@ mod plan_tests {
         assert_eq!(core.plan_list(&s.id).len(), 1);
         let pending = core.approval_list(Some("pending"), 10).unwrap();
         assert_eq!(pending.len(), 1, "应落一张计划审批单");
-        assert!(pending[0].command.starts_with("[plan]"), "计划审批单带前缀标");
+        assert!(
+            pending[0].command.starts_with("[plan]"),
+            "计划审批单带前缀标"
+        );
         let ap_id = pending[0].id.clone();
         // 批准（经 approvals 通道）→ 回放执行
         let decided = core.approval_decide(&ap_id, true).await.unwrap();
@@ -1802,7 +2303,9 @@ mod plan_tests {
                 &serde_json::json!({ "op": "write", "path": "q.txt", "content": "v" }),
             )
             .await;
-        let ap_id = core.approval_list(Some("pending"), 10).unwrap()[0].id.clone();
+        let ap_id = core.approval_list(Some("pending"), 10).unwrap()[0]
+            .id
+            .clone();
         core.approval_decide(&ap_id, false).await.unwrap();
         assert!(crate::plan::is_plan_mode(&s.id), "拒绝后仍在 plan 模式");
         assert_eq!(core.plan_list(&s.id).len(), 1, "清单保留");
@@ -1831,6 +2334,54 @@ mod plan_tests {
         assert!(r.ok, "读操作放行：{:?}", r.error);
         // 清理：关模式并丢弃清单
         crate::plan::approve(&s.id);
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    /// 视频动作审批往返（[video] 前缀）：批准 = 回调代发执行器；拒绝 = 记录跳过
+    #[tokio::test]
+    async fn 视频动作审批_批准回调与拒绝跳过() {
+        let core = plan_core();
+        // 注入代发执行器（模拟网关侧注册；记录被调载荷）
+        let called = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let sink = called.clone();
+        core.register_video_act_executor(Arc::new(move |payload| {
+            let sink = sink.clone();
+            Box::pin(async move {
+                sink.lock().push(payload);
+                Ok("已代发：测试文本".into())
+            })
+        }));
+        // 产一张 [video] 审批单（模拟 tool_act 的 create_act_approval）
+        let req = crate::types::ApprovalRequest {
+            id: format!("apr{}", &crate::types::new_id()[..14]),
+            session_id: "s-video".into(),
+            node_id: None,
+            agent_id: "video".into(),
+            command: "[video] {\"channelId\":\"bili\",\"videoId\":\"BV1\",\"text\":\"测试文本\"}"
+                .into(),
+            status: "pending".into(),
+            result: None,
+            created_at: crate::types::now_iso(),
+            decided_at: None,
+            origin_user: None,
+            origin_role: None,
+        };
+        core.store.add_approval(&req).unwrap();
+        // 批准 → 执行器被调、审批单 executed
+        let decided = core.approval_decide(&req.id, true).await.unwrap();
+        assert_eq!(decided.status, "executed");
+        assert!(decided.result.as_deref().unwrap_or("").contains("已代发"));
+        assert_eq!(called.lock().len(), 1, "代发执行器应被调用一次");
+        assert!(called.lock()[0].contains("BV1"));
+        // 拒绝路径：再产一张 → denied，不触执行器
+        let mut req2 = req.clone();
+        req2.id = format!("apr{}", &crate::types::new_id()[..14]);
+        req2.status = "pending".into();
+        req2.decided_at = None;
+        core.store.add_approval(&req2).unwrap();
+        let denied = core.approval_decide(&req2.id, false).await.unwrap();
+        assert_eq!(denied.status, "denied");
+        assert_eq!(called.lock().len(), 1, "拒绝不应触代发");
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 }

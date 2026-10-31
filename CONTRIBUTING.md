@@ -15,9 +15,9 @@ All tests passing means you're ready to develop. | 全部测试通过即可开�
 
 ## Code Style | 代码风格
 
-- **Rust**: Standard rustfmt defaults; comments in Chinese | 标准 rustfmt 默认配置；注释用中文
+- **Rust**: Standard rustfmt defaults; comments in Chinese or English, whichever expresses the intent best | 标准 rustfmt 默认配置；注释中文英文皆可，以清晰达意为先
 - **TypeScript**: React function components + Hooks; state via zustand | React 函数组件 + Hooks；状态用 zustand
-- **Commit messages**: `type: 中文描述——动机` format (feat / fix / perf / refactor / docs / test / chore / ui / copy / rename / build / ci / revert) | 用「`类型: 中文描述——动机`」格式，type 用英文小写
+- **Commit messages**: `type: description——motivation` format; description in Chinese or English (type 用英文小写：feat / fix / perf / refactor / docs / test / chore / ui / copy / rename / build / ci / revert) | 「`类型: 描述——动机`」格式，type 用英文小写；描述中文英文皆可，项目惯例用中文但不强制
 - **Workflow**: Branch model, release process, CI policy → [docs/开发规范.md](./docs/开发规范.md) | 分支模型、发版流程与工作流纪律见开发规范
 
 ## Architecture Principles | 架构原则

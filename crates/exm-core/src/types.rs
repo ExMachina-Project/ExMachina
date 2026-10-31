@@ -147,6 +147,9 @@ pub enum ToolName {
     /// 模型自行判断时机，把窗口外旧历史主动压成滚动摘要
     #[serde(rename = "context_compact")]
     ContextCompact,
+    /// 会话级任务清单（spec: agent-todo）：长任务自组织——全量重写条目（内容+状态），
+    /// 清单非空时每轮注入系统提示（✅/🔄/⬜ 渲染），模型随时看到进度全景
+    Todo,
 }
 
 impl ToolName {
@@ -171,6 +174,7 @@ impl ToolName {
             ToolName::Git => "git",
             ToolName::Spawn => "spawn",
             ToolName::ContextCompact => "context_compact",
+            ToolName::Todo => "todo",
         }
     }
 
@@ -184,6 +188,7 @@ impl ToolName {
                 | ToolName::WebSearch
                 | ToolName::WebFetch
                 | ToolName::MemoryRead
+                | ToolName::Todo
         )
     }
 
@@ -208,6 +213,7 @@ impl ToolName {
             "git" => Some(ToolName::Git),
             "spawn" => Some(ToolName::Spawn),
             "context_compact" => Some(ToolName::ContextCompact),
+            "todo" => Some(ToolName::Todo),
             _ => None,
         }
     }
@@ -655,6 +661,9 @@ pub struct Session {
     pub last_message_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<String>,
+    /// 用户置顶（会话列表置顶分组；默认 false）
+    #[serde(default)]
+    pub pinned: bool,
     pub ledger: SessionLedger,
     pub created_at: String,
     pub updated_at: String,
@@ -993,10 +1002,11 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-// ---------------------------------------------------------------- 技能包（数据化技能，docs/10）
+// ---------------------------------------------------------------- 技能包（SKILL.md 通用格式）
 
 /// 技能包：任务目标命中触发词时，把指令注入相关个体的派发指令。
-/// 技能是数据（`agents/skills/` 或自定义组 `skills/`），热装载，扩编不写代码。
+/// 存储格式 = SKILL.md（YAML frontmatter + Markdown 正文=instructions，跨工具通用标准）；
+/// 旧 `*.json` 单文件仍可读（热转换，迁移零成本）。热装载，扩编不写代码。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDef {
@@ -1007,7 +1017,7 @@ pub struct SkillDef {
     /// 触发词：目标/节点标题包含任一词即注入
     #[serde(default)]
     pub triggers: Vec<String>,
-    /// 随派发下发的行为约束与作业知识
+    /// 随派发下发的行为约束与作业知识（= SKILL.md 正文）
     pub instructions: String,
     /// 适用的个体 identifier；空 = 全体适用
     #[serde(default)]
@@ -1164,6 +1174,15 @@ pub struct CronRun {
 
 // ---------------------------------------------------------------- 执行审批（docs/10）
 
+/// 视频动作代发执行器（video__act 审批批准后回调）：
+/// 入参 = 审批单内 JSON 载荷（channel/videoId/text/replyTo），返回执行结果文本。
+/// 网关侧注入（video 插件装配时），Core 不直接依赖平台 API。
+pub type VideoActExecutor = std::sync::Arc<
+    dyn Fn(String) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + Sync,
+>;
+
 /// 终端命令审批单：命令被闸门拦截后挂起，等待用户批准后由系统代执行
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1208,6 +1227,10 @@ pub struct PairingCode {
     pub created_at: String,
     /// 过期时间（Unix 毫秒）
     pub expires_at_ms: u64,
+    /// 预设角色：admin | member（缺省 member）；兑换时身份直接落此角色，
+    /// 免除「先 member 后手动提权」两步割裂
+    #[serde(default)]
+    pub role: String,
 }
 
 /// 绑定的外部用户身份：通道账号 → 平台用户档案（配对码换发的长期绑定）

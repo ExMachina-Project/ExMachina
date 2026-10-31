@@ -23,7 +23,10 @@ pub struct McpServer {
 
 impl McpServer {
     pub fn new(core: Arc<Core>, client: impl Into<String>) -> Self {
-        McpServer { core, client: client.into() }
+        McpServer {
+            core,
+            client: client.into(),
+        }
     }
 
     fn acl(&self) -> crate::config::McpServeConfig {
@@ -41,7 +44,11 @@ impl McpServer {
     }
 
     /// 会话亲和校验：存在且 active 且在 ACL 范围 → 返回会话；否则拒绝（可读错误）
-    fn resolve_session(&self, acl: &crate::config::McpServeConfig, session_id: &str) -> anyhow::Result<crate::types::Session> {
+    fn resolve_session(
+        &self,
+        acl: &crate::config::McpServeConfig,
+        session_id: &str,
+    ) -> anyhow::Result<crate::types::Session> {
         let s = self
             .core
             .store
@@ -115,14 +122,18 @@ impl McpServer {
             .into_iter()
             .find(|s| s.name == tool)
             .ok_or_else(|| anyhow::anyhow!("工具不可用或不在授权范围: {tool}"))?;
-        let tool_name = ToolName::parse(&spec.name)
-            .ok_or_else(|| anyhow::anyhow!("未知工具: {tool}"))?;
+        let tool_name =
+            ToolName::parse(&spec.name).ok_or_else(|| anyhow::anyhow!("未知工具: {tool}"))?;
 
         // 会话亲和：在该会话组的上下文中执行（执行完还原）
         let prev_group = self.core.registry.active_group();
         let mut switched = false;
         if session.group_id != prev_group && self.core.group_meta(&session.group_id).is_some() {
-            switched = self.core.registry.set_active_group(&session.group_id).is_ok();
+            switched = self
+                .core
+                .registry
+                .set_active_group(&session.group_id)
+                .is_ok();
         }
         let agent_label = format!("mcp/{}", self.client);
         let allowlist: Vec<ToolName> = vec![tool_name];
@@ -156,7 +167,9 @@ impl McpServer {
             Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
         };
         let err = |code: i64, message: &str| -> Option<Value> {
-            Some(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
+            Some(
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+            )
         };
 
         match method {
@@ -189,7 +202,11 @@ impl McpServer {
                     return err(-32000, "MCP 服务端未启用（mcpServe.enabled = false）");
                 }
                 let params = req.get("params").cloned().unwrap_or(json!({}));
-                let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let tool = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
                 // 会话亲和：会话标识 = arguments.session（保留字段，从载荷剥离后不进工具实参）
                 let session_id = arguments
@@ -199,7 +216,10 @@ impl McpServer {
                 let session_id = match session_id {
                     Some(s) => s,
                     None => {
-                        return err(-32002, "缺少会话标识：请在 arguments.session 提供有效会话 id（会话亲和）")
+                        return err(
+                            -32002,
+                            "缺少会话标识：请在 arguments.session 提供有效会话 id（会话亲和）",
+                        )
                     }
                 };
                 if let Some(obj) = arguments.as_object_mut() {
@@ -214,7 +234,8 @@ impl McpServer {
                     // 前两者是协议级拒绝（对不可见工具保持「不可用」口径），执行失败走工具级 isError
                     Err(e) => {
                         let msg = e.to_string();
-                        let code = if msg.contains("不在授权范围") || msg.contains("未知工具") {
+                        let code = if msg.contains("不在授权范围") || msg.contains("未知工具")
+                        {
                             -32602
                         } else if msg.contains("会话") {
                             -32002
@@ -235,7 +256,9 @@ mod tests {
     use super::*;
     use crate::types::AgentDefinition;
 
-    async fn server_with(security: impl FnOnce(&mut crate::config::ExmConfig)) -> (Arc<Core>, std::path::PathBuf) {
+    async fn server_with(
+        security: impl FnOnce(&mut crate::config::ExmConfig),
+    ) -> (Arc<Core>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("exm-mcpd-{}", crate::types::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = crate::config::ExmConfig::load(&dir);
@@ -245,7 +268,9 @@ mod tests {
         cfg.mcp_serve.allowed_tools = vec!["read".into(), "terminal".into(), "filesystem".into()];
         security(&mut cfg);
         let core = Arc::new(Core::with_config(cfg).unwrap());
-        core.registry().create_group(Some("t".into()), "mcp组", "").unwrap();
+        core.registry()
+            .create_group(Some("t".into()), "mcp组", "")
+            .unwrap();
         let def = AgentDefinition {
             name: "服务体".into(),
             identifier: "mcp-orch".into(),
@@ -284,7 +309,12 @@ mod tests {
         let srv = McpServer::new(core.clone(), "stdio");
 
         // initialize
-        let init = rpc(&srv, "initialize", json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {} })).await;
+        let init = rpc(
+            &srv,
+            "initialize",
+            json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {} }),
+        )
+        .await;
         assert_eq!(init["result"]["serverInfo"]["name"], SERVER_NAME);
         assert_eq!(init["result"]["protocolVersion"], PROTOCOL_VERSION);
         // 通知不回复
@@ -322,11 +352,17 @@ mod tests {
         )
         .await;
         assert_eq!(call["result"]["isError"], false, "{}", call);
-        assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("mcp-ok"));
+        assert!(call["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("mcp-ok"));
 
         // 审计来源标注 mcp/stdio
         let audit = core.store.list_tool_audit("mcp/stdio", 10).unwrap();
-        assert!(audit.iter().any(|a| a["tool"] == "read"), "审计应含来源标注 mcp/stdio");
+        assert!(
+            audit.iter().any(|a| a["tool"] == "read"),
+            "审计应含来源标注 mcp/stdio"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -336,7 +372,12 @@ mod tests {
         let (core, dir) = server_with(|_| {}).await;
         let srv = McpServer::new(core.clone(), "stdio");
         // 缺会话标识
-        let missing = rpc(&srv, "tools/call", json!({ "name": "read", "arguments": { "path": "x.txt" } })).await;
+        let missing = rpc(
+            &srv,
+            "tools/call",
+            json!({ "name": "read", "arguments": { "path": "x.txt" } }),
+        )
+        .await;
         assert!(missing["error"]["code"] == -32002, "{}", missing);
         // 不存在的会话
         let ghost = rpc(
@@ -345,8 +386,19 @@ mod tests {
             json!({ "name": "read", "arguments": { "session": "no-such", "path": "x.txt" } }),
         )
         .await;
-        assert!(ghost["error"]["message"].as_str().unwrap().contains("会话不存在"), "{}", ghost);
-        assert_eq!(core.store.list_tool_audit("mcp/stdio", 10).unwrap().len(), 0, "拒绝的调用无执行副作用");
+        assert!(
+            ghost["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("会话不存在"),
+            "{}",
+            ghost
+        );
+        assert_eq!(
+            core.store.list_tool_audit("mcp/stdio", 10).unwrap().len(),
+            0,
+            "拒绝的调用无执行副作用"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -355,10 +407,14 @@ mod tests {
         let (core, dir) = server_with(|cfg| {
             cfg.mcp_serve.allowed_groups = vec!["t".into()];
             cfg.mcp_serve.allowed_sessions = vec![];
-        }).await;
+        })
+        .await;
         let srv = McpServer::new(core.clone(), "http:127.0.0.1:1");
         let ok_session = core.create_session("范围内").unwrap();
-        assert!(srv.resolve_session(&srv.acl(), &ok_session.id).is_ok(), "范围内的会话放行");
+        assert!(
+            srv.resolve_session(&srv.acl(), &ok_session.id).is_ok(),
+            "范围内的会话放行"
+        );
 
         // 组范围：建一个组外会话（default 组）→ 拒绝
         core.registry().set_active_group("exmachina").unwrap();
@@ -371,10 +427,14 @@ mod tests {
         // 会话范围清单：未列入 → 拒绝
         let (core2, dir2) = server_with(|cfg| {
             cfg.mcp_serve.allowed_sessions = vec!["specific".into()];
-        }).await;
+        })
+        .await;
         let srv2 = McpServer::new(core2.clone(), "stdio");
         let other = core2.create_session("未列入").unwrap();
-        assert!(srv2.resolve_session(&srv2.acl(), &other.id).is_err(), "会话范围外拒绝");
+        assert!(
+            srv2.resolve_session(&srv2.acl(), &other.id).is_err(),
+            "会话范围外拒绝"
+        );
 
         // 默认关闭：handle_request 拒绝
         let (core3, dir3) = server_with(|cfg| cfg.mcp_serve.enabled = false).await;
@@ -396,7 +456,8 @@ mod tests {
         let (core, dir) = server_with(|cfg| {
             cfg.security.exec_approval = "always".into();
             cfg.security.approval_wait_secs = 0; // 旧语义：拦截即受阻回流（不等待）
-        }).await;
+        })
+        .await;
         let s = core.create_session("审批口径").unwrap();
         let srv = McpServer::new(core.clone(), "http:10.0.0.9");
         let resp = rpc(
@@ -405,17 +466,29 @@ mod tests {
             json!({ "name": "terminal", "arguments": { "session": s.id, "command": "echo blocked-mcp" } }),
         )
         .await;
-        assert_eq!(resp["result"]["isError"], true, "审批拦截应返回工具级错误: {resp}");
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "审批拦截应返回工具级错误: {resp}"
+        );
         assert!(
-            resp["result"]["content"][0]["text"].as_str().unwrap().contains("待人工审批"),
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("待人工审批"),
             "错误信息应说明审批口径: {resp}"
         );
         // 审批卡出现（pending 审批单入存储）
         let pending = core.approval_list(Some("pending"), 10).unwrap();
-        assert!(pending.iter().any(|a| a.command.contains("blocked-mcp")), "审批请求应已登记: {pending:?}");
+        assert!(
+            pending.iter().any(|a| a.command.contains("blocked-mcp")),
+            "审批请求应已登记: {pending:?}"
+        );
         // 审计来源可归因：mcp/http:10.0.0.9
         let audit = core.store.list_tool_audit("mcp/http:10.0.0.9", 10).unwrap();
-        assert!(audit.iter().any(|a| a["tool"] == "terminal"), "审计应标注来源与客户端身份");
+        assert!(
+            audit.iter().any(|a| a["tool"] == "terminal"),
+            "审计应标注来源与客户端身份"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

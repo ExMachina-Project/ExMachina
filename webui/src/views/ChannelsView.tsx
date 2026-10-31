@@ -8,6 +8,7 @@ import { PlusOutlined, QrcodeOutlined, ReloadOutlined } from "@ant-design/icons"
 import { api, type Channel, type ChannelStatus } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { IdentityPanel } from "../components/IdentityPanel";
+import { MaskedPasswordInput } from "../components/MaskedInput";
 import { BiliQrLoginModal } from "../components/BiliQrLoginModal";
 import { useExm } from "../store";
 import { useT, type TKey } from "../i18n/core";
@@ -35,7 +36,7 @@ interface ChanField {
 }
 interface ChanPlat {
   key: string;
-  color: string;
+  color?: string;
   /** 表格里的平台标牌（品牌名，各语言一致） */
   tag?: string;
   tagKey?: TKey;
@@ -51,7 +52,7 @@ interface ChanPlat {
 const PLATFORMS: ChanPlat[] = [
   {
     key: "qqbot",
-    color: "geekblue",
+    color: undefined,
     tag: "QQ Bot",
     labelKey: "channels.plat.qqbot",
     helpKey: "channels.platHelp.qqbot",
@@ -64,7 +65,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "napcat",
-    color: "blue",
+    color: undefined,
     tag: "NapCat",
     labelKey: "channels.plat.napcat",
     helpKey: "channels.platHelp.napcat",
@@ -76,7 +77,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "telegram",
-    color: "processing",
+    color: undefined,
     tag: "Telegram",
     labelKey: "channels.plat.telegram",
     helpKey: "channels.platHelp.telegram",
@@ -85,7 +86,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "discord",
-    color: "purple",
+    color: undefined,
     tag: "Discord",
     labelKey: "channels.plat.discord",
     helpKey: "channels.platHelp.discord",
@@ -96,7 +97,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "slack",
-    color: "magenta",
+    color: undefined,
     tag: "Slack",
     labelKey: "channels.plat.slack",
     helpKey: "channels.platHelp.slack",
@@ -108,7 +109,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "matrix",
-    color: "gold",
+    color: undefined,
     tag: "Matrix",
     labelKey: "channels.plat.matrix",
     helpKey: "channels.platHelp.matrix",
@@ -120,7 +121,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "bilibili",
-    color: "pink",
+    color: undefined,
     tag: "B站",
     labelKey: "channels.plat.bilibili",
     helpKey: "channels.platHelp.bilibili",
@@ -145,11 +146,31 @@ const PLATFORMS: ChanPlat[] = [
       },
       { key: "keywords", labelKey: "channels.f.keywords", helpKey: "channels.f.keywordsHelp" },
       { key: "interests", labelKey: "channels.f.interests", multiline: true, ph: "channels.f.interestsPh", helpKey: "channels.f.interestsHelp" },
-      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
       { key: "commentStyle", labelKey: "channels.f.commentStyle", multiline: true, helpKey: "channels.f.commentStyleHelp" },
       { key: "intervalMinutes", labelKey: "channels.f.intervalMinutes", default: "10", helpKey: "channels.f.intervalMinutesHelp" },
       { key: "maxActionsPerRun", labelKey: "channels.f.maxActionsPerRun", default: "1", helpKey: "channels.f.maxActionsPerRunHelp" },
       { key: "dailyLimit", labelKey: "channels.f.dailyLimit", default: "6", helpKey: "channels.f.dailyLimitHelp" },
+      {
+        key: "approval",
+        labelKey: "channels.f.approval",
+        default: "off",
+        options: [
+          { value: "off", labelKey: "channels.f.approvalOff" },
+          { value: "always", labelKey: "channels.f.approvalAlways" },
+        ],
+        helpKey: "channels.f.approvalHelp",
+      },
+      {
+        key: "actRole",
+        labelKey: "channels.f.actRole",
+        default: "admin",
+        options: [
+          { value: "admin", labelKey: "channels.f.actRoleAdmin" },
+          { value: "member", labelKey: "channels.f.actRoleMember" },
+        ],
+        helpKey: "channels.f.actRoleHelp",
+      },
+      { key: "maxWatchSteps", labelKey: "channels.f.maxWatchSteps", default: "8", helpKey: "channels.f.maxWatchStepsHelp" },
       { key: "maxCommentChars", labelKey: "channels.f.maxCommentChars", default: "120", helpKey: "channels.f.maxCommentCharsHelp" },
     ],
   },
@@ -180,17 +201,51 @@ const PLATFORMS: ChanPlat[] = [
       },
       { key: "keywords", labelKey: "channels.f.keywords", helpKey: "channels.f.keywordsHelp" },
       { key: "interests", labelKey: "channels.f.interests", multiline: true, ph: "channels.f.interestsPh", helpKey: "channels.f.interestsHelp" },
-      { key: "replyKeywords", labelKey: "channels.f.replyKeywords", helpKey: "channels.f.replyKeywordsHelp" },
       { key: "commentStyle", labelKey: "channels.f.commentStyle", multiline: true, helpKey: "channels.f.commentStyleHelp" },
       { key: "intervalMinutes", labelKey: "channels.f.intervalMinutes", default: "10", helpKey: "channels.f.intervalMinutesHelp" },
       { key: "maxActionsPerRun", labelKey: "channels.f.maxActionsPerRun", default: "1", helpKey: "channels.f.maxActionsPerRunHelp" },
       { key: "dailyLimit", labelKey: "channels.f.dailyLimit", default: "6", helpKey: "channels.f.dailyLimitHelp" },
+      {
+        key: "approval",
+        labelKey: "channels.f.approval",
+        default: "off",
+        options: [
+          { value: "off", labelKey: "channels.f.approvalOff" },
+          { value: "always", labelKey: "channels.f.approvalAlways" },
+        ],
+        helpKey: "channels.f.approvalHelp",
+      },
+      {
+        key: "actRole",
+        labelKey: "channels.f.actRole",
+        default: "admin",
+        options: [
+          { value: "admin", labelKey: "channels.f.actRoleAdmin" },
+          { value: "member", labelKey: "channels.f.actRoleMember" },
+        ],
+        helpKey: "channels.f.actRoleHelp",
+      },
+      { key: "maxWatchSteps", labelKey: "channels.f.maxWatchSteps", default: "8", helpKey: "channels.f.maxWatchStepsHelp" },
       { key: "maxCommentChars", labelKey: "channels.f.maxCommentChars", default: "120", helpKey: "channels.f.maxCommentCharsHelp" },
     ],
   },
   {
+    key: "rss",
+    color: undefined,
+    tag: "RSS",
+    labelKey: "channels.plat.rss",
+    helpKey: "channels.platHelp.rss",
+    proactive: true,
+    fields: [
+      { key: "feeds", labelKey: "channels.f.rssFeeds", multiline: true, required: true, ph: "channels.f.rssFeedsPh", helpKey: "channels.f.rssFeedsHelp" },
+      { key: "intervalMinutes", labelKey: "channels.f.rssInterval", default: "30", helpKey: "channels.f.rssIntervalHelp" },
+      { key: "maxPerRound", labelKey: "channels.f.rssMaxPerRound", default: "10", helpKey: "channels.f.rssMaxPerRoundHelp" },
+      { key: "push", labelKey: "channels.f.rssPush", helpKey: "channels.f.rssPushHelp" },
+    ],
+  },
+  {
     key: "webhook",
-    color: "cyan",
+    color: undefined,
     tag: "Webhook",
     labelKey: "channels.plat.webhook",
     helpKey: "channels.platHelp.webhook",
@@ -198,7 +253,7 @@ const PLATFORMS: ChanPlat[] = [
   },
   {
     key: "qq",
-    color: "geekblue",
+    color: undefined,
     tagKey: "channels.tag.qq",
     labelKey: "channels.plat.qq",
     helpKey: "channels.platHelp.qq",
@@ -233,6 +288,41 @@ function platformDefaults(kind: string): Record<string, unknown> {
 
 export function ChannelsView(): React.ReactElement {
   const t = useT();
+  // 插件清单动态并入平台目录：插件声明的 channel kinds（凭据字段按清单渲染）
+  const [extraPlats, setExtraPlats] = useState<ChanPlat[]>([]);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await api.plugins();
+        const plugs = r.plugins ?? [];
+        const extra: ChanPlat[] = [];
+        for (const p of plugs) {
+          if (!p.enabled || !p.capabilities?.channel) continue;
+          const kinds = p.capabilities.channel.kinds ?? [];
+          // 静态表已有的 kind：凭据字段仍由静态表精细维护（帮助文案/扫码登录等），跳过
+          const newKinds = kinds.filter((k) => !PLATFORMS.some((sp) => sp.key === k));
+          for (const k of newKinds) {
+            extra.push({
+              key: k,
+              color: undefined,
+              tag: p.name || p.id,
+              labelKey: "channels.plat.plugin" as TKey,
+              helpKey: "channels.platHelp.plugin" as TKey,
+              proactive: true,
+              fields: [], // 凭据字段在详情处按清单动态渲染（下方 pluginCredentialFields）
+            });
+          }
+        }
+        setExtraPlats(extra);
+      } catch {
+        /* 插件面不可用时不阻塞静态目录 */
+      }
+    })();
+  }, []);
+  const catalog = React.useMemo<ChanPlat[]>(
+    () => [...PLATFORMS, ...extraPlats],
+    [extraPlats],
+  );
   const { groups } = useExm();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [tab, setTab] = useState("accounts");
@@ -294,7 +384,7 @@ export function ChannelsView(): React.ReactElement {
 
   const openEdit = (c: Channel) => {
     setEditing(c);
-    const plat = PLATFORMS.find((p) => p.key === c.type);
+    const plat = catalog.find((p) => p.key === c.type);
     // 扩展 config（目录之外键）反序列化为 JSON 预填，保存时随 config 一并回传
     const catalogKeys = new Set((plat?.fields ?? []).map((f) => f.key));
     const extra: Record<string, string> = {};
@@ -316,6 +406,7 @@ export function ChannelsView(): React.ReactElement {
       replyWebhook: c.replyWebhook,
       token: c.token,
       allowedChats: (c.allowedChats ?? []).join(", "),
+      admins: (c.admins ?? []).join(", "),
       capability: c.capability ?? "computer",
       memoryIsolation: c.memoryIsolation ?? false,
       config: cfg,
@@ -350,7 +441,7 @@ export function ChannelsView(): React.ReactElement {
   const submit = async () => {
     const v = await form.validateFields();
     setSaving(true);
-    const plat = PLATFORMS.find((p) => p.key === v.platform) ?? PLATFORMS[0];
+    const plat = catalog.find((p) => p.key === v.platform) ?? catalog[0];
     // config 扩展 JSON：面板未展开时字段未注册，从 form store 直读并手动校验（合法才允许保存）
     const parsedJson = parseConfigJson(form.getFieldValue("configJson"));
     if (parsedJson.error) {
@@ -379,6 +470,10 @@ export function ChannelsView(): React.ReactElement {
       token: v.token || undefined,
       config,
       allowedChats: (v.allowedChats ?? "")
+        .split(/[,,\s]+/)
+        .map((s: string) => s.trim())
+        .filter(Boolean),
+      admins: (v.admins ?? "")
         .split(/[,,\s]+/)
         .map((s: string) => s.trim())
         .filter(Boolean),
@@ -420,16 +515,16 @@ export function ChannelsView(): React.ReactElement {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
 
   const platformTag = (p: string) => {
-    const plat = PLATFORMS.find((x) => x.key === p);
+    const plat = catalog.find((x) => x.key === p);
     if (!plat) return <Tag>{p}</Tag>;
-    return <Tag color={plat.color}>{plat.tag ?? (plat.tagKey ? t(plat.tagKey) : p)}</Tag>;
+    return <Tag color={plat.color || undefined}>{plat.tag ?? (plat.tagKey ? t(plat.tagKey) : p)}</Tag>;
   };
 
   const fieldSet = (c: Channel, f: ChanField) =>
     f.top === "token" ? !!c.token : f.top === "secret" ? !!c.secret : !!c.config?.[f.key];
 
   const credTag = (c: Channel) => {
-    const plat = PLATFORMS.find((x) => x.key === c.type);
+    const plat = catalog.find((x) => x.key === c.type);
     if (!plat) return <Tag>{c.type}</Tag>;
     const missing = plat.fields.filter((f) => f.required && !fieldSet(c, f));
     if (missing.length > 0) {
@@ -501,6 +596,7 @@ export function ChannelsView(): React.ReactElement {
           size="small"
           rowKey="id"
           pagination={false}
+          scroll={{ x: "max-content" }}
           dataSource={channels}
           locale={{ emptyText: <BrandEmpty description={t("channels.empty")} className="pane-empty" /> }}
           columns={[
@@ -525,7 +621,7 @@ export function ChannelsView(): React.ReactElement {
                   <Space direction="vertical" size={2}>
                     {c.group ? (
                       isSingle ? (
-                        <Tag color="cyan">
+                        <Tag>
                           {t("channels.f.singleTag")} · {singles.find((s) => s.identifier === c.group!.slice(7))?.name ?? c.group.slice(7)}
                         </Tag>
                       ) : (
@@ -535,11 +631,11 @@ export function ChannelsView(): React.ReactElement {
                       <Tag>{t("channels.followSingle")}</Tag>
                     )}
                     <Space size={4} wrap>
-                      <Tag color={cap === "chat" ? "default" : cap === "tools" ? "blue" : "volcano"}>
+                      <Tag color={cap === "chat" ? undefined : "purple"}>
                         {t(`channels.cap.${cap}` as TKey)}
                       </Tag>
                       {c.memoryIsolation ? (
-                        <Tag color="orange">{t("channels.memIsolated")}</Tag>
+                        <Tag>{t("channels.memIsolated")}</Tag>
                       ) : (
                         <Tag>{t("channels.memShared")}</Tag>
                       )}
@@ -555,6 +651,11 @@ export function ChannelsView(): React.ReactElement {
               width: 110,
               render: (_, c) => {
                 const st = testResult[c.id];
+                const testText = st
+                  ? st.ok
+                    ? st.identity || t("channels.testOkShort")
+                    : t("channels.testCat." + st.category, { msg: (st.message ?? "").slice(0, 60) })
+                  : "";
                 return (
                   <Space size={4} direction="vertical">
                     <Button
@@ -566,17 +667,24 @@ export function ChannelsView(): React.ReactElement {
                           .then((r) => {
                             setTestResult((m) => ({ ...m, [c.id]: r }));
                             if (r.ok) message.success(t("channels.testOk", { id: r.identity ?? "" }));
-                            else message.warning(t("channels.testFailC", { cat: r.category ?? "", msg: r.message ?? r.error ?? "" }));
+                            else message.warning(t("channels.testFailC", { cat: r.category ?? "", msg: (r.message ?? r.error ?? "").slice(0, 80) }));
                           })
-                          .catch((e) => message.error(t("channels.testFailC", { cat: "", msg: String(e).slice(0, 120) })));
+                          .catch((e) => message.error(t("channels.testFailC", { cat: "", msg: String(e).slice(0, 80) })));
                       }}
                     >
                       {t("channels.testBtn")}
                     </Button>
                     {st && (
-                      <Tag color={st.ok ? "success" : st.category === "auth" ? "error" : st.category === "missing" ? "warning" : "default"}>
-                        {st.ok ? st.identity || t("channels.testOkShort") : t("channels.testCat." + st.category, { msg: (st.message ?? "").slice(0, 60) })}
-                      </Tag>
+                      /* 长错误文案限宽省略 + Tooltip 全文：antd Tag 不换行会撑破列宽，
+                         连接类报错（IO error: Connection refused 等）曾把表格挤出视口 */
+                      <Tooltip title={testText}>
+                        <Tag
+                          color={st.ok ? undefined : st.category === "auth" ? "error" : st.category === "missing" ? "warning" : undefined}
+                          style={{ maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginInlineEnd: 0 }}
+                        >
+                          {testText}
+                        </Tag>
+                      </Tooltip>
                     )}
                   </Space>
                 );
@@ -585,8 +693,8 @@ export function ChannelsView(): React.ReactElement {
             {
               title: t("channels.colReply"),
               render: (_, c) => {
-                const plat = PLATFORMS.find((x) => x.key === c.type);
-                if (plat?.proactive) return <Tag color="pink">{t("channels.replyProactive")}</Tag>;
+                const plat = catalog.find((x) => x.key === c.type);
+                if (plat?.proactive) return <Tag color="purple">{t("channels.replyProactive")}</Tag>;
                 return plat?.replyBuiltin ? (
                   <Tag>{t("channels.replyBuiltin")}</Tag>
                 ) : (
@@ -641,7 +749,7 @@ export function ChannelsView(): React.ReactElement {
         <Form form={form} layout="vertical" onFinish={() => void submit()}>
           <Form.Item noStyle shouldUpdate={(a, b) => a.platform !== b.platform}>
             {({ getFieldValue }) => {
-              const plat = PLATFORMS.find((p) => p.key === getFieldValue("platform")) ?? PLATFORMS[0];
+              const plat = catalog.find((p) => p.key === getFieldValue("platform")) ?? catalog[0];
               return (
                 <>
                   <Form.Item
@@ -652,7 +760,7 @@ export function ChannelsView(): React.ReactElement {
                   >
                     <Select
                       disabled={editing !== null}
-                      options={PLATFORMS.map((p) => ({ value: p.key, label: t(p.labelKey) }))}
+                      options={catalog.map((p) => ({ value: p.key, label: p.tag ? `${t(p.labelKey)} · ${p.tag}` : t(p.labelKey) }))}
                       onChange={(kind) =>
                         form.setFieldsValue({
                           token: undefined,
@@ -707,7 +815,7 @@ export function ChannelsView(): React.ReactElement {
                           ) : f.multiline ? (
                             <Input.TextArea rows={3} placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           ) : f.secret ? (
-                            <Input.Password autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
+                            <MaskedPasswordInput autoComplete="new-password" placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           ) : (
                             <Input placeholder={f.ph?.startsWith("channels.") ? t(f.ph as TKey) : f.ph} />
                           )}
@@ -755,6 +863,14 @@ export function ChannelsView(): React.ReactElement {
                     extra={t("channels.f.memoryIsolationHelp")}
                   >
                     <Switch size="small" />
+                  </Form.Item>
+                  {/* 管理者账号：主体区直接可见（判权跟人走，任何通道配了都全局生效） */}
+                  <Form.Item
+                    name="admins"
+                    label={t("channels.f.admins")}
+                    extra={t("channels.f.adminsExtra")}
+                  >
+                    <Input placeholder={t("channels.f.adminsPh")} />
                   </Form.Item>
 
                   <Collapse

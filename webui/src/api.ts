@@ -102,6 +102,8 @@ export interface GatewayConfig {
   hooks?: { preTool: string[]; postTool: string[]; onRunEnd: string[] };
   /** 工具面（声明式自定义工具） */
   tools?: { custom: Array<Record<string, unknown>> };
+  /** 回收站保留契约（保留期 + 容量上限） */
+  trash?: { retentionDays: number; maxBytes: number };
   mock: boolean;
 }
 
@@ -209,6 +211,54 @@ export interface SkillDef {
   createdAt: string;
 }
 
+/** 插件列表项（GET /api/plugins） */
+export interface PluginSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  form: "builtin" | "process" | "declarative" | "virtual" | "unknown";
+  enabled: boolean;
+  error?: string | null;
+  capabilities: {
+    tools: number;
+    channel?: { kinds: string[]; credentials: number };
+    watch: boolean;
+    resources: number;
+    process: boolean;
+  };
+  /** 进程形态握手发现的工具名（列表页直接可见） */
+  toolsSnapshot?: string[];
+}
+
+/** 插件详情（GET /api/plugins/:id） */
+export interface PluginDetail extends PluginSummary {
+  manifest: Record<string, unknown>;
+  health: "ok" | "degraded";
+  installation?: { kind: string; url: string; subdir?: string; ref?: string } | null;
+  credentialsConfigured?: boolean;
+  /** 进程插件握手后 tools/list 快照（空 = 未拉起或非进程形态） */
+  toolsSnapshot?: string[];
+}
+
+/** 插件凭据区回显（值一律掩码） */
+export interface PluginCredentials {
+  id: string;
+  credentials: Record<string, string>;
+  configured: boolean;
+}
+
+/** 索引目录条目（GET /api/plugins/index） */
+export interface PluginIndexEntry {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  status: "available" | "installed" | "updatable" | "incompatible";
+  localVersion?: string;
+  exmMin?: string;
+}
+
 export interface CronJob {
   id: string;
   name: string;
@@ -273,6 +323,48 @@ export interface ApprovalRequest {
   decidedAt?: string;
 }
 
+// 计划模式（spec plan-mode：WebUI 计划卡片数据契约）
+export interface PlanItem {
+  id: string;
+  tool: string;
+  target: string;
+  action: string;
+  args: Record<string, unknown>;
+  createdAt: string;
+}
+
+// 任务清单（spec agent-todo）：todo.updated 事件负载
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "done";
+}
+
+// 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件数据
+export interface SpawnBgItem {
+  spawnId: string;
+  preview: string;
+  status: "running" | "done" | "failed" | "timeout";
+  /** 终态结果预览（spawn.finished 的 summaryPreview） */
+  resultPreview?: string;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+export interface PlanInfo {
+  sessionId: string;
+  mode: "plan" | "execute";
+  items: PlanItem[];
+  count: number;
+}
+
+export interface PlanAppliedItem {
+  itemId: string;
+  tool: string;
+  target: string;
+  ok: boolean;
+}
+
 export interface Channel {
   id: string;
   type: string;
@@ -286,6 +378,8 @@ export interface Channel {
   config?: Record<string, string>;
   /** 会话白名单（Telegram chat id / QQ openid / OneBot 群号或 QQ 号；空 = 不限） */
   allowedChats?: string[];
+  /** 管理者账号：外部用户 ID 清单，判权视同 admin（免配对绑定） */
+  admins?: string[];
   /** 群聊唤醒门控逐通道覆盖：true = 群内仅提及/回复触发；缺省 = 跟随全局默认 */
   groupGate?: boolean;
   /** 能力边界：chat = 仅聊天；tools = 可调工具；computer = 电脑操控（缺省） */
@@ -410,6 +504,11 @@ export const api = {
     req<{ ok: boolean; title: string }>(`/sessions/${id}/title`, {
       method: "PUT",
       body: JSON.stringify({ title }),
+    }),
+  pinSession: (id: string, pinned: boolean) =>
+    req<{ ok: boolean; pinned: boolean }>(`/sessions/${id}/pin`, {
+      method: "PUT",
+      body: JSON.stringify({ pinned }),
     }),
   deleteSession: (id: string) => req<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   // 会话历史管控（组 9）：撤销 / 编辑重发 / 分支派生 / 归档与快照视图
@@ -606,6 +705,34 @@ export const api = {
   }) => req<SkillDef>("/skills", { method: "POST", body: JSON.stringify(body) }),
   deleteSkill: (id: string) => req<{ ok: boolean }>(`/skills/${id}`, { method: "DELETE" }),
 
+  // ---------------- 插件系统（/api/plugins）
+  plugins: () => req<{ plugins: PluginSummary[] }>("/plugins"),
+  pluginDetail: (id: string) => req<PluginDetail>(`/plugins/${id}`),
+  setPluginEnabled: (id: string, enabled: boolean) =>
+    req<{ id: string; enabled: boolean }>(`/plugins/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  deletePlugin: (id: string) =>
+    req<{ id: string; removed: boolean }>(`/plugins/${id}`, { method: "DELETE" }),
+  pluginCredentials: (id: string) =>
+    req<PluginCredentials>(`/plugins/${id}/credentials`),
+  setPluginCredentials: (id: string, credentials: Record<string, string>) =>
+    req<{ id: string; saved: boolean }>(`/plugins/${id}/credentials`, {
+      method: "PUT",
+      body: JSON.stringify({ credentials }),
+    }),
+  pluginIndex: () => req<{ indexUrl: string; entries: PluginIndexEntry[] }>("/plugins/index"),
+  installPlugin: (source: string, overwrite = false) =>
+    req<{ id: string; version: string; updated: boolean }>("/plugins/install", {
+      method: "POST",
+      body: JSON.stringify({ source, overwrite }),
+    }),
+  updatePlugin: (id: string) =>
+    req<{ id: string; updated: boolean; message: string }>(`/plugins/${id}/update`, {
+      method: "POST",
+    }),
+
   listCron: () => req<CronJob[]>("/cron"),
   createCron: (body: {
     name: string;
@@ -646,6 +773,14 @@ export const api = {
       body: JSON.stringify({}),
     }),
 
+  // 计划模式（spec plan-mode：跨端审批呈现——WebUI 计划卡片）
+  getPlan: (id: string) => req<PlanInfo>(`/sessions/${id}/plan`),
+  decidePlan: (id: string, action: "approve" | "reject" | "setMode", plan?: boolean) =>
+    req<{ sessionId: string; ok?: boolean; okCount?: number; failCount?: number; applied?: PlanAppliedItem[] }>(
+      `/sessions/${id}/plan`,
+      { method: "POST", body: JSON.stringify({ action, plan }) },
+    ),
+
   listChannels: () => req<Channel[]>("/channels"),
   channelStatus: () => req<Record<string, ChannelStatus>>("/channels/status"),
   /** B 站扫码登录：出码（返回二维码内容 URL）→ 前端渲染二维码 → 轮询到 confirmed 拿登录 Cookie */
@@ -665,12 +800,13 @@ export const api = {
     token?: string;
     enabled?: boolean;
     allowedChats?: string[];
+    admins?: string[];
     groupGate?: boolean;
     capability?: "chat" | "tools" | "computer";
     memoryIsolation?: boolean;
     config?: Record<string, string>;
   }) => req<Channel>("/channels", { method: "POST", body: JSON.stringify(body) }),
-  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; groupGate?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
+  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
     req<Channel>(`/channels/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
 
@@ -777,8 +913,11 @@ export function identityList(): Promise<IdentityList> {
 }
 
 /** 通道身份：签发配对码（单次有效、限时） */
-export function identityIssue(note: string): Promise<{ code: string; expiresAtMs: number }> {
-  return req(`/identity/code`, { method: "POST", body: JSON.stringify({ note }) });
+export function identityIssue(note: string, role?: "admin" | "member"): Promise<{ code: string; expiresAtMs: number }> {
+  return req(`/identity/code`, {
+    method: "POST",
+    body: JSON.stringify({ note, role: role ?? "member" }),
+  });
 }
 
 /** 通道身份：调整角色（admin | member） */

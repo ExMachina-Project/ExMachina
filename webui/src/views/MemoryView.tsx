@@ -108,14 +108,15 @@ function MdEditor(): React.ReactElement {
   );
 }
 
-const KIND_COLORS: Record<string, string> = {
-  fact: "blue",
+// 记忆类别 → 资产灰阶语汇：decision（裁决）保留品牌紫点缀，其余中性 mono 标签
+const KIND_COLORS: Record<string, string | undefined> = {
+  fact: undefined,
   decision: "purple",
-  preference: "gold",
-  evidence: "cyan",
-  digest: "default",
-  lesson: "volcano",
-  stat: "green",
+  preference: undefined,
+  evidence: undefined,
+  digest: undefined,
+  lesson: "red",
+  stat: undefined,
 };
 
 export function MemoryView(): React.ReactElement {
@@ -310,9 +311,9 @@ export function MemoryView(): React.ReactElement {
               <List.Item>
                 <Space direction="vertical" style={{ width: "100%" }}>
                   <Space>
-                    <Tag color={KIND_COLORS[h.entry.kind] ?? "default"}>{h.entry.kind}</Tag>
+                    <Tag color={KIND_COLORS[h.entry.kind]}>{h.entry.kind}</Tag>
                     <b>{h.entry.title}</b>
-                    <Tag color="green">{t("memory.score", { s: h.score.toFixed(2) })}</Tag>
+                    <Tag>{t("memory.score", { s: h.score.toFixed(2) })}</Tag>
                     <span className="memory-reason">{h.reasons.join("；")}</span>
                   </Space>
                   <span>{h.entry.body.slice(0, 200)}</span>
@@ -365,7 +366,7 @@ export function MemoryView(): React.ReactElement {
               title: t("memory.colKind"),
               dataIndex: "kind",
               width: 100,
-              render: (k: string) => <Tag color={KIND_COLORS[k] ?? "default"}>{k}</Tag>,
+              render: (k: string) => <Tag color={KIND_COLORS[k]}>{k}</Tag>,
             },
             {
               title: t("memory.colLayer"),

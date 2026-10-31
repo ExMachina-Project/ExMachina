@@ -890,10 +890,7 @@ pub async fn workbench_file(
 }
 
 /// 计划清单（GET /api/sessions/:id/plan）：当前条目 + 模式位
-pub async fn plan_list(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn plan_list(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let items = st.core.plan_list(&id);
     Json(json!({
         "sessionId": id,
@@ -956,7 +953,9 @@ pub async fn plan_decide(
         }
         other => (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("未知 action：{other}（支持 approve/reject/setMode）") })),
+            Json(
+                json!({ "error": format!("未知 action：{other}（支持 approve/reject/setMode）") }),
+            ),
         )
             .into_response(),
     }
@@ -1015,10 +1014,11 @@ pub async fn deny_request(State(st): State<AppState>, Path(id): Path<String>) ->
 /// - `slack`：Slack 应用（Socket Mode，免公网回调，slack.rs）；
 /// - `matrix`：Matrix 房间（Client-Server API 长轮询 /sync，matrix.rs）；
 /// - `bilibili` / `youtube`：视频平台主动观看与互动（video.rs，按配置轮询热门/关键词视频，
-///   读取字幕/简介与评论 → 生成评论/回复 → 可选真发；默认 dry-run）。
+///   读取字幕/简介与评论 → 生成评论/回复 → 可选真发；默认 dry-run）；
+/// - `rss`：RSS/Atom 订阅阅读（plugins/rss，按配置轮询新条目 → 阅读简报 → 可选推送）。
 pub const CHANNEL_PLATFORMS: &[&str] = &[
     "webhook", "telegram", "qqbot", "napcat", "discord", "slack", "matrix", "qq", "wechat",
-    "bilibili", "youtube",
+    "bilibili", "youtube", "rss",
 ];
 
 /// 通道定义：外部消息源接入点。平台 = `type`（webhook / telegram / qqbot / napcat …）。
@@ -1038,6 +1038,10 @@ pub struct Channel {
     /// 会话白名单：允许交互的会话键（Telegram chat id / QQ openid / OneBot 群号或 QQ 号；空 = 不限）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_chats: Vec<String>,
+    /// 管理者账号：外部用户 ID 清单（QQ 号 / Telegram user id 等），命中即视同 admin 角色——
+    /// 免配对绑定即拥有管理者判权（与绑定身份的 admin 角色同权并集）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admins: Vec<String>,
     /// 账号备注（同平台多账号时区分用途）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -1087,7 +1091,7 @@ pub(crate) fn load_channels(core: &exm_core::Core) -> Vec<Channel> {
         .unwrap_or_default()
 }
 
-fn save_channels(core: &exm_core::Core, channels: &[Channel]) -> anyhow::Result<()> {
+pub(crate) fn save_channels(core: &exm_core::Core, channels: &[Channel]) -> anyhow::Result<()> {
     let p = channels_path(core);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1174,7 +1178,10 @@ pub(crate) fn target_exists(core: &exm_core::Core, target: &str) -> bool {
     if let Some(id) = single {
         return core.registry().single(&id).is_some();
     }
-    group.as_deref().map(|g| core.group_meta(g).is_some()).unwrap_or(true)
+    group
+        .as_deref()
+        .map(|g| core.group_meta(g).is_some())
+        .unwrap_or(true)
 }
 
 // ---------------------------------------------------------------- 出站能力矩阵与回复整形（组 6）
@@ -1506,8 +1513,15 @@ pub(crate) async fn admit(
         return GateDecision::Ignore;
     }
 
-    // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引
-    if identity_cfg.identity_required && core.identity_of(&ch.id, ctx.external_id).is_none() {
+    // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引。管理者账号清单命中豁免——
+    // 按外部用户 ID 跨通道匹配（人在任一通道的管理者清单即凭证；判权跟人走，
+    // 用户可能在此通道说话、经别的通道执行动作，故不限于本通道清单）
+    if identity_cfg.identity_required
+        && core.identity_of(&ch.id, ctx.external_id).is_none()
+        && !load_channels(core)
+            .iter()
+            .any(|c| c.admins.iter().any(|a| a.trim() == ctx.external_id))
+    {
         return GateDecision::Deny(
             "【报告】未绑定身份：请在控制台「通道身份」页签发配对码，然后在此发送 /pair <配对码> 完成绑定。".into(),
         );
@@ -1665,7 +1679,11 @@ impl ChannelRun {
             // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
             // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
             "plan.pending" => {
-                let count = evt.payload.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let count = evt
+                    .payload
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let items = self.core.plan_list(&self.session_id);
                 let mut lines = vec![format!("📋 计划待审批（{count} 条）：")];
                 for (i, it) in items.iter().take(8).enumerate() {
@@ -1679,8 +1697,16 @@ impl ChannelRun {
                 Some(lines.join("\n").chars().take(max_chars).collect())
             }
             "plan.applied" => {
-                let ok = evt.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                let target = evt.payload.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                let ok = evt
+                    .payload
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let target = evt
+                    .payload
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 Some(format!(
                     "{} 计划条目已执行：{target}",
                     if ok { "✅" } else { "❌" }
@@ -1718,13 +1744,14 @@ impl ChannelRun {
                         let fail_n = rs.len() - ok_n;
                         self.core.emit_run_error(
                             &self.session_id,
-                            &format!(
-                                "【报告】计划已批准并回放：{ok_n} 条成功，{fail_n} 条失败。"
-                            ),
+                            &format!("【报告】计划已批准并回放：{ok_n} 条成功，{fail_n} 条失败。"),
                         );
                     }
                     Err(e) => {
-                        self.core.emit_run_error(&self.session_id, &format!("【警告】计划回放失败：{e}"));
+                        self.core.emit_run_error(
+                            &self.session_id,
+                            &format!("【警告】计划回放失败：{e}"),
+                        );
                     }
                 }
             } else {
@@ -1783,7 +1810,11 @@ impl Drop for GroupRestore {
 }
 
 /// 还原到之前的交互上下文（组 + 单智能体快照）
-pub(crate) fn restore_context(core: &exm_core::Core, prev_group: &str, prev_single: &Option<String>) {
+pub(crate) fn restore_context(
+    core: &exm_core::Core,
+    prev_group: &str,
+    prev_single: &Option<String>,
+) {
     if let Some(id) = prev_single {
         let _ = core.registry().set_active_single(Some(id));
     } else {
@@ -2043,7 +2074,7 @@ pub async fn channel_status() -> impl IntoResponse {
 // 直接回给前端填表单，不落盘（保存通道时才随 config 入库并掩码）。
 
 pub async fn bili_qr_start() -> impl IntoResponse {
-    match crate::video::bili_qr_generate().await {
+    match crate::plugins::video::bili_qr_generate().await {
         Ok(s) => Json(json!({ "qrcodeKey": s.qrcode_key, "url": s.url })).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -2061,7 +2092,7 @@ pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
         )
             .into_response();
     }
-    match crate::video::bili_qr_poll(qrcode_key.trim()).await {
+    match crate::plugins::video::bili_qr_poll(qrcode_key.trim()).await {
         // Ok(登录态) → 成功；Err(业务码) → 86101 未扫 / 86090 待确认 / 86083 过期
         Ok(Ok(login)) => Json(json!({
             "state": "confirmed",
@@ -2080,12 +2111,12 @@ pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
     }
 }
 
-
 // ---------------------------------------------------------------- 通道 CRUD（脱敏回显）
 
-/// 平台 config 中的敏感键（掩码回显；更新时掩码值 = 沿用旧值）
-fn secret_config_keys(kind: &str) -> &'static [&'static str] {
-    match kind {
+/// 平台 config 中的敏感键（掩码回显；更新时掩码值 = 沿用旧值）。
+/// 插件通道（经注册面声明的 kind）再并入清单 sensitive 凭据键（双源并集）。
+fn secret_config_keys(kind: &str) -> Vec<&'static str> {
+    let static_keys: &[&'static str] = match kind {
         "qqbot" => &["appSecret"],
         "napcat" => &["token"],
         // Slack Socket Mode 应用级令牌（xapp-）；机器人令牌走顶层 token
@@ -2094,11 +2125,32 @@ fn secret_config_keys(kind: &str) -> &'static [&'static str] {
         "bilibili" => &["sessdata", "biliJct"],
         "youtube" => &["apiKey", "accessToken"],
         _ => &[],
+    };
+    static_keys.to_vec()
+}
+
+/// 通道脱敏判定：静态表或任一已注册插件清单的 sensitive 凭据键命中即掩码。
+/// （插件凭据面由 PluginChannelDecl.credentials.sensitive 声明——通道页渲染与
+/// 脱敏回显共用同一清单，两边不会漂移。）
+fn is_sensitive_config_key(kind: &str, key: &str, core: &exm_core::Core) -> bool {
+    if secret_config_keys(kind).contains(&key) {
+        return true;
     }
+    core.plugins()
+        .enabled_providers()
+        .iter()
+        .filter_map(|p| p.channel_provider())
+        .any(|cp| {
+            cp.kinds().iter().any(|k| k == kind)
+                && cp
+                    .credential_fields()
+                    .iter()
+                    .any(|f| f.sensitive && f.key == key)
+        })
 }
 
 /// 通道脱敏序列化：顶层 token/secret 与平台敏感 config 键掩码回显，任何接口都不出明文密钥
-fn channel_json(ch: &Channel) -> Value {
+fn channel_json(ch: &Channel, core: &exm_core::Core) -> Value {
     let mut v = serde_json::to_value(ch).unwrap_or(Value::Null);
     let Some(obj) = v.as_object_mut() else {
         return v;
@@ -2121,9 +2173,10 @@ fn channel_json(ch: &Channel) -> Value {
         obj.insert("token".into(), mask.clone());
     }
     if let Some(cfg) = obj.get_mut("config").and_then(|c| c.as_object_mut()) {
-        for k in secret_config_keys(&ch.kind) {
-            if ch.cfg(k).is_some() {
-                cfg.insert((*k).to_string(), mask.clone());
+        let keys: Vec<String> = cfg.keys().cloned().collect();
+        for k in keys {
+            if ch.cfg(&k).is_some() && is_sensitive_config_key(&ch.kind, &k, core) {
+                cfg.insert(k, mask.clone());
             }
         }
     }
@@ -2131,7 +2184,10 @@ fn channel_json(ch: &Channel) -> Value {
 }
 
 pub async fn list_channels(State(st): State<AppState>) -> impl IntoResponse {
-    let list: Vec<Value> = load_channels(&st.core).iter().map(channel_json).collect();
+    let list: Vec<Value> = load_channels(&st.core)
+        .iter()
+        .map(|c| channel_json(c, &st.core))
+        .collect();
     Json(list).into_response()
 }
 
@@ -2150,6 +2206,9 @@ pub struct ChannelBody {
     /// 会话白名单（空 = 不限）
     #[serde(default)]
     pub allowed_chats: Option<Vec<String>>,
+    /// 管理者账号（外部用户 ID 清单；判权视同 admin）
+    #[serde(default)]
+    pub admins: Option<Vec<String>>,
     #[serde(default)]
     pub account: Option<String>,
     #[serde(default)]
@@ -2199,11 +2258,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "telegram"
-        && b.token
-            .as_deref()
-            .is_none_or(|t| t.trim().is_empty())
-    {
+    if platform == "telegram" && b.token.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "telegram 通道需要 bot token" })),
@@ -2219,9 +2274,7 @@ pub async fn create_channel(
     // 新平台必填项：qqbot 需要 appId + appSecret；napcat 需要 WS 地址
     if platform == "qqbot"
         && (config.get("appId").is_none_or(|v| v.trim().is_empty())
-            || config
-                .get("appSecret")
-                .is_none_or(|v| v.trim().is_empty()))
+            || config.get("appSecret").is_none_or(|v| v.trim().is_empty()))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -2238,9 +2291,7 @@ pub async fn create_channel(
     }
     // discord / slack / matrix 的顶层 token 均为必填（bot token 或 access token）
     if matches!(platform.as_str(), "discord" | "slack" | "matrix")
-        && b.token
-            .as_deref()
-            .is_none_or(|t| t.trim().is_empty())
+        && b.token.as_deref().is_none_or(|t| t.trim().is_empty())
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -2255,11 +2306,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "matrix"
-        && config
-            .get("homeserver")
-            .is_none_or(|v| v.trim().is_empty())
-    {
+    if platform == "matrix" && config.get("homeserver").is_none_or(|v| v.trim().is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "matrix 通道需要 config.homeserver（如 https://matrix.org）" })),
@@ -2283,6 +2330,17 @@ pub async fn create_channel(
         )
             .into_response();
     }
+    // actRole 合法性（点播评论准入：admin/member）
+    if let Some(r) = config.get("actRole") {
+        let r = r.trim();
+        if !r.is_empty() && r != "admin" && r != "member" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "config.actRole 须为 admin 或 member" })),
+            )
+                .into_response();
+        }
+    }
     let capability = b
         .capability
         .as_deref()
@@ -2301,7 +2359,9 @@ pub async fn create_channel(
         if !target_exists(&st.core, g) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "绑定的智能体或组不存在（智能体写 single:<id>，组写组 id）" })),
+                Json(
+                    json!({ "error": "绑定的智能体或组不存在（智能体写 single:<id>，组写组 id）" }),
+                ),
             )
                 .into_response();
         }
@@ -2316,6 +2376,7 @@ pub async fn create_channel(
         enabled: b.enabled.unwrap_or(true),
         group: b.group.clone().filter(|s| !s.trim().is_empty()),
         allowed_chats: b.allowed_chats.clone().unwrap_or_default(),
+        admins: b.admins.clone().unwrap_or_default(),
         account: b.account.clone().filter(|s| !s.trim().is_empty()),
         secret: b.secret.filter(|s| !s.trim().is_empty()),
         reply_webhook: b.reply_webhook.filter(|s| !s.trim().is_empty()),
@@ -2334,7 +2395,7 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    Json(channel_json(&ch)).into_response()
+    Json(channel_json(&ch, &st.core)).into_response()
 }
 
 /// 更新通道（启停 / 换组 / 换 token 等）
@@ -2385,6 +2446,10 @@ pub async fn update_channel(
     if let Some(v) = &b.allowed_chats {
         ch.allowed_chats = v.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
     }
+    // 管理者账号：整表替换（空 = 清空；条目为外部用户 ID）
+    if let Some(v) = &b.admins {
+        ch.admins = v.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
+    }
     if let Some(v) = &b.account {
         ch.account = if v.trim().is_empty() {
             None
@@ -2421,8 +2486,21 @@ pub async fn update_channel(
         }
     }
     if let Some(v) = &b.config {
+        // actRole 合法性前置校验（点播评论准入：admin/member）
+        if let Some(r) = v.get("actRole") {
+            let r = r.trim();
+            if !r.is_empty() && r != "admin" && r != "member" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "config.actRole 须为 admin 或 member" })),
+                )
+                    .into_response();
+            }
+        }
         // 整表替换：UI 编辑时按平台提交完整配置；启停等局部更新不带 config 即保持不变。
         // 敏感键掩码回传 = 从旧表取回原值；空值键不入库（用户清空敏感键即删除）。
+        // 防误丢保护：敏感键在旧表有值而新表缺失时保留旧值——API 直接 PUT 局部
+        // config（如仅 actRole）不应静默清掉登录凭据（部署实测踩坑）。
         let mut next: BTreeMap<String, String> = BTreeMap::new();
         for (k, val) in v {
             let t = val.trim();
@@ -2437,11 +2515,19 @@ pub async fn update_channel(
             }
             next.insert(k.clone(), t.to_string());
         }
+        for (k, old) in &ch.config {
+            if !next.contains_key(k)
+                && !v.contains_key(k)
+                && is_sensitive_config_key(&ch.kind, k, &st.core)
+            {
+                next.insert(k.clone(), old.clone());
+            }
+        }
         ch.config = next;
     }
     let saved = ch.clone();
     match save_channels(&st.core, &channels) {
-        Ok(_) => Json(channel_json(&saved)).into_response(),
+        Ok(_) => Json(channel_json(&saved, &st.core)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -2686,6 +2772,7 @@ mod identity_gate_tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -2778,6 +2865,39 @@ mod identity_gate_tests {
         }
     }
 
+    /// 管理者账号清单：身份管控开启时，清单命中的外部用户免 /pair 绑定直接放行。
+    /// 判权跨通道匹配（人在任一通道的管理者清单即凭证）——清单落在另一通道上同样生效
+    #[tokio::test]
+    async fn 身份管控_管理者清单豁免() {
+        let core = test_core();
+        let mut cfg = (*core.config()).clone();
+        cfg.identity.identity_required = true;
+        core.apply_config(cfg).unwrap();
+        let ch = chan(None);
+        // 管理者清单挂在另一个通道（napcat）上：判权跟人走，不跟执行通道走
+        let holder = Channel {
+            id: "nap-main".into(),
+            kind: "napcat".into(),
+            enabled: true,
+            admins: vec!["10086".into(), " 2515681159 ".into()],
+            ..chan(None)
+        };
+        save_channels(&core, &[ch.clone(), holder]).unwrap();
+        // 清单命中（含空白容差）：放行，不要求绑定
+        for uid in ["10086", "2515681159"] {
+            match admit(&core, &ch, &ctx("帮我做事", uid, false, false)).await {
+                GateDecision::Allow => {}
+                GateDecision::Ignore => panic!("管理员 {uid} 应豁免放行，却被忽略"),
+                GateDecision::Deny(m) => panic!("管理员 {uid} 应豁免放行，却被拒绝：{m}"),
+            }
+        }
+        // 清单未命中且未绑定：仍拒绝（给配对指引）
+        match admit(&core, &ch, &ctx("帮我做事", "u9", false, false)).await {
+            GateDecision::Deny(msg) => assert!(msg.contains("/pair"), "拒绝应含配对指引: {msg}"),
+            _ => panic!("非管理员未绑定应拒绝"),
+        }
+    }
+
     /// /pair 兑换：有效码绑定成功（单次有效）；过期码拒绝；重复使用拒绝
     #[tokio::test]
     async fn 配对码_兑换流转() {
@@ -2819,6 +2939,7 @@ mod identity_gate_tests {
             created_by: "console".into(),
             created_at: exm_core::types::now_iso(),
             expires_at_ms: exm_core::types::now_ms() - 1000,
+            role: String::new(),
         };
         core.save_pairing_code(&expired).unwrap();
         let late = admit(&core, &ch, &ctx("/pair expired1", "u6", false, false)).await;
@@ -3142,7 +3263,7 @@ mod cron_notify_tests {
 
 #[cfg(test)]
 mod plan_endpoint_tests {
-    use super::*;
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // oneshot
@@ -3193,7 +3314,7 @@ mod plan_endpoint_tests {
         assert_eq!(v["mode"], "plan");
         // 2) 模拟拦截产生清单（等价工具网关拦截写操作）
         {
-            let orch = {
+            {
                 // core 已移入 app——重建一个同配置 Core 不可行，直接用进程级 plan API
                 exm_core::plan::push_item(
                     &s.id,
@@ -3202,8 +3323,7 @@ mod plan_endpoint_tests {
                         &serde_json::json!({ "op": "write", "path": "e2e.txt", "content": "x" }),
                     ),
                 );
-            };
-            let _ = orch;
+            }
         }
         // 3) GET 清单
         let resp = app
@@ -3289,7 +3409,9 @@ mod plan_endpoint_tests {
             "树应含 src/main.rs：{v}"
         );
         assert!(
-            !nodes.iter().any(|n| n["path"].as_str().unwrap_or("").starts_with(".git")),
+            !nodes
+                .iter()
+                .any(|n| n["path"].as_str().unwrap_or("").starts_with(".git")),
             "不应含 .git"
         );
         // 读文件（分页）
@@ -3377,6 +3499,7 @@ mod channel_boundary_tests {
             enabled: true,
             group: None,
             allowed_chats: vec![],
+            admins: vec![],
             account: None,
             secret: None,
             reply_webhook: None,
@@ -3515,5 +3638,112 @@ mod channel_boundary_tests {
         };
         let text2 = run.take_reply(&evt2, 500).expect("应有结果回复");
         assert!(text2.contains("s.rs"), "含目标：{text2}");
+    }
+}
+
+#[cfg(test)]
+mod plugin_secret_mask_tests {
+    use super::*;
+
+    fn core_with_video() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-mask-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        exm_core::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    /// 插件清单声明的 sensitive 键（video：sessdata/biliJct/apiKey）脱敏回显
+    #[test]
+    fn 脱敏_插件清单敏感键掩码() {
+        let core = core_with_video();
+        // 手动注册 video builtin（spawn_all 需 Arc<Core>；此处仅需注册面凭据声明）
+        core.plugins()
+            .register_builtin_late(Box::new(crate::plugins::VideoPlugin::new()));
+        let ch = load_channels(&core)
+            .into_iter()
+            .find(|c| c.kind == "bilibili")
+            .unwrap_or(Channel {
+                id: "bili-main".into(),
+                kind: "bilibili".into(),
+                enabled: true,
+                group: None,
+                allowed_chats: vec![],
+                admins: vec![],
+                account: None,
+                secret: None,
+                token: None,
+                reply_webhook: None,
+                group_gate: None,
+                capability: "computer".into(),
+                memory_isolation: false,
+                created_at: String::new(),
+                config: [
+                    ("sessdata".to_string(), "real-secret-value".to_string()),
+                    ("biliJct".to_string(), "real-jct".to_string()),
+                    ("uid".to_string(), "12345".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            });
+        let v = channel_json(&ch, &core);
+        let cfg = &v["config"];
+        assert_eq!(cfg["sessdata"], crate::llm_admin::KEY_MASK);
+        assert_eq!(cfg["biliJct"], crate::llm_admin::KEY_MASK);
+        // 非敏感键明文
+        assert_eq!(cfg["uid"], "12345");
+        // 原值不泄露
+        assert!(!v.to_string().contains("real-secret-value"));
+    }
+
+    /// 审计归因：插件工具调用的 tool.call/tool.result 事件带 plugin 字段
+    #[tokio::test]
+    async fn 审计_插件工具归因字段() {
+        let dir = std::env::temp_dir().join(format!("exm-audit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        let core = exm_core::Core::with_config(cfg).unwrap();
+        let sid = core.store.create_session("审计", "a1").unwrap().id;
+        let orch = core.orchestrator();
+        let gw = orch.tools.clone();
+        // 订阅事件流
+        let mut rx = core.subscribe();
+        // 注册一个插件工具并调用（不可达地址，走错误路径也带归因）
+        gw.append_plugin_tools(vec![exm_core::config::CustomTool {
+            name: "demo__ping".into(),
+            description: "审计用".into(),
+            kind: "http".into(),
+            method: "GET".into(),
+            target: "https://127.0.0.1:1/x".into(),
+            headers: Default::default(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            agents: vec![],
+            response_max_chars: None,
+            response_select: None,
+        }]);
+        let _ = gw
+            .execute_named("a1", &sid, &[], "demo__ping", &serde_json::json!({}))
+            .await;
+        // 收事件验证 plugin 归因
+        let mut saw_call = false;
+        let mut saw_result = false;
+        while let Ok(evt) = rx.try_recv() {
+            match evt.kind.as_str() {
+                "tool.call" if evt.payload["tool"] == "demo__ping" => {
+                    assert_eq!(evt.payload["plugin"], "demo", "call 事件应带 plugin 归因");
+                    saw_call = true;
+                }
+                "tool.result" if evt.payload["tool"] == "demo__ping" => {
+                    assert_eq!(evt.payload["plugin"], "demo", "result 事件应带 plugin 归因");
+                    saw_result = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_call, "应有 tool.call 事件");
+        assert!(saw_result, "应有 tool.result 事件");
     }
 }

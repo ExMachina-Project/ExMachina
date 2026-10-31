@@ -865,7 +865,7 @@ impl MemoryStore {
 
     pub fn agent_stats(&self, limit: usize) -> Result<Vec<AgentStat>> {
         let mut list: Vec<AgentStat> = self.db.list(STATS)?;
-        list.sort_by(|a, b| b.runs.cmp(&a.runs));
+        list.sort_by_key(|a| std::cmp::Reverse(a.runs));
         list.truncate(limit);
         Ok(list)
     }

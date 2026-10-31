@@ -12,6 +12,7 @@ import {
   Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
+import { MaskedPasswordInput } from "../components/MaskedInput";
 import {
   ApiOutlined, CheckCircleOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
@@ -481,14 +482,14 @@ export function ModelsView(): React.ReactElement {
                 </div>
                 <div className="model-kv">
                   <span className="k">{t("models.modelName")}</span>
-                  <Tag color="cyan">{p.model || t("models.unspecified")}</Tag>
+                  <Tag>{p.model || t("models.unspecified")}</Tag>
                 </div>
                 <div className="model-kv">
                   <span className="k">{t("models.modelList")}</span>
                   <span className="model-caps">
                     {p.models.length ? (
                       p.models.map((m) => (
-                        <Tag key={m.model} color={m.model === p.model ? "geekblue" : "default"}>
+                        <Tag key={m.model}>
                           {m.model === p.model ? <CheckCircleOutlined /> : null}
                           {m.model}
                           {m.vision ? <EyeOutlined style={{ marginLeft: 4 }} /> : null}
@@ -513,7 +514,7 @@ export function ModelsView(): React.ReactElement {
                 <div className="model-kv">
                   <span className="k">{t("models.statusLabel")}</span>
                   {active ? (
-                    <Tag color="success">{t("models.globalDefault")}</Tag>
+                    <Tag className="tag-ok">{t("models.globalDefault")}</Tag>
                   ) : (
                     <span className="dim">{t("models.followGlobal")}</span>
                   )}
@@ -573,7 +574,7 @@ export function ModelsView(): React.ReactElement {
                   {fields.map(({ key, name, ...rest }) => (
                     <div key={key} className="key-row">
                       <Form.Item {...rest} name={[name, "value"]} noStyle>
-                        <Input.Password placeholder={editing ? "******" : "sk-…"} />
+                        <MaskedPasswordInput placeholder="sk-…" />
                       </Form.Item>
                       {fields.length > 1 && (
                         <Button
