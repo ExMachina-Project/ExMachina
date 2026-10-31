@@ -192,7 +192,7 @@ pub async fn delete_single(
 pub async fn update_single(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Json(b): Json<crate::AgentUpdateBody>,
+    Json(b): Json<crate::agents_admin::AgentUpdateBody>,
 ) -> impl IntoResponse {
     // 连结体代理绑定校验（与 update_agent 同口径）
     if let Some(link_id) = b.link.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
