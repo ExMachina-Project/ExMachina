@@ -38,6 +38,8 @@ pub(crate) fn parse_command(text: &str) -> Option<BuiltinCmd> {
 }
 
 /// 尝试执行内置命令：命中返回回复文本（由调用方按平台发回），未命中返回 None 走正常消息流。
+/// `/new` `/sessions` `/use` 已升级为聊天流（chat flow）指令，统一在 `platform::admit`
+/// 的 `flow_command` 处理（流绑定语义，旧会话保留可切回）；这里只保留 `/status`。
 pub(crate) async fn builtin_command(
     core: &Arc<Core>,
     ch: &Channel,
@@ -45,67 +47,8 @@ pub(crate) async fn builtin_command(
     text: &str,
 ) -> Option<String> {
     match parse_command(text) {
-        Some(BuiltinCmd::New) => Some(cmd_new(core, ch, chat_key).await),
         Some(BuiltinCmd::Status) => Some(cmd_status(core, ch, chat_key)),
-        None => None,
-    }
-}
-
-/// 通道会话的规范标题（与 `ChannelRun::begin` 同口径——两边必须一字不差，
-/// 否则 /new 建的新会话不会被下一轮消息复用）
-fn channel_session_title(ch_id: &str, chat_key: &str) -> String {
-    format!("channel:{ch_id}:{chat_key}")
-}
-
-/// /new：开新会话。
-/// 做法：旧会话改名让出规范标题（历史保留、可在控制台回看），随即以规范标题建全新会话，
-/// 下一轮入站消息自动落进新会话。与 `ChannelRun::begin` 同口径的组切换/还原。
-async fn cmd_new(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
-    let prev = core.active_group();
-    let mut switched = false;
-    if let Some(g) = &ch.group {
-        if *g != prev && core.group_meta(g).is_some() {
-            switched = core.registry().set_active_group(g).is_ok();
-        }
-    }
-    let title = channel_session_title(&ch.id, chat_key);
-    // 旧会话归档：改名（带时间戳防重名），失败则不动旧会话直接报错
-    let mut archived: Option<(String, String)> = None;
-    let existing = core
-        .list_sessions_in_group(&core.active_group())
-        .ok()
-        .and_then(|list| list.into_iter().find(|s| s.title == title));
-    if let Some(old) = existing {
-        let stamp = chrono::Utc::now().format("%m%d-%H%M");
-        let new_title = format!("{title}·归档{stamp}");
-        match core.store.update_session_title(&old.id, &new_title) {
-            Ok(_) => archived = Some((old.id, new_title)),
-            Err(e) => {
-                if switched {
-                    let _ = core.registry().set_active_group(&prev);
-                }
-                return format!("⚠️ 开新会话失败：旧会话改名出错（{e}）。可直接重试。");
-            }
-        }
-    }
-    let created = core.create_session(&title);
-    if switched {
-        let _ = core.registry().set_active_group(&prev);
-    }
-    match created {
-        Ok(_) => match archived {
-            Some((_, old_title)) => {
-                format!("🆕 新会话已开启。\n旧会话已归档为「{old_title}」，历史仍可在控制台回看。")
-            }
-            None => "🆕 新会话已开启。".to_string(),
-        },
-        Err(e) => {
-            // 归档成功但建新失败：把旧会话名改回去，避免规范标题悬空（下一轮消息找不到会话会另建，历史就"断"了）
-            if let Some((old_id, _)) = &archived {
-                let _ = core.store.update_session_title(old_id, &title);
-            }
-            format!("⚠️ 开新会话失败：{e}。旧会话未受影响，可直接重试。")
-        }
+        Some(BuiltinCmd::New) | None => None,
     }
 }
 
@@ -128,11 +71,9 @@ fn cmd_status(core: &Arc<Core>, ch: &Channel, chat_key: &str) -> String {
         // webhook/qq/wechat 桥接类没有运行时，无状态上报属正常
         None => "⚪ 无长连接（桥接类通道属正常）".to_string(),
     };
-    let title = channel_session_title(&ch.id, chat_key);
     let sess = core
-        .list_sessions_in_group(&gid)
-        .ok()
-        .and_then(|list| list.into_iter().find(|s| s.title == title));
+        .flow_active_session(&ch.id, chat_key)
+        .and_then(|sid| core.store.get_session(&sid).ok().flatten());
     let sess_line = match sess {
         Some(s) => format!(
             "· 会话：{}（状态 {}）",
@@ -371,9 +312,10 @@ mod tests {
         }
     }
 
-    /// /new 端到端（替身 Core）：首轮直接建新；再开时旧会话归档、规范标题顶上新会话
+    /// /new 已升级为聊天流指令（platform::admit::flow_command）：builtin_command
+    /// 不再处理 New（返回 None 放行到闸门）；此处验证转发口径不回归。
     #[tokio::test]
-    async fn 命令_开新会话归档旧会话() {
+    async fn 命令_new转发流指令() {
         let dir = std::env::temp_dir().join(format!("exm-chutil-{}", exm_core::types::new_id()));
         std::fs::create_dir_all(dir.join("agents")).unwrap();
         let core = Arc::new({
@@ -382,37 +324,10 @@ mod tests {
             exm_core::Core::with_config(cfg).expect("创建 Core 失败")
         });
         let ch = test_channel();
-        let gid = core.active_group();
-        let title = "channel:t1:100";
-
-        // 首轮：无旧会话 → 直接建新
-        let r1 = builtin_command(&core, &ch, "100", "/new").await.unwrap();
-        assert!(r1.contains("新会话已开启"), "{r1}");
-        let first = core
-            .list_sessions_in_group(&gid)
-            .unwrap()
-            .into_iter()
-            .find(|s| s.title == title)
-            .expect("首轮应建出规范标题会话");
-
-        // 第二轮：旧会话归档（改名），规范标题上是全新会话
-        let r2 = builtin_command(&core, &ch, "100", "/new").await.unwrap();
-        assert!(r2.contains("归档"), "应提示归档去向：{r2}");
-        let sessions = core.list_sessions_in_group(&gid).unwrap();
-        let canonical = sessions
-            .iter()
-            .find(|s| s.title == title)
-            .expect("归档后规范标题应有新会话");
-        assert_ne!(canonical.id, first.id, "规范标题应顶上全新会话");
-        let archived = sessions
-            .iter()
-            .find(|s| s.id == first.id)
-            .expect("旧会话不删只改名");
-        assert!(
-            archived.title.starts_with(title) && archived.title.contains("归档"),
-            "{}",
-            archived.title
-        );
+        // /new 不再由 builtin_command 处理（流指令在 admit 内统一收口）
+        assert!(builtin_command(&core, &ch, "100", "/new").await.is_none());
+        // /status 仍在此处理
+        assert!(builtin_command(&core, &ch, "100", "/status").await.is_some());
     }
 
     /// /status：能报出通道与连接口径（无运行时上报 = 桥接类属正常）

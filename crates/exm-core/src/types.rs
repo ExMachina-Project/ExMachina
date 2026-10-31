@@ -1253,6 +1253,35 @@ pub struct UserIdentity {
     pub note: String,
 }
 
+// ---------------------------------------------------------------- 通道聊天流（chat flow）
+
+/// 通道聊天流：外部 IM 的一个对话单元（群聊 / 私聊各一条流；无细分对话的
+/// 平台一如视频通道整通道一条流）。一条流绑定一个活跃会话——不主动切换时
+/// 固定复用同一会话，让跨轮上下文与记忆自然延续。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelFlow {
+    /// 主键：`{channelId}:{chatKey}`（群号 / 私聊用户 id / 平台固定键）
+    pub id: String,
+    pub channel_id: String,
+    /// 流内对话键（与 id 的 chatKey 同值，列表展示与按通道过滤用）
+    pub chat_key: String,
+    /// 流的展示名（群名 / 对端昵称；缺省用 chat_key）
+    #[serde(default)]
+    pub display_name: String,
+    /// 是否群聊流（私聊 false；影响展示分组）
+    #[serde(default)]
+    pub is_group: bool,
+    /// 当前绑定的会话 id（None = 尚未有会话，下次消息自动开新会话）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session: Option<String>,
+    /// 最后一条消息预览（列表展示）
+    #[serde(default)]
+    pub last_message: String,
+    pub last_active_at: String,
+    pub created_at: String,
+}
+
 // ---------------------------------------------------------------- 事件触发器（文件监听 / webhook 事件源）
 
 /// 事件触发器：匹配的事件经去抖后注入目标组会话（复用 cron 的注入通路）
