@@ -2332,6 +2332,40 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await;
 
+    // ---- 配对码生命周期（identity）：签发 → 撤销幂等 → 过期清理 ----
+    {
+        let issue: serde_json::Value = client
+            .post(format!("{base}/identity/code"))
+            .json(&serde_json::json!({ "note": "e2e 撤销验证" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        let code = issue["code"].as_str().unwrap_or_default().to_string();
+        c.check("签发配对码", !code.is_empty());
+
+        // 撤销（幂等：二次删除也 200）
+        let r1 = client
+            .delete(format!("{base}/identity/code/{code}"))
+            .send()
+            .await?;
+        c.check("撤销配对码", r1.status() == 200);
+        let r2 = client
+            .delete(format!("{base}/identity/code/{code}"))
+            .send()
+            .await?;
+        c.check("撤销幂等（不存在也 200）", r2.status() == 200);
+
+        // 过期清理：直接清（无过期码时 0）+ 端点可用
+        let purge: serde_json::Value = client
+            .post(format!("{base}/identity/codes/purge"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("过期码清理端点", purge["ok"] == true);
+    }
+
     // ---- 后台密钥鉴权（docs/12）----
     let _set_key: serde_json::Value = client
         .put(format!("{base}/config"))
