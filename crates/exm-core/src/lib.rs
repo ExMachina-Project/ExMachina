@@ -1069,6 +1069,8 @@ impl Core {
             last_message_preview: None,
             last_active_at: None,
             pinned: false, // 置顶不继承分支
+            archived_at: None, // 归档态不继承分支（分支从活跃态开始）
+            message_count: None,
             ledger: src.ledger.clone(),
             created_at: now.clone(),
             updated_at: now,
@@ -1432,6 +1434,31 @@ impl Core {
     /// 会话置顶切换（列表置顶分组数据源）
     pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> anyhow::Result<()> {
         self.store.toggle_session_pin(id, pinned)
+    }
+
+    /// 会话归档 / 恢复（可逆状态：归档移出主列表，恢复回原分组）
+    pub fn set_session_archived(&self, id: &str, archived: bool) -> anyhow::Result<()> {
+        self.store.set_session_archived(id, archived)
+    }
+
+    /// 归档区列表（只含归档态，按归档时间倒序；预览口径与主列表一致）
+    pub fn list_archived_sessions(&self) -> anyhow::Result<Vec<Session>> {
+        let mut list = self.store.list_archived_sessions()?;
+        for s in list.iter_mut() {
+            s.last_message_preview = self.store.last_message_preview(&s.id, 80);
+            s.last_active_at = Some(s.updated_at.clone());
+            s.message_count = Some(self.store.message_count(&s.id));
+        }
+        Ok(list)
+    }
+
+    /// 管理视角全量会话（含消息数计数；主列表口径 = 未归档）
+    pub fn list_sessions_admin(&self) -> anyhow::Result<Vec<Session>> {
+        let mut list = self.list_sessions()?;
+        for s in list.iter_mut() {
+            s.message_count = Some(self.store.message_count(&s.id));
+        }
+        Ok(list)
     }
 
     pub fn create_session(&self, title: &str) -> anyhow::Result<Session> {
@@ -2186,6 +2213,45 @@ pub fn build_orchestrator(
 
 #[cfg(test)]
 mod im_discipline_tests {
+    /// 会话归档状态机（spec session-management）：归档移出主列表、
+    /// 归档区可见、恢复回主列表原分组、组内列表同口径过滤。
+    #[test]
+    fn 会话归档_过滤恢复与隔离() {
+        let dir = std::env::temp_dir().join(format!("exm-arch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let core = crate::Core::create(&dir).expect("创建 Core 失败");
+        let a = core.create_session("arch-a").unwrap();
+        let b = core.create_session("arch-b").unwrap();
+        // 归档 a：主列表（组内 + 全量）只剩 b
+        core.set_session_archived(&a.id, true).unwrap();
+        let group_ids: Vec<String> = core
+            .list_sessions_in_group(&a.group_id)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(!group_ids.contains(&a.id), "归档态不进组内主列表");
+        assert!(group_ids.contains(&b.id));
+        let all_ids: Vec<String> = core.list_sessions().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(!all_ids.contains(&a.id), "归档态不进全量主列表");
+        // 归档区：a 可见且带 archived_at 时间戳
+        let archived = core.list_archived_sessions().unwrap();
+        assert_eq!(archived.len(), 1, "归档区恰一条");
+        assert_eq!(archived[0].id, a.id);
+        assert!(archived[0].archived_at.is_some(), "归档时间落档");
+        // 恢复：主列表回归（同组原位），归档区清空
+        core.set_session_archived(&a.id, false).unwrap();
+        let group_ids: Vec<String> = core
+            .list_sessions_in_group(&a.group_id)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(group_ids.contains(&a.id), "恢复后回主列表");
+        assert!(core.list_archived_sessions().unwrap().is_empty(), "归档区清空");
+        // 不存在的会话：报错不 panic
+        assert!(core.set_session_archived("no-such", true).is_err());
+    }
     /// 流未读计数（spec experience-iteration 未读徽标服务端口径）：
     /// 有流才计数、累积不溢出、清零即除名、无流 bump 静默忽略。
     #[test]

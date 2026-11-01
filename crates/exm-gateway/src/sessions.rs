@@ -182,6 +182,57 @@ pub(crate) async fn pin_session(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionBatchBody {
+    /// batch 动作：archive（归档）/ unarchive（恢复）/ delete（删除）
+    action: String,
+    ids: Vec<String>,
+}
+
+/// 会话批量操作（POST /api/sessions/batch）。
+/// 逐条独立执行（单条失败不断整批），返回作用计数与失败明细——
+/// 批量语义 = 「尽力而为 + 全量反馈」，前端据 failed 提示部分失败。
+pub(crate) async fn session_batch(
+    State(st): State<AppState>,
+    Json(b): Json<SessionBatchBody>,
+) -> impl IntoResponse {
+    if b.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "ids 不能为空" })),
+        )
+            .into_response();
+    }
+    let mut ok_count = 0usize;
+    let mut failed: Vec<Value> = Vec::new();
+    for id in &b.ids {
+        let r = match b.action.as_str() {
+            "archive" => st.core.set_session_archived(id, true),
+            "unarchive" => st.core.set_session_archived(id, false),
+            "delete" => st.core.delete_session(id),
+            other => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("未知动作: {other}") })),
+                )
+                    .into_response();
+            }
+        };
+        match r {
+            Ok(()) => ok_count += 1,
+            Err(e) => failed.push(json!({ "id": id, "error": e.to_string() })),
+        }
+    }
+    Json(json!({
+        "ok": failed.is_empty(),
+        "action": b.action,
+        "affected": ok_count,
+        "failed": failed,
+    }))
+    .into_response()
+}
+
 // ---------------------------------------------------------------- 工具审计聚合（ops-visibility）
 
 /// 工具审计查询（GET /api/audit）：跨个体聚合既有审计分片，服务端过滤
@@ -431,9 +482,12 @@ pub(crate) async fn list_sessions(
     State(st): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> impl IntoResponse {
-    // 组是交互对象：会话列表归属激活组（?all=1 管理视角看全部）
-    let result = if q.all.unwrap_or(false) {
-        st.core.list_sessions()
+    // 组是交互对象：会话列表归属激活组（?all=1 管理视角看全部，附消息数）；
+    // ?archived=true 显式查归档区（归档会话不进默认列表）
+    let result = if q.archived.unwrap_or(false) {
+        st.core.list_archived_sessions()
+    } else if q.all.unwrap_or(false) {
+        st.core.list_sessions_admin()
     } else {
         st.core.list_sessions_in_scope()
     };
@@ -452,6 +506,8 @@ pub(crate) async fn list_sessions(
 pub(crate) struct SessionListQuery {
     #[serde(default)]
     all: Option<bool>,
+    #[serde(default)]
+    archived: Option<bool>,
 }
 
 pub(crate) async fn delete_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {

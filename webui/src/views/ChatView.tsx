@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { api, type LlmProfile } from "../api";
 import { agentIdEn } from "../models";
@@ -169,6 +169,15 @@ export function ChatView(): React.ReactElement {
   useEffect(() => {
     void loadTarget();
   }, [loadTarget, activeGroup]);
+  // 会话管理页操作（归档/恢复/删除/重命名/置顶）后同步左栏：轻量重拉列表
+  // （同一后端事实源；归档态在服务端默认过滤，左栏自然隐藏）
+  useEffect(() => {
+    const h = () => {
+      api.listSessions().then((list) => useExm.setState({ sessions: list })).catch(() => undefined);
+    };
+    window.addEventListener("exm:flows-refresh", h);
+    return () => window.removeEventListener("exm:flows-refresh", h);
+  }, []);
   useEffect(() => {
     api.llmProfiles().then((r) => {
       setProfiles(r.profiles);
@@ -499,51 +508,6 @@ export function ChatView(): React.ReactElement {
     return buckets.filter((b) => b.items.length > 0);
   }, [visibleSessions]);
 
-  const removeSession = async (id: string) => {
-    try {
-      await api.deleteSession(id);
-      // 从最新状态构建列表（不用渲染闭包的旧快照），无论删的是否为当前会话都先落列表
-      const rest = useExm.getState().sessions.filter((s) => s.id !== id);
-      useExm.setState({ sessions: rest });
-      if (id === sessionId) {
-        useExm.setState({ sessionId: undefined, messages: [], graph: null });
-        if (rest.length > 0) {
-          await selectSession(rest[0].id);
-        } else {
-          await newSession();
-        }
-      }
-      // 列表删空后留在列表页（窄屏），否则会落在一个空会话页上
-      if (rest.length === 0 && narrow) setScreen("list");
-    } catch {
-      // 删除失败静默：会话可能在运行中被网关拒绝
-    }
-  };
-
-  // ---- 会话导出 Markdown（2.3）：角色前缀正文 + 工具摘要 + 思维链折叠引用 ----
-  const exportSession = async (id: string, title: string, format: "markdown" | "json" = "markdown") => {
-    try {
-      // 走服务端导出端点：含审批记录与全量消息（前端拼装版拿不到审批）
-      const base = (window as unknown as { __EXM_API_BASE__?: string }).__EXM_API_BASE__ ?? "";
-      const key = localStorage.getItem("exm.key") ?? "";
-      const resp = await fetch(`${base}/api/sessions/${id}/export?format=${format}`, {
-        headers: { "X-Auth-Key": key },
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const day = new Date().toISOString().slice(0, 10);
-      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-${day}.${format === "json" ? "json" : "md"}`;
-      a.click();
-      URL.revokeObjectURL(url);
-      message.success(t("chat.exportDone"));
-    } catch (e) {
-      message.error(t("chat.exportFailed", { err: String(e).slice(0, 120) }));
-    }
-  };
-
   // ---- 会话历史管控（组 9.5）：撤销 / 编辑重发 / 分叉 ----
   const [editing, setEditing] = useState<{ turn: number; text: string } | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
@@ -670,6 +634,15 @@ export function ChatView(): React.ReactElement {
                 { value: "channel", label: t("chat.kind.channel") },
               ]}
             />
+            {/* 会话管理入口（session-management）：管理职能解耦到管理页，左栏留直达 */}
+            <Button
+              size="small"
+              type="text"
+              className="session-manage-btn"
+              icon={<UnorderedListOutlined />}
+              title={t("nav.sessions")}
+              onClick={() => useExm.getState().requestNav("sessions")}
+            />
           </div>
           <div className="session-list">
             {sessions.length === 0 && !sessionsLoaded && <SkeletonList rows={6} />}
@@ -758,14 +731,14 @@ export function ChatView(): React.ReactElement {
                         </>
                       );
                     })()}
-                    {/* 操作收进「⋮」菜单：此前三个图标常驻，窄屏上既挤占标题又换行 */}
+                    {/* 操作收进「⋮」菜单：管理项（导出/删除/归档）在会话管理页，
+                        左栏只留轻操作（重命名/置顶）——左栏是「切换」不是「管理」
+                        （session-management：管理职能解耦到 SessionsView） */}
                     <span className="session-ops" onClick={(e) => e.stopPropagation()}>
                       <Dropdown
                         trigger={["click"]}
                         menu={{
                           items: [
-                            { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
-                            { key: "exportJson", icon: <ExportOutlined />, label: `${t("chat.export")} (JSON)` },
                             { key: "rename", icon: <EditOutlined />, label: t("common.rename") },
                             {
                               key: "pin",
@@ -773,23 +746,13 @@ export function ChatView(): React.ReactElement {
                               label: s.pinned ? t("chat.unpin") : t("chat.pin"),
                             },
                             { type: "divider" },
-                            { key: "delete", icon: <CloseOutlined />, label: t("chat.delete"), danger: true },
+                            { key: "manage", icon: <UnorderedListOutlined />, label: t("chat.manageInSessions") },
                           ],
                           onClick: ({ key, domEvent }) => {
                             domEvent.stopPropagation();
-                            if (key === "export") void exportSession(s.id, s.title, "markdown");
-                            else if (key === "exportJson") void exportSession(s.id, s.title, "json");
-                            else if (key === "rename") setRenaming({ id: s.id, title: s.title });
+                            if (key === "rename") setRenaming({ id: s.id, title: s.title });
                             else if (key === "pin") void toggleSessionPin(s.id, !s.pinned);
-                            else {
-                              modal.confirm({
-                                title: t("chat.deleteConfirm"),
-                                okText: t("common.confirm"),
-                                okButtonProps: { danger: true },
-                                cancelText: t("common.cancel"),
-                                onOk: () => removeSession(s.id),
-                              });
-                            }
+                            else if (key === "manage") useExm.getState().requestNav("sessions");
                           },
                         }}
                       >
