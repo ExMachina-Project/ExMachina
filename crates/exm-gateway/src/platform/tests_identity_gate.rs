@@ -26,6 +26,8 @@ mod identity_gate_tests {
             token: None,
             config: Default::default(),
             group_gate: gate,
+            proactive_reply: None,
+            proactive_rate: None,
             capability: "computer".into(),
             memory_isolation: false,
             created_at: exm_core::types::now_iso(),

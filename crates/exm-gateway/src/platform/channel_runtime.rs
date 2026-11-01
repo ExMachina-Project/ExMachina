@@ -544,8 +544,16 @@ pub(crate) async fn admit(
         return GateDecision::Deny(reply);
     }
 
-    // ② 群聊唤醒门控：群内仅提及 / 回复触发；私聊豁免
-    if ch.gate_enabled(core) && ctx.is_group && !ctx.mentioned {
+    // ② 群聊唤醒门控：群内仅提及 / 回复触发；私聊豁免。
+    // 主动回复（实验性，通道级开关）：未 @ 但通道开了 proactive_reply 时，
+    // 经三级漏斗（回复率采样 → 探活词表 → 决策模型）判断是否主动回应
+    // （proactive.rs；任何一级失败都保守忽略——主动回复是增益不是义务）
+    if ch.gate_enabled(core)
+        && ctx.is_group
+        && !ctx.mentioned
+        && (!ch.proactive_enabled()
+            || !super::proactive::should_proactively_reply(core, ch, ctx).await)
+    {
         return GateDecision::Ignore;
     }
 

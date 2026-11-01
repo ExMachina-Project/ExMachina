@@ -603,6 +603,8 @@ mod tests {
                 ("intervalMinutes".to_string(), "30".to_string()),
             ]),
             group_gate: None,
+            proactive_reply: None,
+            proactive_rate: None,
             capability: "chat".into(),
             memory_isolation: true,
             created_at: String::new(),
