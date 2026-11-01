@@ -944,6 +944,8 @@ export const useExm = create<ExmState>((set, get) => ({
         set({ ledger: p as unknown as SessionLedger });
         break;
       case "run.finished": {
+        // 流面板未读刷新（spec experience-iteration）：任何会话收束都可能给流加未读
+        window.dispatchEvent(new Event("exm:flows-refresh"));
         // 浏览器通知（web-notifications）：非当前会话或页面隐藏时提醒
         {
           const prefs = loadNotifyPrefs();

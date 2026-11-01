@@ -1071,6 +1071,94 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(false),
     );
 
+    // 流未读徽标（experience-iteration）：回调送达 = run.finished 已过 → 该流未读 ≥1；
+    // read 端点清零后列表归零（spec：打开会话后未读 MUST 清零）
+    let flows: serde_json::Value = client
+        .get(format!("{base}/channels/flows?channel=e2e-hook"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let flow_unread = flows
+        .as_array()
+        .and_then(|a| a.iter().find(|f| f["chatKey"] == "user-a"))
+        .map(|f| f["unread"].as_u64().unwrap_or(0))
+        .unwrap_or(0);
+    c.check("流列表带未读字段且回调后 ≥1", flow_unread >= 1);
+    let flow_id = flows
+        .as_array()
+        .and_then(|a| a.iter().find(|f| f["chatKey"] == "user-a"))
+        .and_then(|f| f["id"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let read_res: serde_json::Value = client
+        .post(format!("{base}/channels/flows/{flow_id}/read"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check("流未读清零端点 ok", read_res["ok"] == true);
+    let flows2: serde_json::Value = client
+        .get(format!("{base}/channels/flows?channel=e2e-hook"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let unread2 = flows2
+        .as_array()
+        .and_then(|a| a.iter().find(|f| f["chatKey"] == "user-a"))
+        .map(|f| f["unread"].as_u64().unwrap_or(0))
+        .unwrap_or(0);
+    c.check("清零后列表未读归零", unread2 == 0);
+    // 非法流 id（无冒号分隔）400
+    let bad_read = client
+        .post(format!("{base}/channels/flows/nope/read"))
+        .send()
+        .await?;
+    c.check("流 read 非法 id 400", bad_read.status().as_u16() == 400);
+
+    // 流内会话切换（experience-iteration）：sessions 列表含当前绑定（active 标记）；
+    // PUT active 改绑同源状态；跨流会话错绑被拒
+    let fs_list: serde_json::Value = client
+        .get(format!("{base}/channels/flows/{flow_id}/sessions"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let bound_sid = inbound["sessionId"].as_str().unwrap_or("").to_string();
+    let has_active = fs_list
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .any(|s| s["id"] == bound_sid.as_str() && s["active"] == true)
+        })
+        .unwrap_or(false);
+    c.check("流内会话列表含当前绑定且标记 active", has_active);
+    // 幂等改绑：绑回同一会话 ok
+    let rebind: serde_json::Value = client
+        .put(format!("{base}/channels/flows/{flow_id}/active"))
+        .json(&serde_json::json!({ "sessionId": bound_sid }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check("流绑定改绑（同会话幂等）", rebind["ok"] == true);
+    // 跨流错绑被拒：造一个不属于该流的会话 id
+    let foreign: serde_json::Value = client
+        .post(format!("{base}/sessions"))
+        .json(&serde_json::json!({ "title": "foreign-session" }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let foreign_id = foreign["id"].as_str().unwrap_or("").to_string();
+    let bad_bind = client
+        .put(format!("{base}/channels/flows/{flow_id}/active"))
+        .json(&serde_json::json!({ "sessionId": foreign_id }))
+        .send()
+        .await?;
+    c.check("跨流会话错绑 400", bad_bind.status().as_u16() == 400);
+
     // 入站消毒（inbound-sanitization）：注入消息受理 + 审计条目落会话事件流（不含原文全文）
     let sanitize_sid = inbound["sessionId"].as_str().unwrap_or("").to_string();
     let inject_inbound: serde_json::Value = client

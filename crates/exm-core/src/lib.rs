@@ -76,6 +76,9 @@ pub struct Core {
     auto_state: parking_lot::RwLock<AutoAgentState>,
     /// 会话级运行串行：同一会话的并发输入排队（followup），不互踩任务图
     run_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 聊天流未读计数（流粒度，内存态）：智能体在流绑定会话产出回复且用户未打开
+    /// 该会话时累积；打开即清零。未读是瞬时 UI 状态，重启归零合理（D5 单一事实源）。
+    flow_unread: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// MCP 服务器池（与 Orchestrator 内工具网关共用同一实例）
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 远程执行器（工作者池；网关在 serve 时注入）
@@ -187,6 +190,7 @@ impl Core {
             cron,
             auto_state,
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
             mcp: mcp_handle.clone(),
             remote: parking_lot::RwLock::new(None),
             plugins: parking_lot::RwLock::new(plugins),
@@ -717,6 +721,34 @@ impl Core {
 
     pub fn drop_channel_flow(&self, id: &str) -> anyhow::Result<()> {
         self.store.delete_channel_flow(id)
+    }
+
+    /// 流未读 +1（智能体在流绑定会话产出回复时调用；spawn_reply 收束点）。
+    /// 流不存在时忽略（未绑定流的会话无未读语义）。
+    pub fn bump_flow_unread(&self, channel_id: &str, chat_key: &str) {
+        let id = Self::flow_id(channel_id, chat_key);
+        if self.store.get_channel_flow(&id).ok().flatten().is_none() {
+            return;
+        }
+        let mut m = self.flow_unread.lock();
+        let c = m.entry(id).or_insert(0);
+        *c = c.saturating_add(1);
+    }
+
+    /// 流未读清零（用户打开该流绑定会话时调用；REST /flows/:id/read）
+    pub fn clear_flow_unread(&self, channel_id: &str, chat_key: &str) {
+        self.flow_unread
+            .lock()
+            .remove(&Self::flow_id(channel_id, chat_key));
+    }
+
+    /// 单条流未读数（列表输出用）
+    pub fn flow_unread_count(&self, channel_id: &str, chat_key: &str) -> u32 {
+        self.flow_unread
+            .lock()
+            .get(&Self::flow_id(channel_id, chat_key))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// 流绑定的活跃会话；不存在或已删 → None（调用方开新会话后回写绑定）
@@ -2154,6 +2186,26 @@ pub fn build_orchestrator(
 
 #[cfg(test)]
 mod im_discipline_tests {
+    /// 流未读计数（spec experience-iteration 未读徽标服务端口径）：
+    /// 有流才计数、累积不溢出、清零即除名、无流 bump 静默忽略。
+    #[test]
+    fn 流未读_累积与清零() {
+        let dir = std::env::temp_dir().join(format!("exm-unread-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let core = crate::Core::create(&dir).expect("创建 Core 失败");
+        // 建流（bind_flow_session 顺带建流文档）
+        let s = core.create_session("unread-test").unwrap();
+        core.bind_flow_session("ch1", "g100", &s.id).unwrap();
+        assert_eq!(core.flow_unread_count("ch1", "g100"), 0, "初始零未读");
+        core.bump_flow_unread("ch1", "g100");
+        core.bump_flow_unread("ch1", "g100");
+        assert_eq!(core.flow_unread_count("ch1", "g100"), 2, "两次回复累积 2");
+        core.clear_flow_unread("ch1", "g100");
+        assert_eq!(core.flow_unread_count("ch1", "g100"), 0, "打开会话清零");
+        // 无流 bump：静默忽略不 panic、不产生幽灵计数
+        core.bump_flow_unread("ch-none", "g-none");
+        assert_eq!(core.flow_unread_count("ch-none", "g-none"), 0);
+    }
     /// IM 会话标记状态机：登记幂等、除名后不再命中、独立于轮次消费（不 take）。
     /// 注入路径（single_direct_round / converge 读 is_im_session 拼 IM_DISCIPLINE）
     /// 由编译器保证走同一分支，此处锚定标记语义与纪律文本的关键约束项。

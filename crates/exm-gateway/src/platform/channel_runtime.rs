@@ -727,8 +727,8 @@ async fn flow_command(
     None
 }
 
-/// 流内会话的默认展示名（无自定义标题时用创建时间区分）
-fn default_flow_session_label(created_at: &str) -> String {
+/// 流内会话的默认展示名（无自定义标题时用创建时间区分；REST 流会话列表共用）
+pub(crate) fn default_flow_session_label(created_at: &str) -> String {
     // ISO 时间取到分位（2026-11-01T15:30:00 → 11-01 15:30）
     let chars: Vec<char> = created_at.chars().collect();
     if chars.len() >= 16 {
@@ -1141,6 +1141,11 @@ where
                 }
             }
             if let Some(text) = run.take_reply(&evt, max_chars) {
+                // 流未读 +1：智能体在本流产出回复（spec experience-iteration 未读徽标；
+                // 用户打开该会话时清零）。一次收束记一条未读（不是按分段计数）。
+                if let Some((ch_id, chat_key)) = run.flow.as_ref() {
+                    run.core.bump_flow_unread(ch_id, chat_key);
+                }
                 // 长回复分段推送（组 6.6）：按平台上限逐段送达，顺序保持。
                 // 段数封顶（IM 防轰炸）：单轮最多 3 段，超出截断并注明——
                 // 需要完整长文的场景（文档/代码交付）应走文件产物而非刷屏
