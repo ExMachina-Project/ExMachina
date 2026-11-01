@@ -122,6 +122,8 @@ export const en: Partial<Dict> = {
   "chat.sessions": "Sessions",
   "chat.flows": "Chat Flows",
   "chat.flowEmpty": "No messages yet — next one starts a session",
+  "chat.flowSessions": "Sessions in this flow",
+  "chat.flowNoSessions": "No sessions yet (send /new to start one)",
   "chat.sessionsShort": "Chats",
   "chat.delete": "Delete",
   "chat.moreOps": "Session actions",

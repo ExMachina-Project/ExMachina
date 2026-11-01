@@ -120,6 +120,8 @@ export const zh = {
   "chat.sessions": "会话",
   "chat.flows": "聊天流",
   "chat.flowEmpty": "暂无消息——下条消息自动开会话",
+  "chat.flowSessions": "流内会话",
+  "chat.flowNoSessions": "还没有会话（发送 /new 开一个）",
   "chat.sessionsShort": "会话",
   "chat.delete": "删除",
   "chat.moreOps": "会话操作",

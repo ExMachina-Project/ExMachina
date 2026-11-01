@@ -334,6 +334,7 @@ pub async fn list_channel_flows(
                 "displayName": if f.display_name.is_empty() { f.chat_key.clone() } else { f.display_name.clone() },
                 "isGroup": f.is_group,
                 "activeSession": f.active_session,
+                "unread": st.core.flow_unread_count(&f.channel_id, &f.chat_key),
                 "lastMessage": f.last_message,
                 "lastActiveAt": f.last_active_at,
                 "createdAt": f.created_at,
@@ -341,6 +342,132 @@ pub async fn list_channel_flows(
         })
         .collect();
     Json(flows).into_response()
+}
+
+/// 流未读清零（spec experience-iteration：用户打开流绑定会话时调用）
+pub async fn read_channel_flow(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    // 流 id = `{channelId}:{chatKey}`（channel 不含 ':'，chat_key 可能含——rsplit 拆）
+    let Some((channel_id, chat_key)) = id.rsplit_once(':') else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "非法流 id（应为 channelId:chatKey）" })),
+        )
+            .into_response();
+    };
+    st.core.clear_flow_unread(channel_id, chat_key);
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// 流内会话列表（spec experience-iteration 流内会话切换：与通道 /sessions 指令同口径——
+/// 同流标题前缀的全部会话，活跃时间倒序，活跃绑定带标记）
+pub async fn list_flow_sessions(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let Some((channel_id, chat_key)) = id.rsplit_once(':') else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "非法流 id（应为 channelId:chatKey）" })),
+        )
+            .into_response();
+    };
+    let Some(flow) = st.core.channel_flow(channel_id, chat_key) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "流不存在" }))).into_response();
+    };
+    // 归属 scope 与通道执行同口径：通道绑定目标（group 或 single:<id>；
+    // 缺省回落默认单智能体——与 ChannelRun::begin 的 target 解析一致）
+    let scope = load_channels(&st.core)
+        .into_iter()
+        .find(|c| c.id == channel_id)
+        .and_then(|c| c.group.clone())
+        .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(&st.core)));
+    let title_prefix = format!("channel:{channel_id}:{chat_key}:");
+    let bare_title = format!("channel:{channel_id}:{chat_key}");
+    let mut mine: Vec<_> = st
+        .core
+        .list_sessions_in_group(&scope)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.title.starts_with(&title_prefix) || s.title == bare_title)
+        .collect();
+    mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let active = flow.active_session.clone();
+    let items: Vec<Value> = mine
+        .iter()
+        .take(20)
+        .map(|s| {
+            let label = s
+                .title
+                .strip_prefix(&title_prefix)
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| default_flow_session_label(&s.created_at));
+            json!({
+                "id": s.id,
+                "label": label,
+                "createdAt": s.created_at,
+                "updatedAt": s.updated_at,
+                "active": active.as_deref() == Some(s.id.as_str()),
+            })
+        })
+        .collect();
+    Json(items).into_response()
+}
+
+/// 流绑定会话改绑（spec：与 /new /use 指令共享同一绑定状态——一处切换他处反映）
+pub async fn set_flow_active_session(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(b): Json<FlowActiveBody>,
+) -> impl IntoResponse {
+    let Some((channel_id, chat_key)) = id.rsplit_once(':') else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "非法流 id（应为 channelId:chatKey）" })),
+        )
+            .into_response();
+    };
+    if st.core.channel_flow(channel_id, chat_key).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "流不存在" }))).into_response();
+    }
+    // 会话必须属于本流（防跨流错绑：只收同前缀标题的会话 id）
+    let title_prefix = format!("channel:{channel_id}:{chat_key}:");
+    let bare_title = format!("channel:{channel_id}:{chat_key}");
+    let scope = load_channels(&st.core)
+        .into_iter()
+        .find(|c| c.id == channel_id)
+        .and_then(|c| c.group.clone())
+        .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(&st.core)));
+    let belongs = st
+        .core
+        .list_sessions_in_group(&scope)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|s| s.id == b.session_id && (s.title.starts_with(&title_prefix) || s.title == bare_title));
+    if !belongs {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "会话不属于本流" })),
+        )
+            .into_response();
+    }
+    match st.core.bind_flow_session(channel_id, chat_key, &b.session_id) {
+        Ok(()) => Json(json!({ "ok": true, "sessionId": b.session_id })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowActiveBody {
+    pub session_id: String,
 }
 
 #[derive(Deserialize)]
@@ -868,6 +995,8 @@ pub async fn channel_inbound(
     if let Some(url) = reply_url {
         let core = st.core.clone();
         let sid = session.id.clone();
+        let channel_id = channel.id.clone();
+        let flow_key = key.clone();
         let mut rx = core.subscribe();
         tokio::spawn(async move {
             while let Ok(evt) = rx.recv().await {
@@ -880,6 +1009,8 @@ pub async fn channel_inbound(
                         .json(&evt.payload)
                         .send()
                         .await;
+                    // 流未读 +1（与 spawn_reply 同语义）：智能体回复送达 = 用户有未读
+                    core.bump_flow_unread(&channel_id, &flow_key);
                     break;
                 }
             }
