@@ -3432,3 +3432,96 @@ pre.code-folded { position: relative; margin: 0; max-height: calc(14 * 1.6em + 2
   50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--amber) 45%, transparent); }
 }
 @media (prefers-reduced-motion: reduce) { .nav-badge { animation: none; } }
+
+/* ============================================================ 会话管理页（session-management） */
+.sessions-view { display: flex; flex-direction: column; gap: 14px; }
+.sessions-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sessions-search { max-width: 280px; }
+.sessions-count { margin-left: auto; color: var(--text-dim, #59626f); font-size: 12px; }
+.sessions-batchbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; border: 1px solid var(--border, #20262f); border-radius: 8px;
+  background: var(--bg-slot, #161b22); font-size: 12px;
+}
+.sessions-loading, .sessions-empty {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 240px; color: var(--text-dim, #59626f); font-size: 13px;
+  border: 1px dashed var(--border, #20262f); border-radius: 10px;
+}
+/* 表格：CSS 网格行列（role=table 语义 + 自绘样式，与 antd Table 解耦——批量工具条联动更直接） */
+.sessions-table { border: 1px solid var(--border, #20262f); border-radius: 10px; overflow: hidden; }
+.sessions-tr {
+  display: grid;
+  grid-template-columns: 40px minmax(220px, 1fr) 76px minmax(110px, 160px) 110px 84px 96px;
+  align-items: center; gap: 8px; padding: 0 12px; min-height: 44px;
+}
+.sessions-th {
+  min-height: 38px; background: var(--bg-slot, #161b22);
+  font-family: var(--mono, monospace); font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--text-dim, #59626f);
+  border-bottom: 1px solid var(--border, #20262f);
+}
+.sessions-row { border-bottom: 1px solid color-mix(in srgb, var(--border, #20262f) 55%, transparent); cursor: pointer; }
+.sessions-row:last-child { border-bottom: none; }
+.sessions-row:hover { background: var(--bg-hover, rgba(128,128,128,.08)); }
+.sessions-row.selected { background: color-mix(in srgb, var(--accent, #7c8cff) 10%, transparent); }
+.sessions-td { overflow: hidden; }
+.sessions-td-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sessions-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.sessions-preview {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+  color: var(--text-dim, #59626f); font-size: 12px;
+}
+.sessions-pin { color: var(--accent, #7c8cff); font-size: 11px; }
+.sessions-kind-tag {
+  display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+  border: 1px solid var(--border, #20262f); color: var(--text-sec, #9aa3b0);
+}
+.sessions-kind-tag.channel { color: var(--accent, #7c8cff); border-color: color-mix(in srgb, var(--accent, #7c8cff) 45%, transparent); }
+.sessions-td-scope, .sessions-td-count { font-size: 12px; color: var(--text-sec, #9aa3b0); }
+.sessions-td-active { font-size: 12px; color: var(--text-dim, #59626f); }
+.sessions-td-ops { display: flex; justify-content: flex-end; gap: 2px; }
+@media (max-width: 900px) {
+  .sessions-tr { grid-template-columns: 36px minmax(160px, 1fr) 70px 90px 64px 84px; }
+  .sessions-td-scope { display: none; }
+}
+@media (max-width: 640px) {
+  .sessions-tr { grid-template-columns: 36px minmax(140px, 1fr) 70px 84px; }
+  .sessions-td-count, .sessions-td-kind { display: none; }
+  .sessions-toolbar { flex-direction: column; align-items: stretch; }
+  .sessions-search { max-width: none; }
+}
+
+/* ============================================================ 模型档案卡状态行 + 能力徽章（model-settings-ux） */
+.model-status-row {
+  display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+  padding: 6px 0 2px; margin-bottom: 4px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border, #20262f) 70%, transparent);
+}
+.model-status-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.model-status-item .k { color: var(--text-dim, #59626f); }
+.model-status-item .mono { color: var(--text-sec, #9aa3b0); }
+.model-status-item.test-state .test-ok { color: var(--ok, #57ab5a); }
+.model-status-item.test-state .test-fail-text {
+  color: var(--danger, #e5534b); cursor: help;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cap-badges { display: inline-flex; gap: 2px; margin-left: 4px; }
+.cap-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 4px; font-size: 10px;
+  border: 1px solid var(--border, #20262f); color: var(--text-sec, #9aa3b0);
+}
+.cap-badge-detected { color: var(--accent, #7c8cff); border-color: color-mix(in srgb, var(--accent, #7c8cff) 45%, transparent); }
+.cap-badge-manual { color: var(--ok, #57ab5a); border-color: color-mix(in srgb, var(--ok, #57ab5a) 45%, transparent); }
+
+/* 模型编辑表单分节（model-settings-ux）：窄屏单列不溢出 */
+.form-section { margin-bottom: 12px; }
+.form-section .ant-collapse-content-box { padding-top: 8px !important; }
+@media (max-width: 768px) {
+  .form-grid-2 { grid-template-columns: 1fr; }
+  .model-row { flex-wrap: wrap; }
+}
+
+/* 页头动作分组分隔（视觉走查：视图切换与操作按钮分层） */
+.head-divider { width: 1px; height: 18px; background: var(--border, #20262f); display: inline-block; }

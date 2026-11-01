@@ -467,7 +467,9 @@ pub async fn test_profile(
                 "max_tokens": 1,
             })),
     };
+    let t0 = std::time::Instant::now();
     let resp = rb.timeout(std::time::Duration::from_secs(10)).send().await;
+    let latency_ms = t0.elapsed().as_millis() as u64;
     match resp {
         Ok(r) => {
             let status = r.status().as_u16();
@@ -475,11 +477,12 @@ pub async fn test_profile(
             Json(json!({
                 "ok": (200..300).contains(&status),
                 "status": status,
+                "latencyMs": latency_ms,
                 "snippet": body.chars().take(300).collect::<String>(),
             }))
             .into_response()
         }
-        Err(e) => Json(json!({ "ok": false, "error": e.to_string() })).into_response(),
+        Err(e) => Json(json!({ "ok": false, "latencyMs": latency_ms, "error": e.to_string() })).into_response(),
     }
 }
 

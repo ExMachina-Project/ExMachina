@@ -661,7 +661,8 @@ async fn flow_command(
             })
             .cloned()
             .collect();
-        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        // 活跃倒序；同秒活跃以创建时间破平（同秒内新建者在前——序号寻址确定性）
+        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
         if mine.is_empty() {
             return Some("本聊天流还没有会话。发送 /new 开一个。".into());
         }
@@ -701,7 +702,8 @@ async fn flow_command(
             })
             .cloned()
             .collect();
-        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        // 活跃倒序；同秒活跃以创建时间破平（与 /sessions 列表同口径，序号寻址确定性）
+        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
         // 序号优先；否则按标题片段模糊匹配
         let hit = if let Ok(idx) = rest.parse::<usize>() {
             mine.get(idx).cloned().map(|s| s.id).map(|id| (id, rest.to_string()))

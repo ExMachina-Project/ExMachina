@@ -527,6 +527,16 @@ export const api = {
   dismissKeySetup: () => req<{ ok: boolean }>("/auth/dismiss", { method: "POST" }),
   health: () => req<{ ok: boolean; mock: boolean; agents: number }>("/health"),
   listSessions: () => req<Session[]>("/sessions"),
+  /** 管理视角全量会话（含所有组；归档态默认排除） */
+  listAllSessions: () => req<Session[]>("/sessions?all=true"),
+  /** 归档区列表（仅归档态，按归档时间倒序） */
+  listArchivedSessions: () => req<Session[]>("/sessions?archived=true"),
+  /** 批量操作（archive / unarchive / delete）：返回作用计数与失败明细 */
+  batchSessions: (action: "archive" | "unarchive" | "delete", ids: string[]) =>
+    req<{ ok: boolean; affected: number; failed: { id: string; error: string }[] }>("/sessions/batch", {
+      method: "POST",
+      body: JSON.stringify({ action, ids }),
+    }),
   createSession: (title: string) =>
     req<Session>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
   getSession: (id: string) => req<Session>(`/sessions/${id}`),
@@ -855,7 +865,7 @@ export const api = {
   activateLlmProfile: (id: string) =>
     req<{ ok: boolean; active: string; mock: boolean }>("/llm/active", { method: "PUT", body: JSON.stringify({ id }) }),
   testLlmProfile: (id?: string) =>
-    req<{ ok: boolean; mock?: boolean; configured?: boolean; status?: number; snippet?: string; message?: string; error?: string }>("/llm/test", {
+    req<{ ok: boolean; mock?: boolean; configured?: boolean; status?: number; latencyMs?: number; snippet?: string; message?: string; error?: string }>("/llm/test", {
       method: "POST",
       body: JSON.stringify(id ? { id } : {}),
     }),
