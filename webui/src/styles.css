@@ -1531,12 +1531,18 @@ textarea.ant-input:focus,
 }
 .cfg-nav {
   flex: none;
+  /* 等高拉伸：跟随 settings2 全高（flex 链已把 settings2 撑满短页一屏），
+     左导航与右面板底边对齐——旧 flex:none + 默认 align-items:flex-start
+     只到菜单末尾就截止，短内容页下方空一截（视觉断口） */
+  align-self: stretch;
   width: 200px;
   display: flex;
   flex-direction: column;
   /* 视口封顶：长页下卡片不随面板内容拉出数屏空壳（内层 sticky 条目仍可视）。
-     旧魔数 calc(100dvh - 120px) 漏算遥测条 26 与页头实高，短页恒定溢出 ~50px */
-  max-height: calc(100dvh - var(--tel-h) - 168px);
+     实测几何（1440x900）：页头 54 + 页头上边距 8 = settings2 顶 62，
+     可用高 = 视口 − 遥测条 26 − 62；旧魔数 168 超算 106px，短内容页
+     导航底边距面板底边恒空 ~86px（截图实测 gap=86） */
+  max-height: calc(100dvh - var(--tel-h) - 70px);
   border: 1px solid var(--line);
   background: var(--bg-panel);
   border-radius: var(--r-lg);
