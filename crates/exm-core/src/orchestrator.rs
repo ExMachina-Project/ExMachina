@@ -73,6 +73,42 @@ pub fn is_im_session(session_id: &str) -> bool {
     im_sessions().lock().contains(session_id)
 }
 
+/// 探活消息判定（IM 通道短路直答用）：纯问候 / 在线确认 / 简单致谢收尾，
+/// 无任何任务语义——不值得进规划流水线（实证：全量注册表 + 记忆召回注入，
+/// 就为回一句「在」）。规则刻意保守：命中才短路，模糊输入照常走完整轮次。
+pub fn is_probing_message(text: &str) -> bool {
+    probe_reply(text).is_some()
+}
+
+/// 探活消息 → 直答文案（按语义分类，避免「晚安」回「在」的错位）。
+/// None = 非探活（走完整轮次）。
+pub fn probe_reply(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    if t.chars().count() > 10 {
+        return None;
+    }
+    // 标点剥离后的裸词表（问候语常带 ？/～/。/! 等语气修饰）
+    let bare = t
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    match bare.as_str() {
+        // 在线确认
+        "在吗" | "在么" | "在不在" | "在" | "吗" => Some("在。有什么需要直接说。"),
+        // 问候（含时段问候——按问候回，不逐时段定制）
+        "你好" | "您好" | "hello" | "hi" | "hey" | "哈喽" | "嗨" | "喂" | "早" | "早上好"
+        | "早安" | "中午好" | "下午好" | "晚上好" => Some("你好，在的。有事直接说。"),
+        // 晚安是收尾语义，不引导继续
+        "晚安" => Some("晚安。"),
+        // 致谢
+        "谢谢" | "多谢" | "感谢" | "thanks" | "thank you" => Some("不客气。"),
+        // 简单确认 / 收到：最短回应
+        "ok" | "okay" | "好的" | "嗯" | "嗯嗯" | "哦" | "收到" => Some("好。"),
+        // 链路测试
+        "测试" | "test" => Some("收到，链路正常。"),
+        _ => None,
+    }
+}
+
 /// IM 通道表达纪律（注入系统提示；与平台消息长度限制协同，
 /// 提示层约束输出冗长、通道层截断兜底）
 pub const IM_DISCIPLINE: &str = "## 表达纪律（强制：IM 通道）
@@ -129,7 +165,8 @@ pub const PLANNING_CONTRACT: &str = "
 }
 - L0 = 本机直接回答（此时 nodes 为空、finalAnswer 必填）；L1 单链；L2 并行；L3 含裁决。
 - agentIdentifier 只能取自下方可调度子个体清单。
-- 创建/修改组内个体必须由用户明确要求；用户未要求时禁止规划任何个体管理类节点。";
+- 创建/修改组内个体必须由用户明确要求；用户未要求时禁止规划任何个体管理类节点。
+- 输入无任务语义（闲聊 / 单字重复 / 无法理解的碎片）时必须 L0：要么请求澄清，要么简短回应，**禁止从会话历史捡旧任务执行**——用户没在本轮下达的任务不是任务。";
 
 pub struct Orchestrator {
     pub registry: Arc<LocalRegistry>,
@@ -648,6 +685,38 @@ impl Orchestrator {
             origin,
             vec![Statement::new(SpeechTag::要求, text)],
         )?;
+
+        // 探活短路（IM 会话）：纯问候 / 在线确认零 LLM 直答——这类输入无任务语义，
+        // 进规划流水线纯属浪费（全量注册表注入 + 规划调用，就为回一句「在」）。
+        // 短路在 collect 之前：探活不并入排队窗口的 goal 合并。
+        if is_im_session(session_id) {
+            if let Some(reply) = probe_reply(text) {
+                let statements = vec![Statement::new(SpeechTag::肯定, reply)];
+                let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
+                self.store.add_message_full(
+                    session_id,
+                    MessageRole::Orchestrator,
+                    Some(self.orch_id().as_str()),
+                    statements.clone(),
+                    thinking,
+                    tool_calls,
+                    steps,
+                )?;
+                self.emit(
+                    session_id,
+                    "run.finished",
+                    serde_json::json!({
+                        "routeLevel": "L0",
+                        "shortCircuit": "probe",
+                        "agentId": self.orch_id(),
+                        "statements": statements,
+                        "artifacts": []
+                    }),
+                );
+                self.record_turn_snapshot(session_id, "done");
+                return Ok(());
+            }
+        }
 
         // collect 语义：把「上一条非 user 消息之后到达的全部用户输入」合并为本轮目标
         // （串行锁保证的排队窗口内的多条消息 = 一轮处理，避免逐条各跑一遍）
@@ -3263,6 +3332,44 @@ mod statement_parse_tests {
         let tags: Vec<&str> = stmts.iter().map(|s| s.tag.as_str()).collect();
         assert_eq!(tags, vec!["警告", "观测"]);
         assert_eq!(stmts[0].text, "通道受限。");
+    }
+
+    /// 探活短路词表：命中形态（裸词/带语气标点/大小写）与不命中形态（有任务
+    /// 语义、超长、模糊碎片）——规则刻意保守，模糊输入照常走完整轮次。
+    #[test]
+    fn 探活判定_词表边界() {
+        // 命中：裸词
+        assert!(is_probing_message("在吗"));
+        assert!(is_probing_message("在"));
+        // 命中：语气标点修饰
+        assert!(is_probing_message("在吗？"));
+        assert!(is_probing_message("你好！"));
+        assert!(is_probing_message("  hi~  "));
+        // 命中：大小写归一
+        assert!(is_probing_message("Hello"));
+        assert!(is_probing_message("OK"));
+        // 不命中：有任务语义
+        assert!(!is_probing_message("你好，帮我查下明天的天气"));
+        assert!(!is_probing_message("测试一下发送消息功能"));
+        // 不命中：超长（>10 字符，问候不会这么长）
+        assert!(!is_probing_message("在吗在吗在吗在吗在吗在吗在吗"));
+        // 不命中：模糊碎片（交规划器 L0 澄清，不武断短路）
+        assert!(!is_probing_message("对应"));
+        assert!(!is_probing_message("？？？"));
+    }
+
+    /// 探活直答按语义分类：晚安不回「在」、致谢回「不客气」、确认回最短。
+    #[test]
+    fn 探活直答_按语义分类() {
+        assert_eq!(probe_reply("在吗？"), Some("在。有什么需要直接说。"));
+        assert_eq!(probe_reply("你好"), Some("你好，在的。有事直接说。"));
+        // 晚安是收尾语义——回「在」是错位
+        assert_eq!(probe_reply("晚安"), Some("晚安。"));
+        assert_eq!(probe_reply("谢谢！"), Some("不客气。"));
+        assert_eq!(probe_reply("ok"), Some("好。"));
+        assert_eq!(probe_reply("test"), Some("收到，链路正常。"));
+        // 非探活
+        assert_eq!(probe_reply("对应"), None);
     }
 
     #[test]
