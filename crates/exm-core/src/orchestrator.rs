@@ -46,6 +46,63 @@ fn take_session_mode(session_id: &str) -> Option<String> {
     session_modes().lock().remove(session_id)
 }
 
+// ---------------------------------------------------------------- IM 通道表达纪律
+
+/// IM 通道会话登记（会话 → 是否经即时通讯通道交互）。
+/// 通道 begin 时登记、会话删除时除名；轮次组装系统提示时读取——
+/// IM 场景（QQ/TG/Discord 等）注入简洁表达纪律，避免一次性回复大量内容。
+static IM_SESSIONS: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn im_sessions() -> &'static parking_lot::Mutex<std::collections::HashSet<String>> {
+    IM_SESSIONS.get_or_init(|| parking_lot::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 登记会话为 IM 通道交互（begin 时调用；重复登记幂等）
+pub fn mark_im_session(session_id: &str) {
+    im_sessions().lock().insert(session_id.to_string());
+}
+
+/// 除名（会话删除 / 通道解绑时调用）
+pub fn unmark_im_session(session_id: &str) {
+    im_sessions().lock().remove(session_id);
+}
+
+/// 会话是否经 IM 通道交互
+pub fn is_im_session(session_id: &str) -> bool {
+    im_sessions().lock().contains(session_id)
+}
+
+/// IM 通道表达纪律（注入系统提示；与平台消息长度限制协同，
+/// 提示层约束输出冗长、通道层截断兜底）
+pub const IM_DISCIPLINE: &str = "## 表达纪律（强制：IM 通道）
+
+本会话经由即时通讯通道进行（QQ / Telegram / Discord 等），回复将作为聊天消息送达：
+- 先给结论：默认 1~5 句话直接回答用户的问题或汇报结果。
+- 工具过程不逐条播报：中间状态、进度、校验步骤不写入回复；仅在影响理解时一句话带过。
+- 状态播报前缀（▸/⚠/⛔ 等）、多级标题、要点清单、重复确认，在聊天场景是噪音——禁止使用。
+- 用户明确要求详细展开或生成长文（文档/代码/翻译全文等）时才可长回复，此时直接输出内容主体，不加多余框架。
+- 不主动追问「是否需要我继续」；信息不足就给出当前结论并说明缺什么。";
+
+/// 自主记忆纪律（实验性，experiments.llmDrivenMemory 开启时注入）：
+/// 程序不再每轮自动写入记忆，改由模型判断哪些内容值得长期保存（经 memory_write）。
+pub const LLM_MEMORY_DISCIPLINE: &str = "## 记忆纪律（自主记忆模式）
+
+本环境已关闭程序自动记忆：不会每轮自动保存会话摘要。是否记忆、记什么，由你判断并主动调用 memory_write 工具完成。
+
+值得记忆（调用 memory_write）：
+- 用户的稳定偏好与身份事实（称呼、语言、工作习惯、长期目标）
+- 跨会话有用的技术结论（踩过的坑、验证过的方案、环境事实）
+- 明确的决策及其理由（用户拍板的取舍、禁区、命名约定）
+- 失败教训（下次遇到同类任务应避开的做法）
+
+不值得记忆（不调用）：
+- 单次任务的中间过程、状态播报、临时上下文
+- 对本轮回复本身的复述
+- 尚未确认的猜测与假设
+
+判定原则：只在「下次新会话遇到类似情况时会用上」时才写；宁可少记，不可灌水。";
+
 /// 自定义组的规划契约：主智能体提示词 + 该契约 = 指挥体能力
 pub const PLANNING_CONTRACT: &str = "
 
@@ -538,14 +595,14 @@ impl Orchestrator {
     /// 返回 (滚动摘要, 最近窗口消息原文文本)——共享实现见 compaction.rs（单智能体循环同口径复用）
     async fn ensure_compacted(&self, session_id: &str) -> (Option<String>, String) {
         let (provider, model) = self.resolve_orch_model();
-        let c = crate::compaction::ensure_compacted(
-            &self.store,
-            &provider,
-            &model,
-            session_id,
-            crate::compaction::CompactParams::default(),
-        )
-        .await;
+        let sliding = self.config_snapshot.read().experiments.sliding_context_window;
+        let params = crate::compaction::CompactParams {
+            sliding,
+            ..Default::default()
+        };
+        let c =
+            crate::compaction::ensure_compacted(&self.store, &provider, &model, session_id, params)
+                .await;
         (c.summary, c.recent)
     }
 
@@ -733,12 +790,32 @@ impl Orchestrator {
             .and_then(|id| self.registry.single_persona(&id).ok())
             .unwrap_or_else(|| LocalRegistry::DEFAULT_PERSONA.to_string());
         system_prompt.push_str(&format!("\n\n## SOUL（人格）\n{soul}"));
+        // IM 通道会话：注入简洁表达纪律（一次性大量内容的提示层治理）
+        if is_im_session(session_id) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(IM_DISCIPLINE);
+        }
+        // 自主记忆模式（实验性）：注入记忆纪律，引导模型经 memory_write 自主决定
+        if self.config_snapshot.read().experiments.llm_driven_memory {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(LLM_MEMORY_DISCIPLINE);
+        }
+        // Super Agent（实验性）：会话深度委托——静默长链路推进，只在停机条件产出消息
+        if self.config_snapshot.read().experiments.super_agent {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::autonomy::SUPER_AGENT_DISCIPLINE);
+        }
 
         // 会话历史窗口:最近 40 条按角色映射(User→user, Orchestrator→assistant);
         // 本轮输入已由 handle_user_message 落库,天然位于窗口末尾。
         // 窗口外更早历史接入共享滚动压缩(compaction.rs,与组调度同口径):
         // 压缩摘要注入系统提示,窗口内保持原文
         let rows = self.store.list_messages(session_id, 40)?;
+        let sliding = self
+            .config_snapshot
+            .read()
+            .experiments
+            .sliding_context_window;
         let compacted = crate::compaction::ensure_compacted(
             &self.store,
             &self.orch_provider,
@@ -747,6 +824,7 @@ impl Orchestrator {
             crate::compaction::CompactParams {
                 trigger: 40,
                 keep: 20,
+                sliding,
             },
         )
         .await;
@@ -1256,17 +1334,35 @@ impl Orchestrator {
 
         // ---- 自我进化：写入记忆（摘要/决策/证据/教训/个体统计） ----
         if self.memory_enabled {
-            let ids =
-                self.write_memories(session_id, text, &plan, &graph, &final_reports, &statements);
-            // 语义向量后台回填（混合记忆检索；无嵌入模型时静默跳过）
-            if !ids.is_empty() {
-                let o = self.clone();
-                tokio::spawn(async move {
-                    o.backfill_embeddings(&ids).await;
-                });
+            // 自主记忆摘要（实验性，experiments.llmDrivenMemory）：关闭程序自动
+            // 写入（治理记忆库被无关内容灌满），改由模型经 memory_write 自主决定。
+            // 个体可靠性统计照常（运行指标非记忆内容）。
+            if self.config_snapshot.read().experiments.llm_driven_memory {
+                for node in graph.list() {
+                    if let Some(report) = final_reports.get(&node.id) {
+                        let status = match report.status {
+                            SyncStatus::Done => "done",
+                            _ => "blocked",
+                        };
+                        let _ = self
+                            .memory
+                            .record_agent_outcome(&node.agent_identifier, status, report.confidence);
+                    }
+                }
+            } else {
+                let ids =
+                    self.write_memories(session_id, text, &plan, &graph, &final_reports, &statements);
+                // 语义向量后台回填（混合记忆检索；无嵌入模型时静默跳过）
+                if !ids.is_empty() {
+                    let o = self.clone();
+                    tokio::spawn(async move {
+                        o.backfill_embeddings(&ids).await;
+                    });
+                }
             }
-            // 经验优化自动触发：新教训达阈值时后台合成（docs/10 §5，只调优既有个体）
-            if self.auto_adapt {
+            // 经验优化自动触发：新教训达阈值时后台合成（docs/10 §5，只调优既有个体）。
+            // 自主记忆模式下无自动教训产生，不触发（模型仍可手动调 optimize）。
+            if self.auto_adapt && !self.config_snapshot.read().experiments.llm_driven_memory {
                 let mut agent_ids: Vec<String> = graph
                     .list()
                     .iter()
@@ -1656,6 +1752,13 @@ impl Orchestrator {
             // 自定义组：追加系统级规划契约（内置组提示词已内含）
             system_prompt.push_str(PLANNING_CONTRACT);
         }
+        // Super Agent（实验性）：组模式同样受深度委托纪律约束——规划轮决定拆解与
+        // 派发策略（并行拆独立子任务）/ L0 直答决定回复口径，两处都按「静默推进、
+        // 按影响停、只在停机条件产出非空回复」执行
+        if self.config_snapshot.read().experiments.super_agent {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::autonomy::SUPER_AGENT_DISCIPLINE);
+        }
         let registry_brief = self
             .registry
             .units()
@@ -1921,6 +2024,21 @@ impl Orchestrator {
         }
         .unwrap_or_else(|| LocalRegistry::DEFAULT_PERSONA.to_string());
         system_prompt.push_str(&format!("\n\n## SOUL（人格）\n{soul}"));
+        // IM 通道会话：注入简洁表达纪律（收束是用户可见的最终回复）
+        if is_im_session(session_id) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(IM_DISCIPLINE);
+        }
+        // 自主记忆模式（实验性）：收束轮可自主决定是否写入记忆
+        if self.config_snapshot.read().experiments.llm_driven_memory {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(LLM_MEMORY_DISCIPLINE);
+        }
+        // Super Agent（实验性）：收束轮同样受深度委托纪律约束
+        if self.config_snapshot.read().experiments.super_agent {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::autonomy::SUPER_AGENT_DISCIPLINE);
+        }
         let digest = graph
             .list()
             .iter()
@@ -2768,26 +2886,86 @@ fn fallback_converge_text(
     lines.join("\n")
 }
 
+/// 剥离行首列表标记（`- `/`* `/`+ `/`1. `/`1) `/`1、`），返回剩余内容。
+/// 收束输出常以列表形式给句式前缀行（`- 【否定】…`），标记不剥会把
+/// 带标记的陈述行误判为未标记文本（双层前缀的根源之一）。
+fn strip_list_marker(t: &str) -> &str {
+    let s = t.trim_start();
+    for m in ["- ", "* ", "+ ", "-\t"] {
+        if let Some(rest) = s.strip_prefix(m) {
+            return rest.trim_start();
+        }
+    }
+    if s == "-" {
+        return "";
+    }
+    if let Some(rest) = s.strip_prefix('-') {
+        if rest.starts_with(char::is_whitespace) {
+            return rest.trim_start();
+        }
+    }
+    // 数字序号：1. / 1) / 1、（序号后可直接跟内容）
+    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+    if digits_end > 0 {
+        let tail = &s[digits_end..];
+        let sep_len = tail
+            .chars()
+            .next()
+            .filter(|c| matches!(*c, '.' | ')' | '、'))
+            .map(|c| c.len_utf8())
+            .unwrap_or(0);
+        if sep_len > 0 {
+            return tail[sep_len..].trim_start();
+        }
+    }
+    s
+}
+
 pub fn text_to_statements(text: &str) -> Vec<Statement> {
+    const TAGS: [SpeechTag; 8] = [
+        SpeechTag::肯定,
+        SpeechTag::否定,
+        SpeechTag::疑问,
+        SpeechTag::报告,
+        SpeechTag::提案,
+        SpeechTag::警告,
+        SpeechTag::要求,
+        SpeechTag::观测,
+    ];
     let mut out = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
+    // 未标记行按段落聚合：同一句陈述跨多行（列表项/续行）合并为一条，
+    // 避免逐行各起一条【报告】把 IM 回复刷成前缀墙（部署实测）。
+    let mut pending: Vec<String> = Vec::new();
+    fn flush(pending: &mut Vec<String>, out: &mut Vec<Statement>) {
+        if pending.is_empty() {
+            return;
+        }
+        let joined = pending.join("\n");
+        pending.clear();
+        let block = strip_list_marker(&joined);
+        let t = block.trim();
         if t.is_empty() {
+            return;
+        }
+        if let Some(rest) = t.strip_prefix("##") {
+            out.push(Statement::report(rest.trim()));
+        } else {
+            out.push(Statement::report(t));
+        }
+    }
+    for line in text.lines() {
+        let raw = line.trim();
+        if raw.is_empty() {
+            // 空行 = 段落边界：聚合中的未标记块收口成一条陈述
+            flush(&mut pending, &mut out);
             continue;
         }
+        let t = strip_list_marker(raw);
         let mut matched = false;
-        for tag in [
-            SpeechTag::肯定,
-            SpeechTag::否定,
-            SpeechTag::疑问,
-            SpeechTag::报告,
-            SpeechTag::提案,
-            SpeechTag::警告,
-            SpeechTag::要求,
-            SpeechTag::观测,
-        ] {
+        for tag in TAGS {
             let prefix = format!("【{}】", tag.as_str());
             if let Some(rest) = t.strip_prefix(&prefix) {
+                flush(&mut pending, &mut out);
                 out.push(Statement::new(tag, rest.trim()));
                 matched = true;
                 break;
@@ -2796,12 +2974,14 @@ pub fn text_to_statements(text: &str) -> Vec<Statement> {
         if matched {
             continue;
         }
-        if let Some(rest) = t.strip_prefix("##") {
-            out.push(Statement::report(rest.trim()));
-        } else {
-            out.push(Statement::report(t.trim_start_matches('-').trim()));
+        if t.starts_with("##") {
+            flush(&mut pending, &mut out);
+            out.push(Statement::report(t.strip_prefix("##").unwrap_or(t).trim()));
+            continue;
         }
+        pending.push(raw.to_string());
     }
+    flush(&mut pending, &mut out);
     if out.is_empty() {
         out.push(Statement::report("（收束输出为空）"));
     }
@@ -3003,6 +3183,58 @@ mod protocol_inject_tests {
 }
 
 // ---------------------------------------------------------------- 收束降级测试
+
+#[cfg(test)]
+mod statement_parse_tests {
+    use super::*;
+
+    /// 部署实测回归：收束输出以六段结构 + 列表行给句式前缀，旧解析逐行强转
+    /// 【报告】且不剥列表标记，IM 端渲染成「【报告】【否定】…」双层前缀墙。
+    #[test]
+    fn 陈述解析_列表标记与双层前缀() {
+        let text = "## 任务边界\n- 【报告】目标为修改昵称，并通过独立读取验证。\n- 【否定】未取得目标群唯一标识。\n1. 【肯定】其余属性未被修改。\n2. 【否定】未形成真实修改请求。";
+        let stmts = text_to_statements(text);
+        let tags: Vec<&str> = stmts.iter().map(|s| s.tag.as_str()).collect();
+        assert_eq!(
+            tags,
+            vec!["报告", "报告", "否定", "肯定", "否定"],
+            "段落头自成一条报告；列表行应解析出真实句式 tag"
+        );
+        assert_eq!(stmts[0].text, "任务边界", "段落头剥离 ## 标记");
+        for s in &stmts {
+            assert!(
+                !s.text.contains('【'),
+                "陈述文本不应残留句式前缀（双层前缀）：{:?}",
+                s.text
+            );
+        }
+    }
+
+    #[test]
+    fn 陈述解析_未标记段落聚合为单条() {
+        let text = "本轮完成了边界核对。\n全部子任务均已回流。\n\n第二段：结论稳定。";
+        let stmts = text_to_statements(text);
+        assert_eq!(stmts.len(), 2, "空行分段：两段各一条，未标记行不逐行拆");
+        assert!(stmts[0].text.contains("边界核对"));
+        assert!(stmts[0].text.contains("均已回流"), "同段跨行合并");
+        assert!(stmts[1].text.contains("结论稳定"));
+        assert_eq!(stmts[0].tag.as_str(), "报告", "未标记段落默认报告");
+    }
+
+    #[test]
+    fn 陈述解析_行首句式保持旧行为() {
+        let stmts = text_to_statements("【警告】通道受限。\n【观测】已留存证据。");
+        let tags: Vec<&str> = stmts.iter().map(|s| s.tag.as_str()).collect();
+        assert_eq!(tags, vec!["警告", "观测"]);
+        assert_eq!(stmts[0].text, "通道受限。");
+    }
+
+    #[test]
+    fn 陈述解析_空输出兜底() {
+        assert_eq!(text_to_statements("").len(), 1);
+        assert_eq!(text_to_statements("\n \n").len(), 1);
+    }
+}
 
 #[cfg(test)]
 mod fallback_converge_tests {

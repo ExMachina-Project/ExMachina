@@ -1587,20 +1587,28 @@ mod terminal_gate_tests {
 
     // ---------------- 实验性开关（experiments） ----------------
 
-    /// 动态压缩门控：开关关闭时 context_compact 不在 schema 面
+    /// 动态压缩门控：开关关闭时 context_compact 不在 schema 面；
+    /// 滑动窗口模式与动态压缩互斥——开启时即使 dynamicCompaction=true 也不下发
     #[test]
     fn 实验开关_动态压缩关闭时schema剔除context_compact() {
         let allow = [ToolName::Terminal, ToolName::ContextCompact];
         let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
-        let specs = ToolGateway::tool_specs_experiments(specs, false);
+        let specs = ToolGateway::tool_specs_experiments(specs, false, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "开关关闭时 context_compact 不应下发"
         );
         // 开启时保留
         let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
-        let specs = ToolGateway::tool_specs_experiments(specs, true);
+        let specs = ToolGateway::tool_specs_experiments(specs, true, false);
         assert!(specs.iter().any(|s| s.name == "context_compact"));
+        // 滑动窗口互斥：dynamic=true + sliding=true 仍不下发
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_experiments(specs, true, true);
+        assert!(
+            specs.iter().all(|s| s.name != "context_compact"),
+            "滑动窗口开启时 context_compact 不应下发（互斥）"
+        );
     }
 
     /// 动态压缩执行：装配压缩器后调用成功落库摘要；未装配时明确报错

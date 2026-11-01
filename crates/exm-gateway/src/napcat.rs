@@ -328,7 +328,8 @@ async fn on_text(
     let tx = tx.clone();
     let raw = v.clone();
     tokio::spawn(async move {
-        let Some(external_id) = napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
+        let Some((external_id, text)) =
+            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
         else {
             return; // 闸门拦截（忽略 / 已回复）
         };
@@ -444,6 +445,7 @@ fn collect_media(m: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 /// OneBot 消息的入站闸门（群聊唤醒 + 身份管控）：在 spawn 的任务内执行
+/// 闸门放行时返回 (external_id, 消毒后文本)——消毒后文本替代原始 text 进入会话执行
 async fn napcat_gate(
     core: &Core,
     ch: &Channel,
@@ -452,7 +454,7 @@ async fn napcat_gate(
     user_id: Option<i64>,
     raw: &serde_json::Value,
     text: &str,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let is_group = group_id.is_some();
     // 提及归一化：@ 机器人本体才算提及（群内 @ 机器人是主语义）。
     // NapCat 上报两种格式：CQ 码字符串（[CQ:at qq=xxx]）与数组段
@@ -469,6 +471,13 @@ async fn napcat_gate(
         .map(|g| g.to_string())
         .or_else(|| user_id.map(|u| u.to_string()))
         .unwrap_or_default();
+    // 发送者显示名（群聊标注用）：群名片 card 优先，回落昵称 nickname，再回落 QQ 号
+    let sender_name = raw
+        .pointer("/sender/card")
+        .or_else(|| raw.pointer("/sender/nickname"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let ctx = InboundCtx {
         text,
         external_id: &external_id,
@@ -478,7 +487,16 @@ async fn napcat_gate(
         chat_key: &peer,
     };
     match admit(core, ch, &ctx).await {
-        GateDecision::Allow => Some(external_id),
+        GateDecision::Allow(clean) => {
+            // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
+            let text = crate::channel_util::sender_prefix_if_group(
+                is_group,
+                &clean,
+                &sender_name,
+                &external_id,
+            );
+            Some((external_id, text))
+        }
         GateDecision::Ignore => None,
         GateDecision::Deny(reply) => {
             let action = match group_id {
@@ -497,14 +515,35 @@ async fn napcat_gate(
     }
 }
 
-/// OneBot 消息体 → 纯文本：数组段取 text；CQ 码字符串剥掉非文本段。
+/// OneBot 消息体 → 纯文本：数组段取 text；at 段转写为 `@<名字|qq>` 内联
+/// （群聊「@张三 你看」若整个丢弃 at 段，@谁的信息就丢了——部署实测用户
+/// 反馈带@的消息语义残缺）；CQ 码字符串剥掉非文本段（at 码同样转写）。
 fn extract_text(m: &serde_json::Value) -> String {
     if let Some(arr) = m.as_array() {
-        arr.iter()
-            .filter(|seg| seg.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .filter_map(|seg| seg.pointer("/data/text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("")
+        let mut out = String::new();
+        for seg in arr {
+            match seg.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(t) = seg.pointer("/data/text").and_then(|t| t.as_str()) {
+                        out.push_str(t);
+                    }
+                }
+                Some("at") => {
+                    // 名字优先（NapCat 常带 data.name），缺省回落 qq 号
+                    let name = seg
+                        .pointer("/data/name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    let qq = seg.pointer("/data/qq").and_then(|x| x.as_str()).unwrap_or("");
+                    let who = if name.trim().is_empty() { qq } else { name };
+                    if !who.trim().is_empty() {
+                        out.push_str(&format!("@{who}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     } else if let Some(s) = m.as_str() {
         strip_cq(s)
     } else {
@@ -553,15 +592,32 @@ fn strip_cq(s: &str) -> String {
     let mut rest = s;
     while let Some(i) = rest.find("[CQ:") {
         out.push_str(&rest[..i]);
-        match rest[i..].find(']') {
-            Some(j) => rest = &rest[i + j + 1..],
-            None => {
-                // 找不到收尾 ] ：原样保留标记与后面正文，曾把前缀重复拼一遍
-                out.push_str(&rest[i..]);
-                rest = "";
-                break;
+        let close = rest[i..].find(']');
+        let Some(j) = close else {
+            // 找不到收尾 ] ：原样保留标记与后面正文，曾把前缀重复拼一遍
+            out.push_str(&rest[i..]);
+            rest = "";
+            break;
+        };
+        let code = &rest[i + 4..i + j]; // [CQ:xxx,key=val,...] 的 xxx,key=val,... 部分
+        let kind = code.split(',').next().unwrap_or("").trim();
+        if kind == "at" {
+            // at 码转写为可读 @（与数组段同口径）：qq= 名字缺失时用号
+            let mut who = "";
+            let mut qq = "";
+            for kv in code.split(',') {
+                if let Some(v) = kv.strip_prefix("qq=") {
+                    qq = v.trim();
+                } else if let Some(v) = kv.strip_prefix("name=") {
+                    who = v.trim();
+                }
+            }
+            let who = if who.is_empty() { qq } else { who };
+            if !who.is_empty() {
+                out.push_str(&format!("@{who}"));
             }
         }
+        rest = &rest[i + j + 1..];
     }
     out.push_str(rest);
     out
@@ -725,7 +781,7 @@ mod tests {
         assert!(last_event_at().lock().unwrap().get(&id).is_none());
     }
 
-    /// 文本提取：数组段拼接 text，其余类型（图/文件/AT）不混入正文
+    /// 文本提取：数组段拼接 text；at 段转写为 `@<名字|qq>` 内联（@ 语义不丢）
     #[test]
     fn 文本提取_数组段拼接() {
         let m = json!([
@@ -734,15 +790,28 @@ mod tests {
             { "type": "text", "data": { "text": "看这张图" } },
             { "type": "at", "data": { "qq": "10086" } },
         ]);
-        assert_eq!(extract_text(&m), "帮我看这张图");
+        assert_eq!(extract_text(&m), "帮我看这张图@10086");
+        // at 段带名字（NapCat 常见形态）：名字优先
+        let m2 = json!([
+            { "type": "at", "data": { "qq": "10086", "name": "黑星" } },
+            { "type": "text", "data": { "text": " 你看这个" } },
+        ]);
+        assert_eq!(extract_text(&m2), "@黑星 你看这个");
+        // 空白 at 段（qq/name 全缺）：不产生悬挂 @
+        let m3 = json!([
+            { "type": "at", "data": {} },
+            { "type": "text", "data": { "text": "正文" } },
+        ]);
+        assert_eq!(extract_text(&m3), "正文");
         // 非数组（CQ 码字符串）走剥离路径
         assert_eq!(extract_text(&json!("看[CQ:image,id=1]这张")), "看这张");
     }
 
-    /// CQ 码剥离：完整码剥掉；未闭合码不吞后面正文
+    /// CQ 码剥离：完整码剥掉；未闭合码不吞后面正文；at 码转写为 @（语义保留）
     #[test]
     fn cq码剥离_未闭合不吞正文() {
-        assert_eq!(strip_cq("[CQ:at,qq=1]你好"), "你好");
+        assert_eq!(strip_cq("[CQ:at,qq=1]你好"), "@1你好");
+        assert_eq!(strip_cq("[CQ:at,qq=1,name=黑星]你好"), "@黑星你好");
         assert_eq!(strip_cq("a[CQ:x]b[CQ:y]c"), "abc");
         assert_eq!(strip_cq("没有码"), "没有码");
         assert_eq!(strip_cq("未闭合[CQ:at"), "未闭合[CQ:at");

@@ -436,7 +436,9 @@ pub(crate) struct InboundCtx<'a> {
 }
 
 pub(crate) enum GateDecision {
-    Allow,
+    /// 放行，携带消毒后文本——消毒在身份判定之后执行（inbound-sanitization 分层要求：
+    /// 已过身份判定的消息仍必经消毒），携带于返回值使调用方无法绕过消毒结果
+    Allow(String),
     /// 群聊未唤醒：静默忽略
     Ignore,
     /// 拒绝执行并回复提示（含 /pair 结果与配对指引）
@@ -473,19 +475,66 @@ pub(crate) async fn admit(
     }
 
     // ① 配对码兑换（控制台签发短码 → 通道内 /pair <码> 绑定；单次有效、限期）
+    // 防爆破（inbound-sanitization）：单通道单账号连续失败 N 次（默认 5）进入锁定
+    // 窗口（默认 15 分钟）——锁定期内正确码也拒绝并提示剩余时间；锁定有审计事件
     let trimmed = ctx.text.trim();
     if let Some(code) = trimmed
         .strip_prefix("/pair ")
         .map(str::trim)
         .filter(|c| !c.is_empty())
     {
+        let idcfg = &core.config().identity;
+        let pkey = format!("pair:{}:{}", ch.id, ctx.external_id);
+        let now = exm_core::types::now_ms();
+        let lockout_ms = idcfg.pairing_lockout_secs * 1000;
+        let already = crate::limits::RateLimiter::count(&pkey, lockout_ms, now);
+        if idcfg.pairing_max_failures > 0 && already >= idcfg.pairing_max_failures as usize {
+            core.emit_sanitize_finding(serde_json::json!({
+                "kind": "pairing.lockout",
+                "channel": ch.id,
+                "externalId": ctx.external_id,
+                "failures": already,
+                "lockoutRemainSecs": lockout_ms / 1000,
+            }));
+            return GateDecision::Deny(format!(
+                "【报告】尝试过于频繁：已锁定，请约 {} 分钟后再试。",
+                lockout_ms / 60000
+            ));
+        }
         return match core.redeem_pairing(code, &ch.id, ctx.external_id, ctx.display_name, "member")
         {
-            Ok(idn) => GateDecision::Deny(format!(
-                "【报告】绑定成功：{}（角色 {}）。现在可以正常对话。",
-                idn.display_name, idn.role
-            )),
-            Err(e) => GateDecision::Deny(format!("【报告】绑定失败：{e}")),
+            Ok(idn) => {
+                // 兑换成功清空失败计数（成功后不应残留历史失败导致误锁）
+                crate::limits::RateLimiter::reset(&pkey);
+                GateDecision::Deny(format!(
+                    "【报告】绑定成功：{}（角色 {}）。现在可以正常对话。",
+                    idn.display_name, idn.role
+                ))
+            }
+            Err(e) => {
+                let allowed = crate::limits::RateLimiter::check(
+                    &pkey,
+                    lockout_ms,
+                    idcfg.pairing_max_failures.max(1),
+                    now,
+                );
+                if !allowed {
+                    core.emit_sanitize_finding(serde_json::json!({
+                        "kind": "pairing.lockout",
+                        "channel": ch.id,
+                        "externalId": ctx.external_id,
+                        "failures": idcfg.pairing_max_failures,
+                        "lockoutRemainSecs": lockout_ms / 1000,
+                    }));
+                    GateDecision::Deny(format!(
+                        "【报告】连续失败 {} 次，已锁定约 {} 分钟：期间即使码正确也不受理。",
+                        idcfg.pairing_max_failures,
+                        lockout_ms / 60000
+                    ))
+                } else {
+                    GateDecision::Deny(format!("【报告】绑定失败：{e}"))
+                }
+            }
         };
     }
 
@@ -544,7 +593,23 @@ pub(crate) async fn admit(
             }
         }
     }
-    GateDecision::Allow
+    // ⑤ 入站消毒（inbound-sanitization）：身份判定之后、放行之前——
+    // 检出注入模式即中性化（Finding 仅审计不阻断）。此时流尚未绑定会话
+    //（ChannelRun::begin 才发生），审计事件 payload 内嵌通道/账号定位；
+    // session_id 留空走广播（WS 实时可见），不落事件库（无所属会话可挂）。
+    // 规则开关随 config（security.sanitizeRules 单项可关）
+    let (clean_text, findings) =
+        crate::sanitize::sanitize_with(ctx.text, Some(&core.config().security.sanitize_rules));
+    if !findings.is_empty() {
+        crate::sanitize::note_findings(&findings);
+        core.emit_sanitize_finding(serde_json::json!({
+            "channel": ch.id,
+            "externalId": ctx.external_id,
+            "patterns": findings.iter().map(|f| f.rule).collect::<Vec<_>>(),
+            "actions": findings.iter().map(|f| f.action).collect::<Vec<_>>(),
+        }));
+    }
+    GateDecision::Allow(clean_text)
 }
 
 /// 聊天流（chat flow）会话管理指令：
@@ -768,6 +833,9 @@ impl ChannelRun {
             }
             return None;
         };
+        // IM 通道会话登记：轮次组装系统提示时注入简洁表达纪律
+        // （治理「一次性回复大量内容」：提示层约束 + 通道层截断双保险）
+        exm_core::orchestrator::mark_im_session(&session.id);
         // 记忆隔离即时生效：通道每次执行前把分区键同步到会话；
         // 关闭隔离时清空分区，立即回到同组共享记忆。
         let partition = ch.memory_partition(&scope);
@@ -807,7 +875,17 @@ impl ChannelRun {
                     .get("message")
                     .and_then(|v| v.as_str())
                     .unwrap_or("运行失败");
-                Some(format!("【警告】{msg}").chars().take(max_chars).collect())
+                // 消息自带句式前缀（【报告】/【警告】等）时不再包裹——
+                // emit_run_error 的调用方文案已按语言纪律定稿，二次包裹会产生
+                // 「【警告】【报告】…」双层前缀（部署实测）
+                let already = msg.starts_with('【')
+                    && msg.chars().skip(1).take(4).any(|c| c == '】');
+                let text = if already {
+                    msg.to_string()
+                } else {
+                    format!("【警告】{msg}")
+                };
+                Some(text.chars().take(max_chars).collect())
             }
             // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
             // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
@@ -1052,16 +1130,32 @@ where
                 }
             }
             if let Some(text) = run.take_reply(&evt, max_chars) {
-                // 长回复分段推送（组 6.6）：按平台上限逐段送达，顺序保持
+                // 长回复分段推送（组 6.6）：按平台上限逐段送达，顺序保持。
+                // 段数封顶（IM 防轰炸）：单轮最多 3 段，超出截断并注明——
+                // 需要完整长文的场景（文档/代码交付）应走文件产物而非刷屏
                 let segments = split_reply(&text, max_chars);
                 let total = segments.len();
-                for (i, seg) in segments.into_iter().enumerate() {
-                    // 产物注记并入最后一段（文本主体保持整洁）
-                    if i + 1 == total && !media_notes.is_empty() {
-                        send(format!("{seg}\n{}", media_notes.join("\n"))).await;
-                    } else {
+                const MAX_SEGMENTS: usize = 3;
+                if total <= MAX_SEGMENTS {
+                    for (i, seg) in segments.into_iter().enumerate() {
+                        // 产物注记并入最后一段（文本主体保持整洁）
+                        if i + 1 == total && !media_notes.is_empty() {
+                            send(format!("{seg}\n{}", media_notes.join("\n"))).await;
+                        } else {
+                            send(seg).await;
+                        }
+                    }
+                } else {
+                    let capped = total - MAX_SEGMENTS;
+                    for seg in segments.into_iter().take(MAX_SEGMENTS - 1) {
                         send(seg).await;
                     }
+                    let mut note = media_notes.join("\n");
+                    note.truncate(note.char_indices().nth(200).map(|(i, _)| i).unwrap_or(note.len()));
+                    send(format!(
+                        "（内容过长已截断，略去末尾 {capped} 段；完整回复见工作台会话记录）\n{note}"
+                    ))
+                    .await;
                 }
                 break;
             }

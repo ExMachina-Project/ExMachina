@@ -160,4 +160,51 @@ mod channel_boundary_tests {
         let text2 = run.take_reply(&evt2, 500).expect("应有结果回复");
         assert!(text2.contains("s.rs"), "含目标：{text2}");
     }
+
+    /// run.error 文案已含句式前缀（【报告】/【警告】）时不再二次包裹——
+    /// 部署实测「【警告】【报告】…」双层前缀的回归锚点
+    #[test]
+    fn 回帖_前缀不双层() {
+        let core = exm_core::Core::create(std::env::temp_dir().join(format!(
+            "exm-prefix-{}",
+            uuid::Uuid::new_v4()
+        )))
+        .expect("创建 Core 失败");
+        let run = ChannelRun {
+            core: std::sync::Arc::new(core),
+            session_id: "s".into(),
+            prev_group: String::new(),
+            prev_single: None,
+            switched: false,
+            kind: "webhook".into(),
+            scope: exm_core::types::ToolScope::Tools,
+            origin: None,
+            flow: None,
+        };
+        // 已含【报告】：原样透传
+        let evt = exm_core::types::CoreEvent {
+            kind: "run.error".into(),
+            session_id: "s".into(),
+            payload: serde_json::json!({ "message": "【报告】当前无待审批计划（清单为空或已处理）。" }),
+        };
+        let text = run.take_reply(&evt, 500).unwrap();
+        assert_eq!(text, "【报告】当前无待审批计划（清单为空或已处理）。");
+        assert!(!text.contains("【警告】"), "不得二次包裹：{text}");
+        // 已含【警告】：原样透传
+        let evt2 = exm_core::types::CoreEvent {
+            kind: "run.error".into(),
+            session_id: "s".into(),
+            payload: serde_json::json!({ "message": "【警告】计划回放失败：x" }),
+        };
+        let text2 = run.take_reply(&evt2, 500).unwrap();
+        assert_eq!(text2, "【警告】计划回放失败：x");
+        // 裸消息：正常包裹【警告】
+        let evt3 = exm_core::types::CoreEvent {
+            kind: "run.error".into(),
+            session_id: "s".into(),
+            payload: serde_json::json!({ "message": "会话 token 预算已耗尽" }),
+        };
+        let text3 = run.take_reply(&evt3, 500).unwrap();
+        assert_eq!(text3, "【警告】会话 token 预算已耗尽");
+    }
 }

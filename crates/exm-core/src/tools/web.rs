@@ -99,10 +99,14 @@ impl ToolGateway {
         let text = text.trim().chars().take(max_chars).collect::<String>();
         if text.is_empty() {
             ToolResult::err("页面无可提取文本（可能是纯二进制或脚本渲染页）")
-        } else if let Some(hint) = self.video_platform_hint(url) {
-            ToolResult::ok(format!("{hint}\n\n{text}"))
         } else {
-            ToolResult::ok(text)
+            // 外部内容隔离包装（inbound-sanitization）：数据而非指令边界 + 截断标注
+            let wrapped = external_wrap::wrap_external("网页", url, &text, max_chars);
+            if let Some(hint) = self.video_platform_hint(url) {
+                ToolResult::ok(format!("{hint}\n\n{wrapped}"))
+            } else {
+                ToolResult::ok(wrapped)
+            }
         }
     }
 

@@ -920,8 +920,12 @@ impl ToolGateway {
     pub fn tool_specs_experiments(
         specs: Vec<crate::provider::ToolSpec>,
         dynamic_compaction: bool,
+        sliding_window: bool,
     ) -> Vec<crate::provider::ToolSpec> {
-        if dynamic_compaction {
+        // 滑动窗口模式与动态压缩互斥：同为「何时压缩」的决策权归属，
+        // 滑动窗口 = 交回程序窗口语义（不主动压）；动态压缩 = 交模型。
+        // slidingContextWindow 开启时 context_compact 一律不下发。
+        if dynamic_compaction && !sliding_window {
             specs
         } else {
             specs

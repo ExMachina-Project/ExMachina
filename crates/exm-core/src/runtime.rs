@@ -149,6 +149,7 @@ impl AgentRuntime {
         specs = crate::tools::ToolGateway::tool_specs_experiments(
             specs,
             self.experiments.dynamic_compaction,
+            self.experiments.sliding_context_window,
         );
         // 声明式自定义工具（按 agents 可见性）与 MCP 第三方工具一并下发；
         // 仅聊天档连 schema 都不下发——不承诺、不执行任何工具。
@@ -401,6 +402,7 @@ impl AgentRuntime {
         specs = crate::tools::ToolGateway::tool_specs_experiments(
             specs,
             self.experiments.dynamic_compaction,
+            self.experiments.sliding_context_window,
         );
         // 仅聊天档连自定义 / MCP schema 都不下发
         if scope.allows_tools() {

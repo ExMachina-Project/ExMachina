@@ -314,7 +314,15 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         chat_key: channel.as_str(),
                     };
                     match admit(core.as_ref(), &ch, &gate_ctx).await {
-                        GateDecision::Allow => {}
+                        GateDecision::Allow(clean) => {
+                            text = clean;
+                            // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
+                            // Slack 事件载荷只带 user id，显示名需另查 users.info——
+                            // 此处先以 id 标注（身份可区分），显示名增强留待后续
+                            text = crate::channel_util::sender_prefix_if_group(
+                                is_group, &text, "", &external_id,
+                            );
+                        }
                         GateDecision::Ignore => continue,
                         GateDecision::Deny(reply) => {
                             let client2 = client.clone();

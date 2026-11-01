@@ -15,6 +15,15 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// task-local 声明：轮次作用域（会话归属键 → (组名, 单智能体 id)）。
+/// lib.rs 的轮次入口在此设值；registry 读口（active_group / active_single 等）
+/// 先查本值再回落全局激活态。
+pub(crate) mod round_scope_decl {
+    tokio::task_local! {
+        pub(crate) static ROUND_SCOPE: Option<(String, Option<String>)>;
+    }
+}
+
 pub struct GroupData {
     pub meta: GroupMeta,
     pub defs: HashMap<String, AgentDefinition>,
@@ -298,8 +307,28 @@ impl LocalRegistry {
         self.groups.read().get(gid).map(|g| g.meta.clone())
     }
 
+    /// 轮次内有效的作用域读取（task-local；不在轮次内 = None）。
+    /// 轮次把会话归属作为临时上下文（并发跨组轮次互不干扰），全局激活态不被污染。
+    fn round_scope(&self) -> Option<(String, Option<String>)> {
+        round_scope_decl::ROUND_SCOPE
+            .try_with(|s| s.clone())
+            .ok()
+            .flatten()
+    }
+
+    /// 有效交互上下文：轮次作用域（会话归属）优先，否则全局激活态。
+    /// 返回 (组名, 单智能体 id)。
+    fn effective_context(&self) -> (String, Option<String>) {
+        self.round_scope().unwrap_or_else(|| {
+            (
+                self.active.read().clone(),
+                self.active_single.read().clone(),
+            )
+        })
+    }
+
     pub fn active_group(&self) -> String {
-        self.active.read().clone()
+        self.effective_context().0
     }
 
     pub fn active_group_meta(&self) -> Option<GroupMeta> {
@@ -580,7 +609,7 @@ impl LocalRegistry {
 
     fn with_active<T>(&self, f: impl FnOnce(&GroupData) -> T) -> Option<T> {
         let groups = self.groups.read();
-        groups.get(&*self.active.read()).map(f)
+        groups.get(&self.effective_context().0).map(f)
     }
 
     pub fn get(&self, identifier: &str) -> Option<AgentDefinition> {
@@ -633,16 +662,16 @@ impl LocalRegistry {
 
     /// 当前是否处于智能体交互模式
     pub fn single_mode(&self) -> bool {
-        self.active_single.read().is_some()
+        self.active_single().is_some()
     }
 
     pub fn active_single(&self) -> Option<String> {
-        self.active_single.read().clone()
+        self.effective_context().1
     }
 
     /// 当前交互范围 id：智能体模式 = single:<id>（会话归属键），否则 = 激活组
     pub fn active_scope(&self) -> String {
-        match &*self.active_single.read() {
+        match &self.active_single() {
             Some(id) => format!("single:{id}"),
             None => self.active_group(),
         }
@@ -669,7 +698,7 @@ impl LocalRegistry {
             });
         }
         let groups = self.groups.read();
-        let g = groups.get(&*self.active.read());
+        let g = groups.get(&self.effective_context().0);
         let dir = g.map(|g| g.dir.clone()).unwrap_or_else(|| self.dir.clone());
         Some(if stem.contains('/') || stem.contains('\\') {
             dir.join(&file)
@@ -775,11 +804,11 @@ impl LocalRegistry {
                 format!(
                     "# {}
 
-你是 {}，用户的智能体：听清意图、亲手做完、回报结果——分析与实施一体完成。
+你是 {}，管理者的智能体：听清意图、亲手做完、回报结果——分析与实施一体完成。
 
 ## 语言纪律
-- 称用户为\"用户\"，以\"本机\"自称。
-- 被问起你是谁：一句话说明名字与职责，随即回到用户的事上。
+- 称对方为「管理者」（你的主人与授权者），以\"本机\"自称。
+- 被问起你是谁：一句话说明名字与职责，随即回到管理者的事上。
 - 信息不足时显式说明假设，再给出最小验证路径。
 ",
                     def.name, def.name
@@ -826,6 +855,25 @@ impl LocalRegistry {
         Ok(())
     }
 
+    /// 交互上下文快照（激活组 + 单智能体）：轮次执行前保存，结束后还原。
+    /// 会话按自身归属执行，不污染全局激活态（并发会话互不干扰）。
+    pub fn context_snapshot(&self) -> (String, Option<String>) {
+        (self.active_group(), self.active_single())
+    }
+
+    /// 全局激活组（不含轮次作用域；轮次作用域请用 active_group）
+    pub fn active_group_global(&self) -> String {
+        self.active.read().clone()
+    }
+
+    pub fn group_exists(&self, gid: &str) -> bool {
+        self.groups.read().contains_key(gid)
+    }
+
+    pub fn single_exists(&self, id: &str) -> bool {
+        self.singles.read().contains_key(id)
+    }
+
     /// 指定组的个体清单（供跨组查看组详情，不依赖激活组）
     pub fn agents_in_group(&self, gid: &str) -> Vec<AgentDefinition> {
         let groups = self.groups.read();
@@ -849,13 +897,14 @@ impl LocalRegistry {
 
     /// 当前交互目标的主智能体：智能体模式 = 该智能体；否则 = 组内主智能体
     pub fn primary(&self) -> Option<AgentDefinition> {
-        if let Some(id) = &*self.active_single.read() {
+        let (group, single) = self.effective_context();
+        if let Some(id) = &single {
             if let Some(d) = self.singles.read().get(id) {
                 return Some(d.clone());
             }
         }
         let groups = self.groups.read();
-        let g = groups.get(&*self.active.read())?;
+        let g = groups.get(&group)?;
         let pid = g.meta.primary.clone()?;
         g.defs.get(&pid).cloned()
     }
@@ -914,7 +963,7 @@ impl LocalRegistry {
     /// 否则兼容旧约定 `<编成根>/prompts/<file>`。
     fn prompt_fs_path(&self, prompt_file: &str) -> PathBuf {
         let groups = self.groups.read();
-        let g = groups.get(&*self.active.read());
+        let g = groups.get(&self.effective_context().0);
         let dir = g.map(|g| g.dir.clone()).unwrap_or_else(|| self.dir.clone());
         if prompt_file.contains('/') || prompt_file.contains('\\') {
             dir.join(prompt_file)
@@ -1451,7 +1500,7 @@ impl LocalRegistry {
                 &prompt_path,
                 format!(
                     "# {}\n\n你是 EXMACHINA 的{}（identifier: {}），受指挥体直接调度。\n职责：{}\n\n## 语言纪律\n\
-                     - 你是受指挥体直接调度的子个体；称主智能体为\"指挥体\"，称用户为\"用户\"。\n\
+                     - 你是受指挥体直接调度的子个体；称主智能体为\"指挥体\"，称对方为「管理者」（你的主人与授权者）。\n\
                      - 每条陈述以句式前缀开头：【肯定】【否定】【疑问】【报告】【提案】【警告】【观测】。\n\
                      - 零情绪：禁止寒暄、感叹、安慰、夸赞、拟人化情绪表达。\n\
                      - 压缩表达：只输出推进任务、降低不确定性、完成验证闭环所需的信息。\n",
@@ -1748,7 +1797,7 @@ impl LocalRegistry {
     /// 组主智能体的 SOUL：组根 SOUL.md。子个体返回 None。
     fn persona_path(&self, identifier: &str) -> Option<PathBuf> {
         let groups = self.groups.read();
-        let g = groups.get(&*self.active.read())?;
+        let g = groups.get(&self.effective_context().0)?;
         (g.defs.contains_key(identifier) && g.meta.primary.as_deref() == Some(identifier))
             .then(|| g.dir.join("SOUL.md"))
     }
@@ -1811,7 +1860,7 @@ impl LocalRegistry {
         let builtin = self
             .groups
             .read()
-            .get(&*self.active.read())
+            .get(&self.effective_context().0)
             .map(|g| g.meta.builtin)
             .unwrap_or(false);
         if builtin && path.exists() {
@@ -2214,5 +2263,75 @@ mod skills_dir_tests {
         assert!(parse_skill_md("---\nid: x\nname: y\n").is_err());
         // 缺正文
         assert!(parse_skill_md("---\nid: x\nname: y\n---\n").is_err());
+    }
+
+    /// 会话归属路由（切换人设无效的回归锚点）：轮次作用域（task-local）按
+    /// 会话 group_id（single:<id> / 组名）对齐交互上下文；全局激活态零污染——
+    /// 并发轮次 / REST / 通道绑定读到的始终是各自显式设置的上下文。
+    #[tokio::test]
+    async fn 交互上下文_轮次作用域与全局零污染() {
+        let dir = std::env::temp_dir().join(format!("exm-ctx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = crate::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        let core = crate::Core::with_config(cfg).expect("创建 Core 失败");
+        let reg = core.registry();
+
+        // 造两个组 + 一个单智能体
+        reg.create_group(Some("g1".into()), "组一", "").unwrap();
+        reg.create_group(Some("g2".into()), "组二", "").unwrap();
+        reg.set_active_group("g1").unwrap();
+        reg.upsert_single(crate::types::AgentDefinition {
+            name: "单体".into(),
+            identifier: "solo-x".into(),
+            domain: "测试".into(),
+            tier: crate::types::Tier::Orchestrator,
+            description: "测试单智能体".into(),
+            capabilities: vec![],
+            tools: vec![],
+            when_to_call: String::new(),
+            link: None,
+            max_steps: None,
+            dependencies: vec![],
+            composable_with: vec![],
+            input_schema: Default::default(),
+            output_schema: Default::default(),
+            prompt_file: String::new(),
+            model_hint: None,
+        }, None)
+        .unwrap();
+
+        // 全局态：g1 组模式
+        assert_eq!(reg.active_group(), "g1");
+        assert!(reg.active_single().is_none());
+
+        // 轮次作用域内：对齐到单智能体会话（single:solo-x）→ 单智能体模式生效
+        round_scope_decl::ROUND_SCOPE
+            .scope(Some(("g1".into(), Some("solo-x".into()))), async {
+                assert_eq!(reg.active_single().as_deref(), Some("solo-x"));
+                assert!(reg.single_mode());
+                assert_eq!(reg.active_scope(), "single:solo-x");
+            })
+            .await;
+
+        // 作用域外：全局态未被污染（仍 g1 组模式）
+        assert_eq!(reg.active_group(), "g1");
+        assert!(reg.active_single().is_none());
+
+        // 轮次作用域内：对齐到组会话（g2）→ 组模式生效
+        round_scope_decl::ROUND_SCOPE
+            .scope(Some(("g2".into(), None)), async {
+                assert_eq!(reg.active_group(), "g2");
+                assert!(!reg.single_mode());
+            })
+            .await;
+
+        // 作用域外：仍是 g1
+        assert_eq!(reg.active_group(), "g1");
+
+        // 无作用域（不在轮次内）：回落全局激活态
+        // （已在上面断言）
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

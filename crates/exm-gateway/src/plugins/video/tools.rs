@@ -531,8 +531,15 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
             api_ok(&body)?;
             let d = body.get("data").cloned().unwrap_or(Value::Null);
             let dur = d.get("duration").and_then(as_u64).unwrap_or(0);
+            // 外部内容隔离包装（inbound-sanitization）：简介是典型外部注入载体
+            let desc = exm_core::tools::wrap_external_for(
+                "视频简介",
+                &format!("bilibili {video_id}"),
+                d.get("desc").and_then(|v| v.as_str()).unwrap_or("（无简介）"),
+                4000,
+            );
             let out = format!(
-                "标题：{}\nUP主：{}\n时长：{}分{}秒\n播放：{}\n弹幕：{}\n评论：{}\n点赞：{}\n分区：{}\n发布：{}\n\n简介：\n{}",
+                "标题：{}\nUP主：{}\n时长：{}分{}秒\n播放：{}\n弹幕：{}\n评论：{}\n点赞：{}\n分区：{}\n发布：{}\n\n{desc}",
                 placeholder(d.get("title").and_then(|v| v.as_str()).unwrap_or("")),
                 placeholder(d.pointer("/owner/name").and_then(|v| v.as_str()).unwrap_or("")),
                 dur / 60, dur % 60,
@@ -542,7 +549,6 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
                 d.pointer("/stat/like").and_then(as_u64).unwrap_or(0),
                 placeholder(d.pointer("/tid_name").unwrap_or(&Value::Null).as_str().unwrap_or("")),
                 placeholder(d.get("pubdate").and_then(|p| p.as_i64()).map(|t| chrono::DateTime::from_timestamp(t, 0).map(|dt| dt.format("%Y-%m-%d").to_string()).unwrap_or_default()).as_deref().unwrap_or("")),
-                d.get("desc").and_then(|v| v.as_str()).unwrap_or("（无简介）"),
             );
             Ok(out)
         }
@@ -561,8 +567,15 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
             if item.is_null() {
                 anyhow::bail!("YouTube 未找到视频：{video_id}");
             }
+            // 外部内容隔离包装（inbound-sanitization）：简介是典型外部注入载体
+            let desc = exm_core::tools::wrap_external_for(
+                "视频简介",
+                &format!("youtube {video_id}"),
+                item.pointer("/snippet/description").and_then(|v| v.as_str()).unwrap_or("（无简介）"),
+                4000,
+            );
             let out = format!(
-                "标题：{}\n频道：{}\n时长：{}\n播放：{}\n评论：{}\n点赞：{}\n发布：{}\n\n简介：\n{}",
+                "标题：{}\n频道：{}\n时长：{}\n播放：{}\n评论：{}\n点赞：{}\n发布：{}\n\n{desc}",
                 placeholder(item.pointer("/snippet/title").and_then(|v| v.as_str()).unwrap_or("")),
                 placeholder(item.pointer("/snippet/channelTitle").and_then(|v| v.as_str()).unwrap_or("")),
                 placeholder(item.pointer("/contentDetails/duration").and_then(|v| v.as_str()).unwrap_or("")),
@@ -570,7 +583,6 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
                 item.pointer("/statistics/commentCount").and_then(as_u64).unwrap_or(0),
                 item.pointer("/statistics/likeCount").and_then(as_u64).unwrap_or(0),
                 placeholder(item.pointer("/snippet/publishedAt").and_then(|v| v.as_str()).unwrap_or("")),
-                item.pointer("/snippet/description").and_then(|v| v.as_str()).unwrap_or("（无简介）"),
             );
             Ok(out)
         }
@@ -722,7 +734,13 @@ fn format_subtitle_pages(lines: &[Value], page: usize) -> anyhow::Result<String>
     } else {
         format!("\n（第 {page}/{total_pages} 页；已到末页）")
     };
-    Ok(format!("{out}{nav}"))
+    // 外部内容隔离包装（inbound-sanitization）：字幕是外部数据
+    Ok(exm_core::tools::wrap_external_for(
+        "字幕",
+        &format!("第 {page}/{total_pages} 页"),
+        &format!("{out}{nav}"),
+        12000,
+    ))
 }
 
 /// video__danmaku：B站弹幕 protobuf 接口（分段抽样）
@@ -813,7 +831,13 @@ async fn tool_danmaku(
             total_segs - 1
         ));
     }
-    Ok(out)
+    // 外部内容隔离包装（inbound-sanitization）：弹幕是外部数据
+    Ok(exm_core::tools::wrap_external_for(
+        "弹幕",
+        &format!("aid={aid}"),
+        &out,
+        8000,
+    ))
 }
 
 /// protobuf 弹幕粗解析（字段 6 = 内容文本；字段 2 附近为时间偏移 ms）。
@@ -941,7 +965,7 @@ async fn tool_comments(
                 return Ok(format!("没有更多评论（第 {page} 页为空；共 {total} 条）"));
             }
             let mut st_lock = st.lock().unwrap();
-            let mut out = format!("评论区（第 {page} 页，热度排序）共 {total} 条：\n");
+            let mut body = format!("评论区（第 {page} 页，热度排序）共 {total} 条：\n");
             for r in &replies {
                 let id = r
                     .get("rpid")
@@ -959,16 +983,22 @@ async fn tool_comments(
                 let likes = r.get("like").and_then(as_u64).unwrap_or(0);
                 let rcount = r.get("rcount").and_then(as_u64).unwrap_or(0);
                 st_lock.seen_comments.insert(id.clone());
-                out.push_str(&format!(
+                body.push_str(&format!(
                     "- [{likes}赞 {rcount}回复] {author}（id={id}）：{}\n",
                     text.replace('\n', " ")
                 ));
             }
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "\n（翻下一页传 page={}；回复某条用 video__act 的 reply.commentId）",
                 page + 1
             ));
-            Ok(out)
+            // 外部内容隔离包装（inbound-sanitization）：评论文本是典型外部注入载体
+            Ok(exm_core::tools::wrap_external_for(
+                "评论",
+                &format!("bilibili {video_id}"),
+                &body,
+                8000,
+            ))
         }
         "youtube" => {
             let key = yt_key(ch)?;
@@ -1002,7 +1032,7 @@ async fn tool_comments(
             }
             let window: Vec<Value> = items.into_iter().skip(start).take(COMMENTS_PAGE).collect();
             let mut st_lock = st.lock().unwrap();
-            let mut out = format!("评论区（第 {page} 页）：\n");
+            let mut body = format!("评论区（第 {page} 页）：\n");
             for x in &window {
                 let Some(sn) = x.pointer("/snippet/topLevelComment") else {
                     continue;
@@ -1025,13 +1055,19 @@ async fn tool_comments(
                     .and_then(as_u64)
                     .unwrap_or(0);
                 st_lock.seen_comments.insert(id.to_string());
-                out.push_str(&format!(
+                body.push_str(&format!(
                     "- [{likes}赞 {rcount}回复] {author}（id={id}）：{}\n",
                     text.replace('\n', " ")
                 ));
             }
-            out.push_str(&format!("\n（翻下一页传 page={}）", page + 1));
-            Ok(out)
+            body.push_str(&format!("\n（翻下一页传 page={}）", page + 1));
+            // 外部内容隔离包装（inbound-sanitization）：评论文本是典型外部注入载体
+            Ok(exm_core::tools::wrap_external_for(
+                "评论",
+                &format!("youtube {video_id}"),
+                &body,
+                8000,
+            ))
         }
         other => anyhow::bail!("不支持的平台：{other}"),
     }
@@ -1066,7 +1102,8 @@ async fn tool_uploader(ch: &Channel, uploader_id: String) -> anyhow::Result<Stri
                 .cloned()
                 .unwrap_or_default();
             let mut out = format!(
-                "UP主：{name}\n粉丝：{fans}\n签名：{sign}\n\n近期投稿（{}）：\n",
+                "UP主：{name}\n粉丝：{fans}\n签名：{}\n\n近期投稿（{}）：\n",
+                exm_core::tools::wrap_external_for("UP主签名", name, sign, 2000),
                 videos.len()
             );
             for v in videos.iter().take(8) {
@@ -1128,7 +1165,7 @@ async fn tool_uploader(ch: &Channel, uploader_id: String) -> anyhow::Result<Stri
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let mut out = format!("频道：{name}\n订阅：{subs}\n简介：{desc}\n\n近期投稿：\n");
+            let mut out = format!("频道：{name}\n订阅：{subs}\n简介：{}\n\n近期投稿：\n", exm_core::tools::wrap_external_for("频道简介", name, desc, 2000));
             for x in items.iter().take(8) {
                 let t = x
                     .pointer("/snippet/title")
