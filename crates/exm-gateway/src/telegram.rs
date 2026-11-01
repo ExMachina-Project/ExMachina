@@ -341,10 +341,9 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
             {
                 GateDecision::Allow(clean) => {
                     text = clean;
-                    // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
-                    text = crate::channel_util::sender_prefix_if_group(
+                    // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）
+                    let sender_mark = crate::channel_util::sender_origin(
                         is_group,
-                        &text,
                         &display,
                         &from_id,
                     );
@@ -362,6 +361,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             &from_id,
                             inbound_media.unwrap_or_default(),
                             &text,
+                            sender_mark.as_deref(),
                         )
                         .await
                     }
@@ -501,6 +501,7 @@ async fn handle_message(
     external_id: &str,
     media: Vec<(String, String, String)>,
     text: &str,
+    sender_mark: Option<&str>,
 ) {
     // typing 指示（组 6.5）：平台支持即发送，处理结束随回帖自然覆盖
     if caps("telegram").typing {
@@ -545,6 +546,12 @@ async fn handle_message(
             async move { tg_send_media(&token, chat_id, item).await }
         },
     );
+    // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
+    let run = if let Some(mark) = sender_mark {
+        run.with_origin(mark)
+    } else {
+        run
+    };
     run.run(&text).await;
     let _ = reply.await;
 }
