@@ -59,6 +59,13 @@ pub struct Channel {
     /// 群聊唤醒门控：Some(true)=群内仅提及/回复触发；None=取全局默认（config.identity.groupGateDefault）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_gate: Option<bool>,
+    /// 主动回复（实验性）：群聊免 @ 时经决策模型判断是否回应。None/false = 关（仅 @ 触发）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proactive_reply: Option<bool>,
+    /// 主动回复率（0~100 百分比采样）：决策模型前的概率闸门——未命中直接忽略，
+    /// 控制成本。缺省 100 = 全量交决策模型判断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proactive_rate: Option<u32>,
     /// 能力边界：chat = 仅聊天；tools = 可调工具（不含 computer）；computer = 完整能力。
     /// 缺省 computer：兼容旧通道配置，不改变既有接入账号的行为。
     #[serde(default = "default_channel_capability")]
@@ -112,6 +119,16 @@ impl Channel {
     pub(crate) fn gate_enabled(&self, core: &exm_core::Core) -> bool {
         self.group_gate
             .unwrap_or_else(|| core.config().identity.group_gate_default)
+    }
+
+    /// 主动回复是否开启（群聊免 @ 时经决策模型判断是否回应）
+    pub(crate) fn proactive_enabled(&self) -> bool {
+        self.proactive_reply.unwrap_or(false)
+    }
+
+    /// 主动回复率（0~100）：决策模型前的概率闸门；非法值钳到 0~100
+    pub(crate) fn proactive_rate_pct(&self) -> u32 {
+        self.proactive_rate.unwrap_or(100).min(100)
     }
 
     /// 能力边界（未知值回退完整档：老配置不因新字段失效）。
@@ -361,6 +378,12 @@ pub struct ChannelBody {
     /// 群聊唤醒门控（None = 取全局默认）
     #[serde(default)]
     pub group_gate: Option<bool>,
+    /// 主动回复（None = 创建用关；更新不传 = 保持）
+    #[serde(default)]
+    pub proactive_reply: Option<bool>,
+    /// 主动回复率 0~100（None = 创建用 100；更新不传 = 保持）
+    #[serde(default)]
+    pub proactive_rate: Option<u32>,
     /// 能力边界：chat | tools | computer（None = 创建用完整档；更新不传 = 保持）
     #[serde(default)]
     pub capability: Option<String>,
@@ -518,6 +541,8 @@ pub async fn create_channel(
         token: b.token.filter(|s| !s.trim().is_empty()),
         config,
         group_gate: b.group_gate,
+        proactive_reply: b.proactive_reply,
+        proactive_rate: b.proactive_rate,
         capability: capability.to_string(),
         memory_isolation: b.memory_isolation.unwrap_or(false),
         created_at: exm_core::types::now_iso(),
@@ -556,6 +581,12 @@ pub async fn update_channel(
     }
     if let Some(v) = b.group_gate {
         ch.group_gate = Some(v);
+    }
+    if let Some(v) = b.proactive_reply {
+        ch.proactive_reply = Some(v);
+    }
+    if let Some(v) = b.proactive_rate {
+        ch.proactive_rate = Some(v.min(100));
     }
     if let Some(v) = &b.capability {
         let cap = v.trim();

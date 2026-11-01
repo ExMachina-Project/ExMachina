@@ -289,6 +289,8 @@ mod tests {
             token: token.map(|t| t.into()),
             config: Default::default(),
             group_gate: None,
+            proactive_reply: None,
+            proactive_rate: None,
             capability: "computer".into(),
             memory_isolation: false,
             created_at: String::new(),

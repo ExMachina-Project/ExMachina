@@ -382,6 +382,10 @@ export interface Channel {
   admins?: string[];
   /** 群聊唤醒门控逐通道覆盖：true = 群内仅提及/回复触发；缺省 = 跟随全局默认 */
   groupGate?: boolean;
+  /** 主动回复（实验性）：群聊免 @ 时经决策模型判断是否回应；缺省/false = 关 */
+  proactiveReply?: boolean;
+  /** 主动回复率 0~100（决策模型前的概率采样闸门；缺省 100 = 全量交决策模型） */
+  proactiveRate?: number;
   /** 能力边界：chat = 仅聊天；tools = 可调工具；computer = 电脑操控（缺省） */
   capability?: "chat" | "tools" | "computer";
   /** 记忆隔离：true = 本通道独立记忆；false/缺省 = 同组跨平台共享 */
@@ -819,11 +823,13 @@ export const api = {
     allowedChats?: string[];
     admins?: string[];
     groupGate?: boolean;
+    proactiveReply?: boolean;
+    proactiveRate?: number;
     capability?: "chat" | "tools" | "computer";
     memoryIsolation?: boolean;
     config?: Record<string, string>;
   }) => req<Channel>("/channels", { method: "POST", body: JSON.stringify(body) }),
-  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
+  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; proactiveReply?: boolean; proactiveRate?: number; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
     req<Channel>(`/channels/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
 
