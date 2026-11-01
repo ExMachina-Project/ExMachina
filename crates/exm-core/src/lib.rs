@@ -1076,8 +1076,10 @@ impl Core {
         self.chat_scoped_origin(session_id, text, scope, None).await
     }
 
-    /// 带来源标记的一轮执行：自动任务（视频观看/定时/webhook）传 origin（如 "auto:video"），
-    /// 消息落库 agent_id 携带该标记，展示层据此把系统自动内容与真人消息区分开。
+    /// 带来源标记的一轮执行：origin 落库进消息 agent_id，语义按前缀区分——
+    /// "auto:xxx" 系统自动内容（视频观看/定时/webhook），展示层区分于真人消息；
+    /// "im:名字(id)" 外部群聊发送者，展示层消息头署名、模型上下文渲染「用户·名字」；
+    /// None = 真人输入（WebUI / 私聊）。
     pub async fn chat_scoped_origin(
         &self,
         session_id: &str,

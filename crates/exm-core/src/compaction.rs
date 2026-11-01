@@ -26,10 +26,10 @@ pub const COMPACTER_SYSTEM: &str = "你是会话压缩器【会话压缩】。�
 /// 消息渲染为对话转录行（每条截 400 字符）
 fn transcript_line(m: &ChatMessage) -> String {
     let who = match m.role {
-        MessageRole::User => "用户",
-        MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体"),
-        MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
-        MessageRole::System => "系统",
+        MessageRole::User => user_label(m),
+        MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体").to_string(),
+        MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体").to_string(),
+        MessageRole::System => "系统".to_string(),
     };
     let body = m
         .statements
@@ -40,15 +40,24 @@ fn transcript_line(m: &ChatMessage) -> String {
     format!("[{who}] {}", body.chars().take(400).collect::<String>())
 }
 
+/// user 消息的转录署名：带 im: 发送者标记（群聊多人区分）时渲染「用户·名字」，
+/// 其余（WebUI / 私聊 / 自动任务）保持「用户」。
+fn user_label(m: &ChatMessage) -> String {
+    match m.agent_id.as_deref() {
+        Some(mark) if mark.starts_with("im:") => format!("用户·{}", &mark[3..]),
+        _ => "用户".into(),
+    }
+}
+
 /// 最近窗口消息渲染为文本（按时间正序输出；每条截 300 字符）
 pub fn render_recent(msgs: &[ChatMessage]) -> String {
     msgs.iter()
         .map(|m| {
             let who = match m.role {
-                MessageRole::User => "用户",
-                MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体"),
-                MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
-                MessageRole::System => "系统",
+                MessageRole::User => user_label(m),
+                MessageRole::Orchestrator => m.agent_id.as_deref().unwrap_or("指挥体").to_string(),
+                MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体").to_string(),
+                MessageRole::System => "系统".to_string(),
             };
             let body = m
                 .statements

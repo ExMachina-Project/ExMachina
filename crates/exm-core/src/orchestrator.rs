@@ -580,7 +580,19 @@ impl Orchestrator {
             if m.role != MessageRole::User {
                 break;
             }
-            let mut stmts: Vec<String> = m.statements.iter().map(|s| s.text.clone()).collect();
+            // 群聊发送者（im: 标记）转行内署名：排队窗口内多人发言合并为一轮目标时
+            // 仍可区分「谁说了什么」（与 history 渲染同口径）
+            let who = m
+                .agent_id
+                .as_deref()
+                .and_then(|a| a.strip_prefix("im:"))
+                .unwrap_or("");
+            let prefix = if who.is_empty() { String::new() } else { format!("（{who} 说）") };
+            let mut stmts: Vec<String> = m
+                .statements
+                .iter()
+                .map(|s| format!("{prefix}{}", s.text))
+                .collect();
             stmts.reverse();
             pending.extend(stmts);
         }
@@ -616,8 +628,8 @@ impl Orchestrator {
     }
 
     /// 带能力边界处理一轮（外部通道入口）：scope 贯穿规划/派发/单聊执行。
-    /// `origin`：自动任务的来源标记（如 "auto:video"），落入消息 agent_id；
-    /// None = 真人输入。展示层据此区分「用户消息」与「系统自动内容」。
+    /// `origin`：消息来源标记，落入消息 agent_id——"auto:xxx" 系统自动内容、
+    /// "im:名字(id)" 群聊发送者（展示层消息头署名）、None = 真人输入。
     pub async fn handle_user_message_scoped(
         self: &Arc<Self>,
         session_id: &str,
@@ -915,7 +927,19 @@ impl Orchestrator {
                 continue;
             }
             match m.role {
-                MessageRole::User => history.push(ChatMessage::user(content)),
+                // 群聊发送者（im: 标记）在内容头署名——多人发言在模型视角可区分
+                MessageRole::User => {
+                    let who = m
+                        .agent_id
+                        .as_deref()
+                        .and_then(|a| a.strip_prefix("im:"))
+                        .unwrap_or("");
+                    history.push(ChatMessage::user(if who.is_empty() {
+                        content
+                    } else {
+                        format!("（{who} 说）{content}")
+                    }))
+                }
                 MessageRole::Orchestrator => history.push(ChatMessage::assistant(content)),
                 _ => {}
             }
@@ -1116,7 +1140,19 @@ impl Orchestrator {
                 continue;
             }
             match m.role {
-                MessageRole::User => history.push(ChatMessage::user(content)),
+                // 群聊发送者（im: 标记）在内容头署名——多人发言在模型视角可区分
+                MessageRole::User => {
+                    let who = m
+                        .agent_id
+                        .as_deref()
+                        .and_then(|a| a.strip_prefix("im:"))
+                        .unwrap_or("");
+                    history.push(ChatMessage::user(if who.is_empty() {
+                        content
+                    } else {
+                        format!("（{who} 说）{content}")
+                    }))
+                }
                 MessageRole::Orchestrator => {
                     history.push(ChatMessage::assistant(format!("【指挥体】{content}")))
                 }
