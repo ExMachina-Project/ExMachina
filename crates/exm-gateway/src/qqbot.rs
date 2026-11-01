@@ -321,7 +321,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         // 纯媒体消息（官方平台发图常无 caption）：占位正文兜底，
                                         // 曾直接空内容丢弃——用户「只发一张图」会得不到任何响应
                                         let kinds: Vec<&str> = inbound.iter().map(|(k, _, _, _)| k.as_str()).collect();
-                                        let text = if content.trim().is_empty() { media_placeholder(&kinds) } else { content.trim().to_string() };
+                                        let mut text = if content.trim().is_empty() { media_placeholder(&kinds) } else { content.trim().to_string() };
                                         if text.trim().is_empty() && inbound.is_empty() {
                                             continue;
                                         }
@@ -344,7 +344,17 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                             chat_key: peer.key(),
                                         };
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
-                                            GateDecision::Allow => {}
+                                            GateDecision::Allow(clean) => {
+                                                text = clean;
+                                                // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
+                                                let display = d
+                                                    .pointer("/author/username")
+                                                    .and_then(|x| x.as_str())
+                                                    .unwrap_or("");
+                                                text = crate::channel_util::sender_prefix_if_group(
+                                                    is_group, &text, display, &external_id,
+                                                );
+                                            }
                                             GateDecision::Ignore => continue,
                                             GateDecision::Deny(reply) => {
                                                 let creds2 = creds.clone();

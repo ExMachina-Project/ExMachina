@@ -9,6 +9,7 @@
 pub mod browser;
 pub mod budget;
 pub mod bus;
+pub mod autonomy;
 pub mod compaction;
 pub mod computer;
 pub mod config;
@@ -19,6 +20,7 @@ pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
 pub mod nexus;
+
 pub mod orchestrator;
 pub mod parse;
 pub mod patch;
@@ -55,6 +57,13 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// Auto Agent 运行态（实验性）：空转连续次数（退避用）+ 上次 Eval 的分钟键
+#[derive(Debug, Default)]
+pub struct AutoAgentState {
+    idle_streak: u32,
+    last_tick_minute: i64,
+}
+
 /// 核心句柄：所有渠道（CLI / Gateway / 未来桌面端）共用同一实例
 pub struct Core {
     pub bus: Arc<dyn MessageBus>,
@@ -63,6 +72,8 @@ pub struct Core {
     pub memory: Arc<MemoryStore>,
     pub events: broadcast::Sender<CoreEvent>,
     pub cron: Arc<CronStore>,
+    /// Auto Agent 运行态（实验性 experiments.autoAgent）：空转计数 + 上次 tick 分钟
+    auto_state: parking_lot::RwLock<AutoAgentState>,
     /// 会话级运行串行：同一会话的并发输入排队（followup），不互踩任务图
     run_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// MCP 服务器池（与 Orchestrator 内工具网关共用同一实例）
@@ -77,6 +88,26 @@ pub struct Core {
     config: Arc<RwLock<Arc<ExmConfig>>>,
 }
 
+/// 会话归属键 → 轮次作用域元组：`"single:<id>"` → (单智能体原组回落, Some(id))；
+/// 组名 → (组名, None)。归属目标已被删除时返回 None（轮次回落全局激活态，
+/// 与旧 align_to_session_group 的「目标不存在保持现状」语义一致）。
+fn parse_session_scope(
+    registry: &LocalRegistry,
+    group_id: &str,
+) -> Option<(String, Option<String>)> {
+    if let Some(id) = group_id.strip_prefix("single:") {
+        if registry.single_exists(id) {
+            return Some((registry.active_group_global(), Some(id.to_string())));
+        }
+        return None;
+    }
+    let g = group_id.trim();
+    if !g.is_empty() && registry.group_exists(g) {
+        return Some((g.to_string(), None));
+    }
+    None
+}
+
 impl Core {
     pub fn create(workspace_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         Self::with_config(ExmConfig::load(workspace_root))
@@ -86,6 +117,7 @@ impl Core {
         let store = Arc::new(Store::open(&cfg.data_dir)?);
         let memory = Arc::new(MemoryStore::open(&cfg.data_dir)?);
         let cron = Arc::new(CronStore::open(&cfg.data_dir)?);
+        let auto_state = parking_lot::RwLock::new(AutoAgentState::default());
         let registry = Arc::new(LocalRegistry::new(&cfg.agents_dir)?);
         let bus: Arc<dyn MessageBus> = Arc::new(InProcessBus::new());
         let (events, _rx) = broadcast::channel(8192);
@@ -153,6 +185,7 @@ impl Core {
             memory,
             events,
             cron,
+            auto_state,
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             mcp: mcp_handle.clone(),
             remote: parking_lot::RwLock::new(None),
@@ -833,6 +866,12 @@ impl Core {
         });
     }
 
+    /// 入站消毒审计事件（inbound-sanitization）：广播 + 落事件库（事件页可查）。
+    /// payload 只记模式摘要（通道/账号/模式/处置），MUST NOT 含原文全文。
+    pub fn emit_sanitize_finding(&self, payload: serde_json::Value) {
+        self.orchestrator.read().emit("", "sanitize.finding", payload);
+    }
+
     /// 回滚检查点：`date` 为空取最近一份；返回被覆盖的文件相对路径
     pub fn restore_checkpoint(&self, date: Option<&str>, rel: &str) -> anyhow::Result<String> {
         let target = self
@@ -1064,9 +1103,27 @@ impl Core {
         let _guard = lock.lock().await;
         // 轮次生命周期：开始（登记取消令牌）→ 执行 → 结束（移除）
         crate::round_trace::begin(session_id);
-        let result = self
-            .orchestrator()
-            .handle_user_message_scoped(session_id, text, scope, origin)
+        let session = self
+            .store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        // 交互上下文对齐会话归属（路由唯一事实源）：会话 group_id 形如
+        // "single:<id>"（单智能体）或组名。WebUI 切换目标 / 通道绑定切换 /
+        // 子代理会话并发都可能翻转全局激活态，若不对齐，旧会话会被错误的
+        // 人格/路由接管（部署实测：组会话在切换到单智能体后仍答指挥体人格）。
+        // 实现为 task-local 轮次作用域：归属只在本轮任务内生效，全局激活态
+        // 零污染——REST / 通道绑定 / 并发轮次读到的仍是各自显式设置的上下文
+        // （旧实现写全局态再还原，run.finished 事件先于还原到达时会泄漏临时态）。
+        // 归属目标已删除 → scope None → 回落全局激活态（轮次不中断）。
+        let ctx = parse_session_scope(&self.registry, &session.group_id);
+        let result = crate::registry::round_scope_decl::ROUND_SCOPE
+            .scope(ctx, async {
+                self.orchestrator()
+                    .handle_user_message_scoped(session_id, text, scope, origin)
+                    .await
+            })
             .await;
         crate::round_trace::end(session_id);
         result
@@ -1334,6 +1391,7 @@ impl Core {
     }
 
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
+        crate::orchestrator::unmark_im_session(id);
         self.store.delete_session(id)
     }
 
@@ -1814,6 +1872,87 @@ impl Core {
         run
     }
 
+    // ---------------------------------------------------------------- Auto Agent（experiments.autoAgent）
+
+    /// Auto Agent 状态（进程内：空转计数 + 上次 tick 分钟）。 Eval 通过次数与
+    /// 执行结果落事件流（auto.eval / auto.act），重启归零不影响正确性。
+    fn auto_agent_state(&self) -> (u32, i64) {
+        let st = self.auto_state.read();
+        (st.idle_streak, st.last_tick_minute)
+    }
+
+    /// Auto Agent 一次 tick：周期/退避判定 → Eval 自评 →（通过）自主行动。
+    /// 返回 Some(任务) 表示本轮触发了行动；None = 未到周期 / Eval 无任务。
+    /// 调度器每 20s 调用；内部按分钟粒度去重（同一分钟只评一次）。
+    pub async fn auto_agent_tick(&self, now_minute: i64) -> Option<(String, String)> {
+        let cfg = self.config();
+        if !cfg.experiments.auto_agent {
+            return None;
+        }
+        let (idle_streak, last_tick) = self.auto_agent_state();
+        // 周期判定：距上次 tick 的分钟数 ≥ 退避间隔才评（首 tick last=0 直评）
+        let due = crate::autonomy::auto_backoff_minutes(&cfg, idle_streak) as i64;
+        if last_tick != 0 && now_minute - last_tick < due {
+            return None;
+        }
+        self.auto_state.write().last_tick_minute = now_minute;
+        // Eval：非流式一次调用（工具不可用——Eval 只读判断，行动轮才有工具）
+        let orch = self.orchestrator();
+        let req = crate::provider::ChatRequest::new(
+            orch.orch_model.clone(),
+            vec![
+                crate::provider::ChatMessage::system(crate::autonomy::AUTO_EVAL_PROMPT),
+                crate::provider::ChatMessage::user("执行一次自评。"),
+            ],
+        );
+        let output = match orch.orch_provider.chat(req).await {
+            Ok(r) => r.content,
+            Err(e) => {
+                let _ = self.events.send(CoreEvent {
+                    kind: "auto.eval".into(),
+                    session_id: String::new(),
+                    payload: serde_json::json!({ "ok": false, "error": e.to_string() }),
+                });
+                return None;
+            }
+        };
+        let Some((task, why)) = crate::autonomy::parse_auto_eval(&output) else {
+            // 无任务：空转计数 +1（退避拉长），发审计事件
+            self.auto_state.write().idle_streak += 1;
+            let _ = self.events.send(CoreEvent {
+                kind: "auto.eval".into(),
+                session_id: String::new(),
+                payload: serde_json::json!({ "ok": true, "act": false }),
+            });
+            return None;
+        };
+        // Eval 通过：空传统计复位，开自主行动会话执行
+        self.auto_state.write().idle_streak = 0;
+        let _ = self.events.send(CoreEvent {
+            kind: "auto.eval".into(),
+            session_id: String::new(),
+            payload: serde_json::json!({ "ok": true, "act": true, "task": task, "why": why }),
+        });
+        let title = format!("auto-agent:{}", task.chars().take(30).collect::<String>());
+        let session = self.create_session(&title).ok()?;
+        let prompt = format!(
+            "{}\n\n## 任务输入\n目标：{task}\n选定理由：{why}\n步数预算：{}",
+            crate::autonomy::AUTO_ACT_DISCIPLINE,
+            crate::autonomy::auto_act_max_steps(&cfg),
+        );
+        let result = self.chat(&session.id, &prompt).await;
+        let _ = self.events.send(CoreEvent {
+            kind: "auto.act".into(),
+            session_id: session.id.clone(),
+            payload: serde_json::json!({
+                "task": task,
+                "status": if result.is_ok() { "done" } else { "failed" },
+                "error": result.err().map(|e| e.to_string()),
+            }),
+        });
+        Some((task, why))
+    }
+
     /// 指挥体身份 = 激活组主智能体 identifier（自定义组随组切换）
     pub fn orchestrator_id(&self) -> String {
         self.registry
@@ -1888,8 +2027,9 @@ pub fn build_orchestrator(
         )
         .with_experiments(cfg.experiments.clone()),
     );
-    // 动态上下文压缩（实验性）：开关开启才装配压缩器——schema 下发与执行体同门
-    if cfg.experiments.dynamic_compaction {
+    // 动态上下文压缩（实验性）：开关开启才装配压缩器——schema 下发与执行体同门。
+    // 滑动窗口模式（实验性，互斥）开启时不装配：窗口语义替代模型主动压缩。
+    if cfg.experiments.dynamic_compaction && !cfg.experiments.sliding_context_window {
         tools.set_compactor(provider.clone(), cfg.llm.model.clone());
     }
     // 模型档案运行池：每个档案独立 Provider。
@@ -2009,6 +2149,32 @@ pub fn build_orchestrator(
 }
 
 // ---------------------------------------------------------------- 会话历史管控（组 9 单测）
+
+#[cfg(test)]
+mod im_discipline_tests {
+    /// IM 会话标记状态机：登记幂等、除名后不再命中、独立于轮次消费（不 take）。
+    /// 注入路径（single_direct_round / converge 读 is_im_session 拼 IM_DISCIPLINE）
+    /// 由编译器保证走同一分支，此处锚定标记语义与纪律文本的关键约束项。
+    #[test]
+    fn im会话标记_登记幂等与除名() {
+        let sid = format!("im-test-{}", crate::types::new_id());
+        assert!(!crate::orchestrator::is_im_session(&sid));
+        crate::orchestrator::mark_im_session(&sid);
+        crate::orchestrator::mark_im_session(&sid); // 幂等
+        assert!(crate::orchestrator::is_im_session(&sid));
+        crate::orchestrator::unmark_im_session(&sid);
+        assert!(!crate::orchestrator::is_im_session(&sid));
+    }
+
+    #[test]
+    fn im纪律文本_含关键约束() {
+        let d = crate::orchestrator::IM_DISCIPLINE;
+        assert!(d.contains("先给结论"), "结论先行：{d}");
+        assert!(d.contains("1~5 句"), "句数上限：{d}");
+        assert!(d.contains("不逐条播报"), "过程静默：{d}");
+        assert!(d.contains("噪音"), "禁播报前缀：{d}");
+    }
+}
 
 #[cfg(test)]
 mod history_tests {

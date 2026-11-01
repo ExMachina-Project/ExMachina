@@ -18,6 +18,8 @@ use std::time::Instant;
 // tools.rs 已按领域拆为子模块（纯搬移零重写）；此处 re-export 保持
 // `exm_core::tools::X` 路径与 crate 外全部既有引用兼容。
 pub use result::ToolResult;
+/// 外部内容隔离包装（inbound-sanitization）：供网关侧工具（RSS digest 等）复用
+pub use external_wrap::wrap_external as wrap_external_for;
 pub use allowlist::{is_destructive_command};
 pub use terminal::{BgTask, SpawnBgState, SpawnBgTask};
 pub use hooks::run_hook_command;
@@ -59,6 +61,7 @@ mod terminal;
 mod todo;
 mod computer;
 mod approval;
+mod external_wrap;
 mod web;
 mod browser;
 mod schedule;

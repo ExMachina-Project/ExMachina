@@ -491,3 +491,149 @@ pub(crate) async fn list_messages(State(st): State<AppState>, Path(id): Path<Str
             .into_response(),
     }
 }
+
+// ---------------------------------------------------------------- 会话导出
+
+#[derive(Deserialize)]
+pub(crate) struct ExportQuery {
+    /// markdown | json（缺省 markdown）
+    format: Option<String>,
+}
+
+/// GET /api/sessions/:id/export?format=markdown|json
+/// Markdown：消息 + 思考/工具摘要 + 审批记录（人读归档）；JSON：结构化全量（机读回放）。
+pub(crate) async fn export_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<ExportQuery>,
+) -> impl IntoResponse {
+    let Some(session) = st.core.store.get_session(&id).ok().flatten() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
+    };
+    let msgs = st.core.store.list_messages(&id, 100_000).unwrap_or_default();
+    let approvals = st
+        .core
+        .approval_list(None, 100_000)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.session_id == id)
+        .collect::<Vec<_>>();
+
+    let fname = format!(
+        "exm-session-{}-{}.{}",
+        session.title.replace('/', "-").chars().take(24).collect::<String>(),
+        id.chars().take(8).collect::<String>(),
+        if q.format.as_deref() == Some("json") { "json" } else { "md" }
+    );
+
+    if q.format.as_deref() == Some("json") {
+        let body = json!({
+            "session": session,
+            "messages": msgs,
+            "approvals": approvals,
+        });
+        let body = serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into());
+        (
+            StatusCode::OK,
+            [
+                ("content-type", "application/json; charset=utf-8"),
+                (
+                    "content-disposition",
+                    Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str())
+                        as &str,
+                ),
+            ],
+            body,
+        )
+            .into_response()
+    } else {
+        let mut md = String::new();
+        md.push_str(&format!("# 会话导出：{}\n\n", session.title));
+        md.push_str(&format!(
+            "- 会话 ID：`{}`\n- 创建：{}\n- 状态：{}\n- 消息数：{}\n\n---\n\n",
+            session.id,
+            session.created_at,
+            session.status,
+            msgs.len()
+        ));
+        for m in &msgs {
+            let role = match m.role {
+                exm_core::types::MessageRole::User => "用户",
+                exm_core::types::MessageRole::Orchestrator => "指挥体",
+                exm_core::types::MessageRole::Unit => "子个体",
+                exm_core::types::MessageRole::System => "系统",
+            };
+            let agent = m.agent_id.as_deref().unwrap_or("");
+            md.push_str(&format!(
+                "## {}{} · {}\n\n",
+                role,
+                if agent.is_empty() {
+                    String::new()
+                } else {
+                    format!("（{agent}）")
+                },
+                m.created_at
+            ));
+            if let Some(th) = &m.thinking {
+                if !th.trim().is_empty() {
+                    md.push_str(&format!(
+                        "<details><summary>思考过程（{} 字符）</summary>\n\n```\n{}\n```\n\n</details>\n\n",
+                        th.chars().count(),
+                        th
+                    ));
+                }
+            }
+            if !m.tool_calls.is_empty() {
+                md.push_str(&format!(
+                    "**工具调用 × {}**：{}\n\n",
+                    m.tool_calls.len(),
+                    m.tool_calls
+                        .iter()
+                        .map(|c| format!("`{}`", c.tool))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+            }
+            for s in &m.statements {
+                let text = s.text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                md.push_str(&format!("{text}\n\n"));
+            }
+        }
+        if !approvals.is_empty() {
+            md.push_str("---\n\n## 审批记录\n\n");
+            for a in &approvals {
+                md.push_str(&format!(
+                    "- **{}** `{}`（{}）— {}{}\n",
+                    a.status,
+                    a.command.chars().take(120).collect::<String>(),
+                    a.created_at,
+                    a.agent_id,
+                    a.result
+                        .as_deref()
+                        .map(|r| format!(" → {}", r.chars().take(200).collect::<String>()))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        (
+            StatusCode::OK,
+            [
+                ("content-type", "text/markdown; charset=utf-8"),
+                (
+                    "content-disposition",
+                    Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str())
+                        as &str,
+                ),
+            ],
+            md,
+        )
+            .into_response()
+    }
+}
