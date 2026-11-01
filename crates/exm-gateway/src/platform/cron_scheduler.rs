@@ -66,6 +66,15 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
         }
     }
 
+    // Auto Agent（实验性，experiments.autoAgent）：周期 Eval 自评 + 自主行动。
+    // 内部按分钟去重与退避（连续无任务拉长间隔）；开关关闭时 tick 直接返回。
+    if core.config().experiments.auto_agent {
+        let minute = now.timestamp() / 60;
+        if core.auto_agent_tick(minute).await.is_some() {
+            changed = true;
+        }
+    }
+
     if changed {
         let _ = core.events.send(CoreEvent {
             kind: "cron.updated".into(),

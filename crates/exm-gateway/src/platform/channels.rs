@@ -802,8 +802,26 @@ pub async fn channel_inbound(
                 .into_response();
         }
     };
-    // 流预览回写（入站文本 → 列表展示）
-    let _ = st.core.touch_flow_message(&channel.id, &key, b.text.trim());
+    // 流预览回写（入站消毒后文本 → 列表展示；失败不影响执行）
+    // 消毒审计：webhook 路径此处已有会话，落库挂在会话事件流（事件页可查）
+    let (clean_text, findings) = crate::sanitize::sanitize_with(
+        b.text.trim(),
+        Some(&st.core.config().security.sanitize_rules),
+    );
+    if !findings.is_empty() {
+        crate::sanitize::note_findings(&findings);
+        st.core.orchestrator().emit(
+            &session.id,
+            "sanitize.finding",
+            json!({
+                "channel": channel.id,
+                "externalId": b.sender_id.clone().unwrap_or_default(),
+                "patterns": findings.iter().map(|f| f.rule).collect::<Vec<_>>(),
+                "actions": findings.iter().map(|f| f.action).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    let _ = st.core.touch_flow_message(&channel.id, &key, &clean_text);
     // 能力边界 + 记忆隔离：webhook 与内置适配器走同一套通道配置语义
     let tool_scope = channel.tool_scope();
     let partition = channel.memory_partition(&scope_id);
@@ -837,8 +855,9 @@ pub async fn channel_inbound(
         });
     }
     // 202 受理，运行过程经 WS 推流；运行结束后恢复交互上下文
+    // 注：消毒在上文流预览回写处完成（clean_text 复用），此处仅收束所有权
     let core = st.core.clone();
-    let text = b.text.clone();
+    let text = clean_text;
     let sid = session.id.clone();
     tokio::spawn(async move {
         let r = core.chat_scoped(&sid, &text, tool_scope).await;

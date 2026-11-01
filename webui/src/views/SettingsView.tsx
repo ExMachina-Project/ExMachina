@@ -11,7 +11,7 @@ import { useT, type TKey } from "../i18n/core";
 import { LANGS, useLang } from "../i18n/core";
 import { PageHeader } from "../components/PageHeader";
 import { MaskedPasswordInput } from "../components/MaskedInput";
-import { api, limitsStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
+import { api, limitsStats, sanitizeStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
 import { loadNotifyPrefs, saveNotifyPrefs, type NotifyPrefs } from "../store";
 
 /** 分组元数据。ui 是本地偏好分区，不属于后端 config schema */
@@ -50,6 +50,10 @@ const FIELD_I18N: Record<string, { label: TKey; help?: TKey }> = {
   "memory.halfLifeDays": { label: "cfg.halfLifeDays", help: "cfg.halfLifeDays.help" },
   "security.execApproval": { label: "cfg.execApproval", help: "cfg.execApproval.help" },
   "security.execAllowlist": { label: "cfg.execAllowlist", help: "cfg.execAllowlist.help" },
+  "security.sanitizeRules.fakeSystemPrompt": { label: "cfg.sanitizeFakeSystemPrompt", help: "cfg.sanitizeFakeSystemPrompt.help" },
+  "security.sanitizeRules.hijackDirective": { label: "cfg.sanitizeHijackDirective", help: "cfg.sanitizeHijackDirective.help" },
+  "security.sanitizeRules.fakeToolResult": { label: "cfg.sanitizeFakeToolResult", help: "cfg.sanitizeFakeToolResult.help" },
+  "security.sanitizeRules.hiddenUnicode": { label: "cfg.sanitizeHiddenUnicode", help: "cfg.sanitizeHiddenUnicode.help" },
   "security.authKey": { label: "cfg.authKey", help: "cfg.authKey.help" },
   "automation.heartbeatEnabled": { label: "cfg.heartbeatEnabled", help: "cfg.heartbeatEnabled.help" },
   "automation.heartbeatIntervalMinutes": { label: "cfg.heartbeatInterval", help: "cfg.heartbeatInterval.help" },
@@ -401,6 +405,7 @@ export function SettingsView(): React.ReactElement {
               <p>{t(meta.descKey)}</p>
             </header>
             {current.key === "limits" && <LimitsStatsCard />}
+            {current.key === "security" && <SanitizeStatsCard />}
             <div className="cfg-list">
               {current.fields.map((f) => {
                 const value = values[f.key];
@@ -468,8 +473,41 @@ export function SettingsView(): React.ReactElement {
 }
 
 /** 用量统计卡（ops-visibility）：消费既有 /limits/stats 快照 */
-function LimitsStatsCard(): React.ReactElement {
+/** 消毒命中统计（安全区顶卡）：模式 → 计数；零命中显示空态文案 */
+function SanitizeStatsCard(): React.ReactElement {
   const t = useT();
+  const [stats, setStats] = useState<{ pattern: string; count: number }[] | null>(null);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await sanitizeStats();
+        setStats(r.stats ?? []);
+      } catch {
+        setStats(null);
+      }
+    })();
+  }, []);
+  if (stats === null) return <></>;
+  return (
+    <Card size="small" className="hud" style={{ marginBottom: 12 }}>
+      <div className="dim" style={{ marginBottom: 6 }}>{t("cfg.sanitizeStatsTitle")}</div>
+      {stats.length === 0 ? (
+        <div className="dim">{t("cfg.sanitizeStatsEmpty")}</div>
+      ) : (
+        <table className="plain-table">
+          <thead><tr><th>{t("cfg.sanitizeStatsPattern")}</th><th>{t("cfg.sanitizeStatsCount")}</th></tr></thead>
+          <tbody>
+            {stats.map((s) => (
+              <tr key={s.pattern}><td className="mono">{s.pattern}</td><td className="mono">{s.count}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Card>
+  );
+}
+
+function LimitsStatsCard(): React.ReactElement {  const t = useT();
   const [stats, setStats] = useState<LimitsStats | null>(null);
   useEffect(() => {
     void (async () => {

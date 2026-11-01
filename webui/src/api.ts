@@ -971,3 +971,12 @@ export interface LimitsStats {
 export function limitsStats(): Promise<LimitsStats> {
   return req(`/limits/stats`);
 }
+
+/** 消毒命中统计（inbound-sanitization 设置页安全区）：模式 → 计数（进程级） */
+export interface SanitizeStats {
+  stats: { pattern: string; count: number }[];
+}
+
+export function sanitizeStats(): Promise<SanitizeStats> {
+  return req(`/config/sanitize-stats`);
+}

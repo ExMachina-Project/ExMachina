@@ -78,6 +78,11 @@ pub struct CompactParams {
     pub trigger: usize,
     /// 保留最近 N 条原文
     pub keep: usize,
+    /// 滑动窗口模式（实验性，experiments.slidingContextWindow）：
+    /// 不做新压缩调用——已压过的沿用旧摘要，窗口外未压的历史直接不进上下文。
+    /// 模型持续持有最近 keep 条完整原文；早期细节由模型经 context_compact
+    /// 自主决策回收（与 dynamicCompaction 协同）。
+    pub sliding: bool,
 }
 
 impl Default for CompactParams {
@@ -85,6 +90,7 @@ impl Default for CompactParams {
         Self {
             trigger: COMPACT_TRIGGER,
             keep: COMPACT_KEEP,
+            sliding: false,
         }
     }
 }
@@ -119,6 +125,16 @@ pub async fn ensure_compacted(
         .as_ref()
         .and_then(|s| s.rolling_summary.clone())
         .unwrap_or_default();
+    // 滑动窗口模式（实验性）：不做新压缩调用。已压过的沿用旧摘要；
+    // 窗口外未压历史不进上下文——模型持续持有最近 keep 条完整原文，
+    // 何时回收早期细节交由模型（context_compact / 任务自然结束）。
+    if params.sliding {
+        let recent_text = render_recent(&recent.into_iter().cloned().collect::<Vec<_>>());
+        return Compacted {
+            summary: (!prev_summary.trim().is_empty()).then_some(prev_summary),
+            recent: recent_text,
+        };
+    }
     if prev_upto == upto {
         let recent_text = render_recent(&recent.into_iter().cloned().collect::<Vec<_>>());
         return Compacted {
@@ -333,6 +349,7 @@ mod tests {
             &sid,
             CompactParams {
                 trigger: 10,
+                sliding: false,
                 keep: 5,
             },
         )
@@ -353,6 +370,7 @@ mod tests {
             &sid,
             CompactParams {
                 trigger: 10,
+                sliding: false,
                 keep: 5,
             },
         )
@@ -380,6 +398,7 @@ mod tests {
             &sid,
             CompactParams {
                 trigger: 10,
+                sliding: false,
                 keep: 5,
             },
         )
@@ -401,6 +420,7 @@ mod tests {
             &sid,
             CompactParams {
                 trigger: 10,
+                sliding: false,
                 keep: 5,
             },
         )
@@ -415,5 +435,89 @@ mod tests {
         let p = CompactParams::default();
         assert_eq!(p.trigger, COMPACT_TRIGGER);
         assert_eq!(p.keep, COMPACT_KEEP);
+        assert!(!p.sliding, "默认非滑动窗口（既有行为）");
+    }
+
+    /// 滑动窗口模式（实验性，experiments.slidingContextWindow）：
+    /// 超阈值也不发起压缩调用——失败 provider 不阻断即证明零 LLM 调用；
+    /// 已有旧摘要沿用；窗口 = 最近 keep 条完整原文。
+    #[tokio::test]
+    async fn 滑动窗口_超阈值不压缩_窗口完整原文() {
+        let (store, sid) = test_store_with(30);
+        // 失败替身：若滑动模式仍调 LLM 压缩会返回 Err→摘要 None 且 panic 链路不可达；
+        // 这里直接断言「无新摘要持久化 + 窗口外消息不进上下文」
+        let provider: Arc<dyn LlmProvider> = Arc::new(FailCompacter);
+        let c = ensure_compacted(
+            &store,
+            &provider,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+                sliding: true,
+            },
+        )
+        .await;
+        // 无旧摘要可沿用：summary=None（未压缩，不是失败）
+        assert!(c.summary.is_none(), "滑动模式不产生新摘要");
+        // 窗口 = 最近 5 条原文；窗口外不进上下文
+        assert!(c.recent.contains("消息29"), "窗口含最新消息");
+        assert!(!c.recent.contains("消息0"), "窗口外消息不进上下文");
+        // 会话无摘要持久化（压缩零调用）
+        let s = store.get_session(&sid).unwrap().unwrap();
+        assert!(s.rolling_summary.is_none());
+        assert_eq!(s.summary_upto, None);
+    }
+
+    /// 滑动窗口 + 已有旧摘要：沿用旧摘要（不追加压缩），新窗口滑过旧边界
+    #[tokio::test]
+    async fn 滑动窗口_已有旧摘要_沿用不追压() {
+        let (store, sid) = test_store_with(30);
+        // 先以常规模式建立摘要（upto=25）
+        let ok: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
+        ensure_compacted(
+            &store,
+            &ok,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+                sliding: false,
+            },
+        )
+        .await;
+        // 追加消息后切滑动模式：沿用旧摘要，不再压（FailCompacter 证明零调用）
+        store
+            .add_message(
+                &sid,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::报告, "追加消息")],
+            )
+            .unwrap();
+        let fail: Arc<dyn LlmProvider> = Arc::new(FailCompacter);
+        let c = ensure_compacted(
+            &store,
+            &fail,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+                sliding: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            c.summary.as_deref(),
+            Some("合并摘要：目标与结论"),
+            "沿用旧摘要"
+        );
+        assert!(c.recent.contains("追加消息"), "窗口含最新消息");
+        // summary_upto 不变（未追压）
+        let s = store.get_session(&sid).unwrap().unwrap();
+        assert_eq!(s.summary_upto, Some(25));
     }
 }
