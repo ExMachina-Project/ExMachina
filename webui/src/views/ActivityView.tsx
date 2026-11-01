@@ -33,7 +33,7 @@ function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; co
   // 事件信封有两层：外层 type="event" 只是投递标记，真实事件名在 payload.type
   // （此前按 payload.kind 取，取不到 → 每一行都退化成「event / 内部事件」）。
   const kind = String(p.type ?? p.kind ?? e.type ?? e.kind ?? "event");
-  let text = "";
+  let text: string;
   switch (kind) {
     case "dispatch":
       text = t("activity.dispatch", {
