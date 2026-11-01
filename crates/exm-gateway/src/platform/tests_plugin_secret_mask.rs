@@ -36,6 +36,8 @@ mod plugin_secret_mask_tests {
                 token: None,
                 reply_webhook: None,
                 group_gate: None,
+            proactive_reply: None,
+            proactive_rate: None,
                 capability: "computer".into(),
                 memory_isolation: false,
                 created_at: String::new(),

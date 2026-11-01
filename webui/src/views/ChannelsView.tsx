@@ -1,7 +1,7 @@
 /** 通道网关：多平台多账号接入（QQ 官方机器人 / NapCat / Telegram / Discord / Slack / Matrix / webhook 桥接），每个账号可绑定不同智能体组 */
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  Button, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch, Table, Tag, Tooltip, message,
+  Button, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Slider, Space, Spin, Switch, Table, Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
 import { PlusOutlined, QrcodeOutlined, ReloadOutlined } from "@ant-design/icons";
@@ -378,6 +378,7 @@ export function ChannelsView(): React.ReactElement {
       platform: "qqbot",
       capability: "computer",
       memoryIsolation: false,
+      proactiveReply: false,
       config: platformDefaults("qqbot"),
     });
     setModal(true);
@@ -410,6 +411,8 @@ export function ChannelsView(): React.ReactElement {
       admins: (c.admins ?? []).join(", "),
       capability: c.capability ?? "computer",
       memoryIsolation: c.memoryIsolation ?? false,
+      proactiveReply: c.proactiveReply ?? false,
+      proactiveRate: c.proactiveRate ?? 100,
       config: cfg,
       configJson: Object.keys(extra).length > 0 ? JSON.stringify(extra, null, 2) : "",
     });
@@ -480,6 +483,8 @@ export function ChannelsView(): React.ReactElement {
         .filter(Boolean),
       capability: v.capability ?? "computer",
       memoryIsolation: Boolean(v.memoryIsolation),
+      proactiveReply: Boolean(v.proactiveReply),
+      proactiveRate: v.proactiveReply ? Number(v.proactiveRate ?? 100) : undefined,
     };
     try {
       if (editing) {
@@ -866,6 +871,34 @@ export function ChannelsView(): React.ReactElement {
                     extra={t("channels.f.memoryIsolationHelp")}
                   >
                     <Switch size="small" />
+                  </Form.Item>
+                  {/* 主动回复（群聊免 @）：开关 + 回复率（回复率仅开启时有意义） */}
+                  <Form.Item
+                    noStyle
+                    shouldUpdate={(a, b) => a.proactiveReply !== b.proactiveReply}
+                  >
+                    {({ getFieldValue }) => (
+                      <>
+                        <Form.Item
+                          name="proactiveReply"
+                          valuePropName="checked"
+                          label={t("channels.f.proactiveReply")}
+                          extra={t("channels.f.proactiveReplyHelp")}
+                        >
+                          <Switch size="small" />
+                        </Form.Item>
+                        {getFieldValue("proactiveReply") && (
+                          <Form.Item
+                            name="proactiveRate"
+                            label={t("channels.f.proactiveRate")}
+                            extra={t("channels.f.proactiveRateHelp")}
+                            initialValue={100}
+                          >
+                            <Slider min={0} max={100} step={5} marks={{ 0: "0", 50: "50", 100: "100" }} />
+                          </Form.Item>
+                        )}
+                      </>
+                    )}
                   </Form.Item>
                   {/* 管理者账号：主体区直接可见（判权跟人走，任何通道配了都全局生效） */}
                   <Form.Item

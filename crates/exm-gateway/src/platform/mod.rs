@@ -41,6 +41,7 @@ mod cron_scheduler;
 mod approvals;
 mod workbench;
 mod plan;
+mod proactive;
 pub mod channels;
 pub mod channel_runtime;
 mod routes;
