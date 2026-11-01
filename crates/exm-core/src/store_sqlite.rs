@@ -141,6 +141,7 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA).context("初始化 schema 失败")?;
         // 旧库列补齐（CREATE TABLE IF NOT EXISTS 不会给已存在的表加新列）
         add_column_if_missing(&conn, "sessions", "pinned", "INTEGER NOT NULL DEFAULT 0");
+        add_column_if_missing(&conn, "sessions", "archived_at", "TEXT");
 
         let store = SqliteStore {
             conn: Mutex::new(conn),
@@ -247,8 +248,8 @@ impl SqliteStore {
 
     fn insert_session_conn(conn: &Connection, s: &Session) -> anyhow::Result<()> {
         conn.execute(
-            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,pinned,ledger,created_at,updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,pinned,archived_at,ledger,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             rusqlite::params![
                 s.id,
                 s.title,
@@ -259,6 +260,7 @@ impl SqliteStore {
                 s.parent_session,
                 s.parent_upto,
                 s.pinned as i64,
+                s.archived_at,
                 serde_json::to_string(&s.ledger)?,
                 s.created_at,
                 s.updated_at,
@@ -279,6 +281,8 @@ impl SqliteStore {
             parent_session: row.get("parent_session")?,
             parent_upto: row.get("parent_upto")?,
             pinned: row.get::<_, i64>("pinned").unwrap_or(0) != 0,
+            archived_at: row.get("archived_at").unwrap_or(None),
+            message_count: None,
             ledger: serde_json::from_str(&row.get::<_, String>("ledger")?).unwrap_or_default(),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -306,6 +310,8 @@ impl SqliteStore {
             last_message_preview: None,
             last_active_at: None,
             pinned: false,
+            archived_at: None,
+            message_count: None,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -324,7 +330,19 @@ impl SqliteStore {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 200")?;
+        // 主列表不含归档态（归档区走 list_archived_sessions）
+        let mut st = conn.prepare(
+            "SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT 200",
+        )?;
+        let rows = st.query_map([], Self::row_session)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 归档区视图：只含归档态，按归档时间倒序
+    pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn
+            .prepare("SELECT * FROM sessions WHERE archived_at IS NOT NULL ORDER BY archived_at DESC")?;
         let rows = st.query_map([], Self::row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -903,8 +921,9 @@ impl SqliteStore {
     /// 按组列出会话
     pub fn list_sessions_in_group(&self, group_id: &str) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
+        // 组内主列表不含归档态
         let mut st = conn.prepare(
-            "SELECT * FROM sessions WHERE group_id=?1 ORDER BY updated_at DESC LIMIT 200",
+            "SELECT * FROM sessions WHERE group_id=?1 AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 200",
         )?;
         let rows = st.query_map(rusqlite::params![group_id], Self::row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())

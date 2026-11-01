@@ -664,6 +664,13 @@ pub struct Session {
     /// 用户置顶（会话列表置顶分组；默认 false）
     #[serde(default)]
     pub pinned: bool,
+    /// 归档时间（ISO）：None = 未归档；Some = 已归档（移出主列表与聊天左栏，
+    /// 归档区可见可恢复——归档是可逆状态而非删除，旧数据缺省 None 零迁移）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    /// 消息条数（管理页附加，不入存储）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<usize>,
     pub ledger: SessionLedger,
     pub created_at: String,
     pub updated_at: String,

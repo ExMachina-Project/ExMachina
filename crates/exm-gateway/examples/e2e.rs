@@ -2806,6 +2806,112 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // ---- 会话归档与批量（session-management）：归档→主列表隐身→归档区可见→恢复→回归 ----
+    {
+        let a1: String = client
+            .post(format!("{base}/sessions"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "title": "batch-arch-a" }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let a2: String = client
+            .post(format!("{base}/sessions"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "title": "batch-arch-b" }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        // 批量归档 2 条
+        let bar: serde_json::Value = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "archive", "ids": [a1, a2] }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("批量归档作用计数=2", bar["affected"] == 2 && bar["ok"] == true);
+        // 主列表（all 视角）不再含这两条
+        let main: serde_json::Value = client
+            .get(format!("{base}/sessions?all=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let main_ids = main.as_array().cloned().unwrap_or_default();
+        let gone = main_ids
+            .iter()
+            .all(|s| s["id"].as_str() != Some(a1.as_str()) && s["id"].as_str() != Some(a2.as_str()));
+        c.check("归档后主列表不含归档会话", gone);
+        // 归档区恰含这两条且带 archivedAt
+        let arch: serde_json::Value = client
+            .get(format!("{base}/sessions?archived=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let arch_arr = arch.as_array().cloned().unwrap_or_default();
+        let arch_hit = arch_arr
+            .iter()
+            .filter(|s| {
+                (s["id"].as_str() == Some(a1.as_str()) || s["id"].as_str() == Some(a2.as_str()))
+                    && s["archivedAt"].is_string()
+            })
+            .count();
+        c.check("归档区可见且带归档时间", arch_hit == 2);
+        // 批量恢复 → 主列表回归
+        let un: serde_json::Value = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "unarchive", "ids": [a1] }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("批量恢复作用计数=1", un["affected"] == 1);
+        let main2: serde_json::Value = client
+            .get(format!("{base}/sessions?all=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let back = main2
+            .as_array()
+            .map(|a| a.iter().any(|s| s["id"].as_str() == Some(a1.as_str())))
+            .unwrap_or(false);
+        c.check("恢复后主列表回归", back);
+        // 清理：批量删除三条（含未恢复的 a2）
+        let del: serde_json::Value = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "delete", "ids": [a1, a2] }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("批量删除作用计数=2", del["affected"] == 2);
+        // 非法动作 400
+        let bad: reqwest::Response = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "explode", "ids": [a1] }))
+            .send()
+            .await?;
+        c.check("未知批量动作 400", bad.status().as_u16() == 400);
+    }
+
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {
