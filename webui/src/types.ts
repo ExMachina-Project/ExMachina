@@ -100,6 +100,10 @@ export interface Session {
   lastActiveAt?: string;
   /** 用户置顶（列表置顶分组） */
   pinned?: boolean;
+  /** 归档时间（ISO）：有值 = 归档态（主列表/左栏不显示，归档区可见） */
+  archivedAt?: string;
+  /** 消息条数（管理页附加） */
+  messageCount?: number;
 }
 
 export type TaskStatus =

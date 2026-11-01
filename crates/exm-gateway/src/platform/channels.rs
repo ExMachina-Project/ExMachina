@@ -393,7 +393,8 @@ pub async fn list_flow_sessions(
         .into_iter()
         .filter(|s| s.title.starts_with(&title_prefix) || s.title == bare_title)
         .collect();
-    mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    // 活跃倒序；同秒以创建时间破平（与 /sessions /use 序号寻址同口径）
+    mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
     let active = flow.active_session.clone();
     let items: Vec<Value> = mine
         .iter()

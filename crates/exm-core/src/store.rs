@@ -61,6 +61,8 @@ impl Store {
             last_message_preview: None,
             last_active_at: None,
             pinned: false,
+            archived_at: None,
+            message_count: None,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -90,6 +92,8 @@ impl Store {
             last_message_preview: None,
             last_active_at: None,
             pinned: false,
+            archived_at: None,
+            message_count: None,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -110,12 +114,27 @@ impl Store {
         }
     }
 
+    /// 会话归档 / 恢复（archived_at = Some(时间) 即归档态；None 即恢复）。
+    /// 归档是可逆状态：不删消息，只把会话移出主列表与聊天左栏。
+    pub fn set_session_archived(&self, id: &str, archived: bool) -> Result<()> {
+        match self.get_session(id)? {
+            Some(mut s) => {
+                s.archived_at = if archived { Some(now_iso()) } else { None };
+                self.db.put("sessions", &s.id, &s)?;
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("会话不存在: {id}")),
+        }
+    }
+
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.db.get("sessions", id)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let mut list: Vec<Session> = self.db.list("sessions")?;
+        let all: Vec<Session> = self.db.list("sessions")?;
+        // 主列表不含归档态（归档区走 list_archived_sessions 专用视图）
+        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_none()).collect();
         // 置顶优先，组内按活跃时间倒序（列表结构 = 置顶分组 + 时间分组）
         list.sort_by(|a, b| {
             b.pinned
@@ -124,6 +143,26 @@ impl Store {
         });
         list.truncate(200);
         Ok(list)
+    }
+
+    /// 归档区视图：只含归档态，按归档时间倒序（最近归档在前）
+    pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
+        let all: Vec<Session> = self.db.list("sessions")?;
+        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_some()).collect();
+        list.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
+        Ok(list)
+    }
+
+    /// 会话消息条数（JSONL 非空行计数；无文件 = 0）。与管理页「消息数」列同口径。
+    pub fn message_count(&self, session_id: &str) -> usize {
+        let path = self
+            .db
+            .root()
+            .join("messages")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::read_to_string(path)
+            .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
     }
 
     /// 会话最后一条消息的纯文本预览（末行 JSONL 直接取，避免整文件反序列化）
@@ -588,7 +627,10 @@ impl Store {
     /// 按组列出会话（组是交互对象：会话归属创建时的激活组）
     pub fn list_sessions_in_group(&self, group_id: &str) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
-        let mut list: Vec<Session> = all.into_iter().filter(|s| s.group_id == group_id).collect();
+        let mut list: Vec<Session> = all
+            .into_iter()
+            .filter(|s| s.group_id == group_id && s.archived_at.is_none())
+            .collect();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list.truncate(200);
         Ok(list)
