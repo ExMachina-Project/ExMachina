@@ -33,10 +33,12 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
   const isUser = m.role === "user";
   // 自动任务标记：agentId 带 auto: 前缀的 user 消息是系统自动内容（视频观看等），非真人输入
   const autoOrigin = isUser && m.agentId?.startsWith("auto:") ? m.agentId.slice(5) : null;
+  // 群聊发送者：agentId 带 im: 前缀 = 外部群聊真人发言者（消息头署名，正文保持纯净）
+  const imSender = isUser && m.agentId?.startsWith("im:") ? m.agentId.slice(3) : null;
   const title = isUser
     ? autoOrigin
       ? tb("chat.role.auto")
-      : tb("chat.role.user")
+      : imSender ?? tb("chat.role.user")
     : m.role === "orchestrator"
       ? (orchLabel ?? tb("chat.role.orchestrator"))
       : (m.agentId ?? tb("chat.role.system"));
