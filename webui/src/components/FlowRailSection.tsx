@@ -31,6 +31,12 @@ export function FlowRailSection({ t }: { t: (k: never) => string }): React.React
   const selectSession = useExm((st) => st.selectSession);
   const sessions = useExm((st) => st.sessions);
   const sessionId = useExm((st) => st.sessionId);
+  /** 展开的流 id（同屏只展开一条；再点收起）——hooks 必须在早退之前：
+   *  条件 return 后再声明 hooks 会触发 React Hooks 顺序违规（白屏）。 */
+  const [expanded, setExpanded] = useState<string | null>(null);
+  /** 流内会话列表（展开的流） */
+  const [flowSessions, setFlowSessions] = useState<FlowSessionInfo[]>([]);
+  const [fsLoading, setFsLoading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -56,37 +62,6 @@ export function FlowRailSection({ t }: { t: (k: never) => string }): React.React
     window.addEventListener("exm:flows-refresh", h);
     return () => window.removeEventListener("exm:flows-refresh", h);
   }, [load, sessionId]);
-
-  if (loading || flows.length === 0) return <></>;
-
-  // 按通道分组（保持通道在列表中的顺序）
-  const byChannel = new Map<string, { channel: Channel | undefined; flows: ChannelFlow[] }>();
-  for (const f of flows) {
-    if (!byChannel.has(f.channelId)) {
-      byChannel.set(f.channelId, { channel: channels.find((c) => c.id === f.channelId), flows: [] });
-    }
-    byChannel.get(f.channelId)!.flows.push(f);
-  }
-
-  const sessionById = new Map(sessions.map((s) => [s.id, s]));
-  void sessionById; // 预留：流会话与本地列表的交叉标记（未读数等后续接入）
-
-  /** 打开流绑定会话：未读清零（spec：打开该会话后未读 MUST 清零）+ 跳转。
-   *  乐观清零本地计数（REST 异步补刀），失败也不回滚——下次拉列表自然对齐。 */
-  const openFlow = (f: ChannelFlow) => {
-    if (!f.activeSession) return;
-    if (f.unread) {
-      setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, unread: 0 } : x)));
-      void api.readChannelFlow(f.id).catch(() => undefined);
-    }
-    void selectSession(f.activeSession);
-  };
-
-  /** 展开的流 id（同屏只展开一条；再点收起） */
-  const [expanded, setExpanded] = useState<string | null>(null);
-  /** 流内会话列表（展开的流） */
-  const [flowSessions, setFlowSessions] = useState<FlowSessionInfo[]>([]);
-  const [fsLoading, setFsLoading] = useState(false);
 
   /** 展开流 → 拉流内会话列表（与通道 /sessions 指令同源） */
   const toggleExpand = useCallback(
@@ -122,6 +97,30 @@ export function FlowRailSection({ t }: { t: (k: never) => string }): React.React
     },
     [selectSession],
   );
+
+  if (loading || flows.length === 0) return <></>;
+
+  // 按通道分组（保持通道在列表中的顺序）
+  const byChannel = new Map<string, { channel: Channel | undefined; flows: ChannelFlow[] }>();
+  for (const f of flows) {
+    if (!byChannel.has(f.channelId)) {
+      byChannel.set(f.channelId, { channel: channels.find((c) => c.id === f.channelId), flows: [] });
+    }
+    byChannel.get(f.channelId)!.flows.push(f);
+  }
+
+  const sessionById = new Map(sessions.map((s) => [s.id, s]));
+  void sessionById; // 预留：流会话与本地列表的交叉标记（未读数等后续接入）
+  /** 打开流绑定会话：未读清零（spec：打开该会话后未读 MUST 清零）+ 跳转。
+   *  乐观清零本地计数（REST 异步补刀），失败也不回滚——下次拉列表自然对齐。 */
+  const openFlow = (f: ChannelFlow) => {
+    if (!f.activeSession) return;
+    if (f.unread) {
+      setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, unread: 0 } : x)));
+      void api.readChannelFlow(f.id).catch(() => undefined);
+    }
+    void selectSession(f.activeSession);
+  };
 
   return (
     <div className="rail-section">

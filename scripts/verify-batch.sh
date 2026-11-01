@@ -41,6 +41,7 @@ else
   echo "（--skip-e2e：跳过 e2e）"
 fi
 run_step "webui tsc" bash -c 'cd webui && npx tsc --noEmit'
+run_step "webui eslint（Hooks 顺序防线）" bash -c 'cd webui && npx eslint . --max-warnings 9999'
 run_step "webui 构建" bash -c 'cd webui && npm run build'
 
 TOTAL_END=$(date +%s.%N)

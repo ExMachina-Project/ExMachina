@@ -722,7 +722,7 @@ export const useExm = create<ExmState>((set, get) => ({
       if (!spawnId) return;
       if (evt.type === "spawn.started") {
         // 只跟踪后台派生（同步派生的结果在工具调用内直接可见）
-        if (!Boolean(p.background)) return;
+        if (!p.background) return;
         const preview = String(p.taskPreview ?? "");
         const fresh: SpawnBgItem = { spawnId, preview, status: "running", startedAt: Date.now() };
         set({ spawns: [fresh, ...get().spawns.filter((s) => s.spawnId !== spawnId)].slice(0, 20) });
