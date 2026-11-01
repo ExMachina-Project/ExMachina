@@ -306,14 +306,14 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         }
                                         let external_id = d.pointer("/author/id").and_then(|x| x.as_str()).unwrap_or("").to_string();
                                         let display = d.pointer("/author/global_name").or_else(|| d.pointer("/author/username")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                        // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）：纯函数前置计算
+                                        let sender_mark = crate::channel_util::sender_origin(
+                                            is_group, &display, &external_id,
+                                        );
                                         let gate_ctx = InboundCtx { text: &text, external_id: &external_id, display_name: &display, is_group, mentioned, chat_key: channel_id.as_str() };
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
                                             GateDecision::Allow(clean) => {
                                                 text = clean;
-                                                // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
-                                                text = crate::channel_util::sender_prefix_if_group(
-                                                    is_group, &text, &display, &external_id,
-                                                );
                                             }
                                             GateDecision::Ignore => continue,
                                             GateDecision::Deny(reply) => {
@@ -336,6 +336,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         let ch2 = ch.clone();
                                         let client2 = client.clone();
                                         let token2 = token.clone();
+                                        let sender_mark = sender_mark.clone();
                                         tokio::spawn(async move {
                                             // 附件下载落 inbox（闸门已过，不浪费白名单外流量）；
                                             // 语音附件（audio/*，Discord 按住说话即此形态）顺带转写——telegram 同款能力
@@ -352,7 +353,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                 }
                                             }
                                             let text = if transcript_note.is_empty() { text } else { format!("{text}{transcript_note}") };
-                                            handle_message(&core, &ch2, &client2, &token2, &channel_id, &external_id, saved, &text).await;
+                                            handle_message(&core, &ch2, &client2, &token2, &channel_id, &external_id, saved, &text, sender_mark.as_deref()).await;
                                         });
                                     }
                                     _ => {}
@@ -456,6 +457,7 @@ async fn handle_message(
     external_id: &str,
     media: Vec<(String, String, String)>,
     text: &str,
+    sender_mark: Option<&str>,
 ) {
     // typing 指示（组 6.5）：触发输入中状态
     if caps("discord").typing {
@@ -510,6 +512,12 @@ async fn handle_message(
             async move { dc_send_media(&client2, &token2, &cid, item).await }
         },
     );
+    // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
+    let run = if let Some(mark) = sender_mark {
+        run.with_origin(mark)
+    } else {
+        run
+    };
     run.run(&text).await;
     let _ = reply.await;
 }

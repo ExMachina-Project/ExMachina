@@ -164,43 +164,31 @@ pub(crate) fn media_placeholder(kinds: &[&str]) -> String {
 
 // ---------------------------------------------------------------- 发送者标注
 
-/// 群聊消息正文加发送者标注（私聊不加——会话本就是两人对话，加了是噪音）。
+/// 群聊发送者 → 消息来源标记（`im:<名字(id)>`）。
 ///
-/// 为什么在共用层：会话历史渲染统一为 `[用户] 正文`，多人群聊里所有人的消息
-/// 长一个样，模型无法区分「谁说了什么」（部署实测：群内讨论被当成单人独白，
-/// 转述/指代全部张冠李戴）。各适配器在闸门 Allow 之后、进入会话之前统一拼
-/// `[来自 <显示名> (<id>)]` 前缀，模型即可按人区分发言与指代。
+/// 为什么在共用层：会话历史里多人群聊的消息若不带身份，模型只能当成
+/// 单人独白（谁说了什么、@了谁都无从分辨）。标记落进消息 agent_id 元数据
+/// （不污染正文）：展示层在消息头显示发送者，模型侧上下文渲染为
+/// 「[用户·名字]」。
 ///
-/// 显示名缺省时只留 id；两者全空返回原文（适配器兜底，不应发生）。
-pub(crate) fn with_sender_prefix(text: &str, display_name: &str, sender_id: &str) -> String {
-    let name = display_name.trim();
-    let id = sender_id.trim();
-    if name.is_empty() && id.is_empty() {
-        return text.to_string();
-    }
-    let who = if name.is_empty() {
-        id.to_string()
-    } else if id.is_empty() || name == id {
-        name.to_string()
-    } else {
-        format!("{name} ({id})")
-    };
-    format!("[来自 {who}] {}", text.trim_start())
-}
-
-/// 群聊才需要标注（单聊双方固定，标注是噪音）。适配器统一走本判定，
-/// 避免各写一遍出现「有的通道标、有的通道不标」的口径漂移。
-pub(crate) fn sender_prefix_if_group(
+/// 私聊返回 None（双方固定，标注是噪音）；名字缺省只用 id；全空同样 None。
+pub(crate) fn sender_origin(
     is_group: bool,
-    text: &str,
     display_name: &str,
     sender_id: &str,
-) -> String {
-    if is_group {
-        with_sender_prefix(text, display_name, sender_id)
-    } else {
-        text.to_string()
+) -> Option<String> {
+    if !is_group {
+        return None;
     }
+    let name = display_name.trim();
+    let id = sender_id.trim();
+    if name.is_empty() {
+        return if id.is_empty() { None } else { Some(format!("im:{id}")) };
+    }
+    if name == id {
+        return Some(format!("im:{id}"));
+    }
+    Some(format!("im:{name}({id})"))
 }
 
 // ---------------------------------------------------------------- 附件类型归类
@@ -265,36 +253,23 @@ mod tests {
         assert_eq!(parse_command(""), None);
     }
 
-    /// 发送者标注（群聊多人消息区分）：群聊拼 `[来自 名字 (id)]`，私聊不加；
+    /// 发送者标注（群聊多人消息区分）：群聊产 im: 标记，私聊 None；
     /// 名字缺省只留 id；名字与 id 相同不重复。
     #[test]
-    fn 发送者标注_群聊拼前缀私聊不加() {
+    fn 发送者标注_群聊产标记私聊为空() {
+        // 群聊：名字 + id 组合形态
         assert_eq!(
-            with_sender_prefix("今天上线吗？", "黑星", "10086"),
-            "[来自 黑星 (10086)] 今天上线吗？"
+            sender_origin(true, "黑星", "10086"),
+            Some("im:黑星(10086)".into())
         );
         // 私聊：会话本就是两人对话，标注是噪音
-        assert_eq!(
-            sender_prefix_if_group(false, "今天上线吗？", "黑星", "10086"),
-            "今天上线吗？"
-        );
+        assert_eq!(sender_origin(false, "黑星", "10086"), None);
         // 群聊：无显示名只留 id（身份仍可区分）
-        assert_eq!(
-            with_sender_prefix("收到", "", "10086"),
-            "[来自 10086] 收到"
-        );
+        assert_eq!(sender_origin(true, "", "10086"), Some("im:10086".into()));
         // 显示名与 id 相同（telegram username = id 形态）：不重复展示
-        assert_eq!(
-            with_sender_prefix("收到", "10086", "10086"),
-            "[来自 10086] 收到"
-        );
-        // 两者全空：不加标注（适配器兜底，不应发生）
-        assert_eq!(with_sender_prefix("收到", "  ", ""), "收到");
-        // 正文左空白归一
-        assert_eq!(
-            with_sender_prefix("  你好", "黑星", "10086"),
-            "[来自 黑星 (10086)] 你好"
-        );
+        assert_eq!(sender_origin(true, "10086", "10086"), Some("im:10086".into()));
+        // 两者全空：不标注（适配器兜底，不应发生）
+        assert_eq!(sender_origin(true, "  ", ""), None);
     }
 
     #[test]

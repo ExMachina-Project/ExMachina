@@ -328,7 +328,7 @@ async fn on_text(
     let tx = tx.clone();
     let raw = v.clone();
     tokio::spawn(async move {
-        let Some((external_id, text)) =
+        let Some((external_id, text, sender_mark)) =
             napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
         else {
             return; // 闸门拦截（忽略 / 已回复）
@@ -402,6 +402,7 @@ async fn on_text(
             &external_id,
             saved,
             &text,
+            sender_mark.as_deref(),
         )
         .await;
     });
@@ -454,7 +455,7 @@ async fn napcat_gate(
     user_id: Option<i64>,
     raw: &serde_json::Value,
     text: &str,
-) -> Option<(String, String)> {
+) -> Option<(String, String, Option<String>)> {
     let is_group = group_id.is_some();
     // 提及归一化：@ 机器人本体才算提及（群内 @ 机器人是主语义）。
     // NapCat 上报两种格式：CQ 码字符串（[CQ:at qq=xxx]）与数组段
@@ -471,13 +472,6 @@ async fn napcat_gate(
         .map(|g| g.to_string())
         .or_else(|| user_id.map(|u| u.to_string()))
         .unwrap_or_default();
-    // 发送者显示名（群聊标注用）：群名片 card 优先，回落昵称 nickname，再回落 QQ 号
-    let sender_name = raw
-        .pointer("/sender/card")
-        .or_else(|| raw.pointer("/sender/nickname"))
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
     let ctx = InboundCtx {
         text,
         external_id: &external_id,
@@ -486,17 +480,18 @@ async fn napcat_gate(
         mentioned,
         chat_key: &peer,
     };
+    // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）：card 优先，回落昵称，再回落 QQ 号
+    let sender_mark = crate::channel_util::sender_origin(
+        is_group,
+        raw
+            .pointer("/sender/card")
+            .or_else(|| raw.pointer("/sender/nickname"))
+            .and_then(|x| x.as_str())
+            .unwrap_or(""),
+        &external_id,
+    );
     match admit(core, ch, &ctx).await {
-        GateDecision::Allow(clean) => {
-            // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
-            let text = crate::channel_util::sender_prefix_if_group(
-                is_group,
-                &clean,
-                &sender_name,
-                &external_id,
-            );
-            Some((external_id, text))
-        }
+        GateDecision::Allow(clean) => Some((external_id, clean, sender_mark)),
         GateDecision::Ignore => None,
         GateDecision::Deny(reply) => {
             let action = match group_id {
@@ -635,6 +630,7 @@ async fn handle_message(
     external_id: &str,
     media: Vec<(String, String, String)>,
     text: &str,
+    sender_mark: Option<&str>,
 ) {
     // 会话键：群聊优先，无群号走私聊
     let peer = group_id
@@ -725,6 +721,12 @@ async fn handle_message(
             }
         },
     );
+    // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
+    let run = if let Some(mark) = sender_mark {
+        run.with_origin(mark)
+    } else {
+        run
+    };
     run.run(&text).await;
     let _ = reply.await;
 }

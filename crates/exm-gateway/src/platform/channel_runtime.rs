@@ -776,8 +776,10 @@ pub(crate) struct ChannelRun {
     pub kind: String,
     /// 本轮能力边界（通道配置在 begin 时快照，执行期不变）
     pub(crate) scope: exm_core::types::ToolScope,
-    /// 自动任务来源标记（None = 人工触发的平台消息；"auto:video" = 主动观看等系统自动内容）
-    pub origin: Option<&'static str>,
+    /// 本轮消息来源标记（None = 人工触发的平台消息；"auto:video" = 主动观看等系统自动内容；
+    /// "im:<名字|id>" = 群聊发送者——落库进消息 agent_id，展示层据此在消息头显示发送者，
+    /// 模型侧上下文渲染为「[用户·名字]」区分群聊多人发言）
+    pub origin: Option<String>,
     /// 聊天流定位（begin 时快照；run 落库后回写流预览用）
     pub(crate) flow: Option<(String, String)>,
 }
@@ -859,9 +861,10 @@ impl ChannelRun {
         ))
     }
 
-    /// 标记本轮为系统自动任务（落库消息带来源，展示层区分于真人消息）
-    pub(crate) fn with_origin(mut self, origin: &'static str) -> Self {
-        self.origin = Some(origin);
+    /// 标记本轮消息来源（auto:xxx 系统自动内容 / im:xxx 群聊发送者；
+    /// 落库进消息 agent_id，展示层与模型侧按前缀区分语义）
+    pub(crate) fn with_origin(mut self, origin: impl Into<String>) -> Self {
+        self.origin = Some(origin.into());
         self
     }
 
@@ -1001,7 +1004,7 @@ impl ChannelRun {
         let _ = limits;
         if let Err(e) = self
             .core
-            .chat_scoped_origin(&self.session_id, text, self.scope, self.origin)
+            .chat_scoped_origin(&self.session_id, text, self.scope, self.origin.as_deref())
             .await
         {
             eprintln!("[channel:{}] 执行失败：{e}", self.session_id);

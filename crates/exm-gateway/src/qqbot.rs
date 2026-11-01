@@ -335,6 +335,15 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         let is_group = !matches!(peer, Peer::C2C(_));
                                         let external_id =
                                             d.pointer("/author/id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                        // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）：
+                                        // qqbot 载荷只有 author.username，事件上无 display 可言
+                                        let sender_mark = crate::channel_util::sender_origin(
+                                            is_group,
+                                            d.pointer("/author/username")
+                                                .and_then(|x| x.as_str())
+                                                .unwrap_or(""),
+                                            &external_id,
+                                        );
                                         let gate_ctx = InboundCtx {
                                             text: &text,
                                             external_id: &external_id,
@@ -346,14 +355,6 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
                                             GateDecision::Allow(clean) => {
                                                 text = clean;
-                                                // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
-                                                let display = d
-                                                    .pointer("/author/username")
-                                                    .and_then(|x| x.as_str())
-                                                    .unwrap_or("");
-                                                text = crate::channel_util::sender_prefix_if_group(
-                                                    is_group, &text, display, &external_id,
-                                                );
                                             }
                                             GateDecision::Ignore => continue,
                                             GateDecision::Deny(reply) => {
@@ -387,7 +388,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                     saved.push((kind, p, name));
                                                 }
                                             }
-                                            handle_message(&core, &ch2, &creds2, base, peer, &external_id, saved, msg_id, &text).await;
+                                            handle_message(&core, &ch2, &creds2, base, peer, &external_id, saved, msg_id, &text, sender_mark.as_deref()).await;
                                         });
                                     }
                                     _ => {}
@@ -521,6 +522,7 @@ async fn handle_message(
     media: Vec<(String, String, String)>,
     msg_id: String,
     text: &str,
+    sender_mark: Option<&str>,
 ) {
     let Some((run, rx)) = ChannelRun::begin(core, ch, peer.key()).await else {
         return;
@@ -562,6 +564,12 @@ async fn handle_message(
         },
         move |_item: MediaItem| async { false },
     );
+    // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
+    let run = if let Some(mark) = sender_mark {
+        run.with_origin(mark)
+    } else {
+        run
+    };
     run.run(&text).await;
     let _ = reply.await;
 }
