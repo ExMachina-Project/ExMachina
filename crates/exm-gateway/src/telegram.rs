@@ -232,6 +232,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
             if text.trim().is_empty() {
                 continue;
             }
+            let mut text = text;
             // 入站媒体（组 6.4）：photo / document 下载落 inbox，随消息注入
             let mut media: Vec<(String, String, String)> = Vec::new();
             if let Some(photos) = u.pointer("/message/photo").and_then(|v| v.as_array()) {
@@ -338,7 +339,15 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
             )
             .await
             {
-                GateDecision::Allow => {
+                GateDecision::Allow(clean) => {
+                    text = clean;
+                    // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
+                    text = crate::channel_util::sender_prefix_if_group(
+                        is_group,
+                        &text,
+                        &display,
+                        &from_id,
+                    );
                     // 内置命令（/new /status）：闸门放行后、进入会话执行前拦截——与其他适配器同口径
                     if let Some(reply) =
                         crate::channel_util::builtin_command(&core, &ch, &chat_key, &text).await

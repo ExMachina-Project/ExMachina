@@ -219,7 +219,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             }
                             // 入站媒体（组 6.4）：标记行解析 → mxc 下载 → 注入
                             let mut saved: Vec<(String, String, String)> = Vec::new();
-                            let text: String = if let Some((kind, mxc)) =
+                            let mut text: String = if let Some((kind, mxc)) =
                                 parse_media_marker(&raw_text)
                             {
                                 let dl = format!(
@@ -304,7 +304,16 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 chat_key: &room,
                             };
                             match admit(core.as_ref(), &ch, &gate_ctx).await {
-                                GateDecision::Allow => {}
+                                GateDecision::Allow(clean) => {
+                                    text = clean;
+                                    // 房间即群：拼发送者标注区分「谁说了什么」
+                                    // Matrix sender 是 MXID（@user:server），取 localpart 作显示名
+                                    let local = sender.strip_prefix('@').unwrap_or(&sender);
+                                    let display = local.split(':').next().unwrap_or(local);
+                                    text = crate::channel_util::sender_prefix_if_group(
+                                        true, &text, display, &sender,
+                                    );
+                                }
                                 GateDecision::Ignore => continue,
                                 GateDecision::Deny(reply) => {
                                     let client2 = client.clone();

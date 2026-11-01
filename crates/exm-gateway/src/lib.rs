@@ -31,6 +31,7 @@ pub mod plugin_admin;
 pub mod plugins;
 pub mod qqbot;
 pub mod singles;
+pub mod sanitize;
 pub mod slack;
 pub mod telegram;
 pub mod triggers;
@@ -38,8 +39,8 @@ pub mod worker_hub;
 // 资源域 handlers（自本文件拆出；build_router 经此引入）
 use assets::{get_asset, health};
 use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
-use config_admin::{get_config, put_config, get_config_schema};
-use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens};
+use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
+use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens};
 use agents_admin::{list_agents, create_agent, remove_agent_from_group, remove_agent, set_agent_model, update_agent};
 use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, list_templates};
 use version::{version_info, version_check, version_apply, version_apply_status};
@@ -222,6 +223,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id", get(get_session).delete(delete_session))
         .route("/api/sessions/:id/messages", get(list_messages))
+        .route("/api/sessions/:id/export", get(export_session))
         .route("/api/sessions/:id/chat", post(chat))
         .route("/api/sessions/:id/graph", get(get_graph))
         .route("/api/sessions/:id/evidence", get(get_evidence))
@@ -261,6 +263,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/playbooks", get(list_playbooks))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/schema", get(get_config_schema))
+        .route("/api/config/sanitize-stats", get(get_sanitize_stats))
         .route("/api/mcp", get(mcp_servers))
         .route("/api/mcp/refresh", post(mcp_refresh))
         .route("/api/voice/transcribe", post(voice_transcribe).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)))

@@ -102,6 +102,41 @@ pub struct SecurityConfig {
     /// 选「不再提醒」后为 true（「下次再说」只记进程内，网关重启即恢复提醒）
     #[serde(default)]
     pub key_setup_dismissed: bool,
+    /// 入站消毒规则开关（inbound-sanitization）：false = 关闭该规则（检出也不改写）。
+    /// 规则族：fake-system-prompt（伪装系统指令）/ hijack-directive（指令劫持短语）/
+    /// fake-tool-result（工具结果伪装）/ hidden-unicode（隐藏控制字符）
+    #[serde(default)]
+    pub sanitize_rules: SanitizeRuleConfig,
+}
+
+/// 消毒规则开关（全默认开；单项可关）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SanitizeRuleConfig {
+    #[serde(default = "default_true")]
+    pub fake_system_prompt: bool,
+    #[serde(default = "default_true")]
+    pub hijack_directive: bool,
+    #[serde(default = "default_true")]
+    pub fake_tool_result: bool,
+    /// 隐藏 Unicode 剥离建议常开（关闭后零宽/双向覆写字符可穿透）
+    #[serde(default = "default_true")]
+    pub hidden_unicode: bool,
+}
+
+impl Default for SanitizeRuleConfig {
+    fn default() -> Self {
+        SanitizeRuleConfig {
+            fake_system_prompt: true,
+            hijack_directive: true,
+            fake_tool_result: true,
+            hidden_unicode: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 单智能体循环默认步数上限（与既有硬编码 24 保持一致）
@@ -126,6 +161,7 @@ impl Default for SecurityConfig {
             chat_max_steps: default_chat_max_steps(),
             context_budget_ratio: default_context_budget_ratio(),
             key_setup_dismissed: false,
+            sanitize_rules: SanitizeRuleConfig::default(),
         }
     }
 }
@@ -382,6 +418,14 @@ pub struct AutomationConfig {
     pub auto_adapt: bool,
     /// 子个体单次派发的最大工具步数（主流的 20-50 步为长任务口径，取中档）
     pub unit_max_steps: usize,
+    /// Auto Agent 周期（分钟，experiments.autoAgent 开启才生效）：
+    /// 每次 tick 由 agent 自评「有没有值得做的事」——不是每次都执行任务
+    pub auto_agent_interval_minutes: u32,
+    /// Auto Agent 单次自主行动的工具步数预算（防失控；0 = 用 unit_max_steps）
+    pub auto_agent_max_steps: usize,
+    /// Auto Agent 连续「无事可做」的冷却倍数：连续 N 次无任务后间隔 × N（防空转），
+    /// 上限 8 倍；有任务即复位
+    pub auto_agent_backoff_max: u32,
 }
 
 impl Default for AutomationConfig {
@@ -394,6 +438,9 @@ impl Default for AutomationConfig {
             heartbeat_agent: None,
             auto_adapt: true,
             unit_max_steps: 16,
+            auto_agent_interval_minutes: 30,
+            auto_agent_max_steps: 24,
+            auto_agent_backoff_max: 8,
         }
     }
 }
@@ -450,6 +497,20 @@ pub struct IdentityConfig {
     pub identity_required: bool,
     /// 群聊唤醒门控的通道默认值（开 = 群内仅提及/回复触发；新装默认开，升级迁移显式置关）
     pub group_gate_default: bool,
+    /// 配对码防爆破：窗口内连续失败达该次数即锁定（0 = 关闭防爆破）
+    #[serde(default = "default_pairing_max_failures")]
+    pub pairing_max_failures: u32,
+    /// 配对码防爆破：锁定窗口时长（秒）
+    #[serde(default = "default_pairing_lockout_secs")]
+    pub pairing_lockout_secs: u64,
+}
+
+fn default_pairing_max_failures() -> u32 {
+    5
+}
+
+fn default_pairing_lockout_secs() -> u64 {
+    900
 }
 
 impl Default for IdentityConfig {
@@ -458,6 +519,8 @@ impl Default for IdentityConfig {
             pairing_ttl_secs: 600,
             identity_required: false,
             group_gate_default: true,
+            pairing_max_failures: 5,
+            pairing_lockout_secs: 900,
         }
     }
 }
@@ -529,6 +592,26 @@ pub struct ExperimentsConfig {
     /// 子个体不再只有 objective 孤岛视角。会放大每轮派发的 token 开销。
     #[serde(default)]
     pub group_shared_context: bool,
+    /// 自主记忆摘要：关闭程序每轮自动写入的会话摘要/决策/证据/教训，
+    /// 改由模型经 memory_write 工具自主决定哪些内容值得记忆
+    /// （治理「经常把不需要记忆的内容也保存」）。工具失败/教训统计仍照常。
+    #[serde(default)]
+    pub llm_driven_memory: bool,
+    /// 滑动上下文窗口：关闭条数阈值触发的定时 LLM 压缩，只保留最近 N 条原文
+    /// 窗口（窗口外已压过的沿用旧摘要，不再新增压缩调用）——模型持续持有
+    /// 最近的完整上下文。与 dynamicCompaction 互斥：开启时 context_compact
+    /// 不装配（同为压缩时机决策，避免双重压缩语义）。
+    #[serde(default)]
+    pub sliding_context_window: bool,
+    /// Super Agent（深度委托，实验性）：会话进入「少占注意力」模式——静默长链路
+    /// 推进（工具循环 + spawn 并行子代理），只在需要决策/交付结果/无法继续时
+    /// 产出一条消息。工作法：尽可能少占用人注意力，尽可能多交付价值。
+    #[serde(default)]
+    pub super_agent: bool,
+    /// Auto Agent（完全自主，实验性）：周期 Eval 门控 + 自主开工会话执行。
+    /// 无人值守：只在「有人必须行动」时经通知通道说话；参数见 automation 段。
+    #[serde(default)]
+    pub auto_agent: bool,
 }
 
 // ---------------------------------------------------------------- 插件系统（plugins/ 目录）
@@ -1095,6 +1178,8 @@ struct SecurityFile {
     context_budget_ratio: Option<f64>,
     #[serde(default)]
     key_setup_dismissed: Option<bool>,
+    #[serde(default)]
+    sanitize_rules: Option<SanitizeRuleConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1112,6 +1197,12 @@ struct AutomationFile {
     auto_adapt: Option<bool>,
     #[serde(default)]
     unit_max_steps: Option<usize>,
+    #[serde(default)]
+    auto_agent_interval_minutes: Option<u32>,
+    #[serde(default)]
+    auto_agent_max_steps: Option<usize>,
+    #[serde(default)]
+    auto_agent_backoff_max: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1263,6 +1354,7 @@ impl ExmConfig {
                 .filter(|v| (0.5..=1.0).contains(v))
                 .unwrap_or_else(|| SecurityConfig::default().context_budget_ratio),
             key_setup_dismissed: file_sec.key_setup_dismissed.unwrap_or(false),
+            sanitize_rules: file_sec.sanitize_rules.clone().unwrap_or_default(),
         };
         let automation = AutomationConfig {
             heartbeat_enabled: file_auto
@@ -1285,6 +1377,15 @@ impl ExmConfig {
             unit_max_steps: file_auto
                 .unit_max_steps
                 .unwrap_or_else(|| AutomationConfig::default().unit_max_steps),
+            auto_agent_interval_minutes: file_auto
+                .auto_agent_interval_minutes
+                .unwrap_or_else(|| AutomationConfig::default().auto_agent_interval_minutes),
+            auto_agent_max_steps: file_auto
+                .auto_agent_max_steps
+                .unwrap_or_else(|| AutomationConfig::default().auto_agent_max_steps),
+            auto_agent_backoff_max: file_auto
+                .auto_agent_backoff_max
+                .unwrap_or_else(|| AutomationConfig::default().auto_agent_backoff_max),
         };
 
         let mut llm = LlmConfig {
@@ -1487,6 +1588,7 @@ impl ExmConfig {
                 chat_max_steps: Some(self.security.chat_max_steps),
                 context_budget_ratio: Some(self.security.context_budget_ratio),
                 key_setup_dismissed: Some(self.security.key_setup_dismissed),
+                sanitize_rules: Some(self.security.sanitize_rules.clone()),
             }),
             computer: Some(self.computer.clone()),
             automation: Some(AutomationFile {
@@ -1496,6 +1598,9 @@ impl ExmConfig {
                 heartbeat_agent: self.automation.heartbeat_agent.clone(),
                 auto_adapt: Some(self.automation.auto_adapt),
                 unit_max_steps: Some(self.automation.unit_max_steps),
+                auto_agent_interval_minutes: Some(self.automation.auto_agent_interval_minutes),
+                auto_agent_max_steps: Some(self.automation.auto_agent_max_steps),
+                auto_agent_backoff_max: Some(self.automation.auto_agent_backoff_max),
             }),
             search: Some(self.search.clone()),
             hooks: Some(self.hooks.clone()),
@@ -1660,12 +1765,23 @@ pub fn config_schema() -> serde_json::Value {
                 "key": "security",
                 "label": "安全与审批",
                 "fields": [
-                    { "key": "security.execApproval", "label": "终端命令审批", "kind": "string",
-                      "default": "off", "required": false,
+                    { "key": "security.execApproval", "label": "终端命令审批", "kind": "string",                      "default": "off", "required": false,
                       "help": "off=不拦截；risky=拦截高危命令（删除/强推/关机等）；always=全部终端命令需审批。白名单前缀可跳过" },
                     { "key": "security.execAllowlist", "label": "审批白名单前缀", "kind": "string",
                       "default": "", "required": false,
                       "help": "逗号分隔的命令前缀，命中即免审批，如：git status,cargo test" },
+                    { "key": "security.sanitizeRules.fakeSystemPrompt", "label": "消毒：伪装系统指令", "kind": "boolean",
+                      "default": "true", "required": false,
+                      "help": "入站消息行首「SYSTEM:/【系统】」等伪装权威角色的文本改写为引用形式（语义保留、权威结构消除）" },
+                    { "key": "security.sanitizeRules.hijackDirective", "label": "消毒：指令劫持短语", "kind": "boolean",
+                      "default": "true", "required": false,
+                      "help": "「ignore previous instructions/忽略之前所有指令」等劫持短语标记为用户引用" },
+                    { "key": "security.sanitizeRules.fakeToolResult", "label": "消毒：工具结果伪装", "kind": "boolean",
+                      "default": "true", "required": false,
+                      "help": "「[tool_result]/【工具返回】」等伪装工具调用结构的标记中性化" },
+                    { "key": "security.sanitizeRules.hiddenUnicode", "label": "消毒：隐藏字符剥离", "kind": "boolean",
+                      "default": "true", "required": false,
+                      "help": "零宽/双向覆写/不可见格式字符剥离（隐藏指令载体；建议常开）" },
                     { "key": "security.authKey", "label": "后台访问密钥", "kind": "password",
                       "default": "", "required": false,
                       "help": "非空时 WebUI 与全部 /api 请求需鉴权（浏览器出现登录门；程序调用带 X-Auth-Key 头）；留空 = 免鉴权。掩码表示沿用已配置密钥，清空保存 = 关闭鉴权" },
@@ -1719,7 +1835,16 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "个体 identifier（per-agent 粒度）：以其所属组身份巡检，产出进其组记忆；留空 = 全局巡检（激活组）" },
                     { "key": "automation.unitMaxSteps", "label": "子个体单次派发步数上限", "kind": "number",
                       "default": "16", "required": false, "min": 3, "max": 60,
-                      "help": "一次派发内允许的「思考-调工具」轮次；复杂任务（多文件改动）需要更大的步数预算" }
+                      "help": "一次派发内允许的「思考-调工具」轮次；复杂任务（多文件改动）需要更大的步数预算" },
+                    { "key": "automation.autoAgentIntervalMinutes", "label": "Auto Agent 自评周期（分钟）", "kind": "number",
+                      "default": "30", "required": false, "min": 5, "max": 1440,
+                      "help": "（实验性 experiments.autoAgent）agent 每周期自评一次「有没有值得做的事」；不是每次都执行任务" },
+                    { "key": "automation.autoAgentMaxSteps", "label": "Auto Agent 单次行动步数预算", "kind": "number",
+                      "default": "24", "required": false, "min": 3, "max": 120,
+                      "help": "自主行动单次的工具步数上限（防失控）；0 = 沿用子个体派发步数上限" },
+                    { "key": "automation.autoAgentBackoffMax", "label": "Auto Agent 空转退避上限（倍）", "kind": "number",
+                      "default": "8", "required": false, "min": 1, "max": 30,
+                      "help": "连续「无事可做」次数 N 后自评间隔 × min(N, 上限)；有任务即复位（防空转耗 token）" }
                 ]
             },
             {
@@ -1825,6 +1950,12 @@ pub fn config_schema() -> serde_json::Value {
                     { "key": "identity.pairingTtlSecs", "label": "配对码有效期（秒）", "kind": "number",
                       "default": "600", "required": false, "min": 60, "max": 86400,
                       "help": "控制台签发的配对码有效时长；单次有效" },
+                    { "key": "identity.pairingMaxFailures", "label": "配对码防爆破阈值（次）", "kind": "number",
+                      "default": "5", "required": false, "min": 0, "max": 100,
+                      "help": "锁定窗口内连续失败达该次数即锁定（0 = 关闭防爆破）；锁定期内正确码也不受理" },
+                    { "key": "identity.pairingLockoutSecs", "label": "配对码锁定时长（秒）", "kind": "number",
+                      "default": "900", "required": false, "min": 60, "max": 86400,
+                      "help": "防爆破锁定窗口时长（默认 15 分钟）；锁定有审计事件" },
                     { "key": "identity.groupGateDefault", "label": "新通道群聊唤醒门控默认值", "kind": "boolean",
                       "default": "true", "required": false,
                       "help": "开启 = 群内仅 @提及 / 回复智能体时触发（私聊不受限）；逐通道可单独覆盖" }
@@ -1905,7 +2036,19 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "（实验性）模型获得 context_compact 工具，自行判断压缩时机：上下文冗长、早期细节不再关键时主动把旧历史压成滚动摘要。关闭时按条数阈值自动压缩" },
                     { "key": "experiments.groupSharedContext", "label": "智能体组共享上下文", "kind": "boolean",
                       "default": "false", "required": false,
-                      "help": "（实验性）派发子个体时自动携带组主会话的滚动摘要与最近对话窗口，子个体不再只有 objective 孤岛视角；会放大派发 token 开销" }
+                      "help": "（实验性）派发子个体时自动携带组主会话的滚动摘要与最近对话窗口，子个体不再只有 objective 孤岛视角；会放大派发 token 开销" },
+                    { "key": "experiments.llmDrivenMemory", "label": "自主记忆摘要", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）关闭程序每轮自动写入的会话摘要/决策/证据/教训，由模型经 memory_write 工具自主决定哪些内容值得长期记忆；治理记忆库被无关内容灌满" },
+                    { "key": "experiments.slidingContextWindow", "label": "滑动上下文窗口", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）关闭条数阈值触发的定时压缩：模型持续持有最近对话的完整原文，窗口外历史不再新增压缩调用（已压过的沿用旧摘要）。与动态上下文压缩互斥" },
+                    { "key": "experiments.superAgent", "label": "Super Agent 深度委托", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）新会话进入深度委托模式：agent 静默长链路推进（工具循环+并行子代理），只在需要决策/交付结果/无法继续时产出一条消息——尽可能少占注意力，尽可能多交付价值" },
+                    { "key": "experiments.autoAgent", "label": "Auto Agent 完全自主", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）无人值守：agent 按周期（automation.autoAgentIntervalMinutes）自评「有没有值得做的事」，有则自主开会话执行，只在有人必须行动时经通知通道说话。配套参数在 automation 段" }
                 ]
             },
             {
@@ -2020,5 +2163,25 @@ mod config_tests {
                 "非法值 {bad} 应回落默认 30 天"
             );
         }
+    }
+
+    /// 实验开关：默认全关（新装环境既有行为不变）；旧 config（无新字段）可加载；
+    /// schema 收录两个新开关（设置页实验区自动渲染）。
+    #[test]
+    fn 实验开关_新字段默认关且schema收录() {
+        let d = ExperimentsConfig::default();
+        assert!(!d.llm_driven_memory, "自主记忆摘要默认关");
+        assert!(!d.sliding_context_window, "滑动窗口默认关");
+        // 旧 config（只有既有实验字段）可反序列化：新字段回落 false
+        let legacy = serde_json::json!({ "dynamicCompaction": true, "groupSharedContext": false });
+        let parsed: ExperimentsConfig = serde_json::from_value(legacy).expect("旧格式可加载");
+        assert!(parsed.dynamic_compaction);
+        assert!(!parsed.llm_driven_memory);
+        assert!(!parsed.sliding_context_window);
+        // schema 收录
+        let schema = config_schema();
+        let text = serde_json::to_string(&schema).unwrap();
+        assert!(text.contains("llmDrivenMemory"), "schema 缺自主记忆开关");
+        assert!(text.contains("slidingContextWindow"), "schema 缺滑动窗口开关");
     }
 }

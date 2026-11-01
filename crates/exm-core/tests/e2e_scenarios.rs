@@ -76,8 +76,9 @@ async fn 场景2_工作台改代码与回滚() {
     let f = core.workbench_file("app.rs", 1, 10).unwrap();
     assert!(f["content"].as_str().unwrap().contains("line1"));
     // 会话轮：模型经 edit 工具改文件（检查点登记）→ 收束（快照挂检查点链）→ undo 回滚
-    let s = core.create_session("工作台改码").unwrap();
-    // mock 编排：建组 + 最小主智能体（chat 轮次收束需要）
+    // mock 编排：建组 + 最小主智能体（chat 轮次收束需要）。
+    // 注意顺序：先建组再建会话——会话 group_id 取建会话时的 active_scope，
+    // 轮次按会话归属路由（先建会话后建组会让会话落在默认组上）
     core.registry()
         .create_group(Some("t".into()), "e2e组", "")
         .unwrap();
@@ -102,6 +103,7 @@ async fn 场景2_工作台改代码与回滚() {
     core.registry().upsert_agent("t", orch_def, None).unwrap();
     core.registry().set_primary("t", "e2e-orch").unwrap();
     core.registry().set_active_group("t").unwrap();
+    let s = core.create_session("工作台改码").unwrap();
     let orch = core.orchestrator().clone();
     let r = orch
         .tools

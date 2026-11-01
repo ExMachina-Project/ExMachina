@@ -519,31 +519,21 @@ export function ChatView(): React.ReactElement {
   };
 
   // ---- 会话导出 Markdown（2.3）：角色前缀正文 + 工具摘要 + 思维链折叠引用 ----
-  const exportSession = async (id: string, title: string) => {
+  const exportSession = async (id: string, title: string, format: "markdown" | "json" = "markdown") => {
     try {
-      const msgs = await api.messages(id);
-      const lines: string[] = [`# ${title}`, "", `> 导出时间：${new Date().toLocaleString()}`, ""];
-      for (const m of msgs) {
-        const role = m.role === "user" ? (m.agentId?.startsWith("auto:") ? "⚙️ 自动任务" : "👤 用户") : m.role === "orchestrator" ? (m.agentId ? `🤖 ${m.agentId}` : "🤖 指挥体") : "⚙️ 系统";
-        lines.push(`## ${role} · ${m.createdAt}`, "");
-        if (m.thinking) {
-          lines.push("<details><summary>思维过程</summary>", "", "```", m.thinking, "```", "", "</details>", "");
-        }
-        if (m.toolCalls && m.toolCalls.length > 0) {
-          lines.push("<details><summary>工具调用</summary>", "");
-          for (const tc of m.toolCalls) {
-            lines.push(`- \`${tc.tool}\` ${tc.status === "ok" ? "✅" : tc.status === "error" ? "❌" : "⏳"} ${tc.summary || ""}`);
-          }
-          lines.push("", "</details>", "");
-        }
-        lines.push(m.statements.map((st) => st.text).join("\n\n"), "");
-      }
-      const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+      // 走服务端导出端点：含审批记录与全量消息（前端拼装版拿不到审批）
+      const base = (window as unknown as { __EXM_API_BASE__?: string }).__EXM_API_BASE__ ?? "";
+      const key = localStorage.getItem("exm.key") ?? "";
+      const resp = await fetch(`${base}/api/sessions/${id}/export?format=${format}`, {
+        headers: { "X-Auth-Key": key },
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       const day = new Date().toISOString().slice(0, 10);
-      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-${day}.md`;
+      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-${day}.${format === "json" ? "json" : "md"}`;
       a.click();
       URL.revokeObjectURL(url);
       message.success(t("chat.exportDone"));
@@ -773,6 +763,7 @@ export function ChatView(): React.ReactElement {
                         menu={{
                           items: [
                             { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
+                            { key: "exportJson", icon: <ExportOutlined />, label: `${t("chat.export")} (JSON)` },
                             { key: "rename", icon: <EditOutlined />, label: t("common.rename") },
                             {
                               key: "pin",
@@ -784,7 +775,8 @@ export function ChatView(): React.ReactElement {
                           ],
                           onClick: ({ key, domEvent }) => {
                             domEvent.stopPropagation();
-                            if (key === "export") void exportSession(s.id, s.title);
+                            if (key === "export") void exportSession(s.id, s.title, "markdown");
+                            else if (key === "exportJson") void exportSession(s.id, s.title, "json");
                             else if (key === "rename") setRenaming({ id: s.id, title: s.title });
                             else if (key === "pin") void toggleSessionPin(s.id, !s.pinned);
                             else {

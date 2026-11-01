@@ -41,6 +41,9 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "heartbeatAgent": cfg.automation.heartbeat_agent,
             "autoAdapt": cfg.automation.auto_adapt,
             "unitMaxSteps": cfg.automation.unit_max_steps,
+            "autoAgentIntervalMinutes": cfg.automation.auto_agent_interval_minutes,
+            "autoAgentMaxSteps": cfg.automation.auto_agent_max_steps,
+            "autoAgentBackoffMax": cfg.automation.auto_agent_backoff_max,
         },
         "search": {
             "provider": cfg.search.provider,
@@ -76,6 +79,10 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
         "experiments": {
             "dynamicCompaction": cfg.experiments.dynamic_compaction,
             "groupSharedContext": cfg.experiments.group_shared_context,
+            "llmDrivenMemory": cfg.experiments.llm_driven_memory,
+            "slidingContextWindow": cfg.experiments.sliding_context_window,
+            "superAgent": cfg.experiments.super_agent,
+            "autoAgent": cfg.experiments.auto_agent,
         },
         "mock": st.core.is_mock(),
     }))
@@ -138,6 +145,14 @@ pub(crate) struct PartialExperiments {
     dynamic_compaction: Option<bool>,
     #[serde(default)]
     group_shared_context: Option<bool>,
+    #[serde(default)]
+    llm_driven_memory: Option<bool>,
+    #[serde(default)]
+    sliding_context_window: Option<bool>,
+    #[serde(default)]
+    super_agent: Option<bool>,
+    #[serde(default)]
+    auto_agent: Option<bool>,
 }
 
 /// 回收站保留契约（部分更新：缺省沿用旧值；0 视为未提供回默认）
@@ -219,6 +234,15 @@ pub(crate) struct PartialSecurity {
     approval_wait_secs: Option<u64>,
     chat_max_steps: Option<usize>,
     context_budget_ratio: Option<f64>,
+    /// 消毒规则开关（inbound-sanitization）：缺省沿用现值
+    #[serde(default)]
+    sanitize_fake_system_prompt: Option<bool>,
+    #[serde(default)]
+    sanitize_hijack_directive: Option<bool>,
+    #[serde(default)]
+    sanitize_fake_tool_result: Option<bool>,
+    #[serde(default)]
+    sanitize_hidden_unicode: Option<bool>,
 }
 
 /// Computer Use（设置页）：部分更新语义——缺省字段沿用旧值
@@ -250,6 +274,12 @@ pub(crate) struct PartialAutomation {
     auto_adapt: Option<bool>,
     #[serde(default)]
     unit_max_steps: Option<usize>,
+    #[serde(default)]
+    auto_agent_interval_minutes: Option<u32>,
+    #[serde(default)]
+    auto_agent_max_steps: Option<usize>,
+    #[serde(default)]
+    auto_agent_backoff_max: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -307,6 +337,10 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         approval_wait_secs: None,
         chat_max_steps: None,
         context_budget_ratio: None,
+        sanitize_fake_system_prompt: None,
+        sanitize_hijack_directive: None,
+        sanitize_fake_tool_result: None,
+        sanitize_hidden_unicode: None,
     });
     let computer = body.computer.clone().unwrap_or(PartialComputer {
         enabled: None,
@@ -321,6 +355,9 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         heartbeat_agent: None,
         auto_adapt: None,
         unit_max_steps: None,
+        auto_agent_interval_minutes: None,
+        auto_agent_max_steps: None,
+        auto_agent_backoff_max: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
@@ -427,6 +464,21 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 .unwrap_or(current.security.context_budget_ratio),
             // 首启引导提醒：不由设置页改写（专属端点 auth/dismiss 控制）
             key_setup_dismissed: current.security.key_setup_dismissed,
+            // 消毒规则开关：单项可关（设置页安全区）；请求未带 = 沿用现值
+            sanitize_rules: exm_core::config::SanitizeRuleConfig {
+                fake_system_prompt: sec
+                    .sanitize_fake_system_prompt
+                    .unwrap_or(current.security.sanitize_rules.fake_system_prompt),
+                hijack_directive: sec
+                    .sanitize_hijack_directive
+                    .unwrap_or(current.security.sanitize_rules.hijack_directive),
+                fake_tool_result: sec
+                    .sanitize_fake_tool_result
+                    .unwrap_or(current.security.sanitize_rules.fake_tool_result),
+                hidden_unicode: sec
+                    .sanitize_hidden_unicode
+                    .unwrap_or(current.security.sanitize_rules.hidden_unicode),
+            },
         },
         computer: exm_core::config::ComputerUseConfig {
             enabled: computer.enabled.unwrap_or(current.computer.enabled),
@@ -462,6 +514,15 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             unit_max_steps: auto
                 .unit_max_steps
                 .unwrap_or(current.automation.unit_max_steps),
+            auto_agent_interval_minutes: auto
+                .auto_agent_interval_minutes
+                .unwrap_or(current.automation.auto_agent_interval_minutes),
+            auto_agent_max_steps: auto
+                .auto_agent_max_steps
+                .unwrap_or(current.automation.auto_agent_max_steps),
+            auto_agent_backoff_max: auto
+                .auto_agent_backoff_max
+                .unwrap_or(current.automation.auto_agent_backoff_max),
         },
         search,
         hooks,
@@ -491,6 +552,14 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 group_shared_context: e
                     .group_shared_context
                     .unwrap_or(current.experiments.group_shared_context),
+                llm_driven_memory: e
+                    .llm_driven_memory
+                    .unwrap_or(current.experiments.llm_driven_memory),
+                sliding_context_window: e
+                    .sliding_context_window
+                    .unwrap_or(current.experiments.sliding_context_window),
+                super_agent: e.super_agent.unwrap_or(current.experiments.super_agent),
+                auto_agent: e.auto_agent.unwrap_or(current.experiments.auto_agent),
             }
         },
         ..(*current).clone()
@@ -533,4 +602,13 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
 
 pub(crate) async fn get_config_schema() -> impl IntoResponse {
     Json(exm_core::config::config_schema())
+}
+
+/// 消毒命中统计（inbound-sanitization 设置页可见性）：模式 → 计数（进程级）
+pub(crate) async fn get_sanitize_stats() -> impl IntoResponse {
+    let stats = crate::sanitize::finding_snapshot()
+        .into_iter()
+        .map(|(pattern, count)| serde_json::json!({ "pattern": pattern, "count": count }))
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({ "stats": stats }))
 }

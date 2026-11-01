@@ -279,7 +279,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         // 入站媒体（组 6.4）：附件下载（图片与文件同走 CDN 直链）
                                         let atts = parse_attachments(&d);
                                         // 纯附件消息（无文字）：占位正文兜底，曾直接丢弃——用户「只发一张图」得不到响应
-                                        let text = if content.trim().is_empty() {
+                                        let mut text = if content.trim().is_empty() {
                                             let kinds: Vec<&str> = atts.iter().map(|(k, _, _)| k.as_str()).collect();
                                             media_placeholder(&kinds)
                                         } else {
@@ -308,7 +308,13 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         let display = d.pointer("/author/global_name").or_else(|| d.pointer("/author/username")).and_then(|x| x.as_str()).unwrap_or("").to_string();
                                         let gate_ctx = InboundCtx { text: &text, external_id: &external_id, display_name: &display, is_group, mentioned, chat_key: channel_id.as_str() };
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
-                                            GateDecision::Allow => {}
+                                            GateDecision::Allow(clean) => {
+                                                text = clean;
+                                                // 群聊拼发送者标注：多人消息在会话历史里区分「谁说了什么」
+                                                text = crate::channel_util::sender_prefix_if_group(
+                                                    is_group, &text, &display, &external_id,
+                                                );
+                                            }
                                             GateDecision::Ignore => continue,
                                             GateDecision::Deny(reply) => {
                                                 let client2 = client.clone();
