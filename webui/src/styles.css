@@ -1916,6 +1916,43 @@ textarea.ant-input:focus,
 }
 .flow-side { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
 .flow-time { font-size: 10px; font-family: var(--mono); color: var(--muted-dim); }
+/* 流未读徽标（spec experience-iteration）：智能体产出回复未查看的计数 */
+.flow-unread {
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent); color: #fff;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  line-height: 16px; text-align: center;
+  pointer-events: none;
+}
+/* 流内会话切换（spec：展开钮 + 会话子列表） */
+.flow-expand {
+  border: none; background: transparent; cursor: pointer;
+  color: var(--muted-dim); font-size: 10px; line-height: 1;
+  padding: 2px; border-radius: 4px;
+  pointer-events: auto;
+}
+.flow-expand:hover { color: var(--text); background: var(--bg-hover, rgba(128,128,128,.15)); }
+.flow-session-list {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 2px 6px 6px 24px;
+}
+.flow-session-empty {
+  font-size: 10px; color: var(--muted-dim); padding: 2px 4px;
+}
+.flow-session-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 3px 6px; border-radius: 6px; cursor: pointer;
+  font-size: 11px;
+}
+.flow-session-item:hover { background: var(--bg-hover, rgba(128,128,128,.12)); }
+.flow-session-item.active .flow-session-label { color: var(--accent); }
+.flow-session-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.flow-session-time {
+  flex: none; font-size: 10px; font-family: var(--mono); color: var(--muted-dim);
+}
 .flow-live {
   width: 6px; height: 6px; border-radius: var(--r-full);
   background: var(--accent);
