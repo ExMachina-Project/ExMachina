@@ -711,6 +711,37 @@ pub struct ChatMessage {
     pub steps: Vec<crate::round_trace::TraceStep>,
 }
 
+// ---------------------------------------------------------------- 会话检索（session-search）
+
+/// 会话检索命中：标题或最近 200 条消息正文匹配关键词。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub title: String,
+    /// 标题本身命中（标题命中的结果排在仅正文命中之前）
+    pub title_match: bool,
+    /// 命中消息条数（同一会话只出现一次，这里计全部命中）
+    pub message_matches: usize,
+    /// 命中消息片段（至多 2 条；含 messageId 供前端定位）
+    pub snippets: Vec<MessageSnippet>,
+    /// 会话最近活跃时间（末条消息时间，缺省 updatedAt）
+    pub last_active_at: String,
+}
+
+/// 检索命中的单条消息片段（正文截断至约 80 字符且保留关键词）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageSnippet {
+    pub message_id: String,
+    pub role: MessageRole,
+    pub text: String,
+    pub created_at: String,
+    /// 来源标记（im: / imctx: / auto: 等），普通消息缺失
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt: u64,

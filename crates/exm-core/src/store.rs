@@ -353,6 +353,72 @@ impl Store {
         self.db.read_lines("messages", session_id, limit)
     }
 
+    // ---------------- 会话内容检索（session-search） ----------------
+
+    /// 检索未归档会话：标题 + 最近 200 条消息正文，大小写不敏感子串匹配。
+    /// 标题命中优先，同组按活跃时间倒序；每会话最多 2 条片段，`limit` 为结果会话上限。
+    /// 只读、无索引：扫描上界与消息读取窗口一致（≤200 会话 × 最近 200 条），
+    /// 保证命中片段一定能被 `GET /sessions/:id/messages` 的窗口加载到。
+    pub fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchHit>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let q_lower = q.to_lowercase();
+        let limit = limit.max(1);
+        let mut sessions = self.list_sessions()?;
+        sessions.truncate(200);
+        let mut hits: Vec<SessionSearchHit> = Vec::new();
+        for s in sessions {
+            // 读取失败按无命中处理：单会话损坏不应拖垮全量检索
+            let msgs = self.list_messages(&s.id, 200).unwrap_or_default();
+            let title_match = s.title.to_lowercase().contains(&q_lower);
+            let matched: Vec<&ChatMessage> = msgs
+                .iter()
+                .filter(|m| {
+                    let text = message_text(m);
+                    !text.is_empty() && text.to_lowercase().contains(&q_lower)
+                })
+                .collect();
+            if !title_match && matched.is_empty() {
+                continue;
+            }
+            let last_active_at = msgs
+                .last()
+                .map(|m| m.created_at.clone())
+                .unwrap_or_else(|| s.updated_at.clone());
+            let snippets = matched
+                .iter()
+                .take(2)
+                .map(|m| {
+                    let body = message_text(m);
+                    MessageSnippet {
+                        message_id: m.id.clone(),
+                        role: m.role,
+                        text: snippet_around(&body, &q_lower, 80),
+                        created_at: m.created_at.clone(),
+                        agent_id: m.agent_id.clone(),
+                    }
+                })
+                .collect();
+            hits.push(SessionSearchHit {
+                session_id: s.id.clone(),
+                title: s.title.clone(),
+                title_match,
+                message_matches: matched.len(),
+                snippets,
+                last_active_at,
+            });
+        }
+        hits.sort_by(|a, b| {
+            b.title_match
+                .cmp(&a.title_match)
+                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     // ---------------- 消息历史管控（undo / 编辑重发 / fork 基座） ----------------
 
     /// 截断活跃消息流：保留前 keep 条，被截断部分**先归档**（归档可查，spec 硬性要求）
@@ -863,6 +929,88 @@ impl Store {
     }
 }
 
+// ---------------------------------------------------------------- 检索片段工具（session-search）
+
+/// 消息正文（多陈述句合并；检索与片段共用同一口径）
+pub(crate) fn message_text(m: &ChatMessage) -> String {
+    m.statements
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 命中位置附近的片段：命中前后各取若干字符，总长 ≤max（含省略号），空白折叠。
+/// 快速路径（小写串与原文等长，ASCII/CJK 常见）按字节下标直接切片；
+/// Unicode 小写展开等罕见情形退化为字符窗口比较，保证不 panic、不产生非法切片。
+pub(crate) fn snippet_around(text: &str, q_lower: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() || max == 0 || q_lower.is_empty() {
+        return flat.chars().take(max).collect();
+    }
+    let lower = flat.to_lowercase();
+    if lower.len() == flat.len() {
+        if let Some(pos) = lower.find(q_lower) {
+            // 等长时小写串的字节下标与原文一一对应
+            return cut_window(&flat, pos, pos + q_lower.len(), max);
+        }
+    }
+    if let Some((start, end)) = find_char_window(&flat, q_lower) {
+        return cut_window(&flat, char_to_byte(&flat, start), char_to_byte(&flat, end), max);
+    }
+    flat.chars().take(max).collect()
+}
+
+/// 以命中区间为中心截取字符窗口：前后各分 `(max-命中字符数)/2` 个字符，
+/// 首尾越界加省略号；总字符数不超过 max。
+fn cut_window(text: &str, m_start: usize, m_end: usize, max: usize) -> String {
+    let match_chars = text[m_start..m_end].chars().count();
+    let side = max.saturating_sub(match_chars).saturating_sub(2) / 2;
+    let mut start = m_start;
+    for _ in 0..side {
+        match text[..start].char_indices().next_back() {
+            Some((i, _)) => start = i,
+            None => break,
+        }
+    }
+    let mut end = m_end;
+    for _ in 0..side {
+        match text[end..].chars().next() {
+            Some(c) => end += c.len_utf8(),
+            None => break,
+        }
+    }
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&text[start..end]);
+    if end < text.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// 慢路径：按字符窗口做小写比较定位命中区间（返回字符下标）。
+fn find_char_window(text: &str, q_lower: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let q_chars = q_lower.chars().count();
+    if q_chars == 0 || q_chars > chars.len() {
+        return None;
+    }
+    for i in 0..=(chars.len() - q_chars) {
+        let window: String = chars[i..i + q_chars].iter().collect();
+        if window.to_lowercase() == q_lower {
+            return Some((i, i + q_chars));
+        }
+    }
+    None
+}
+
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
 #[cfg(test)]
 mod store_tests {
     use super::*;
@@ -1010,4 +1158,159 @@ mod store_tests {
         store.delete_event_trigger("t2").unwrap();
         assert!(store.get_event_trigger("t2").unwrap().is_none());
     }
+
+    /// 检索：标题 / 正文 / 大小写 / 同会话去重 / 片段截断
+    #[test]
+    fn 检索_标题正文与片段() {
+        let store = test_store();
+        let a = store.create_session("部署方案复盘", "exmachina").unwrap();
+        store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "周末讨论 Kubernetes 滚动发布（同步）")],
+            )
+            .unwrap();
+        store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "另外 kube-proxy 也要升级")],
+            )
+            .unwrap();
+        let b = store.create_session("闲聊", "exmachina").unwrap();
+        store
+            .add_message(
+                &b.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "今天天气不错（同步）")],
+            )
+            .unwrap();
+
+        // 正文命中（大小写不敏感）：同会话多条只出现一次，片段 ≤2
+        let hits = store.search_sessions("KUBERNETES", 20).unwrap();
+        assert_eq!(hits.len(), 1, "只应有会话 a 命中");
+        assert_eq!(hits[0].session_id, a.id);
+        assert!(!hits[0].title_match);
+        assert_eq!(hits[0].message_matches, 1);
+        assert_eq!(hits[0].snippets.len(), 1);
+        assert!(hits[0].snippets[0].text.contains("Kubernetes"), "片段应含关键词");
+        assert!(!hits[0].snippets[0].message_id.is_empty());
+
+        // 标题命中优先于仅正文命中
+        let h2 = store.search_sessions("部署", 20).unwrap();
+        assert_eq!(h2[0].session_id, a.id);
+        assert!(h2[0].title_match);
+
+        // limit 生效：两会话均命中「同步」时，limit 0 至少保留 1 条
+        assert_eq!(store.search_sessions("同步", 20).unwrap().len(), 2);
+        assert_eq!(store.search_sessions("同步", 0).unwrap().len(), 1);
+    }
+
+
+    /// 检索性能上界（手动运行，默认 ignore）：200 会话 × 200 条消息，单次 <1s。
+    #[test]
+    #[ignore]
+    fn 检索_基准() {
+        let store = test_store();
+        for i in 0..200 {
+            let s = store
+                .create_session(&format!("基准会话 {i}"), "exmachina")
+                .unwrap();
+            for j in 0..200 {
+                store
+                    .add_message(
+                        &s.id,
+                        MessageRole::User,
+                        None,
+                        vec![Statement::new(
+                            SpeechTag::要求,
+                            format!("消息 {j} 内容 needle-{i}-{j}"),
+                        )],
+                    )
+                    .unwrap();
+            }
+        }
+        let start = std::time::Instant::now();
+        let hits = store.search_sessions("needle-199-199", 20).unwrap();
+        let dur = start.elapsed();
+        println!("检索耗时: {:?}，命中 {}", dur, hits.len());
+        assert_eq!(hits.len(), 1, "应命中唯一针眼");
+        assert!(dur.as_millis() < 1000, "检索耗时超界: {dur:?}");
+    }
+
+    /// 检索：归档会话排除、200 条窗口边界、空查询、Unicode 小写展开不 panic
+    #[test]
+    fn 检索_归档窗口与边界() {
+        let store = test_store();
+        let archived = store.create_session("归档针眼", "exmachina").unwrap();
+        store
+            .add_message(
+                &archived.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "unique-needle-archived")],
+            )
+            .unwrap();
+        store.set_session_archived(&archived.id, true).unwrap();
+        assert!(
+            store.search_sessions("unique-needle-archived", 20).unwrap().is_empty(),
+            "归档会话不得命中"
+        );
+
+        // 窗口边界：最旧一条放入 200 条窗口之外 → 不命中；最新一条 → 命中
+        let old = store.create_session("长会话", "exmachina").unwrap();
+        store
+            .add_message(
+                &old.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "窗口外针眼-outside-window")],
+            )
+            .unwrap();
+        for i in 0..200 {
+            store
+                .add_message(
+                    &old.id,
+                    MessageRole::User,
+                    None,
+                    vec![Statement::new(SpeechTag::要求, format!("普通消息 {i}"))],
+                )
+                .unwrap();
+        }
+        // 现在共 201 条：最近 200 条窗口不含最旧的 outside-window
+        assert!(
+            store.search_sessions("outside-window", 20).unwrap().is_empty(),
+            "窗口外消息不得命中"
+        );
+        store
+            .add_message(
+                &old.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "最新针眼-window-needle")],
+            )
+            .unwrap();
+        let hits = store.search_sessions("window-needle", 20).unwrap();
+        assert_eq!(hits.len(), 1, "窗口内最新消息应命中");
+        assert!(store.search_sessions("   ", 20).unwrap().is_empty(), "空查询无结果");
+
+        // Unicode 小写展开（İ → i̇，字节变长）：不得 panic，仍能定位/截取
+        let u = store.create_session("Unicode", "exmachina").unwrap();
+        store
+            .add_message(
+                &u.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "İstanbul 会议纪要")],
+            )
+            .unwrap();
+        let hits = store.search_sessions("stanbul", 20).unwrap();
+        assert_eq!(hits.len(), 1, "Unicode 展开文本应能命中");
+        assert!(!hits[0].snippets.is_empty());
+    }
+
 }

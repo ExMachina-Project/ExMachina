@@ -570,6 +570,66 @@ impl SqliteStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// 会话内容检索（与 FSDB 实现同口径）：标题 + 最近 200 条消息正文，
+    /// 大小写不敏感；标题命中优先、同组按活跃时间倒序；每会话 ≤2 条片段。
+    /// 当前运行时走 FSDB（`crate::store::Store`），此实现保持两存储 API 对等。
+    pub fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchHit>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let q_lower = q.to_lowercase();
+        let limit = limit.max(1);
+        let mut hits: Vec<SessionSearchHit> = Vec::new();
+        for s in self.list_sessions()? {
+            let msgs = self.list_messages(&s.id, 200).unwrap_or_default();
+            let title_match = s.title.to_lowercase().contains(&q_lower);
+            let matched: Vec<&ChatMessage> = msgs
+                .iter()
+                .filter(|m| {
+                    let text = crate::store::message_text(m);
+                    !text.is_empty() && text.to_lowercase().contains(&q_lower)
+                })
+                .collect();
+            if !title_match && matched.is_empty() {
+                continue;
+            }
+            let last_active_at = msgs
+                .last()
+                .map(|m| m.created_at.clone())
+                .unwrap_or_else(|| s.updated_at.clone());
+            let snippets = matched
+                .iter()
+                .take(2)
+                .map(|m| {
+                    let body = crate::store::message_text(m);
+                    MessageSnippet {
+                        message_id: m.id.clone(),
+                        role: m.role,
+                        text: crate::store::snippet_around(&body, &q_lower, 80),
+                        created_at: m.created_at.clone(),
+                        agent_id: m.agent_id.clone(),
+                    }
+                })
+                .collect();
+            hits.push(SessionSearchHit {
+                session_id: s.id.clone(),
+                title: s.title.clone(),
+                title_match,
+                message_matches: matched.len(),
+                snippets,
+                last_active_at,
+            });
+        }
+        hits.sort_by(|a, b| {
+            b.title_match
+                .cmp(&a.title_match)
+                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     /// 截断活跃消息流:保留前 keep 条,被截断部分标记归档(可查)
     pub fn truncate_messages(&self, session_id: &str, keep: usize) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
@@ -1194,6 +1254,32 @@ mod store_tests {
     fn test_store() -> Store {
         let dir = std::env::temp_dir().join(format!("exm-store-{}", uuid::Uuid::new_v4()));
         Store::open(&dir).expect("打开测试存储失败")
+    }
+
+
+    fn sqlite_test_store() -> SqliteStore {
+        let dir = std::env::temp_dir().join(format!("exm-sqlite-{}", uuid::Uuid::new_v4()));
+        SqliteStore::open(&dir).expect("打开测试 SQLite 存储失败")
+    }
+
+    /// 检索（sqlite 同口径）：正文大小写不敏感命中、空查询无结果
+    #[test]
+    fn 检索_sqlite同口径() {
+        let store = sqlite_test_store();
+        let a = store.create_session("部署方案", "exmachina").unwrap();
+        store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "Kubernetes 滚动发布")],
+            )
+            .unwrap();
+        let hits = store.search_sessions("kubernetes", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, a.id);
+        assert!(!hits[0].snippets.is_empty());
+        assert!(store.search_sessions("   ", 20).unwrap().is_empty());
     }
 
     #[test]

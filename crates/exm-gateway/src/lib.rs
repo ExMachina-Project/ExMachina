@@ -40,7 +40,7 @@ pub mod worker_hub;
 use assets::{get_asset, health};
 use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
 use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
-use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch};
+use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, search_sessions};
 use agents_admin::{list_agents, create_agent, remove_agent_from_group, remove_agent, set_agent_model, update_agent};
 use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, list_templates};
 use version::{version_info, version_check, version_apply, version_apply_status};
@@ -221,6 +221,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
     let mut router = Router::new()
         .route("/api/health", get(health))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/search", get(search_sessions))
         .route("/api/sessions/:id", get(get_session).delete(delete_session))
         .route("/api/sessions/:id/messages", get(list_messages))
         .route("/api/sessions/:id/export", get(export_session))
