@@ -10,12 +10,14 @@ import {
   Button, Checkbox, Dropdown, Input, Modal, Segmented, Space, Spin, Tooltip, message,
 } from "antd";
 import {
-  CheckOutlined, DeleteOutlined, EditOutlined, ExportOutlined, InboxOutlined,
-  PushpinOutlined, ReloadOutlined,
+  CheckOutlined, DeleteOutlined, EditOutlined, ExportOutlined, HistoryOutlined,
+  InboxOutlined, PushpinOutlined, ReloadOutlined,
 } from "@ant-design/icons";
 import { api } from "../api";
 import { toastOk, toastErr } from "../feedback";
-import type { Session } from "../types";
+import type { Session, SessionSearchHit } from "../types";
+import { Highlight, useSessionSearch } from "../components/sessionSearch";
+import { SessionHistoryModal } from "../components/SessionHistoryModal";
 import { useExm } from "../store";
 import { useT, tr } from "../i18n/core";
 import { relativeTime } from "../time";
@@ -32,13 +34,16 @@ export function SessionsView(): React.ReactElement {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setListView] = useState<"main" | "archived">("main");
-  const [keyword, setKeyword] = useState("");
+  // 内容检索（session-search）：主列表走服务端（标题 + 最近 200 条消息），
+  // 归档视图保持本地过滤（不调用内容检索接口）。
+  const search = useSessionSearch({ enabled: view === "main" });
   const [kind, setKind] = useState<KindFilter>("all");
   const [sort, setSort] = useState<SortKey>("active");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [renaming, setRenaming] = useState<Session | null>(null);
   const [renameText, setRenameText] = useState("");
+  const [historyFor, setHistoryFor] = useState<Session | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,9 +67,9 @@ export function SessionsView(): React.ReactElement {
     return () => window.removeEventListener("exm:flows-refresh", h);
   }, [load]);
 
-  /** 过滤：关键字（标题 + 预览）→ 类型（channel: 前缀）→ 排序 */
+  /** 本地过滤：关键字（标题 + 预览，服务端检索失败/归档视图的降级口径）→ 类型 → 排序 */
   const visible = useMemo(() => {
-    const kw = keyword.trim().toLowerCase();
+    const kw = search.query.trim().toLowerCase();
     let list = sessions.filter((s) => {
       const hitKw =
         !kw ||
@@ -84,7 +89,19 @@ export function SessionsView(): React.ReactElement {
       );
     });
     return list;
-  }, [sessions, keyword, kind, sort]);
+  }, [sessions, search.query, kind, sort]);
+
+  /** 服务端检索生效条件：主列表 + 有关键词 + 接口未失败（失败回退本地过滤） */
+  const searching = view === "main" && search.query.trim().length > 0;
+  const showSearchPanel = searching && !search.error;
+  const hitList = useMemo(() => {
+    const list = search.hits ?? [];
+    return kind === "all"
+      ? list
+      : list.filter((h) =>
+          kind === "channel" ? h.title.startsWith("channel:") : !h.title.startsWith("channel:"),
+        );
+  }, [search.hits, kind]);
 
   const allSelected = visible.length > 0 && visible.every((s) => selected.has(s.id));
   const selectedCount = visible.filter((s) => selected.has(s.id)).length;
@@ -196,6 +213,11 @@ export function SessionsView(): React.ReactElement {
     void selectSession(s.id);
     requestNav("chat", s.id);
   };
+  /** 打开检索命中：跳会话并定位到命中消息（无片段时只打开会话） */
+  const openHit = (h: SessionSearchHit) => {
+    void selectSession(h.sessionId);
+    requestNav("chat", h.sessionId, h.snippets[0]?.messageId);
+  };
   /** 导出（与聊天页同源服务端导出：含审批与全量消息） */
   const exportOne = async (s: Session, format: "markdown" | "json") => {
     try {
@@ -226,6 +248,7 @@ export function SessionsView(): React.ReactElement {
       view === "main" ? { key: "pin", icon: <PushpinOutlined />, label: s.pinned ? t("chat.unpin") : t("chat.pin") } : null,
       { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
       { key: "exportJson", icon: <ExportOutlined />, label: `${t("chat.export")} (JSON)` },
+      { key: "history", icon: <HistoryOutlined />, label: t("sessions.history") },
       { type: "divider" as const },
       view === "main"
         ? { key: "archive", icon: <InboxOutlined />, label: t("sessions.archiveOne") }
@@ -238,6 +261,7 @@ export function SessionsView(): React.ReactElement {
       else if (key === "pin") void pinOne(s, !s.pinned);
       else if (key === "export") void exportOne(s, "markdown");
       else if (key === "exportJson") void exportOne(s, "json");
+      else if (key === "history") setHistoryFor(s);
       else if (key === "archive") void archiveOne(s, true);
       else if (key === "unarchive") void archiveOne(s, false);
       else if (key === "delete") deleteOne(s);
@@ -276,9 +300,11 @@ export function SessionsView(): React.ReactElement {
         <Input.Search
           className="sessions-search"
           placeholder={t("sessions.searchPlaceholder")}
+          title={t("sessions.searchScope")}
           allowClear
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          loading={search.loading}
+          value={search.query}
+          onChange={(e) => search.setQuery(e.target.value)}
         />
         <Segmented
           value={kind}
@@ -298,10 +324,10 @@ export function SessionsView(): React.ReactElement {
             { value: "messages", label: t("sessions.sortMessages") },
           ]}
         />
-        <span className="sessions-count mono">{visible.length}</span>
+        <span className="sessions-count mono">{showSearchPanel ? hitList.length : visible.length}</span>
       </div>
 
-      {selectedCount > 0 && (
+      {selectedCount > 0 && !searching && (
         <div className="sessions-batchbar">
           <span className="mono">{t("sessions.selected", { count: selectedCount })}</span>
           <Space>
@@ -324,7 +350,43 @@ export function SessionsView(): React.ReactElement {
         </div>
       )}
 
-      {loading ? (
+      {search.error && searching && (
+        <div className="search-degraded">{t("sessions.searchDegraded")}</div>
+      )}
+
+      {showSearchPanel ? (
+        search.loading && search.hits === null ? (
+          <div className="sessions-loading"><Spin /></div>
+        ) : hitList.length === 0 ? (
+          <div className="sessions-empty">{t("sessions.noContentHits")}</div>
+        ) : (
+          <div className="search-results">
+            {hitList.map((h) => {
+              const snippet = h.snippets[0];
+              return (
+                <button key={h.sessionId} type="button" className="search-result" onClick={() => openHit(h)}>
+                  <div className="search-result-head">
+                    <span className="search-result-title">
+                      <Highlight text={h.title} query={search.query} />
+                    </span>
+                    {h.titleMatch && <span className="search-badge">{t("sessions.searchTitleHit")}</span>}
+                    <span className="search-result-meta mono">
+                      {h.messageMatches > 0 ? `${t("sessions.searchHitCount", { n: h.messageMatches })} · ` : ""}
+                      {relativeTime(h.lastActiveAt)}
+                    </span>
+                  </div>
+                  {snippet && (
+                    <div className="search-result-snippet">
+                      <Highlight text={snippet.text} query={search.query} />
+                    </div>
+                  )}
+                  <span className="search-result-open">{t("sessions.searchOpen")} →</span>
+                </button>
+              );
+            })}
+          </div>
+        )
+      ) : loading ? (
         <div className="sessions-loading"><Spin /></div>
       ) : visible.length === 0 ? (
         <div className="sessions-empty">{view === "archived" ? t("sessions.emptyArchived") : t("sessions.emptyMain")}</div>
@@ -387,6 +449,13 @@ export function SessionsView(): React.ReactElement {
           })}
         </div>
       )}
+
+      <SessionHistoryModal
+        session={historyFor}
+        open={!!historyFor}
+        onClose={() => setHistoryFor(null)}
+        onChanged={() => void load()}
+      />
 
       <Modal
         open={!!renaming}
