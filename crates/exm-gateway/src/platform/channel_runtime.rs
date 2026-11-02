@@ -547,14 +547,16 @@ pub(crate) async fn admit(
     // ② 群聊唤醒门控：群内仅提及 / 回复触发；私聊豁免。
     // 主动回复（实验性，通道级开关）：未 @ 但通道开了 proactive_reply 时，
     // 经三级漏斗（回复率采样 → 探活词表 → 决策模型）判断是否主动回应
-    // （proactive.rs；任何一级失败都保守忽略——主动回复是增益不是义务）
-    if ch.gate_enabled(core)
-        && ctx.is_group
-        && !ctx.mentioned
-        && (!ch.proactive_enabled()
-            || !super::proactive::should_proactively_reply(core, ch, ctx).await)
-    {
-        return GateDecision::Ignore;
+    // （proactive.rs；任何一级失败都保守忽略——主动回复是增益不是义务）。
+    // 被拦下的未 @ 消息不再完全丢弃：落流会话作为「旁听」上下文（imctx: 标记，
+    // 不触发轮次）——「仅 @ 回复」模式下 Agent 被点名时仍能接住群聊话题。
+    if ch.gate_enabled(core) && ctx.is_group && !ctx.mentioned {
+        let proactive = ch.proactive_enabled()
+            && super::proactive::should_proactively_reply(core, ch, ctx).await;
+        if !proactive {
+            record_ambient(core, ch, ctx).await;
+            return GateDecision::Ignore;
+        }
     }
 
     // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引。管理者账号清单命中豁免——
@@ -618,6 +620,89 @@ pub(crate) async fn admit(
         }));
     }
     GateDecision::Allow(clean_text)
+}
+
+/// 群聊旁听落库（ambient context）：门控拦下的未 @ 群消息以 `imctx:` 标记
+/// 追加到流会话——不触发轮次，仅作为「仅 @ 回复」模式下被点名时的群聊上下文。
+///
+/// 语义约定（docs/协议与契约.md）：
+/// - 落 User 角色但标记 `imctx:发送者`，与真实输入（`im:`）区分；
+/// - collect 不并入 goal（群聊旁听是背景，不是本轮任务输入）；
+/// - 模型侧渲染「群聊·发送者」，展示层署名 + 「群聊」标签；
+/// - 文本仍经入站消毒——旁听会进入未来轮次的模型上下文，不能成为注入面。
+async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>) {
+    let text = ctx.text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let Some(sid) = ensure_flow_session(core, ch, ctx.chat_key) else {
+        return;
+    };
+    let (clean, findings) = crate::sanitize::sanitize_with(
+        text,
+        Some(&core.config().security.sanitize_rules),
+    );
+    if !findings.is_empty() {
+        crate::sanitize::note_findings(&findings);
+        core.emit_sanitize_finding(serde_json::json!({
+            "channel": ch.id,
+            "externalId": ctx.external_id,
+            "patterns": findings.iter().map(|f| f.rule).collect::<Vec<_>>(),
+            "actions": findings.iter().map(|f| f.action).collect::<Vec<_>>(),
+            "ambient": true,
+        }));
+    }
+    // 发送者标记沿用六适配器同口径（im:名(id) → imctx:名(id)）；
+    // 无署名时仍保留 imctx: 前缀（前缀本身就是旁听语义，不可丢）
+    let sender = crate::channel_util::sender_origin(
+        ctx.is_group,
+        ctx.display_name,
+        ctx.external_id,
+    )
+    .map(|m| m.trim_start_matches("im:").to_string())
+    .unwrap_or_default();
+    let origin = format!("imctx:{sender}");
+    let _ = core.store.add_message(
+        &sid,
+        exm_core::types::MessageRole::User,
+        Some(origin.as_str()),
+        vec![exm_core::types::Statement::new(
+            exm_core::types::SpeechTag::要求,
+            clean.as_str(),
+        )],
+    );
+    // 流预览跟随最新群消息（控制台流列表展示「群里刚说了什么」）
+    let _ = core.touch_flow_message(&ch.id, ctx.chat_key, &clean);
+}
+
+/// 流会话定位/建立（旁听用，与 `ChannelRun::begin` 同口径）：
+/// 有效绑定优先；未绑定则按 title 认领旧会话（升级迁移）或新建并回写绑定。
+/// 不切全局交互上下文——旁听只是记账，不应翻转打开中的工作目标。
+fn ensure_flow_session(core: &exm_core::Core, ch: &Channel, chat_key: &str) -> Option<String> {
+    if let Some(sid) = core.flow_active_session(&ch.id, chat_key) {
+        return Some(sid);
+    }
+    let target = ch
+        .group
+        .clone()
+        .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(core)));
+    let (single, group) = parse_target(&target);
+    let scope = match (single, group) {
+        (Some(id), _) => format!("{SINGLE_PREFIX}{id}"),
+        (_, Some(g)) => g,
+        _ => core.active_group(),
+    };
+    let title = format!("channel:{}:{chat_key}", ch.id);
+    let legacy = core
+        .list_sessions_in_group(&scope)
+        .ok()
+        .and_then(|list| list.into_iter().find(|s| s.title == title));
+    let sid = match legacy {
+        Some(s) => s.id,
+        None => core.store.create_session(&title, &scope).ok()?.id,
+    };
+    let _ = core.bind_flow_session(&ch.id, chat_key, &sid);
+    Some(sid)
 }
 
 /// 聊天流（chat flow）会话管理指令：

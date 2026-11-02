@@ -35,10 +35,14 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
   const autoOrigin = isUser && m.agentId?.startsWith("auto:") ? m.agentId.slice(5) : null;
   // 群聊发送者：agentId 带 im: 前缀 = 外部群聊真人发言者（消息头署名，正文保持纯净）
   const imSender = isUser && m.agentId?.startsWith("im:") ? m.agentId.slice(3) : null;
+  // 群聊旁听：agentId 带 imctx: 前缀 = 门控期记录的他人群消息（Agent 可见上下文，非直接指令）
+  const ambientSender = isUser && m.agentId?.startsWith("imctx:") ? m.agentId.slice(6) : null;
   const title = isUser
     ? autoOrigin
       ? tb("chat.role.auto")
-      : imSender ?? tb("chat.role.user")
+      : ambientSender !== null
+        ? ambientSender || tb("chat.role.ambient")
+        : imSender ?? tb("chat.role.user")
     : m.role === "orchestrator"
       ? (orchLabel ?? tb("chat.role.orchestrator"))
       : (m.agentId ?? tb("chat.role.system"));
@@ -52,6 +56,7 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
       <div className="msg-head">
         {isUser ? <UserOutlined /> : <RobotOutlined />} <b>{title}</b>
         {autoOrigin && <span className="auto-tag">{autoOrigin}</span>}
+        {ambientSender !== null && <span className="auto-tag ambient-tag">{tb("chat.role.ambient")}</span>}
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
         {time && <span className="msg-time mono">{time}</span>}
         {!isUser && (

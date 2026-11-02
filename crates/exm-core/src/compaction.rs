@@ -41,9 +41,11 @@ fn transcript_line(m: &ChatMessage) -> String {
 }
 
 /// user 消息的转录署名：带 im: 发送者标记（群聊多人区分）时渲染「用户·名字」，
+/// imctx: 旁听（门控拦下的未 @ 群消息）渲染「群聊·名字」——明确是背景上下文，
 /// 其余（WebUI / 私聊 / 自动任务）保持「用户」。
 fn user_label(m: &ChatMessage) -> String {
     match m.agent_id.as_deref() {
+        Some(mark) if mark.starts_with("imctx:") => format!("群聊·{}", &mark[6..]),
         Some(mark) if mark.starts_with("im:") => format!("用户·{}", &mark[3..]),
         _ => "用户".into(),
     }
@@ -345,6 +347,16 @@ mod tests {
         let out = render_recent(&msgs);
         assert!(out.contains("[用户] 你好"));
         assert!(out.contains("[a1] 收到"));
+    }
+
+    /// 群聊旁听（imctx:）：模型侧渲染「群聊·发送者」——
+    /// 与真实用户输入（用户·发送者）区分，明确是背景上下文。
+    #[test]
+    fn render_recent_群聊旁听署名() {
+        let mut m = mk_msg(MessageRole::User, "部署方案定了吗");
+        m.agent_id = Some("imctx:张三".into());
+        let out = render_recent(&[m]);
+        assert!(out.contains("[群聊·张三] 部署方案定了吗"), "{out}");
     }
 
     #[tokio::test]
