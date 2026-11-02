@@ -612,32 +612,7 @@ impl Orchestrator {
         // list_messages 为时间正序（read_lines 语义）：从尾部反向收集连续 user 消息
         let msgs: Vec<crate::types::ChatMessage> =
             self.store.list_messages(session_id, 200).ok()?;
-        let mut pending: Vec<String> = Vec::new();
-        for m in msgs.iter().rev() {
-            if m.role != MessageRole::User {
-                break;
-            }
-            // 群聊发送者（im: 标记）转行内署名：排队窗口内多人发言合并为一轮目标时
-            // 仍可区分「谁说了什么」（与 history 渲染同口径）
-            let who = m
-                .agent_id
-                .as_deref()
-                .and_then(|a| a.strip_prefix("im:"))
-                .unwrap_or("");
-            let prefix = if who.is_empty() { String::new() } else { format!("（{who} 说）") };
-            let mut stmts: Vec<String> = m
-                .statements
-                .iter()
-                .map(|s| format!("{prefix}{}", s.text))
-                .collect();
-            stmts.reverse();
-            pending.extend(stmts);
-        }
-        if pending.is_empty() {
-            return None;
-        }
-        pending.reverse(); // 时间正序
-        Some(pending.join("\n"))
+        pending_inputs_from(&msgs)
     }
 
     /// 上下文压缩（docs/架构与设计.md）：历史超过阈值时，旧消息压成滚动摘要，保留最近窗口原文
@@ -996,18 +971,20 @@ impl Orchestrator {
                 continue;
             }
             match m.role {
-                // 群聊发送者（im: 标记）在内容头署名——多人发言在模型视角可区分
+                // 群聊发送者（im: 标记）在内容头署名——多人发言在模型视角可区分；
+                // 旁听消息（imctx:）标注「群聊·发送者」：明确是背景，不是对本体的指令
                 MessageRole::User => {
-                    let who = m
-                        .agent_id
-                        .as_deref()
-                        .and_then(|a| a.strip_prefix("im:"))
-                        .unwrap_or("");
-                    history.push(ChatMessage::user(if who.is_empty() {
-                        content
-                    } else {
+                    let mark = m.agent_id.as_deref().unwrap_or("");
+                    let who = mark.strip_prefix("im:").unwrap_or("");
+                    let ambient = mark.strip_prefix("imctx:").unwrap_or("");
+                    let body = if !ambient.is_empty() {
+                        format!("（群聊·{ambient} 说）{content}")
+                    } else if !who.is_empty() {
                         format!("（{who} 说）{content}")
-                    }))
+                    } else {
+                        content
+                    };
+                    history.push(ChatMessage::user(body))
                 }
                 MessageRole::Orchestrator => history.push(ChatMessage::assistant(content)),
                 _ => {}
@@ -1209,18 +1186,20 @@ impl Orchestrator {
                 continue;
             }
             match m.role {
-                // 群聊发送者（im: 标记）在内容头署名——多人发言在模型视角可区分
+                // 群聊发送者（im: 标记）在内容头署名——多人发言在模型视角可区分；
+                // 旁听消息（imctx:）标注「群聊·发送者」：背景而非对本体的指令
                 MessageRole::User => {
-                    let who = m
-                        .agent_id
-                        .as_deref()
-                        .and_then(|a| a.strip_prefix("im:"))
-                        .unwrap_or("");
-                    history.push(ChatMessage::user(if who.is_empty() {
-                        content
-                    } else {
+                    let mark = m.agent_id.as_deref().unwrap_or("");
+                    let who = mark.strip_prefix("im:").unwrap_or("");
+                    let ambient = mark.strip_prefix("imctx:").unwrap_or("");
+                    let body = if !ambient.is_empty() {
+                        format!("（群聊·{ambient} 说）{content}")
+                    } else if !who.is_empty() {
                         format!("（{who} 说）{content}")
-                    }))
+                    } else {
+                        content
+                    };
+                    history.push(ChatMessage::user(body))
                 }
                 MessageRole::Orchestrator => {
                     history.push(ChatMessage::assistant(format!("【指挥体】{content}")))
@@ -2344,6 +2323,47 @@ impl Orchestrator {
         );
         Ok(resp.content)
     }
+}
+
+// ---------------------------------------------------------------- collect 纯函数内核
+
+/// collect 的纯函数内核（可单测）：时间正序消息尾部连续 user 输入合并。
+/// 群聊旁听（imctx: 标记）跳过——它是背景上下文，不是本轮任务输入：
+/// 被 @ 时不应把此前的群聊记录当成「用户让我做的事」重新执行。
+fn pending_inputs_from(msgs: &[crate::types::ChatMessage]) -> Option<String> {
+    let mut pending: Vec<String> = Vec::new();
+    for m in msgs.iter().rev() {
+        if m.role != MessageRole::User {
+            break;
+        }
+        if m.agent_id
+            .as_deref()
+            .map(|a| a.starts_with("imctx:"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        // 群聊发送者（im: 标记）转行内署名：排队窗口内多人发言合并为一轮目标时
+        // 仍可区分「谁说了什么」（与 history 渲染同口径）
+        let who = m
+            .agent_id
+            .as_deref()
+            .and_then(|a| a.strip_prefix("im:"))
+            .unwrap_or("");
+        let prefix = if who.is_empty() { String::new() } else { format!("（{who} 说）") };
+        let mut stmts: Vec<String> = m
+            .statements
+            .iter()
+            .map(|s| format!("{prefix}{}", s.text))
+            .collect();
+        stmts.reverse();
+        pending.extend(stmts);
+    }
+    if pending.is_empty() {
+        return None;
+    }
+    pending.reverse(); // 时间正序
+    Some(pending.join("\n"))
 }
 
 // ---------------------------------------------------------------- 节点执行上下文
@@ -3525,5 +3545,66 @@ mod fallback_converge_tests {
             "无回流节点应显式标注：\n{text}"
         );
         assert!(text.contains("降级说明"), "应包含降级说明段");
+    }
+}
+
+#[cfg(test)]
+mod pending_inputs_tests {
+    use super::*;
+
+    fn msg(role: MessageRole, agent: Option<&str>, text: &str) -> crate::types::ChatMessage {
+        crate::types::ChatMessage {
+            id: String::new(),
+            session_id: String::new(),
+            role,
+            agent_id: agent.map(|s| s.to_string()),
+            statements: vec![Statement::new(SpeechTag::要求, text)],
+            created_at: String::new(),
+            turn: None,
+            token_usage: None,
+            thinking: None,
+            last_message_preview: None,
+            last_active_at: None,
+            tool_calls: Vec::new(),
+            steps: Vec::new(),
+        }
+    }
+
+    /// 群聊旁听（imctx:）不并入 goal：它是背景上下文，不是本轮任务输入。
+    /// 尾部真实 @ 消息正常收集；旁听消息跳过且不打断连续窗口扫描。
+    #[test]
+    fn 旁听消息_跳过_真实输入正常合并() {
+        let msgs = vec![
+            msg(MessageRole::User, Some("imctx:张三"), "今晚吃什么"),
+            msg(MessageRole::User, Some("imctx:李四"), "随便"),
+            msg(MessageRole::User, Some("im:王五"), "@bot 帮我们推荐"),
+        ];
+        let goal = pending_inputs_from(&msgs).expect("应收集到真实输入");
+        assert_eq!(goal, "（王五 说）@bot 帮我们推荐");
+        assert!(!goal.contains("今晚吃什么"), "旁听不得并入 goal：{goal}");
+        assert!(!goal.contains("随便"), "旁听不得并入 goal：{goal}");
+    }
+
+    /// 全为旁听消息 → 无待处理输入（不应触发轮次的兜底由调用方保证）
+    #[test]
+    fn 全旁听_无待处理输入() {
+        let msgs = vec![
+            msg(MessageRole::User, Some("imctx:张三"), "一"),
+            msg(MessageRole::User, Some("imctx:李四"), "二"),
+        ];
+        assert!(pending_inputs_from(&msgs).is_none());
+    }
+
+    /// 非 user 消息是窗口边界：旁听在其后、边界前的 @ 消息不应被回溯收集
+    #[test]
+    fn 轮次边界_不回溯() {
+        let msgs = vec![
+            msg(MessageRole::User, Some("im:王五"), "@bot 旧任务"),
+            msg(MessageRole::Orchestrator, None, "旧回答"),
+            msg(MessageRole::User, Some("imctx:张三"), "闲聊"),
+            msg(MessageRole::User, Some("im:王五"), "@bot 新任务"),
+        ];
+        let goal = pending_inputs_from(&msgs).expect("应有新任务");
+        assert_eq!(goal, "（王五 说）@bot 新任务");
     }
 }

@@ -1537,35 +1537,30 @@ textarea.ant-input:focus,
 }
 .cfg-nav {
   flex: none;
-  /* 等高拉伸：跟随 settings2 全高（flex 链已把 settings2 撑满短页一屏），
-     左导航与右面板底边对齐——旧 flex:none + 默认 align-items:flex-start
-     只到菜单末尾就截止，短内容页下方空一截（视觉断口） */
-  align-self: stretch;
+  /* 整卡吸顶（移动端查漏同源修复）：原先吸顶放在内层 cfg-nav-scroll（top:96px），
+     页面顶部时内层就被下推——卡片内空出 19~34px 灰带、首项看似被「切」。
+     改外层吸顶后内层自然贴合卡片顶，滚动长面板时导航仍悬停可达。
+     top = 吸顶页头高（约 54）+ 间距 8；max-height 留出底栏与页头。 */
+  position: sticky;
+  top: 62px;
+  align-self: flex-start;
   width: 200px;
   display: flex;
   flex-direction: column;
-  /* 视口封顶：长页下卡片不随面板内容拉出数屏空壳（内层 sticky 条目仍可视）。
-     实测几何（1440x900）：页头 54 + 页头上边距 8 = settings2 顶 62，
-     可用高 = 视口 − 遥测条 26 − 62；旧魔数 168 超算 106px，短内容页
-     导航底边距面板底边恒空 ~86px（截图实测 gap=86） */
   max-height: calc(100dvh - var(--tel-h) - 70px);
   border: 1px solid var(--line);
   background: var(--bg-panel);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-sm);
 }
-/* 内层滚动区：sticky 吸顶（对齐吸顶页头下缘，页头约 87px）+ 自身滚动。
-   sticky 放外层会破坏 flex stretch 等高，故拆两层 */
+/* 内层滚动区：常规流内滚动（吸顶由外层卡片承担，避免顶部灰带） */
 .cfg-nav-scroll {
-  position: sticky;
-  top: 96px;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 3px;
   padding: 10px 8px;
-  /* 自身滚动封顶：滚动容口高 − 吸顶位 96 − 底距 24 − 遥测条。
-     旧魔数 120 漏算遥测条 26 与页头实高，短页恒定溢出 ~50px（「还能再滚一点」的根源） */
-  max-height: calc(100dvh - 96px - 24px - var(--tel-h));
   overflow-y: auto;
 }
 .cfg-nav-item {
@@ -2548,6 +2543,12 @@ textarea.ant-input:focus,
   color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   opacity: 0.85; font-family: var(--mono);
 }
+/* 群聊旁听消息标签：门控期记录的他人发言（Agent 上下文，非直接指令）——
+   弱化色提醒「这条没有触发回复」 */
+.ambient-tag {
+  color: var(--text-sec, #9aa3b0);
+  border-color: color-mix(in srgb, var(--text-sec, #9aa3b0) 35%, transparent);
+}
 .code-msg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .code-msg .turn-op { padding: 0 4px; }
 .edit-warn { margin-bottom: 12px; }
@@ -3063,7 +3064,7 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   .page-actions .ant-space { flex-wrap: wrap; row-gap: 6px; }
   .page-actions .ant-space-item { margin-inline-end: 0 !important; }
   .page-actions .ant-btn { padding-inline: 10px; }
-  .cfg-nav { width: 100%; max-height: none; }
+  .cfg-nav { width: 100%; max-height: none; position: static; }
   /* 横滚 tab 化（移动端查漏）：分类从 17 项纵向长列改为横向滚动 chips，
      右缘渐隐提示「还能滚」——否则被截断的分类（安全与审批等）不可发现 */
   .cfg-nav-scroll {
