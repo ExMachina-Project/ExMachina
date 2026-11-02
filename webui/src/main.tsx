@@ -4,7 +4,11 @@ import { ConfigProvider, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import App from "./App";
 import { accentColor, themeOf, useTheme, type ThemeKey } from "./theme";
+import { installViewportFix } from "./viewport";
 import "./styles.css";
+
+// 移动端键盘遮挡兜底：iOS Safari 键盘弹出时 100dvh 不缩，需 visualViewport 实时高
+installViewportFix();
 
 /** antd 原生 token 表：与 styles.css 的色阶同源，避免 antd 件与自绘面板两种底色。
  *  antd token 无法直接读 CSS 变量，因此这里按主题硬编码一份（与 CSS 里的色阶保持一致）。 */

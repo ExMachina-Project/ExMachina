@@ -1404,6 +1404,12 @@ textarea.ant-input:focus,
   border-radius: var(--r-sm);
   display: inline-block;
 }
+/* 审批行元信息跳转（移动端查漏）：无边框文本按钮，触屏热区靠行高撑 */
+.link-btn {
+  border: none; background: none; padding: 2px 0;
+  cursor: pointer; text-align: left;
+  color: var(--text-sec, inherit); text-decoration: underline dotted;
+}
 .result-cell { white-space: pre-wrap; word-break: break-all; }
 .inbound-hint {
   margin-top: 16px;
@@ -2877,6 +2883,9 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   /* min-width:0 必填：flex 子项默认 min-width:auto，宽表格会把容器撑破（横向溢出 200px+） */
   .view-stage { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
   .view-stage > * { min-width: 0; }
+  /* 键盘遮挡兜底（4.6）：iOS Safari 键盘弹出时 100dvh 不缩、键盘盖住输入区；
+     --vvh 由 visualViewport 实时写入（viewport.ts），取小者收缩可视壳 */
+  .app-shell { height: min(100dvh, var(--vvh, 100dvh)); }
   /* margin:0 auto（基线的居中写法）会让 flex 子项在交叉轴上不再 stretch，
    .chat-shell 被内容宽度收窄到 255px —— 竖屏必须显式归零外边距并占满 */
   .chat-shell {
@@ -3049,14 +3058,39 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 
 @media (max-width: 860px) {
   .settings2 { flex-direction: column; gap: 12px; align-items: stretch; min-height: 0; }
+  /* 页头动作区允许换行（Space 默认 nowrap 会把「测试全局默认/刷新」顶出视口） */
+  .page-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; max-width: 100%; }
+  .page-actions .ant-space { flex-wrap: wrap; row-gap: 6px; }
+  .page-actions .ant-space-item { margin-inline-end: 0 !important; }
+  .page-actions .ant-btn { padding-inline: 10px; }
   .cfg-nav { width: 100%; max-height: none; }
-  .cfg-nav-scroll { flex-direction: row; overflow-x: auto; gap: 4px; padding: 6px 8px; position: static; max-height: none; }
-  .cfg-nav-item { white-space: nowrap; padding: 6px 10px; }
+  /* 横滚 tab 化（移动端查漏）：分类从 17 项纵向长列改为横向滚动 chips，
+     右缘渐隐提示「还能滚」——否则被截断的分类（安全与审批等）不可发现 */
+  .cfg-nav-scroll {
+    flex-direction: row; overflow-x: auto; gap: 4px; padding: 6px 8px; position: static; max-height: none;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 0%, #000 92%, transparent 100%);
+  }
+  .cfg-nav-scroll::-webkit-scrollbar { display: none; }
+  .cfg-nav-item { white-space: nowrap; padding: 6px 10px; min-height: 36px; align-items: center; }
+  .cfg-nav-skeleton { min-width: 72px; height: 36px; }
   /* 宽表横滚：滚动容器取 wrapper（.ant-table 本身带 min-width，
      放在 .ant-table-content 上滚不动，只会把页面撑破 200px+） */
   .ant-table-wrapper { overflow-x: auto; }
   .ant-table-content { overflow-x: auto; }
-  .ant-table { min-width: 560px; }
+  .ant-table { min-width: 480px; }
+  /* 窄屏已裁列的表（approvals 3 列）不需要 480 兜底——min-width 会把
+     操作列顶出视口、凭空制造横滚（首屏看不到批准/拒绝）。按需覆盖为 100% */
+  .tbl-fit .ant-table { min-width: 100%; }
+  /* 触控命中区（移动端查漏）：小按钮/复选框视觉尺寸不变，热区扩到 ≥40px。
+     实测 390px 下各页 smallTouch 19~217 个 <36px 可点元素——纯 CSS 修复面最大 */
+  .ant-btn-sm { position: relative; }
+  .ant-btn-sm::after {
+    content: ""; position: absolute; inset: -6px; pointer-events: auto;
+  }
+  .ant-checkbox { position: relative; }
+  .ant-checkbox::after { content: ""; position: absolute; inset: -8px; }
+  .ant-pagination-mini .ant-pagination-item, .ant-pagination-prev, .ant-pagination-next { min-width: 36px; min-height: 36px; }
   .skill-grid, .group-grid { grid-template-columns: 1fr; }
   /* 竖屏：操作区换行到标题下方。width:100% 会把行撑出容器（6px 横向滚动条） */
   .page-head-row { flex-wrap: wrap; gap: 10px; }
@@ -3486,10 +3520,13 @@ pre.code-folded { position: relative; margin: 0; max-height: calc(14 * 1.6em + 2
   .sessions-td-scope { display: none; }
 }
 @media (max-width: 640px) {
-  .sessions-tr { grid-template-columns: 36px minmax(140px, 1fr) 70px 84px; }
+  .sessions-tr { grid-template-columns: 32px minmax(110px, 1fr) 64px 80px; padding: 0 8px; gap: 6px; }
   .sessions-td-count, .sessions-td-kind { display: none; }
   .sessions-toolbar { flex-direction: column; align-items: stretch; }
   .sessions-search { max-width: none; }
+  /* 窄屏操作列两个按钮太挤：默认只露「打开」，更多操作收进 ⋯ 下拉（行操作菜单本身已有全量） */
+  .sessions-td-ops .ant-btn:first-child { display: none; }
+  .sessions-row { min-height: 48px; }
 }
 
 /* ============================================================ 模型档案卡状态行 + 能力徽章（model-settings-ux） */
