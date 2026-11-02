@@ -1,5 +1,5 @@
 /** REST 客户端 —— 契约见 docs/04 §7 */
-import type { AgentDefinition, ChatMessage, EvidenceItem, Session, TaskGraph } from "./types";
+import type { AgentDefinition, ChatMessage, EvidenceItem, Session, SessionSearchHit, SessionSnapshot, TaskGraph } from "./types";
 import { tr } from "./i18n/core";
 
 /** 密钥掩码哨兵（与后端 llm_admin::KEY_MASK / 通道脱敏同一契约）：提交时收到此值 = 沿用服务端旧值 */
@@ -568,8 +568,12 @@ export const api = {
       body: JSON.stringify({ turn }),
     }),
   sessionArchive: (id: string) => req<ChatMessage[]>(`/sessions/${id}/archive`),
-  sessionSnapshots: (id: string) =>
-    req<{ turn: number; messageCount: number; status: string }[]>(`/sessions/${id}/snapshots`),
+  sessionSnapshots: (id: string) => req<SessionSnapshot[]>(`/sessions/${id}/snapshots`),
+  /** 会话内容检索：标题 + 最近 200 条消息（空 q 由服务端 400，前端不发） */
+  searchSessions: (q: string, limit = 20) =>
+    req<{ query: string; hits: SessionSearchHit[] }>(
+      `/sessions/search?${new URLSearchParams({ q, limit: String(limit) }).toString()}`,
+    ),
   messages: (id: string) =>
     req<ChatMessage[]>(`/sessions/${id}/messages`).then((list) =>
       // 服务端 ToolCallRecord 用 ok:bool（收束落库形态），前端统一水合为 status 三态；

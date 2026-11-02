@@ -52,7 +52,11 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
   const hasProcess = hasThinking || hasTools || steps.length > 0;
   const time = relativeTime(m.createdAt);
   return (
-    <Card size="small" className={`msg-bubble ${isUser ? "msg-user" : "msg-agent"}`}>
+    <Card
+      size="small"
+      data-message-id={m.id}
+      className={`msg-bubble ${isUser ? "msg-user" : "msg-agent"}`}
+    >
       <div className="msg-head">
         {isUser ? <UserOutlined /> : <RobotOutlined />} <b>{title}</b>
         {autoOrigin && <span className="auto-tag">{autoOrigin}</span>}
@@ -140,7 +144,7 @@ export { relativeTime } from "../time";
 
 export function ChatView(): React.ReactElement {
   const t = useT();
-  const {     messages, liveOrch, liveThinking, liveParts, runToolCalls, approvals,
+  const {     messages, focusMessage, liveOrch, liveThinking, liveParts, runToolCalls, approvals,
     timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
@@ -196,6 +200,34 @@ export function ChatView(): React.ReactElement {
     message.success(mode === "single" ? t("chat.switchedSingle", { id }) : t("chat.switchedGroup", { id }));
     await loadTarget();
   };
+  // 检索命中定位（session-search）：消息就绪后滚动到目标消息并短暂高亮；
+  // 切到其它会话时丢弃过期请求（导航可能晚于用户再次切换）。
+  useEffect(() => {
+    if (!focusMessage) return;
+    if (focusMessage.sessionId !== sessionId) {
+      useExm.setState({ focusMessage: null });
+      return;
+    }
+    if (!messages.length) return;
+    const el = document.querySelector<HTMLElement>(
+      `[data-message-id="${focusMessage.messageId}"]`,
+    );
+    if (!el) {
+      useExm.setState({ focusMessage: null });
+      return;
+    }
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("msg-flash");
+    const timer = setTimeout(() => {
+      el.classList.remove("msg-flash");
+      useExm.setState({ focusMessage: null });
+    }, 1600);
+    return () => {
+      clearTimeout(timer);
+      el.classList.remove("msg-flash");
+    };
+  }, [focusMessage, sessionId, messages]);
+
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [expandedSpawns, setExpandedSpawns] = useState<string[]>([]);

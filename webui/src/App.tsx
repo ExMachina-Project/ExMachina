@@ -27,6 +27,7 @@ import { useExm } from "./store";
 import { useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
+import { CommandPalette } from "./components/CommandPalette";
 import { DataStream } from "./components/DataStream";
 import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
@@ -390,6 +391,8 @@ export default function App(): React.ReactElement {
       </main>
       {/* 底边遥测条：position:fixed 通栏贴窗口底，不参与 .app-shell 的 flex 布局 */}
       <TelemetryBar />
+      {/* 全局会话速查（Ctrl/Cmd+K）：Modal 自带 portal，挂根部即可 */}
+      <CommandPalette />
     </div>
   );
 }

@@ -1476,6 +1476,12 @@ impl Core {
         Ok(list)
     }
 
+    /// 会话内容检索（标题 + 最近 200 条消息）：REST / 速查共用，
+    /// 范围与消息读取窗口一致（命中片段可被聊天页加载并定位）。
+    pub fn search_sessions(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SessionSearchHit>> {
+        self.store.search_sessions(query, limit)
+    }
+
     pub fn agents(&self) -> Vec<AgentDefinition> {
         self.registry.list()
     }
