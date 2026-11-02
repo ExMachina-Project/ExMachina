@@ -111,8 +111,10 @@ interface ExmState {
   setWs: (ok: boolean) => void;
   bumpMemory: () => void;
   /** 跨视图导航请求（审批→会话跳转等）：App 订阅消费 */
-  navRequest: { view: string; sessionId?: string; nonce: number } | null;
-  requestNav: (view: string, sessionId?: string) => void;
+  navRequest: { view: string; sessionId?: string; messageId?: string; nonce: number } | null;
+  /** 消息定位请求（检索命中）：ChatView 加载消息后滚动并短暂高亮，消费即清空 */
+  focusMessage: { sessionId: string; messageId: string; nonce: number } | null;
+  requestNav: (view: string, sessionId?: string, messageId?: string) => void;
   markSessionsLoaded: () => void;
 }
 
@@ -615,7 +617,14 @@ export const useExm = create<ExmState>((set, get) => ({
   clearSpawns: () => set({ spawns: [] }),
 
   navRequest: null,
-  requestNav: (view, sessionId) => set({ navRequest: { view, sessionId, nonce: Date.now() } }),
+  focusMessage: null,
+  requestNav: (view, sessionId, messageId) =>
+    set({
+      navRequest: { view, sessionId, messageId, nonce: Date.now() },
+      ...(sessionId && messageId
+        ? { focusMessage: { sessionId, messageId, nonce: Date.now() } }
+        : {}),
+    }),
   markSessionsLoaded: () => set({ sessionsLoaded: true }),
 
   drafts: (() => {

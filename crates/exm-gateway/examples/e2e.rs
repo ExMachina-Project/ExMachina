@@ -411,6 +411,222 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     c.check("导出不存在会话 404", export_404.status().as_u16() == 404);
 
+    // 会话内容检索（session-search）：标题/正文命中、片段可定位、空 q、归档排除、limit 钳制
+    let search_title: serde_json::Value = client
+        .get(format!("{base}/sessions/search"))
+        .query(&[("q", "e2e")])
+        .send()
+        .await?
+        .json()
+        .await?;
+    let title_hit = search_title["hits"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|h| h["sessionId"].as_str() == Some(sid.as_str()));
+    c.check(
+        "检索：标题命中且 titleMatch=true",
+        title_hit
+            .as_ref()
+            .map(|h| h["titleMatch"].as_bool().unwrap_or(false))
+            .unwrap_or(false),
+    );
+    let search_body: serde_json::Value = client
+        .get(format!("{base}/sessions/search"))
+        .query(&[("q", "集群调度")])
+        .send()
+        .await?
+        .json()
+        .await?;
+    let body_hit = search_body["hits"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|h| h["sessionId"].as_str() == Some(sid.as_str()));
+    c.check(
+        "检索：正文命中且片段含 messageId/关键词",
+        body_hit
+            .as_ref()
+            .map(|h| {
+                h["messageMatches"].as_u64().unwrap_or(0) >= 1
+                    && h["snippets"]
+                        .as_array()
+                        .map(|ss| {
+                            !ss.is_empty()
+                                && ss.iter().all(|sp| sp["messageId"].is_string())
+                                && ss.iter().any(|sp| {
+                                    sp["text"].as_str().unwrap_or("").contains("集群调度")
+                                })
+                        })
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false),
+    );
+    let empty_q: reqwest::Response = client
+        .get(format!("{base}/sessions/search"))
+        .query(&[("q", "   ")])
+        .send()
+        .await?;
+    c.check("检索：空 q 返回 400", empty_q.status().as_u16() == 400);
+    let limit0: serde_json::Value = client
+        .get(format!("{base}/sessions/search"))
+        .query(&[("q", "e2e"), ("limit", "0")])
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "检索：limit=0 钳制到 1",
+        limit0["hits"].as_array().map(|a| a.len() <= 1).unwrap_or(false),
+    );
+    let limit999: serde_json::Value = client
+        .get(format!("{base}/sessions/search"))
+        .query(&[("q", "e2e"), ("limit", "999")])
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "检索：limit=999 钳制到 ≤50",
+        limit999["hits"]
+            .as_array()
+            .map(|a| a.len() <= 50)
+            .unwrap_or(false),
+    );
+    // 归档排除：唯一针眼写入后归档 → 不得命中
+    let arch = core.create_session("e2e-archived-needle").unwrap();
+    core.store
+        .add_message(
+            &arch.id,
+            exm_core::types::MessageRole::User,
+            None,
+            vec![exm_core::types::Statement::new(
+                exm_core::types::SpeechTag::要求,
+                "needle-archived-only-9f2",
+            )],
+        )
+        .unwrap();
+    core.store.set_session_archived(&arch.id, true).unwrap();
+    let archived_hit: serde_json::Value = client
+        .get(format!("{base}/sessions/search"))
+        .query(&[("q", "needle-archived-only-9f2")])
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "检索：归档会话排除",
+        archived_hit["hits"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+    );
+
+    // 历史检查点（session-history）：快照 preview、fork 继承、undo 截断归档
+    let snaps: serde_json::Value = client
+        .get(format!("{base}/sessions/{sid}/snapshots"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let snaps_arr = snaps.as_array().cloned().unwrap_or_default();
+    c.check(
+        "快照：preview 与首轮输入一致",
+        snaps_arr.iter().any(|sn| {
+            sn["turn"].as_u64() == Some(1)
+                && sn["preview"]
+                    .as_str()
+                    .map(|p| p.contains("集群调度"))
+                    .unwrap_or(false)
+        }),
+    );
+    c.check(
+        "快照：既有字段保留",
+        snaps_arr.iter().all(|sn| {
+            sn["messageCount"].is_number()
+                && sn["checkpointIds"].is_array()
+                && sn["status"].is_string()
+                && sn["createdAt"].is_string()
+        }),
+    );
+    let orig_count = messages.as_array().map(|a| a.len()).unwrap_or(0);
+    let fork_resp: reqwest::Response = client
+        .post(format!("{base}/sessions/{sid}/fork"))
+        .json(&json!({ "turn": 1 }))
+        .send()
+        .await?;
+    c.check("分叉：201", fork_resp.status().as_u16() == 201);
+    let fork: serde_json::Value = fork_resp.json().await?;
+    let fork_id = fork["id"].as_str().unwrap_or_default().to_string();
+    c.check(
+        "分叉：标题标注轮次",
+        fork["title"].as_str().unwrap_or("").contains("分支"),
+    );
+    let fork_msgs: serde_json::Value = client
+        .get(format!("{base}/sessions/{fork_id}/messages"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let fork_count = fork_msgs.as_array().map(|a| a.len()).unwrap_or(0);
+    c.check(
+        "分叉：继承前 1 轮消息",
+        fork_count > 0 && fork_count <= orig_count,
+    );
+    let orig_after: serde_json::Value = client
+        .get(format!("{base}/sessions/{sid}/messages"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "分叉：原会话消息不变",
+        orig_after.as_array().map(|a| a.len()).unwrap_or(0) == orig_count,
+    );
+    // undo：独立会话写入 2 条消息后撤销到 0 轮
+    let undo_sid = core.create_session("e2e-undo").unwrap().id;
+    for text in ["undo-one", "undo-two"] {
+        core.store
+            .add_message(
+                &undo_sid,
+                exm_core::types::MessageRole::User,
+                None,
+                vec![exm_core::types::Statement::new(
+                    exm_core::types::SpeechTag::要求,
+                    text,
+                )],
+            )
+            .unwrap();
+    }
+    let undo_resp: reqwest::Response = client
+        .post(format!("{base}/sessions/{undo_sid}/undo"))
+        .json(&json!({ "turn": 0, "restoreFiles": false }))
+        .send()
+        .await?;
+    c.check("撤销：200", undo_resp.status().is_success());
+    let undo_msgs: serde_json::Value = client
+        .get(format!("{base}/sessions/{undo_sid}/messages"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "撤销：活跃消息清空",
+        undo_msgs.as_array().map(|a| a.is_empty()).unwrap_or(false),
+    );
+    let undo_archive: serde_json::Value = client
+        .get(format!("{base}/sessions/{undo_sid}/archive"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "撤销：截断内容归档可查",
+        undo_archive.as_array().map(|a| a.len() == 2).unwrap_or(false),
+    );
+
     let roles: Vec<String> = messages
         .as_array()
         .cloned()

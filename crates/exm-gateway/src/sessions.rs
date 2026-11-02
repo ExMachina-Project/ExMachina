@@ -8,6 +8,40 @@ pub(crate) struct EffortBody {
     effort: Option<String>,
 }
 
+/// 会话内容检索参数（session-search）
+#[derive(Deserialize)]
+pub(crate) struct SearchParams {
+    /// 关键词（去空白后为空 → 400）
+    q: Option<String>,
+    /// 结果会话上限（缺省 20，钳制 1~50）
+    limit: Option<usize>,
+}
+
+/// 会话内容检索（GET /api/sessions/search）：标题 + 最近 200 条消息正文，
+/// 大小写不敏感；标题命中优先、同组按活跃倒序；返回命中片段（含 messageId）。
+pub(crate) async fn search_sessions(
+    State(st): State<AppState>,
+    Query(p): Query<SearchParams>,
+) -> impl IntoResponse {
+    let query = p.q.unwrap_or_default().trim().to_string();
+    if query.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "q 不能为空" })),
+        )
+            .into_response();
+    }
+    let limit = p.limit.unwrap_or(20).clamp(1, 50);
+    match st.core.search_sessions(&query, limit) {
+        Ok(hits) => Json(json!({ "query": query, "hits": hits })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// 当前模型思考强度
 pub(crate) async fn get_effort() -> impl IntoResponse {
     Json(json!({ "effort": exm_core::provider::reasoning_effort() }))
@@ -400,13 +434,54 @@ pub(crate) async fn session_archive(State(st): State<AppState>, Path(id): Path<S
     }
 }
 
-/// 轮次快照清单（GET /api/sessions/:id/snapshots）：undo / fork 的可选轮次与游标
+
+/// 轮次快照的输入预览：轮次 = 第 N 条用户消息（与聊天页编号同口径），
+/// 截断至 ≤80 字符；无对应用户消息时给空串。
+pub(crate) fn snapshot_preview(user_texts: &[String], turn: usize) -> String {
+    if turn == 0 {
+        return String::new();
+    }
+    user_texts
+        .get(turn - 1)
+        .map(|t| t.chars().take(80).collect())
+        .unwrap_or_default()
+}
+
+/// 轮次快照清单（GET /api/sessions/:id/snapshots）：undo / fork 的可选轮次与游标。
+/// 增量附加 `preview`（该轮用户输入摘要，≤80 字）：轮次 = 第 N 条用户消息，
+/// 与聊天页消息编号同口径；不落库、不改既有字段（旧客户端忽略即可）。
 pub(crate) async fn session_snapshots(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match st.core.store.list_turn_snapshots(&id) {
-        Ok(snaps) => Json(serde_json::to_value(snaps).unwrap_or(Value::Null)).into_response(),
+        Ok(snaps) => {
+            // 全量读取：轮次 = 第 N 条用户消息，截断窗口会让老轮次的 preview 错位
+            let msgs = st.core.store.list_messages(&id, 0).unwrap_or_default();
+            let user_texts: Vec<String> = msgs
+                .iter()
+                .filter(|m| m.role == exm_core::types::MessageRole::User)
+                .map(|m| {
+                    m.statements
+                        .iter()
+                        .map(|s| s.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("；")
+                })
+                .collect();
+            let rows: Vec<Value> = snaps
+                .into_iter()
+                .map(|s| {
+                    let preview = snapshot_preview(&user_texts, s.turn);
+                    let mut v = serde_json::to_value(&s).unwrap_or(Value::Null);
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("preview".into(), json!(preview));
+                    }
+                    v
+                })
+                .collect();
+            Json(Value::Array(rows)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -691,5 +766,22 @@ pub(crate) async fn export_session(
             md,
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::snapshot_preview;
+
+    /// 预览与轮次对应：第 N 轮取第 N 条用户消息；越界给空串；超长截断 80 字。
+    #[test]
+    fn 快照预览_轮次对应与截断() {
+        let texts = vec!["第一轮输入".to_string(), "帮我重构压缩模块".to_string()];
+        assert_eq!(snapshot_preview(&texts, 1), "第一轮输入");
+        assert_eq!(snapshot_preview(&texts, 2), "帮我重构压缩模块");
+        assert_eq!(snapshot_preview(&texts, 3), "");
+        assert_eq!(snapshot_preview(&texts, 0), "");
+        let long = "字".repeat(200);
+        assert_eq!(snapshot_preview(&[long], 1).chars().count(), 80);
     }
 }
