@@ -257,6 +257,9 @@ mod identity_gate_tests {
         assert_eq!(run2.session_id, sid1, "不切换时应复用流绑定会话");
 
         // /new：开新会话并改绑（ctx 与 begin 同 chat_key，命中同一流）
+        // 间隔 5ms：会话时间戳为毫秒精度，同毫秒时序号排序退化为 id 破平
+        // （随机 UUID 不保证时序）——/use 序号断言需要真实的新旧次序
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let g_ctx = InboundCtx {
             text: "/new 调研",
             external_id: "u1",
@@ -418,5 +421,127 @@ mod identity_gate_tests {
         // 清理全局限流器状态（测试隔离：键含通道与账号，不影响其他用例）
         crate::limits::RateLimiter::reset("pair:tg-main:u9");
         crate::limits::RateLimiter::reset("pair:tg-main:u10");
+    }
+}
+
+mod ambient_context_tests {
+    use super::*;
+
+    fn test_core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-ambient-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        exm_core::Core::create(&dir).expect("创建 Core 失败")
+    }
+
+    fn chan(gate: Option<bool>) -> Channel {
+        Channel {
+            id: "tg-main".into(),
+            kind: "telegram".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            admins: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: gate,
+            proactive_reply: None,
+            proactive_rate: None,
+            capability: "computer".into(),
+            memory_isolation: false,
+            created_at: exm_core::types::now_iso(),
+        }
+    }
+
+    fn gctx<'a>(text: &'a str, uid: &'a str, key: &'a str, mentioned: bool) -> InboundCtx<'a> {
+        InboundCtx {
+            text,
+            external_id: uid,
+            display_name: uid,
+            is_group: true,
+            mentioned,
+            chat_key: key,
+        }
+    }
+
+    /// 群聊旁听（ambient context）：「仅 @ 回复」门控拦下的未 @ 群消息
+    /// 仍落流会话（imctx: 标记、不触发轮次、复用同一会话）；
+    /// 门控关闭的通道走正常放行、不预建旁听会话。
+    #[tokio::test]
+    async fn 群聊旁听_门控消息落库为上下文() {
+        let core = std::sync::Arc::new(test_core());
+        let ch = chan(Some(true));
+
+        // ①② 两条未 @ 群消息：均忽略，但落同一流会话
+        for (uid, text) in [("u1", "今天的部署方案定了吗"), ("u2", "定在周五")] {
+            match admit(&core, &ch, &gctx(text, uid, "g100", false)).await {
+                GateDecision::Ignore => {}
+                _ => panic!("未 @ 群消息应忽略"),
+            }
+        }
+        let sid = core
+            .flow_active_session(&ch.id, "g100")
+            .expect("旁听应建立并绑定流会话");
+        let msgs = core.store.list_messages(&sid, 10).unwrap();
+        assert_eq!(msgs.len(), 2, "两条旁听均应落库");
+        assert_eq!(msgs[0].agent_id.as_deref(), Some("imctx:u1"));
+        assert_eq!(msgs[1].agent_id.as_deref(), Some("imctx:u2"));
+        assert!(
+            msgs[0].statements[0].text.contains("部署方案"),
+            "旁听正文应保留：{:?}",
+            msgs[0].statements[0].text
+        );
+        // 未触发轮次：无 orchestrator 消息
+        assert!(
+            msgs.iter()
+                .all(|m| m.role == exm_core::types::MessageRole::User),
+            "旁听不得产出回复消息"
+        );
+
+        // ③ @ 消息放行（落库由 ChannelRun 链路负责），旁听记录不丢
+        match admit(&core, &ch, &gctx("@bot 刚才说到哪了", "u1", "g100", true)).await {
+            GateDecision::Allow(_) => {}
+            _ => panic!("@ 消息应放行"),
+        }
+        let msgs = core.store.list_messages(&sid, 10).unwrap();
+        assert_eq!(msgs.len(), 2, "放行不得清掉旁听，也不提前落库");
+        assert_eq!(
+            core.flow_active_session(&ch.id, "g100").as_deref(),
+            Some(sid.as_str()),
+            "@ 消息应复用旁听建立的流会话"
+        );
+
+        // ④ 门控关闭：放行路径不预建会话（会话由 ChannelRun::begin 建立）
+        let ch_off = chan(Some(false));
+        match admit(&core, &ch_off, &gctx("随便聊聊", "u1", "g200", false)).await {
+            GateDecision::Allow(_) => {}
+            _ => panic!("门控关闭应放行"),
+        }
+        assert!(
+            core.flow_active_session(&ch_off.id, "g200").is_none(),
+            "放行路径不应预建旁听会话"
+        );
+    }
+
+    /// 私聊不受旁听影响：未"提及"（私聊无 @ 语义）照常放行
+    #[tokio::test]
+    async fn 私聊_不落旁听() {
+        let core = test_core();
+        let ch = chan(Some(true));
+        let ctx = InboundCtx {
+            text: "在吗",
+            external_id: "u1",
+            display_name: "u1",
+            is_group: false,
+            mentioned: false,
+            chat_key: "p1",
+        };
+        match admit(&core, &ch, &ctx).await {
+            GateDecision::Allow(_) => {}
+            _ => panic!("私聊应豁免门控"),
+        }
+        assert!(core.flow_active_session(&ch.id, "p1").is_none());
     }
 }

@@ -190,11 +190,12 @@ fn recent_group_lines(core: &Core, ch: &Channel, ctx: &InboundCtx<'_>) -> Vec<St
             let body: String = body.chars().take(120).collect();
             match m.role {
                 exm_core::types::MessageRole::User => {
-                    // im: 标记还原发送者署名（与模型上下文同口径）
-                    let who = m
-                        .agent_id
-                        .as_deref()
-                        .and_then(|a| a.strip_prefix("im:"))
+                    // im: 标记还原发送者署名（与模型上下文同口径）；
+                    // imctx: 是旁听消息（门控拦下的未 @ 群消息），同样给署名
+                    let mark = m.agent_id.as_deref().unwrap_or("");
+                    let who = mark
+                        .strip_prefix("imctx:")
+                        .or_else(|| mark.strip_prefix("im:"))
                         .unwrap_or("");
                     if who.is_empty() {
                         format!("[用户] {body}")
