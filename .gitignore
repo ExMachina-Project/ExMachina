@@ -42,3 +42,6 @@ desktop/target
 
 # OpenSpec 规划工件（本地规划过程，不入库；specs/ 主规格仍入库）
 openspec/changes/
+
+# 私有注册表凭据（docker login 产物，只留在部署目录）
+.docker/config.json
