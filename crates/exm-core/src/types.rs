@@ -150,6 +150,16 @@ pub enum ToolName {
     /// 会话级任务清单（spec: agent-todo）：长任务自组织——全量重写条目（内容+状态），
     /// 清单非空时每轮注入系统提示（✅/🔄/⬜ 渲染），模型随时看到进度全景
     Todo,
+    /// 元智能体观测（实验性 experiments.metaAgent）：读运行数据聚合
+    /// （按 agent 的工具统计/最近失败/adaptation 现状）
+    #[serde(rename = "meta_observe")]
+    MetaObserve,
+    /// 元智能体改进提议（实验性 experiments.metaAgent）：结构化提议落 [meta] 审批单
+    #[serde(rename = "meta_propose")]
+    MetaPropose,
+    /// 元智能体构建（实验性 experiments.metaAgent）：新智能体/组定义草稿落 [meta] 审批单
+    #[serde(rename = "meta_build")]
+    MetaBuild,
 }
 
 impl ToolName {
@@ -175,6 +185,9 @@ impl ToolName {
             ToolName::Spawn => "spawn",
             ToolName::ContextCompact => "context_compact",
             ToolName::Todo => "todo",
+            ToolName::MetaObserve => "meta_observe",
+            ToolName::MetaPropose => "meta_propose",
+            ToolName::MetaBuild => "meta_build",
         }
     }
 
@@ -189,6 +202,7 @@ impl ToolName {
                 | ToolName::WebFetch
                 | ToolName::MemoryRead
                 | ToolName::Todo
+                | ToolName::MetaObserve
         )
     }
 
@@ -213,6 +227,9 @@ impl ToolName {
             "git" => Some(ToolName::Git),
             "spawn" => Some(ToolName::Spawn),
             "context_compact" => Some(ToolName::ContextCompact),
+            "meta_observe" => Some(ToolName::MetaObserve),
+            "meta_propose" => Some(ToolName::MetaPropose),
+            "meta_build" => Some(ToolName::MetaBuild),
             "todo" => Some(ToolName::Todo),
             _ => None,
         }
@@ -1245,6 +1262,9 @@ pub struct ApprovalRequest {
     /// member 发起的审批须管理员在控制台批准（升级语义标注）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_role: Option<String>,
+    /// [meta] 提议单的结构化载荷（meta-agent：完整提议 JSON,应用时反序列化）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_json: Option<String>,
 }
 
 // ---------------------------------------------------------------- 通道用户身份（配对绑定）

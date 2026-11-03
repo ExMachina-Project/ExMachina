@@ -1062,6 +1062,11 @@ export function ChatView(): React.ReactElement {
                 <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
                 <span className="approval-agent mono">{a.agentId}</span>
               </div>
+              {a.command.startsWith("[root] ") && (
+                <div className="approval-root-flag" role="alert">
+                  🚨 {t("approval.rootElevation")} — {t("approval.rootElevationHelp")}
+                </div>
+              )}
               <pre className="approval-cmd">{a.command}</pre>
               <div className="approval-ops">
                 <Button

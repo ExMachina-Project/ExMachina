@@ -68,6 +68,14 @@ impl ToolGateway {
         }
         let lowered = cmd.to_lowercase();
         let whitelisted = chain_allowed(&cmd);
+        // root 提权闸门（agent-exec-confinement）：提权命令无视白名单直达审批——
+        // 白名单匹配的是命令内容（apt/git/...），提权前缀（sudo/su/...）本身越权。
+        // execUser 约束开启时才拦截（关 = 旧行为，sudo 按普通命令走既有闸门）。
+        if !self.security.exec_user.trim().is_empty()
+            && super::allowlist::is_elevation_command(&cmd)
+        {
+            return self.gate_command(agent_id, session_id, &format!("[root] {cmd}")).await;
+        }
         // 审批闸门（docs/10）：risky 拦高危命令，always 全拦；白名单前缀放行。
         // 拦截后运行时原地等待人工决定（security.approvalWaitSecs）：
         // 批准 → 系统代执行，输出直接回灌本工具结果，模型继续干活；拒绝/超时 → 受阻回流。

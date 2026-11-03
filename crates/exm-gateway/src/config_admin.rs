@@ -44,6 +44,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "autoAgentIntervalMinutes": cfg.automation.auto_agent_interval_minutes,
             "autoAgentMaxSteps": cfg.automation.auto_agent_max_steps,
             "autoAgentBackoffMax": cfg.automation.auto_agent_backoff_max,
+            "metaIntervalMin": cfg.automation.meta_interval_min,
         },
         "search": {
             "provider": cfg.search.provider,
@@ -83,6 +84,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "slidingContextWindow": cfg.experiments.sliding_context_window,
             "superAgent": cfg.experiments.super_agent,
             "autoAgent": cfg.experiments.auto_agent,
+            "metaAgent": cfg.experiments.meta_agent,
         },
         "mock": st.core.is_mock(),
     }))
@@ -153,6 +155,8 @@ pub(crate) struct PartialExperiments {
     super_agent: Option<bool>,
     #[serde(default)]
     auto_agent: Option<bool>,
+    #[serde(default)]
+    meta_agent: Option<bool>,
 }
 
 /// 回收站保留契约（部分更新：缺省沿用旧值；0 视为未提供回默认）
@@ -243,6 +247,11 @@ pub(crate) struct PartialSecurity {
     sanitize_fake_tool_result: Option<bool>,
     #[serde(default)]
     sanitize_hidden_unicode: Option<bool>,
+    /// 执行身份约束（Linux）：缺省沿用现值
+    #[serde(default)]
+    exec_user: Option<String>,
+    #[serde(default)]
+    exec_home: Option<String>,
 }
 
 /// Computer Use（设置页）：部分更新语义——缺省字段沿用旧值
@@ -280,6 +289,8 @@ pub(crate) struct PartialAutomation {
     auto_agent_max_steps: Option<usize>,
     #[serde(default)]
     auto_agent_backoff_max: Option<u32>,
+    #[serde(default)]
+    meta_interval_min: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -341,6 +352,8 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         sanitize_hijack_directive: None,
         sanitize_fake_tool_result: None,
         sanitize_hidden_unicode: None,
+        exec_user: None,
+        exec_home: None,
     });
     let computer = body.computer.clone().unwrap_or(PartialComputer {
         enabled: None,
@@ -358,6 +371,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         auto_agent_interval_minutes: None,
         auto_agent_max_steps: None,
         auto_agent_backoff_max: None,
+        meta_interval_min: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
@@ -479,6 +493,15 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                     .sanitize_hidden_unicode
                     .unwrap_or(current.security.sanitize_rules.hidden_unicode),
             },
+            // 执行身份约束（Linux）：请求未带 = 沿用现值
+            exec_user: sec
+                .exec_user
+                .clone()
+                .unwrap_or_else(|| current.security.exec_user.clone()),
+            exec_home: sec
+                .exec_home
+                .clone()
+                .unwrap_or_else(|| current.security.exec_home.clone()),
         },
         computer: exm_core::config::ComputerUseConfig {
             enabled: computer.enabled.unwrap_or(current.computer.enabled),
@@ -523,6 +546,9 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             auto_agent_backoff_max: auto
                 .auto_agent_backoff_max
                 .unwrap_or(current.automation.auto_agent_backoff_max),
+            meta_interval_min: auto
+                .meta_interval_min
+                .unwrap_or(current.automation.meta_interval_min),
         },
         search,
         hooks,
@@ -560,6 +586,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                     .unwrap_or(current.experiments.sliding_context_window),
                 super_agent: e.super_agent.unwrap_or(current.experiments.super_agent),
                 auto_agent: e.auto_agent.unwrap_or(current.experiments.auto_agent),
+                meta_agent: e.meta_agent.unwrap_or(current.experiments.meta_agent),
             }
         },
         ..(*current).clone()

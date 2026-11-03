@@ -107,6 +107,13 @@ pub struct SecurityConfig {
     /// fake-tool-result（工具结果伪装）/ hidden-unicode（隐藏控制字符）
     #[serde(default)]
     pub sanitize_rules: SanitizeRuleConfig,
+    /// Agent 执行身份约束（Linux）：终端子进程降权到此用户（用户名或数字 uid；
+    /// 空 = 不约束，默认）。开启后 root 执行需经提权审批（[root] 前缀审批单）
+    #[serde(default)]
+    pub exec_user: String,
+    /// 圈禁根目录（绝对路径；空 = 自动推导 /home/<execUser> 或 getpwuid 查询）
+    #[serde(default)]
+    pub exec_home: String,
 }
 
 /// 消毒规则开关（全默认开；单项可关）
@@ -162,6 +169,8 @@ impl Default for SecurityConfig {
             context_budget_ratio: default_context_budget_ratio(),
             key_setup_dismissed: false,
             sanitize_rules: SanitizeRuleConfig::default(),
+            exec_user: String::new(),
+            exec_home: String::new(),
         }
     }
 }
@@ -426,6 +435,8 @@ pub struct AutomationConfig {
     /// Auto Agent 连续「无事可做」的冷却倍数：连续 N 次无任务后间隔 × N（防空转），
     /// 上限 8 倍；有任务即复位
     pub auto_agent_backoff_max: u32,
+    /// Meta Agent 巡检周期（分钟，experiments.metaAgent 开启才生效;0 = 仅会话召唤）
+    pub meta_interval_min: u32,
 }
 
 impl Default for AutomationConfig {
@@ -441,6 +452,7 @@ impl Default for AutomationConfig {
             auto_agent_interval_minutes: 30,
             auto_agent_max_steps: 24,
             auto_agent_backoff_max: 8,
+            meta_interval_min: 60,
         }
     }
 }
@@ -612,6 +624,10 @@ pub struct ExperimentsConfig {
     /// 无人值守：只在「有人必须行动」时经通知通道说话；参数见 automation 段。
     #[serde(default)]
     pub auto_agent: bool,
+    /// Meta Agent（元智能体，实验性）：运行数据聚合 → 改进提议（提示词/经验要点/
+    /// 成员编成）→ [meta] 审批应用;构建新个体;轮内元认知反思。参数见 automation.metaIntervalMin
+    #[serde(default)]
+    pub meta_agent: bool,
 }
 
 // ---------------------------------------------------------------- 插件系统（plugins/ 目录）
@@ -1180,6 +1196,10 @@ struct SecurityFile {
     key_setup_dismissed: Option<bool>,
     #[serde(default)]
     sanitize_rules: Option<SanitizeRuleConfig>,
+    #[serde(default)]
+    exec_user: Option<String>,
+    #[serde(default)]
+    exec_home: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1203,6 +1223,8 @@ struct AutomationFile {
     auto_agent_max_steps: Option<usize>,
     #[serde(default)]
     auto_agent_backoff_max: Option<u32>,
+    #[serde(default)]
+    meta_interval_min: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1355,6 +1377,8 @@ impl ExmConfig {
                 .unwrap_or_else(|| SecurityConfig::default().context_budget_ratio),
             key_setup_dismissed: file_sec.key_setup_dismissed.unwrap_or(false),
             sanitize_rules: file_sec.sanitize_rules.clone().unwrap_or_default(),
+            exec_user: file_sec.exec_user.clone().unwrap_or_default(),
+            exec_home: file_sec.exec_home.clone().unwrap_or_default(),
         };
         let automation = AutomationConfig {
             heartbeat_enabled: file_auto
@@ -1386,6 +1410,9 @@ impl ExmConfig {
             auto_agent_backoff_max: file_auto
                 .auto_agent_backoff_max
                 .unwrap_or_else(|| AutomationConfig::default().auto_agent_backoff_max),
+            meta_interval_min: file_auto
+                .meta_interval_min
+                .unwrap_or_else(|| AutomationConfig::default().meta_interval_min),
         };
 
         let mut llm = LlmConfig {
@@ -1589,6 +1616,8 @@ impl ExmConfig {
                 context_budget_ratio: Some(self.security.context_budget_ratio),
                 key_setup_dismissed: Some(self.security.key_setup_dismissed),
                 sanitize_rules: Some(self.security.sanitize_rules.clone()),
+                exec_user: Some(self.security.exec_user.clone()),
+                exec_home: Some(self.security.exec_home.clone()),
             }),
             computer: Some(self.computer.clone()),
             automation: Some(AutomationFile {
@@ -1601,6 +1630,7 @@ impl ExmConfig {
                 auto_agent_interval_minutes: Some(self.automation.auto_agent_interval_minutes),
                 auto_agent_max_steps: Some(self.automation.auto_agent_max_steps),
                 auto_agent_backoff_max: Some(self.automation.auto_agent_backoff_max),
+                meta_interval_min: Some(self.automation.meta_interval_min),
             }),
             search: Some(self.search.clone()),
             hooks: Some(self.hooks.clone()),
@@ -1793,7 +1823,13 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "结果超过该长度即全文落盘（.exmachina/tool-output/），回填摘要与文件路径供按需回读；0 = 仅截断" },
                     { "key": "security.approvalWaitSecs", "label": "审批等待（秒）", "kind": "number",
                       "default": "120", "required": false, "min": 0, "max": 3600,
-                      "help": "命令被审批拦截后，运行时原地等待人工决定的最长时长：期间在聊天里批准 → 执行结果直接回灌模型继续干活；超时按受阻回流。0 = 不等待（直接受阻）" }
+                      "help": "命令被审批拦截后，运行时原地等待人工决定的最长时长：期间在聊天里批准 → 执行结果直接回灌模型继续干活；超时按受阻回流。0 = 不等待（直接受阻）" },
+                    { "key": "security.execUser", "label": "执行身份约束（Linux）", "kind": "string",
+                      "default": "", "required": false,
+                      "help": "（实验性 agent 身份约束）终端子进程降权到此用户（用户名或数字 uid；留空 = 不约束）。开启后命令以该身份执行、工作目录圈禁在其主目录；root 操作（sudo/su 等）自动转人工审批" },
+                    { "key": "security.execHome", "label": "圈禁根目录", "kind": "string",
+                      "default": "", "required": false,
+                      "help": "（配合执行身份约束）子进程工作目录与 HOME 边界，须绝对路径；留空 = 自动推导（/home/<用户名> 或 passwd 记录）" }
                 ]
             },
             {
@@ -1844,7 +1880,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "自主行动单次的工具步数上限（防失控）；0 = 沿用子个体派发步数上限" },
                     { "key": "automation.autoAgentBackoffMax", "label": "Auto Agent 空转退避上限（倍）", "kind": "number",
                       "default": "8", "required": false, "min": 1, "max": 30,
-                      "help": "连续「无事可做」次数 N 后自评间隔 × min(N, 上限)；有任务即复位（防空转耗 token）" }
+                      "help": "连续「无事可做」次数 N 后自评间隔 × min(N, 上限)；有任务即复位（防空转耗 token）" },
+                    { "key": "automation.metaIntervalMin", "label": "Meta Agent 巡检周期（分钟）", "kind": "number",
+                      "default": "60", "required": false, "min": 5, "max": 1440,
+                      "help": "（实验性 experiments.metaAgent）元智能体每次巡检的间隔；巡检 = 数据聚合 → 自评 → 有改进点才开会话落提议单" }
                 ]
             },
             {
@@ -2048,7 +2087,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "（实验性）新会话进入深度委托模式：agent 静默长链路推进（工具循环+并行子代理），只在需要决策/交付结果/无法继续时产出一条消息——尽可能少占注意力，尽可能多交付价值" },
                     { "key": "experiments.autoAgent", "label": "Auto Agent 完全自主", "kind": "boolean",
                       "default": "false", "required": false,
-                      "help": "（实验性）无人值守：agent 按周期（automation.autoAgentIntervalMinutes）自评「有没有值得做的事」，有则自主开会话执行，只在有人必须行动时经通知通道说话。配套参数在 automation 段" }
+                      "help": "（实验性）无人值守：agent 按周期（automation.autoAgentIntervalMinutes）自评「有没有值得做的事」，有则自主开会话执行，只在有人必须行动时经通知通道说话。配套参数在 automation 段" },
+                    { "key": "experiments.metaAgent", "label": "Meta Agent 元智能体", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）元智能体：周期巡检运行数据（automation.metaIntervalMin），对高失败率/重复失败/能力缺口提出改进提议（提示词补段/经验要点/成员编成/新个体构建），全部落 [meta] 审批单人工批准后应用；另含轮内元认知反思（连续失败时注入策略调整提示）" }
                 ]
             },
             {
@@ -2065,6 +2107,75 @@ pub fn config_schema() -> serde_json::Value {
             }
         ]
     })
+}
+
+// ---------------------------------------------------------------- Agent 执行身份约束（Linux）
+
+/// execUser 解析结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecIdentity {
+    pub uid: u32,
+    pub gid: u32,
+    /// 圈禁根目录（绝对路径）
+    pub home: String,
+}
+
+/// 解析 security.execUser / execHome → 执行身份。
+/// - execUser 空 → None（不约束，旧行为）
+/// - 数字 uid → 直接生效（无需 /etc/passwd 条目），home 用 execHome（缺省 /home/<uid>）
+/// - 用户名 → getpwuid 体系查询 uid/gid/home；查不到 → Err（显式失败,不静默降级回原身份——那等于假安全）
+/// - execHome 非空必须绝对路径（/ 开头）,否则 Err
+#[cfg(unix)]
+pub fn resolve_exec_identity(exec_user: &str, exec_home: &str) -> Result<Option<ExecIdentity>, String> {
+    let user = exec_user.trim();
+    if user.is_empty() {
+        return Ok(None);
+    }
+    let home_override = exec_home.trim();
+    if !home_override.is_empty() && !home_override.starts_with('/') {
+        return Err(format!("security.execHome 必须是绝对路径: {exec_home}"));
+    }
+    // 数字 uid:无需 passwd 条目;组取同号 gid(无 passwd 时的合理缺省)
+    if let Ok(uid) = user.parse::<u32>() {
+        let home = if home_override.is_empty() {
+            format!("/home/{uid}")
+        } else {
+            home_override.to_string()
+        };
+        return Ok(Some(ExecIdentity { uid, gid: uid, home }));
+    }
+    // 用户名:经 getent 查询(免 libc getpwnam 依赖,结果含 uid:gid:home)
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("getent passwd {user} 2>/dev/null"))
+        .output();
+    let parsed = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return Err(format!("约束用户不存在或不可查: {user}(getent passwd 无结果)")),
+    };
+    // passwd 格式:name:passwd:uid:gid:gecos:home:shell
+    let fields: Vec<&str> = parsed.split(':').collect();
+    if fields.len() < 7 {
+        return Err(format!("约束用户 passwd 记录异常: {parsed}"));
+    }
+    let uid: u32 = fields[2]
+        .parse()
+        .map_err(|_| format!("约束用户 uid 解析失败: {}", fields[2]))?;
+    let gid: u32 = fields[3]
+        .parse()
+        .map_err(|_| format!("约束用户 gid 解析失败: {}", fields[3]))?;
+    let home = if home_override.is_empty() {
+        fields[5].to_string()
+    } else {
+        home_override.to_string()
+    };
+    Ok(Some(ExecIdentity { uid, gid, home }))
+}
+
+/// 非 Unix 平台:execUser 配置无效化(None)——Windows 无 uid 语义
+#[cfg(not(unix))]
+pub fn resolve_exec_identity(_exec_user: &str, _exec_home: &str) -> Result<Option<ExecIdentity>, String> {
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -2145,6 +2256,30 @@ mod config_tests {
         assert_eq!(schema["configVersion"], CONFIG_VERSION);
     }
 
+    /// meta-agent 配置面完整：两个新键都必须进 schema（设置页零 UI 改动渲染的前提）
+    #[test]
+    fn 配置schema_含meta_agent开关与周期() {
+        let schema = config_schema();
+        let all_keys: Vec<String> = schema["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| {
+                g["fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|f| f["key"].as_str().map(String::from))
+            })
+            .collect();
+        for expected in ["experiments.metaAgent", "automation.metaIntervalMin"] {
+            assert!(
+                all_keys.contains(&expected.to_string()),
+                "config_schema 缺少字段 {expected}"
+            );
+        }
+    }
+
     /// 半衰期配置清洗：非法值（0/负数/NaN/∞）回落默认 30 天，合法值原样透传。
     /// 保证设置页显示的半衰期与 decay 实际执行的一致（所见即所跑）。
     #[test]
@@ -2183,5 +2318,60 @@ mod config_tests {
         let text = serde_json::to_string(&schema).unwrap();
         assert!(text.contains("llmDrivenMemory"), "schema 缺自主记忆开关");
         assert!(text.contains("slidingContextWindow"), "schema 缺滑动窗口开关");
+    }
+}
+
+#[cfg(test)]
+mod exec_identity_tests {
+    use super::*;
+
+    #[test]
+    fn 空_不约束() {
+        assert_eq!(resolve_exec_identity("", "").unwrap(), None);
+        assert_eq!(resolve_exec_identity("  ", "").unwrap(), None);
+    }
+
+    #[test]
+    fn 数字uid_直接生效() {
+        let id = resolve_exec_identity("1000", "").unwrap().unwrap();
+        assert_eq!(id.uid, 1000);
+        assert_eq!(id.gid, 1000);
+        assert_eq!(id.home, "/home/1000");
+    }
+
+    #[test]
+    fn 数字uid_home覆盖() {
+        let id = resolve_exec_identity("1000", "/srv/exm-home").unwrap().unwrap();
+        assert_eq!(id.home, "/srv/exm-home");
+    }
+
+    #[test]
+    fn 相对路径home_拒绝() {
+        assert!(resolve_exec_identity("1000", "srv/exm").is_err());
+        assert!(resolve_exec_identity("1000", "relative").is_err());
+    }
+
+    #[test]
+    fn 不存在用户名_显式失败() {
+        let r = resolve_exec_identity("no-such-user-xyz-911", "");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("不存在"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root用户可解析() {
+        // 容器/CI 环境 root 必在 passwd;但 root 是约束的反面——仅验证解析通路
+        let id = resolve_exec_identity("root", "").unwrap().unwrap();
+        assert_eq!(id.uid, 0);
+        assert_eq!(id.home, "/root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 用户名_home覆盖优先() {
+        let id = resolve_exec_identity("root", "/home/exm").unwrap().unwrap();
+        assert_eq!(id.uid, 0);
+        assert_eq!(id.home, "/home/exm");
     }
 }
