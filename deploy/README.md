@@ -36,6 +36,22 @@ EXM_AUTH_KEY=<后台访问密钥>
 
 > 安全提示：挂载 docker.sock 等于授予容器宿主 root 等价权限。仅在信任边界内开启，并保持 `EXM_AUTH_KEY` 强随机。
 
+### 私有镜像仓库（私有 ghcr 包 / 自建 registry）
+
+镜像不是公开可匿名拉取时，`compose pull` 需要凭据。凭据只放部署目录，**不进镜像、不进仓库**：
+
+```bash
+# 在部署目录（与 docker-compose.yml 同级）
+mkdir -p .docker
+docker login ghcr.io -u <用户名>     # 输入带 read:packages 的 token
+cp ~/.docker/config.json .docker/config.json
+chmod 600 .docker/config.json
+```
+
+一键更新脚本（`scripts/apply-update.sh`）检测到 `/host/.docker/config.json` 会自动复制到容器内
+临时 `DOCKER_CONFIG` 再 `compose pull`；无该文件时按匿名拉取处理（公开镜像）。
+`.docker/config.json` 已在仓库 `.gitignore` 中，不会被提交。
+
 ## 从源码部署迁移到镜像部署
 
 原有「仓库根 compose 直接跑」的部署迁移步骤：
