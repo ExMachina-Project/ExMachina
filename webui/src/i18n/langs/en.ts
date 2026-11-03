@@ -148,6 +148,8 @@ export const en: Partial<Dict> = {
   "chat.thinking": "Thinking",
   "chat.approvalTitle": "Awaiting approval",
   "chat.approvalApprove": "Approve & run",
+  "chat.approvalSession": "Allow this session",
+  "chat.approvalAllowlist": "Add to allowlist",
   "chat.approvalDeny": "Deny",
   "chat.approvalHint": "Approved commands run on your behalf; output flows back to the model",
   "chat.orchRunning": "Orchestrator running",
@@ -1176,6 +1178,8 @@ export const en: Partial<Dict> = {
   "approvals.colSession": "Session",
   "approvals.colOps": "Actions",
   "approvals.approve": "Approve",
+  "approvals.session": "Allow this session",
+  "approvals.allowlist": "Add to allowlist",
   "approvals.reject": "Reject",
   "approvals.jump": "Open",
 

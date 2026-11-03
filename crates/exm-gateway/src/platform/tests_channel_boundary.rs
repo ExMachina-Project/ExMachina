@@ -181,6 +181,7 @@ mod channel_boundary_tests {
             kind: "webhook".into(),
             scope: exm_core::types::ToolScope::Tools,
             origin: None,
+            external_id: None,
             flow: None,
         };
         // 已含【报告】：原样透传

@@ -17,6 +17,10 @@ pub type SpawnExec = Arc<
 /// 插件凭据解析闭包：(插件 id, 键) → 真值（None = 未配置）
 pub type PluginCredResolver = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
 
+/// 会话授权查询闭包（approval-ergonomics）：(会话 id, 命令全文) → 是否命中会话授权
+pub type SessionGrantProbe =
+    std::sync::Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
 pub struct ToolGateway {
     pub(crate) workspace_root: PathBuf,
     pub(crate) store: Arc<Store>,
@@ -34,6 +38,9 @@ pub struct ToolGateway {
     /// 子智能体派生执行器（spawn 工具；未注入 = spawn 返回未装配错误）。
     /// RwLock 槽：Core 装配后回接（tools 已 Arc 共享给 runtime，无法再拿可变引用）
     pub(crate) spawn_executor: parking_lot::RwLock<Option<SpawnExec>>,
+    /// 会话授权查询（approval-ergonomics）：Core 装配后回接——gate_command
+    /// 落审批单前先查会话授权表，命中直通。槽位语义同 spawn_executor。
+    pub(crate) session_grant_probe: parking_lot::RwLock<Option<SessionGrantProbe>>,
     /// 上下文压缩执行器（context_compact 工具，实验性；未注入 = 工具返回未装配说明）。
     /// 槽位语义同 spawn_executor：Core 装配后回接 (provider, model)。
     pub(crate) compactor: parking_lot::RwLock<Option<(Arc<dyn LlmProvider>, String)>>,
@@ -113,6 +120,7 @@ impl ToolGateway {
             hooks: crate::config::HooksConfig::default(),
             cron: None,
             spawn_executor: parking_lot::RwLock::new(None),
+            session_grant_probe: parking_lot::RwLock::new(None),
             compactor: parking_lot::RwLock::new(None),
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
@@ -148,6 +156,12 @@ impl ToolGateway {
     /// 并发/超时控制由网关层实现（spec: subagent-spawn）。
     pub fn set_spawn_executor(&self, exec: SpawnExec) {
         *self.spawn_executor.write() = Some(exec);
+    }
+
+    /// 注入会话授权查询（approval-ergonomics）：Core 装配后回接。
+    /// 闭包签名：(会话 id, 命令全文) → 是否命中会话授权（前缀口径见 command_head）。
+    pub fn set_session_grant_probe(&self, f: SessionGrantProbe) {
+        *self.session_grant_probe.write() = Some(f);
     }
 
     /// 注入上下文压缩执行器（context_compact 工具，实验性开关开启时由 Core 装配后回接）

@@ -106,7 +106,7 @@ interface ExmState {
   /** 全部已读（清 unreadCounts 全表） */
   markAllRead: () => void;
   saveConfig: (body: Record<string, unknown>) => Promise<void>;
-  decideApproval: (id: string, approve: boolean) => Promise<void>;
+  decideApproval: (id: string, approve: boolean, scope?: "once" | "session" | "allowlist") => Promise<void>;
   handleEvent: (evt: WsEvent) => void;
   setWs: (ok: boolean) => void;
   bumpMemory: () => void;
@@ -563,9 +563,9 @@ export const useExm = create<ExmState>((set, get) => ({
   setWs: (ok) => set({ wsConnected: ok }),
   bumpMemory: () => set({ memoryVersion: get().memoryVersion + 1 }),
 
-  decideApproval: async (id, approve) => {
+  decideApproval: async (id, approve, scope = "once") => {
     try {
-      await api.decideApproval(id, approve);
+      await api.decideApproval(id, approve, scope);
       // 乐观移除（approval.resolved 事件到达时幂等）
       set({ approvals: get().approvals.filter((a) => a.approvalId !== id) });
       void get().refreshPendingApprovals();

@@ -327,6 +327,22 @@ export interface ApprovalRequest {
   decidedAt?: string;
 }
 
+/**
+ * 破坏性命令前端判定（approval-ergonomics）：与后端
+ * exm-core `DESTRUCTIVE_PATTERNS`（tools/allowlist.rs）口径保持同步——
+ * 命中时审批卡隐藏「本会话允许/加入白名单」档（后端同样降级,此处仅 UI 预避）。
+ */
+export function isDestructiveCommand(command: string): boolean {
+  const pats = [
+    "rm ", "rm -", "del ", "rmdir", "rd /s", "format ", "shutdown", "taskkill",
+    "reg delete", "reg add", "dd if=", "mkfs", "git push --force", "git push -f",
+    "git reset --hard", "git clean", "git rebase", "drop table", "drop database",
+    "truncate table", "remove-item", "invoke-expression", "curl | sh", "curl | bash",
+  ];
+  const lowered = command.toLowerCase();
+  return pats.some((p) => lowered.includes(p));
+}
+
 // 计划模式（spec plan-mode：WebUI 计划卡片数据契约）
 export interface PlanItem {
   id: string;
@@ -819,10 +835,10 @@ export const api = {
     p.set("limit", String(limit));
     return req<ApprovalRequest[]>(`/approvals?${p.toString()}`);
   },
-  decideApproval: (id: string, approve: boolean) =>
+  decideApproval: (id: string, approve: boolean, scope: "once" | "session" | "allowlist" = "once") =>
     req<ApprovalRequest>(`/approvals/${id}/${approve ? "approve" : "deny"}`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: approve ? JSON.stringify({ scope }) : JSON.stringify({}),
     }),
 
   // 计划模式（spec plan-mode：跨端审批呈现——WebUI 计划卡片）
