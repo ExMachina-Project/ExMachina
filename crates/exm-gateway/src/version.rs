@@ -464,11 +464,18 @@ pub(crate) fn update_state() -> UpdateState {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // kill -0 探测(避免引 libc 依赖):sh 内建 kill 对不存在 PID 返回非零;
-    // 属主外的进程(EPERM)在这里不会出现——state 里的 pid 是本容器进程
+    // kill -0 探测(避免引 libc 依赖)。注意 kill -0 对**僵尸进程**同样返回成功:
+    // 脚本被 SIGKILL 后 PID 变 defunct、由 init 收养却未必及时回收,只看 kill -0
+    // 会把已死任务永久判为 running(实测卡死)。故追加 /proc/<pid>/stat 的 state
+    // 检查:Z = 僵尸 → 已结束。
+    let probe = format!(
+        "kill -0 {pid} 2>/dev/null || exit 1; \
+         s=$(sed 's/^.*) //' /proc/{pid}/stat 2>/dev/null | cut -d' ' -f1); \
+         [ \"$s\" != \"Z\" ]"
+    );
     std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("kill -0 {pid} 2>/dev/null"))
+        .arg(probe)
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -553,6 +560,22 @@ mod tests {
         let st = judge_update_state(None, |_| false, 1000, false);
         assert!(!st.running);
         assert_eq!(st.phase, UpdatePhase::Idle);
+    }
+
+    #[test]
+    fn zombie_pid_is_not_alive() {
+        // 回归:脚本被 SIGKILL 后 PID 变僵尸,kill -0 仍成功 → 曾把已死任务永久判 running。
+        // 真实探测必须排除 Z 状态(defunct)。这里用一个确定已成僵尸的子进程验证。
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        // 不 wait:进程退出后由本进程持有 → 僵尸态可稳定观察
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!pid_alive(pid), "僵尸进程必须判为已结束(pid={pid})");
+        let _ = child.wait();
     }
 
     #[test]
