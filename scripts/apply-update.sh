@@ -18,14 +18,16 @@ set_phase() {
     phase="$1"
     now=$(date +%s)
     if [ -f "$STATE_FILE" ] && command -v python3 >/dev/null 2>&1; then
-        python3 - "$STATE_FILE" "$phase" "$now" <<'PYEOF' 2>/dev/null || echo "{\"pid\":$$,\"startedAt\":$now,\"phase\":\"$phase\",\"exitCode\":null}" > "$STATE_FILE"
+        python3 - "$STATE_FILE" "$phase" "$now" "$$" <<'PYEOF' 2>/dev/null || echo "{\"pid\":$$,\"startedAt\":$now,\"phase\":\"$phase\",\"exitCode\":null}" > "$STATE_FILE"
 import json, sys
-p, phase, now = sys.argv[1], sys.argv[2], int(sys.argv[3])
+p, phase, now, pid = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 try:
     f = json.load(open(p))
 except Exception:
     f = {}
-f.setdefault("pid", 0)
+# pid 一律取脚本自身:网关 spawn 的是 `setsid` 中间进程(exec 后立即退出/僵尸),
+# 记录它会让状态机把「脚本仍在跑」误判为已死或反之。
+f["pid"] = pid
 f.setdefault("startedAt", now)
 f["phase"] = phase
 f.pop("exitCode", None)
