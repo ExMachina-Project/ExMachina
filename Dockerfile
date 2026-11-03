@@ -34,11 +34,16 @@ FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 # 运行时动态库：enigo/xcap 的 X11 栈（libxdo / X11 / xkbcommon；容器内无显示面，Computer Use 默认关闭，
 # 但二进制加载即需这些 .so）+ CA 证书与 curl（健康检查）
+# 命令面口径：终端白名单 AllowRule 允许的非开发工具链命令，镜像必须提供——否则审批流走完才失败，
+# 浪费轮次与信任（审计实证：7 张审批单 failed 全为工具缺失）。开发工具链（node/cargo/go/gcc…）
+# 属宿主机编码场景，不进镜像。
 # apt 源换国内（deb.debian.org 为 Fastly CDN，该网络下不可达）
 RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git libxdo3 libx11-6 libxcb1 libxext6 libxinerama1 libxtst6 libxkbcommon0 \
       python3 jq sqlite3 xxd \
+      ffmpeg imagemagick iproute2 iputils-ping dnsutils tree file procps util-linux-extra \
+      bsdextrautils bc unzip zip xz-utils openssh-client rsync util-linux \
     && rm -rf /var/lib/apt/lists/*
 # 一键更新工具链:docker cli + compose 插件由 compose 从宿主机只读挂载(零构建期下载,版本与宿主引擎一致)
 COPY --from=rust-builder /build/target/release/exm /usr/local/bin/exm
@@ -46,6 +51,12 @@ COPY --from=rust-builder /build/target/release/exmachina /usr/local/bin/exmachin
 COPY --from=rust-builder /build/target/release/exm-gateway /usr/local/bin/exm-gateway
 COPY --from=webui-builder /build/dist ./webui/dist
 COPY entities ./entities
+# 一键更新脚本:精简部署目录无 scripts/,网关回落 /app/scripts/apply-update.sh
+COPY scripts/apply-update.sh ./scripts/apply-update.sh
+RUN chmod +x ./scripts/apply-update.sh
+# 执行身份约束专用用户(agent-exec-confinement):固定 uid 911、建主目录;
+# 默认不启用(网关仍 root 跑,子进程降权由 security.execUser 显式开启)
+RUN useradd -r -m -d /home/exm -u 911 exm 2>/dev/null || true
 ENV EXM_LANG=zh
 ENV RUST_LOG=info
 # git 短哈希:runtime 阶段才注入(进程运行时读取)——若放 builder 阶段,每个 commit 都会作废整条 Rust 编译缓存

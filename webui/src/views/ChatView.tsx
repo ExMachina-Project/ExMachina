@@ -1,12 +1,13 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, ExportOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { api, type LlmProfile } from "../api";
 import { agentIdEn } from "../models";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
+import { relativeTime } from "../time";
 
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
 import { StatementList } from "../components/Statements";
@@ -24,6 +25,7 @@ import { SkeletonList } from "../components/SkeletonList";
 import { OrbitRings } from "../components/OrbitRings";
 import { TurnOps } from "../components/HistoryOps";
 import { Emblem } from "../components/Emblem";
+import { FlowRailSection } from "../components/FlowRailSection";
 import type { ChatMessage } from "../types";
 
 function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
@@ -31,10 +33,16 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
   const isUser = m.role === "user";
   // 自动任务标记：agentId 带 auto: 前缀的 user 消息是系统自动内容（视频观看等），非真人输入
   const autoOrigin = isUser && m.agentId?.startsWith("auto:") ? m.agentId.slice(5) : null;
+  // 群聊发送者：agentId 带 im: 前缀 = 外部群聊真人发言者（消息头署名，正文保持纯净）
+  const imSender = isUser && m.agentId?.startsWith("im:") ? m.agentId.slice(3) : null;
+  // 群聊旁听：agentId 带 imctx: 前缀 = 门控期记录的他人群消息（Agent 可见上下文，非直接指令）
+  const ambientSender = isUser && m.agentId?.startsWith("imctx:") ? m.agentId.slice(6) : null;
   const title = isUser
     ? autoOrigin
       ? tb("chat.role.auto")
-      : tb("chat.role.user")
+      : ambientSender !== null
+        ? ambientSender || tb("chat.role.ambient")
+        : imSender ?? tb("chat.role.user")
     : m.role === "orchestrator"
       ? (orchLabel ?? tb("chat.role.orchestrator"))
       : (m.agentId ?? tb("chat.role.system"));
@@ -44,10 +52,15 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
   const hasProcess = hasThinking || hasTools || steps.length > 0;
   const time = relativeTime(m.createdAt);
   return (
-    <Card size="small" className={`msg-bubble ${isUser ? "msg-user" : "msg-agent"}`}>
+    <Card
+      size="small"
+      data-message-id={m.id}
+      className={`msg-bubble ${isUser ? "msg-user" : "msg-agent"}`}
+    >
       <div className="msg-head">
         {isUser ? <UserOutlined /> : <RobotOutlined />} <b>{title}</b>
         {autoOrigin && <span className="auto-tag">{autoOrigin}</span>}
+        {ambientSender !== null && <span className="auto-tag ambient-tag">{tb("chat.role.ambient")}</span>}
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
         {time && <span className="msg-time mono">{time}</span>}
         {!isUser && (
@@ -126,26 +139,12 @@ function TimelineRows({ items, tb, onOpenSub }: { items: TimelineItem[]; tb: (k:
   );
 }
 
-/** 相对时间（chat-ergonomics）：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / 日期 */
-export function relativeTime(iso?: string): string {
-  if (!iso) return "";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
-  const diff = Date.now() - t;
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
-  const hour = Math.floor(min / 60);
-  if (hour < 24) return `${hour} 小时前`;
-  const day = Math.floor(hour / 24);
-  if (day === 1) return "昨天";
-  if (day < 7) return `${day} 天前`;
-  return iso.slice(0, 10);
-}
+/** 相对时间已提取到 src/time.ts（列表场景共用） */
+export { relativeTime } from "../time";
 
 export function ChatView(): React.ReactElement {
   const t = useT();
-  const {     messages, liveOrch, liveThinking, liveParts, runToolCalls, approvals,
+  const {     messages, focusMessage, liveOrch, liveThinking, liveParts, runToolCalls, approvals,
     timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
@@ -179,6 +178,15 @@ export function ChatView(): React.ReactElement {
   useEffect(() => {
     void loadTarget();
   }, [loadTarget, activeGroup]);
+  // 会话管理页操作（归档/恢复/删除/重命名/置顶）后同步左栏：轻量重拉列表
+  // （同一后端事实源；归档态在服务端默认过滤，左栏自然隐藏）
+  useEffect(() => {
+    const h = () => {
+      api.listSessions().then((list) => useExm.setState({ sessions: list })).catch(() => undefined);
+    };
+    window.addEventListener("exm:flows-refresh", h);
+    return () => window.removeEventListener("exm:flows-refresh", h);
+  }, []);
   useEffect(() => {
     api.llmProfiles().then((r) => {
       setProfiles(r.profiles);
@@ -192,6 +200,34 @@ export function ChatView(): React.ReactElement {
     message.success(mode === "single" ? t("chat.switchedSingle", { id }) : t("chat.switchedGroup", { id }));
     await loadTarget();
   };
+  // 检索命中定位（session-search）：消息就绪后滚动到目标消息并短暂高亮；
+  // 切到其它会话时丢弃过期请求（导航可能晚于用户再次切换）。
+  useEffect(() => {
+    if (!focusMessage) return;
+    if (focusMessage.sessionId !== sessionId) {
+      useExm.setState({ focusMessage: null });
+      return;
+    }
+    if (!messages.length) return;
+    const el = document.querySelector<HTMLElement>(
+      `[data-message-id="${focusMessage.messageId}"]`,
+    );
+    if (!el) {
+      useExm.setState({ focusMessage: null });
+      return;
+    }
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("msg-flash");
+    const timer = setTimeout(() => {
+      el.classList.remove("msg-flash");
+      useExm.setState({ focusMessage: null });
+    }, 1600);
+    return () => {
+      clearTimeout(timer);
+      el.classList.remove("msg-flash");
+    };
+  }, [focusMessage, sessionId, messages]);
+
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [expandedSpawns, setExpandedSpawns] = useState<string[]>([]);
@@ -509,61 +545,6 @@ export function ChatView(): React.ReactElement {
     return buckets.filter((b) => b.items.length > 0);
   }, [visibleSessions]);
 
-  const removeSession = async (id: string) => {
-    try {
-      await api.deleteSession(id);
-      // 从最新状态构建列表（不用渲染闭包的旧快照），无论删的是否为当前会话都先落列表
-      const rest = useExm.getState().sessions.filter((s) => s.id !== id);
-      useExm.setState({ sessions: rest });
-      if (id === sessionId) {
-        useExm.setState({ sessionId: undefined, messages: [], graph: null });
-        if (rest.length > 0) {
-          await selectSession(rest[0].id);
-        } else {
-          await newSession();
-        }
-      }
-      // 列表删空后留在列表页（窄屏），否则会落在一个空会话页上
-      if (rest.length === 0 && narrow) setScreen("list");
-    } catch {
-      // 删除失败静默：会话可能在运行中被网关拒绝
-    }
-  };
-
-  // ---- 会话导出 Markdown（2.3）：角色前缀正文 + 工具摘要 + 思维链折叠引用 ----
-  const exportSession = async (id: string, title: string) => {
-    try {
-      const msgs = await api.messages(id);
-      const lines: string[] = [`# ${title}`, "", `> 导出时间：${new Date().toLocaleString()}`, ""];
-      for (const m of msgs) {
-        const role = m.role === "user" ? (m.agentId?.startsWith("auto:") ? "⚙️ 自动任务" : "👤 用户") : m.role === "orchestrator" ? (m.agentId ? `🤖 ${m.agentId}` : "🤖 指挥体") : "⚙️ 系统";
-        lines.push(`## ${role} · ${m.createdAt}`, "");
-        if (m.thinking) {
-          lines.push("<details><summary>思维过程</summary>", "", "```", m.thinking, "```", "", "</details>", "");
-        }
-        if (m.toolCalls && m.toolCalls.length > 0) {
-          lines.push("<details><summary>工具调用</summary>", "");
-          for (const tc of m.toolCalls) {
-            lines.push(`- \`${tc.tool}\` ${tc.status === "ok" ? "✅" : tc.status === "error" ? "❌" : "⏳"} ${tc.summary || ""}`);
-          }
-          lines.push("", "</details>", "");
-        }
-        lines.push(m.statements.map((st) => st.text).join("\n\n"), "");
-      }
-      const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const day = new Date().toISOString().slice(0, 10);
-      a.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-${day}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
-      message.success(t("chat.exportDone"));
-    } catch (e) {
-      message.error(t("chat.exportFailed", { err: String(e).slice(0, 120) }));
-    }
-  };
-
   // ---- 会话历史管控（组 9.5）：撤销 / 编辑重发 / 分叉 ----
   const [editing, setEditing] = useState<{ turn: number; text: string } | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
@@ -663,6 +644,8 @@ export function ChatView(): React.ReactElement {
             )
           )}
         </div>
+        {/* 聊天流（chat flow）：外部 IM 的对话单元——一个群/私聊一条流，点流跳到绑定会话 */}
+        <FlowRailSection t={t} />
         <div className="rail-section grow">
           {/* 工具条：搜索 + 类型过滤（同行紧凑排布，见样式表） */}
           <div className="rail-toolbar">
@@ -687,6 +670,15 @@ export function ChatView(): React.ReactElement {
                 { value: "normal", label: t("chat.kind.normal") },
                 { value: "channel", label: t("chat.kind.channel") },
               ]}
+            />
+            {/* 会话管理入口（session-management）：管理职能解耦到管理页，左栏留直达 */}
+            <Button
+              size="small"
+              type="text"
+              className="session-manage-btn"
+              icon={<UnorderedListOutlined />}
+              title={t("nav.sessions")}
+              onClick={() => useExm.getState().requestNav("sessions")}
             />
           </div>
           <div className="session-list">
@@ -776,13 +768,14 @@ export function ChatView(): React.ReactElement {
                         </>
                       );
                     })()}
-                    {/* 操作收进「⋮」菜单：此前三个图标常驻，窄屏上既挤占标题又换行 */}
+                    {/* 操作收进「⋮」菜单：管理项（导出/删除/归档）在会话管理页，
+                        左栏只留轻操作（重命名/置顶）——左栏是「切换」不是「管理」
+                        （session-management：管理职能解耦到 SessionsView） */}
                     <span className="session-ops" onClick={(e) => e.stopPropagation()}>
                       <Dropdown
                         trigger={["click"]}
                         menu={{
                           items: [
-                            { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
                             { key: "rename", icon: <EditOutlined />, label: t("common.rename") },
                             {
                               key: "pin",
@@ -790,22 +783,13 @@ export function ChatView(): React.ReactElement {
                               label: s.pinned ? t("chat.unpin") : t("chat.pin"),
                             },
                             { type: "divider" },
-                            { key: "delete", icon: <CloseOutlined />, label: t("chat.delete"), danger: true },
+                            { key: "manage", icon: <UnorderedListOutlined />, label: t("chat.manageInSessions") },
                           ],
                           onClick: ({ key, domEvent }) => {
                             domEvent.stopPropagation();
-                            if (key === "export") void exportSession(s.id, s.title);
-                            else if (key === "rename") setRenaming({ id: s.id, title: s.title });
+                            if (key === "rename") setRenaming({ id: s.id, title: s.title });
                             else if (key === "pin") void toggleSessionPin(s.id, !s.pinned);
-                            else {
-                              modal.confirm({
-                                title: t("chat.deleteConfirm"),
-                                okText: t("common.confirm"),
-                                okButtonProps: { danger: true },
-                                cancelText: t("common.cancel"),
-                                onOk: () => removeSession(s.id),
-                              });
-                            }
+                            else if (key === "manage") useExm.getState().requestNav("sessions");
                           },
                         }}
                       >
@@ -1078,6 +1062,11 @@ export function ChatView(): React.ReactElement {
                 <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
                 <span className="approval-agent mono">{a.agentId}</span>
               </div>
+              {a.command.startsWith("[root] ") && (
+                <div className="approval-root-flag" role="alert">
+                  🚨 {t("approval.rootElevation")} — {t("approval.rootElevationHelp")}
+                </div>
+              )}
               <pre className="approval-cmd">{a.command}</pre>
               <div className="approval-ops">
                 <Button

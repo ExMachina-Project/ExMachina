@@ -219,7 +219,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             }
                             // 入站媒体（组 6.4）：标记行解析 → mxc 下载 → 注入
                             let mut saved: Vec<(String, String, String)> = Vec::new();
-                            let text: String = if let Some((kind, mxc)) =
+                            let mut text: String = if let Some((kind, mxc)) =
                                 parse_media_marker(&raw_text)
                             {
                                 let dl = format!(
@@ -295,6 +295,12 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 continue;
                             }
                             // 房间即群：门控按群聊语义执行（self_user 非空时提及才唤醒）
+                            // 房间即群：发送者标记区分「谁说了什么」。
+                            // Matrix sender 是 MXID（@user:server），取 localpart 作显示名
+                            let local = sender.strip_prefix('@').unwrap_or(&sender);
+                            let display = local.split(':').next().unwrap_or(local);
+                            let sender_mark =
+                                crate::channel_util::sender_origin(true, display, &sender);
                             let gate_ctx = InboundCtx {
                                 text: &text,
                                 external_id: &sender,
@@ -304,7 +310,9 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 chat_key: &room,
                             };
                             match admit(core.as_ref(), &ch, &gate_ctx).await {
-                                GateDecision::Allow => {}
+                                GateDecision::Allow(clean) => {
+                                    text = clean;
+                                }
                                 GateDecision::Ignore => continue,
                                 GateDecision::Deny(reply) => {
                                     let client2 = client.clone();
@@ -338,7 +346,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             tokio::spawn(async move {
                                 handle_message(
                                     &core, &ch2, &client2, &hs2, &token2, &room, &sender2, &self2,
-                                    saved, &text,
+                                    saved, &text, sender_mark.as_deref(),
                                 )
                                 .await;
                             });
@@ -497,6 +505,7 @@ async fn handle_message(
     self_user: &str,
     media: Vec<(String, String, String)>,
     text: &str,
+    sender_mark: Option<&str>,
 ) {
     // typing 指示（组 6.5）：官方端点 PUT /rooms/{roomId}/typing/{userId}；
     // 指示属尽力而为，失败静默（whoami 失败时 self_user 为空，直接跳过）
@@ -563,6 +572,12 @@ async fn handle_message(
             async move { mx_send_media(&client2, &hs2, &token2, &room2, &item).await }
         },
     );
+    // 房间发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
+    let run = if let Some(mark) = sender_mark {
+        run.with_origin(mark)
+    } else {
+        run
+    };
     run.run(&text).await;
     let _ = reply.await;
 }

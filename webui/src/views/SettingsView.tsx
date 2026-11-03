@@ -11,7 +11,7 @@ import { useT, type TKey } from "../i18n/core";
 import { LANGS, useLang } from "../i18n/core";
 import { PageHeader } from "../components/PageHeader";
 import { MaskedPasswordInput } from "../components/MaskedInput";
-import { api, limitsStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
+import { api, limitsStats, sanitizeStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
 import { loadNotifyPrefs, saveNotifyPrefs, type NotifyPrefs } from "../store";
 
 /** 分组元数据。ui 是本地偏好分区，不属于后端 config schema */
@@ -50,7 +50,13 @@ const FIELD_I18N: Record<string, { label: TKey; help?: TKey }> = {
   "memory.halfLifeDays": { label: "cfg.halfLifeDays", help: "cfg.halfLifeDays.help" },
   "security.execApproval": { label: "cfg.execApproval", help: "cfg.execApproval.help" },
   "security.execAllowlist": { label: "cfg.execAllowlist", help: "cfg.execAllowlist.help" },
+  "security.sanitizeRules.fakeSystemPrompt": { label: "cfg.sanitizeFakeSystemPrompt", help: "cfg.sanitizeFakeSystemPrompt.help" },
+  "security.sanitizeRules.hijackDirective": { label: "cfg.sanitizeHijackDirective", help: "cfg.sanitizeHijackDirective.help" },
+  "security.sanitizeRules.fakeToolResult": { label: "cfg.sanitizeFakeToolResult", help: "cfg.sanitizeFakeToolResult.help" },
+  "security.sanitizeRules.hiddenUnicode": { label: "cfg.sanitizeHiddenUnicode", help: "cfg.sanitizeHiddenUnicode.help" },
   "security.authKey": { label: "cfg.authKey", help: "cfg.authKey.help" },
+  "security.execUser": { label: "cfg.execUser", help: "cfg.execUser.help" },
+  "security.execHome": { label: "cfg.execHome", help: "cfg.execHome.help" },
   "automation.heartbeatEnabled": { label: "cfg.heartbeatEnabled", help: "cfg.heartbeatEnabled.help" },
   "automation.heartbeatIntervalMinutes": { label: "cfg.heartbeatInterval", help: "cfg.heartbeatInterval.help" },
   "automation.heartbeatPrompt": { label: "cfg.heartbeatPrompt", help: "cfg.heartbeatPrompt.help" },
@@ -164,6 +170,10 @@ function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
       return cfg.security.execAllowlist;
     case "security.authKey":
       return cfg.security.authKey;
+    case "security.execUser":
+      return cfg.security.execUser ?? "";
+    case "security.execHome":
+      return cfg.security.execHome ?? "";
     case "automation.heartbeatEnabled":
       return cfg.automation.heartbeatEnabled;
     case "automation.heartbeatIntervalMinutes":
@@ -401,6 +411,7 @@ export function SettingsView(): React.ReactElement {
               <p>{t(meta.descKey)}</p>
             </header>
             {current.key === "limits" && <LimitsStatsCard />}
+            {current.key === "security" && <SanitizeStatsCard />}
             <div className="cfg-list">
               {current.fields.map((f) => {
                 const value = values[f.key];
@@ -468,8 +479,41 @@ export function SettingsView(): React.ReactElement {
 }
 
 /** 用量统计卡（ops-visibility）：消费既有 /limits/stats 快照 */
-function LimitsStatsCard(): React.ReactElement {
+/** 消毒命中统计（安全区顶卡）：模式 → 计数；零命中显示空态文案 */
+function SanitizeStatsCard(): React.ReactElement {
   const t = useT();
+  const [stats, setStats] = useState<{ pattern: string; count: number }[] | null>(null);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await sanitizeStats();
+        setStats(r.stats ?? []);
+      } catch {
+        setStats(null);
+      }
+    })();
+  }, []);
+  if (stats === null) return <></>;
+  return (
+    <Card size="small" className="hud" style={{ marginBottom: 12 }}>
+      <div className="dim" style={{ marginBottom: 6 }}>{t("cfg.sanitizeStatsTitle")}</div>
+      {stats.length === 0 ? (
+        <div className="dim">{t("cfg.sanitizeStatsEmpty")}</div>
+      ) : (
+        <table className="plain-table">
+          <thead><tr><th>{t("cfg.sanitizeStatsPattern")}</th><th>{t("cfg.sanitizeStatsCount")}</th></tr></thead>
+          <tbody>
+            {stats.map((s) => (
+              <tr key={s.pattern}><td className="mono">{s.pattern}</td><td className="mono">{s.count}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Card>
+  );
+}
+
+function LimitsStatsCard(): React.ReactElement {  const t = useT();
   const [stats, setStats] = useState<LimitsStats | null>(null);
   useEffect(() => {
     void (async () => {
@@ -615,16 +659,26 @@ function VersionPanel() {
       try {
         const st = await api.updateStatus();
         if (st.running) {
+          // 阶段优先取状态机 phase(pulling/building/recreating),日志行兜底
+          const phaseText =
+            st.phase === "pulling"
+              ? t("settings.version.phasePulling")
+              : st.phase === "building"
+                ? t("settings.version.phaseBuilding")
+                : st.phase === "recreating"
+                  ? t("settings.version.phaseRecreating")
+                  : "";
           const lines = st.log.trim().split("\n");
-          setUpdatePhase(lines[lines.length - 1] || t("settings.version.phaseBuilding"));
+          setUpdatePhase(phaseText || lines[lines.length - 1] || t("settings.version.phaseBuilding"));
           continue;
         }
         if (!sawRestart) {
-          // 脚本已退出但容器未重启:可能失败,展示日志尾部
-          const fail = /error|失败|fatal|conflict/i.test(st.log);
+          // 脚本已退出:phase/exitCode 判定成败(exitCode 非零或日志含失败特征)
+          const failed = st.exitCode !== null && st.exitCode !== 0;
+          const failLog = /error|失败|fatal|conflict/i.test(st.log);
           setUpdatingFlag(false);
           setUpdatePhase("");
-          if (fail && !/更新完成/.test(st.log)) {
+          if (failed || (failLog && !/更新完成/.test(st.log))) {
             message.error(`${t("settings.version.failed")}:${st.log.slice(-300)}`);
           } else {
             message.success(t("settings.version.doneNoRestart"));
@@ -677,6 +731,14 @@ function VersionPanel() {
           </div>
           <div className="cfg2-ctrl mono">
             v{info?.version ?? "…"} · {info?.gitHash ?? "…"}
+            {result?.deployMode && (
+              <Tag
+                color={result.deployMode === "git" ? "blue" : result.deployMode === "image" ? "cyan" : "default"}
+                style={{ marginLeft: 8 }}
+              >
+                {t(`settings.version.mode.${result.deployMode}`)}
+              </Tag>
+            )}
           </div>
         </div>
         <div className="cfg2-row">
@@ -693,7 +755,13 @@ function VersionPanel() {
         <div className="cfg2-row">
           <div className="cfg2-label">
             <div className="cfg2-name">{t("settings.version.apply")}</div>
-            <div className="cfg2-help">{t("settings.version.applyHelp")}</div>
+            <div className="cfg2-help">
+              {result?.deployMode === "image"
+                ? t("settings.version.applyHelpImage")
+                : result?.deployMode === "git"
+                  ? t("settings.version.applyHelpGit")
+                  : t("settings.version.applyHelp")}
+            </div>
           </div>
           <div className="cfg2-ctrl">
             {updatePhase ? (
