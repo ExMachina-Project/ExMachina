@@ -563,6 +563,19 @@ impl Store {
         result_summary: &str,
         duration_ms: u64,
     ) -> Result<()> {
+        self.audit_tool_ex(agent_id, tool, args, result_summary, duration_ms, true)
+    }
+
+    /// 带 ok 位审计（meta-agent 聚合层的失败判定依赖；旧条目缺省视为成功）
+    pub fn audit_tool_ex(
+        &self,
+        agent_id: &str,
+        tool: &str,
+        args: &serde_json::Value,
+        result_summary: &str,
+        duration_ms: u64,
+        ok: bool,
+    ) -> Result<()> {
         let entry = serde_json::json!({
             "id": new_id(),
             "agentId": agent_id,
@@ -570,6 +583,7 @@ impl Store {
             "args": args,
             "resultSummary": result_summary,
             "durationMs": duration_ms,
+            "ok": ok,
             "createdAt": now_iso(),
         });
         self.db.append_line("tool_audit", agent_id, &entry)?;

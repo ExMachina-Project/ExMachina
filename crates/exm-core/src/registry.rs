@@ -885,6 +885,18 @@ impl LocalRegistry {
         v
     }
 
+    /// 个体所在组目录（激活组内成员;提示词/经验要点定位用,不存在 → None）
+    pub fn group_dir_of_agent(&self, identifier: &str) -> Option<PathBuf> {
+        self.with_active(|g| {
+            if g.defs.contains_key(identifier) {
+                Some(g.dir.clone())
+            } else {
+                None
+            }
+        })
+        .flatten()
+    }
+
     pub fn units(&self) -> Vec<AgentDefinition> {
         if self.single_mode() {
             return vec![]; // 智能体模式不派发子个体

@@ -79,6 +79,10 @@ export interface GatewayConfig {
     toolOutputSpillChars?: number;
     /** 审批等待（秒）：拦截后原地等待人工决定的时长；0 = 直接受阻 */
     approvalWaitSecs?: number;
+    /** 执行身份约束（Linux）：终端子进程降权到此用户（用户名或数字 uid；空 = 不约束） */
+    execUser?: string;
+    /** 圈禁根目录（绝对路径；空 = 自动推导） */
+    execHome?: string;
   };
   /** Computer Use（截屏 + 键鼠控制本机；默认关闭） */
   computer?: { enabled: boolean; approval: boolean; maxEdge: number; actionIntervalMs: number };
@@ -619,15 +623,19 @@ export const api = {
   listTemplates: () => req<{ templates: TemplateInfo[] }>("/templates"),
   /** 本机版本 */
   versionInfo: () => req<{ version: string; gitHash: string }>("/version"),
-  /** 一键更新(后台执行 git pull → build → up -d,经 /host + docker.sock) */
+  /** 一键更新(image 模式:compose pull + 辅助容器 up -d;git 模式:pull → build → up -d) */
   applyUpdate: () => req<{ started: boolean }>("/version/apply", { method: "POST" }),
-  /** 一键更新状态 */
-  updateStatus: () => req<{ running: boolean; log: string }>("/version/apply/status"),
-  /** 更新检查(分支感知:本地在什么分支就对比该分支的上游);updateAvailable = true/false/null(无法判定) */
+  /** 一键更新状态(phase: pulling/building/recreating/done/failed/idle) */
+  updateStatus: () =>
+    req<{ running: boolean; phase: string; exitCode: number | null; log: string; deployMode: string }>(
+      "/version/apply/status",
+    ),
+  /** 更新检查(双模式:git=源码部署比对上游分支,image=镜像部署比对注册表发布源 SHA) */
   versionCheck: () =>
     req<{
       version: string;
       gitHash: string;
+      deployMode?: "git" | "image" | "none";
       branch?: string;
       upstream?: { ref: string; sha: string; short: string; url: string; date: string };
       updateAvailable?: boolean | null;

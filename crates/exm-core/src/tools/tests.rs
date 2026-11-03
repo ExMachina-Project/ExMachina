@@ -1593,18 +1593,18 @@ mod terminal_gate_tests {
     fn 实验开关_动态压缩关闭时schema剔除context_compact() {
         let allow = [ToolName::Terminal, ToolName::ContextCompact];
         let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
-        let specs = ToolGateway::tool_specs_experiments(specs, false, false);
+        let specs = ToolGateway::tool_specs_experiments(specs, false, false, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "开关关闭时 context_compact 不应下发"
         );
         // 开启时保留
         let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
-        let specs = ToolGateway::tool_specs_experiments(specs, true, false);
+        let specs = ToolGateway::tool_specs_experiments(specs, true, false, false);
         assert!(specs.iter().any(|s| s.name == "context_compact"));
         // 滑动窗口互斥：dynamic=true + sliding=true 仍不下发
         let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
-        let specs = ToolGateway::tool_specs_experiments(specs, true, true);
+        let specs = ToolGateway::tool_specs_experiments(specs, true, true, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "滑动窗口开启时 context_compact 不应下发（互斥）"

@@ -24,6 +24,7 @@ impl ToolGateway {
             decided_at: None,
             origin_user: origin.as_ref().map(|(u, _)| u.clone()),
             origin_role: origin.as_ref().map(|(_, r)| r.clone()),
+            meta_json: None,
         };
         let _ = self.store.add_approval(&req);
         let _ = self.events.send(CoreEvent {

@@ -572,12 +572,13 @@ impl ToolGateway {
                 .take(200)
                 .collect()
         };
-        let _ = self.store.audit_tool(
+        let _ = self.store.audit_tool_ex(
             agent_id,
             full_name,
             args,
             &summary,
             started.elapsed().as_millis() as u64,
+            result.ok,
         );
         // 轮次过程轨迹：随收束落盘到最终消息（过程收起栏数据源）
         crate::round_trace::push_tool(
@@ -890,6 +891,33 @@ impl ToolGateway {
             },
             "required": []
         }));
+        push(ToolName::MetaObserve, "（元智能体）读运行数据聚合：按 agent 维度的工具统计（次数/失败率/平均耗时/最近失败）与经验要点现状（7 天窗口）。改进提议前先观测,让依据落在数据上", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent": { "type": "string", "description": "目标个体 identifier（空 = 全体）" }
+            },
+            "required": []
+        }));
+        push(ToolName::MetaPropose, "（元智能体）提交结构化改进提议,落入人工审批（[meta] 前缀审批单）。批准后自动应用,拒绝则回流。kind=prompt（提示词补段）/adaptation（经验要点）/roster（成员增删调,≤5 op,两阶段校验）", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["prompt", "adaptation", "roster"] },
+                "target": { "type": "string", "description": "目标个体 identifier" },
+                "change": { "type": "object", "description": "prompt: {promptPatch}; adaptation: {content}; roster: {ops: [{op: add|remove|update, ...}]}" },
+                "rationale": { "type": "string", "description": "提议理由（依据的数据与预期收益,展示给审批人）" }
+            },
+            "required": ["kind", "target", "change", "rationale"]
+        }));
+        push(ToolName::MetaBuild, "（元智能体）构建新智能体/组：定义草稿 + 提示词草稿落入 [meta] 审批单,批准后注册。工具本身不做生成——定义由你在参数里给出", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "description": { "type": "string", "description": "任务的自然语言描述（为何需要这个个体）" },
+                "definition": { "type": "object", "description": "个体定义草稿: {name, domain, tier, description, tools: [...]}" },
+                "prompt": { "type": "string", "description": "系统提示词草稿（≥16 字符）" },
+                "asGroup": { "type": "boolean", "description": "true = 构建为组（默认 false = 个体）" }
+            },
+            "required": ["description", "definition", "prompt"]
+        }));
         specs
     }
 
@@ -921,18 +949,30 @@ impl ToolGateway {
         specs: Vec<crate::provider::ToolSpec>,
         dynamic_compaction: bool,
         sliding_window: bool,
+        meta_agent: bool,
     ) -> Vec<crate::provider::ToolSpec> {
         // 滑动窗口模式与动态压缩互斥：同为「何时压缩」的决策权归属，
         // 滑动窗口 = 交回程序窗口语义（不主动压）；动态压缩 = 交模型。
         // slidingContextWindow 开启时 context_compact 一律不下发。
-        if dynamic_compaction && !sliding_window {
+        let mut specs = if dynamic_compaction && !sliding_window {
             specs
         } else {
             specs
                 .into_iter()
                 .filter(|s| s.name != ToolName::ContextCompact.key())
                 .collect()
+        };
+        // meta 工具组（实验性 metaAgent）:关闭时从下发面剔除（allowlist 里有也不下发了
+        // ——工具面承诺与执行一致性;开启时注入三件套,无需逐个编成授权）
+        if !meta_agent {
+            specs.retain(|s| {
+                !matches!(
+                    s.name.as_str(),
+                    "meta_observe" | "meta_propose" | "meta_build"
+                )
+            });
         }
+        specs
     }
 
     /// 工具层事件发双层：实时广播（WS 推流）+ 事件库落盘（历史可回放）。
@@ -1021,6 +1061,8 @@ impl ToolGateway {
                         decided_at: None,
                         origin_user: None,
                         origin_role: None,
+                    
+                        meta_json: None,
                     };
                     let _ = self.store.add_approval(&req);
                     crate::plan::set_pending_approval(session_id, &req.id);
@@ -1067,12 +1109,13 @@ impl ToolGateway {
                         out.clone()
                     };
                     let blocked = ToolResult::err(format!("preTool 钩子拦截：{why}"));
-                    let _ = self.store.audit_tool(
+                    let _ = self.store.audit_tool_ex(
                         agent_id,
                         name,
                         args,
                         "preTool 钩子拦截",
                         started.elapsed().as_millis() as u64,
+                        false,
                     );
                     self.emit_tool_result(session_id, &call_id, agent_id, name, &blocked, &started);
                     return blocked;
@@ -1231,12 +1274,13 @@ impl ToolGateway {
                 .take(200)
                 .collect()
         };
-        let _ = self.store.audit_tool(
+        let _ = self.store.audit_tool_ex(
             agent_id,
             name,
             args,
             &summary,
             started.elapsed().as_millis() as u64,
+            result.ok,
         );
         // 轮次过程轨迹：与 execute_mcp 一致,内置/自定义工具执行同样随收束落盘到最终消息
         crate::round_trace::push_tool(
@@ -1357,6 +1401,9 @@ impl ToolGateway {
             ToolName::Git => self.tool_git(agent_id, session_id, args).await,
             ToolName::Spawn => self.tool_spawn(agent_id, session_id, args).await,
             ToolName::Todo => self.tool_todo(session_id, args),
+            ToolName::MetaObserve | ToolName::MetaPropose | ToolName::MetaBuild => {
+                self.tool_meta(agent_id, session_id, tool, args).await
+            }
             ToolName::ContextCompact => unreachable!("context_compact 在 execute_named 预分发"),
         }
     }
