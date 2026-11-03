@@ -577,7 +577,8 @@ async fn handle_message(
         run.with_origin(mark)
     } else {
         run
-    };
+    }
+    .with_external_id(sender);
     run.run(&text).await;
     let _ = reply.await;
 }

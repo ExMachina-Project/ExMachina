@@ -1238,6 +1238,28 @@ pub type VideoActExecutor = std::sync::Arc<
         + Sync,
 >;
 
+/// 审批决定放行粒度（approval-ergonomics）：
+/// - Once：本次执行（旧行为，缺省档）
+/// - Session：本次执行 + 同命令前缀本会话后续自动放行
+/// - Allowlist：本次执行 + 前缀持久写入 security.execAllowlist
+///
+/// 拒绝语义由 Once{approve:false} 承载（拒绝无档位可言）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalScope {
+    Once { approve: bool },
+    Session,
+    Allowlist,
+}
+
+impl ApprovalScope {
+    pub fn is_approve(&self) -> bool {
+        matches!(
+            self,
+            ApprovalScope::Once { approve: true } | ApprovalScope::Session | ApprovalScope::Allowlist
+        )
+    }
+}
+
 /// 终端命令审批单：命令被闸门拦截后挂起，等待用户批准后由系统代执行
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

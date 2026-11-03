@@ -10,6 +10,31 @@ impl ToolGateway {
     /// - 拒绝：把拒绝原因作为工具结果回灌；
     /// - 超时：按「待人工审批」受阻回流（旧行为）。
     pub(crate) async fn gate_command(&self, agent_id: &str, session_id: &str, cmd: &str) -> ToolResult {
+        // 会话授权短路（approval-ergonomics）：「本会话允许」档已放行的命令前缀
+        // 不再落审批单,直通执行（同一加固路径——execUser 降权/沙箱净化照常生效,
+        // 审批放行的是命令内容不是特权）。[root]/破坏性命令在写入侧就进不了
+        // 授权表,此处无需重复校验。guard 作用域收窄在 await 前（读守卫非 Send）。
+        let granted = {
+            let probe = self.session_grant_probe.read().clone();
+            probe.is_some_and(|p| p(session_id, cmd))
+        };
+        if granted {
+            // 先算 opts 再 await：shell_opts 内部的身份解析含非 Send 中间态,
+            // 其结果（ShellOpts 本身 Send）跨 await 持有即可
+            let opts = self.shell_opts(cmd);
+            let workspace = self.workspace_root.clone();
+            let timeout = self.security.terminal_timeout_secs.max(1) as u64;
+            let out = crate::tools::execute_shell_with(&workspace, cmd, timeout, &opts).await;
+            return if out.ok {
+                ToolResult::ok(out.output)
+            } else {
+                ToolResult::err(format!(
+                    "命令执行失败（会话授权直通）：{}\n{}",
+                    cmd,
+                    out.error.unwrap_or_default()
+                ))
+            };
+        }
         // 来源升级标：通道闸门登记过来源的会话（member）→ 审批单标记须管理员批准
         let origin = self.store.get_session_origin(session_id).ok().flatten();
         let req = ApprovalRequest {
