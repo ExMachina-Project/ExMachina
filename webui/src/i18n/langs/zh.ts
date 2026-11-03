@@ -146,6 +146,8 @@ export const zh = {
   "chat.thinking": "思考",
   "chat.approvalTitle": "待人工审批",
   "chat.approvalApprove": "批准并执行",
+  "chat.approvalSession": "本会话允许",
+  "chat.approvalAllowlist": "加入白名单",
   "chat.approvalDeny": "拒绝",
   "chat.approvalHint": "批准后由系统代执行，输出直接回灌模型继续干活",
   "chat.orchRunning": "指挥体运行中",
@@ -1176,6 +1178,8 @@ export const zh = {
   "approvals.colSession": "所属会话",
   "approvals.colOps": "操作",
   "approvals.approve": "批准",
+  "approvals.session": "本会话允许",
+  "approvals.allowlist": "加入白名单",
   "approvals.reject": "拒绝",
   "approvals.jump": "跳转",
 

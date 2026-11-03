@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
 import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
-import { api, type LlmProfile } from "../api";
+import { api, type LlmProfile, isDestructiveCommand } from "../api";
 import { agentIdEn } from "../models";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
@@ -1077,6 +1077,24 @@ export function ChatView(): React.ReactElement {
                 >
                   {t("chat.approvalApprove")}
                 </Button>
+                {/* 三档放行（approval-ergonomics）：升档按钮仅普通命令单可见——
+                    [root] 提权单与破坏性命令后端红线降级 once,UI 直接隐藏避免误导 */}
+                {!a.command.startsWith("[") && !isDestructiveCommand(a.command) && (
+                  <>
+                    <Button
+                      size="small"
+                      onClick={() => void decideApproval(a.approvalId, true, "session")}
+                    >
+                      {t("chat.approvalSession")}
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => void decideApproval(a.approvalId, true, "allowlist")}
+                    >
+                      {t("chat.approvalAllowlist")}
+                    </Button>
+                  </>
+                )}
                 <Button size="small" danger onClick={() => void decideApproval(a.approvalId, false)}>
                   {t("chat.approvalDeny")}
                 </Button>

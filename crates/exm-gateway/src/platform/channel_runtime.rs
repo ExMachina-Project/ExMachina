@@ -875,6 +875,9 @@ pub(crate) struct ChannelRun {
     /// "im:<名字|id>" = 群聊发送者——落库进消息 agent_id，展示层据此在消息头显示发送者，
     /// 模型侧上下文渲染为「[用户·名字]」区分群聊多人发言）
     pub origin: Option<String>,
+    /// 发送者平台外部 ID（approval-ergonomics 通道裁决权限判定：
+    /// origin 用户本人或跨通道 admins 才能裁 ok:/no:；非 flow 入口为 None）
+    pub external_id: Option<String>,
     /// 聊天流定位（begin 时快照；run 落库后回写流预览用）
     pub(crate) flow: Option<(String, String)>,
 }
@@ -950,6 +953,7 @@ impl ChannelRun {
                 kind: ch.kind.clone(),
                 scope: ch.tool_scope(),
                 origin: None,
+                external_id: None,
                 flow: Some((ch.id.clone(), chat_key.to_string())),
             },
             rx,
@@ -960,6 +964,13 @@ impl ChannelRun {
     /// 落库进消息 agent_id，展示层与模型侧按前缀区分语义）
     pub(crate) fn with_origin(mut self, origin: impl Into<String>) -> Self {
         self.origin = Some(origin.into());
+        self
+    }
+
+    /// 标记发送者平台外部 ID（approval-ergonomics：通道裁决 ok:/no: 权限判定）。
+    /// 六适配器在 stamp_session_origin 同位调用（同一个人的两个标记）。
+    pub(crate) fn with_external_id(mut self, external_id: impl Into<String>) -> Self {
+        self.external_id = Some(external_id.into());
         self
     }
 
@@ -1003,6 +1014,38 @@ impl ChannelRun {
                     lines.push(format!("… 共 {} 条", items.len()));
                 }
                 lines.push("回复「plan:yes」批准执行，「plan:no」拒绝保留".into());
+                Some(lines.join("\n").chars().take(max_chars).collect())
+            }
+            // 审批单待裁决（approval-ergonomics 跨端呈现）：与 plan.pending 同位。
+            // 推单号 + 命令摘要 + 裁决用法;单号支持前缀匹配（完整 8 位或其唯一前缀）。
+            // 通道裁决只走 once 档（设计决策:档位在文本界面无法可靠表达,升档去控制台）。
+            "approval.required" => {
+                let id = evt
+                    .payload
+                    .get("approvalId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let cmd = evt
+                    .payload
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let wait = self
+                    .core
+                    .config()
+                    .security
+                    .approval_wait_secs;
+                let cmd_short: String = cmd.chars().take(120).collect();
+                let mut lines = vec![
+                    format!("⛔ 审批请求（单号 {id}）："),
+                    cmd_short,
+                    format!(
+                        "{wait} 秒内回复 ok:{id} 批准 / no:{id} 拒绝，或到控制台裁决"
+                    ),
+                ];
+                if cmd.len() > 120 {
+                    lines.insert(2, "…（命令已截断）".into());
+                }
                 Some(lines.join("\n").chars().take(max_chars).collect())
             }
             "plan.applied" => {
@@ -1078,6 +1121,92 @@ impl ChannelRun {
             }
             return;
         }
+        // 审批快捷裁决（approval-ergonomics 跨端审批）：ok:<单号> / no:<单号>
+        // 直达裁决,不进模型轮次。单号支持前缀匹配（完整 8 位或唯一前缀）。
+        // 权限口径与身份管控 ③ 段一致：审批单 origin 用户本人,或任一通道 admins
+        // 命中（判权跟人走,跨通道）。通道裁决只走 once 档（设计决策:档位在文本
+        // 界面无法可靠表达,升档去控制台）。
+        if let Some(decision) = parse_approval_directive(trimmed) {
+            let (approve, id_input) = decision;
+            // 前缀匹配：pending 单中 id 以输入开头的集合;唯一命中裁决,多命中报歧义
+            let pendings = self
+                .core
+                .approval_list(Some("pending"), 500)
+                .unwrap_or_default();
+            let hits: Vec<exm_core::types::ApprovalRequest> = pendings
+                .into_iter()
+                .filter(|a| a.id.starts_with(&id_input))
+                .collect();
+            let ap = match hits.as_slice() {
+                [one] => one.clone(),
+                [] => {
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!("【报告】审批单 {id_input} 不存在或已处理。"),
+                    );
+                    return;
+                }
+                _ => {
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!(
+                            "【报告】单号前缀 {} 命中 {} 张待审单（{}），请补全单号。",
+                            id_input,
+                            hits.len(),
+                            hits.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(" / ")
+                        ),
+                    );
+                    return;
+                }
+            };
+            let id = ap.id.clone();
+            // 权限：发送者 = 审批单 origin 用户本人,或跨通道 admins 命中
+            let caller = self.external_id.as_deref().unwrap_or("");
+            let is_origin_user = ap
+                .origin_user
+                .as_deref()
+                .is_some_and(|u| !u.is_empty() && caller == u);
+            let is_admin = !caller.is_empty()
+                && super::channels::load_channels(&self.core)
+                    .iter()
+                    .any(|c| c.admins.iter().any(|a| a.trim() == caller));
+            if !is_origin_user && !is_admin {
+                self.core.emit_run_error(
+                    &self.session_id,
+                    &format!("【报告】审批裁决被拒绝：发送者无权裁决审批单 {id}（仅发起用户或管理员）。"),
+                );
+                return;
+            }
+            match self
+                .core
+                .approval_decide_scoped(
+                    &id,
+                    if approve {
+                        exm_core::types::ApprovalScope::Once { approve: true }
+                    } else {
+                        exm_core::types::ApprovalScope::Once { approve: false }
+                    },
+                )
+                .await
+            {
+                Ok(r) => {
+                    let head = if approve { "已批准并执行" } else { "已拒绝" };
+                    let detail = r.result.as_deref().unwrap_or("");
+                    let note: String = detail.chars().take(300).collect();
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!("【报告】审批单 {id} {head}。{note}"),
+                    );
+                }
+                Err(e) => {
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!("【警告】审批单 {id} 裁决失败：{e}"),
+                    );
+                }
+            }
+            return;
+        }
         // 周期 token 配额（外部来源会话）：耗尽即拒绝新轮次并经 run.error 回帖提示；
         // 组内派发会话无来源登记，天然不受限（设计 D10）
         let limits = self.core.config().limits.clone();
@@ -1122,6 +1251,25 @@ impl Drop for GroupRestore {
             restore_context(&self.core, &self.prev_group, &self.prev_single);
         }
     }
+}
+
+/// 审批快捷指令解析（approval-ergonomics）：`ok:<单号>` / `no:<单号>`。
+/// 单号 = 8 位审批单 id（approval.required 推送文本所带）。返回 (是否批准, 单号)。
+/// 大小写不敏感；单号非空即受理（不存在/已处理在裁决点报告,不在解析点挡）。
+pub(crate) fn parse_approval_directive(text: &str) -> Option<(bool, String)> {
+    let lower = text.trim().to_lowercase();
+    let (approve, rest) = if let Some(r) = lower.strip_prefix("ok:") {
+        (true, r)
+    } else if let Some(r) = lower.strip_prefix("no:") {
+        (false, r)
+    } else {
+        return None;
+    };
+    let id = rest.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some((approve, id.to_string()))
 }
 
 /// 还原到之前的交互上下文（组 + 单智能体快照）

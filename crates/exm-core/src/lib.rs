@@ -87,6 +87,13 @@ pub struct Core {
     /// 聊天流未读计数（流粒度，内存态）：智能体在流绑定会话产出回复且用户未打开
     /// 该会话时累积；打开即清零。未读是瞬时 UI 状态，重启归零合理（D5 单一事实源）。
     flow_unread: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 会话级审批授权（approval-ergonomics）：会话 → {命令前缀 → ()}。
+    /// 「本会话允许」档批准时写入；内存态（重启即清）、随会话删除清理。
+    /// 红线：[root] 提权单与破坏性命令永不入表（写入侧校验）。
+    session_grants: parking_lot::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, ()>>>,
+    /// 自引用弱句柄（approval-ergonomics）：attach_session_grant_probe 首次注入后
+    /// 缓存；orchestrator 重建路径（rebind_plugin_tools）用它重挂授权探针。
+    self_weak: parking_lot::RwLock<Option<std::sync::Weak<Core>>>,
     /// MCP 服务器池（与 Orchestrator 内工具网关共用同一实例）
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 远程执行器（工作者池；网关在 serve 时注入）
@@ -200,6 +207,8 @@ impl Core {
             meta_state: parking_lot::RwLock::new(MetaAgentState { last_tick_minute: 0 }),
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            session_grants: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            self_weak: parking_lot::RwLock::new(None),
             mcp: mcp_handle.clone(),
             remote: parking_lot::RwLock::new(None),
             plugins: parking_lot::RwLock::new(plugins),
@@ -207,6 +216,22 @@ impl Core {
             orchestrator: RwLock::new(orchestrator),
             config: config_shared,
         })
+    }
+
+    /// 装配会话授权查询（approval-ergonomics）：把 session_grants 查询面回接到
+    /// 工具网关（gate_command 落单前短路）。必须经 Arc<Core> 调用——闭包持 Weak
+    /// 引用避免与 orchestrator 成环（tools 由 orchestrator 持有,强引用即环）。
+    /// orchestrator 重建路径（apply_config / set_remote 等）由 rebind_plugin_tools
+    /// 尾部统一重挂。
+    pub fn attach_session_grant_probe(self: &std::sync::Arc<Self>) {
+        let weak = std::sync::Arc::downgrade(self);
+        *self.self_weak.write() = Some(weak.clone());
+        let orch = self.orchestrator.read().clone();
+        orch.tools.set_session_grant_probe(std::sync::Arc::new(
+            move |sid: &str, cmd: &str| {
+                weak.upgrade().is_some_and(|c| c.session_granted(sid, cmd).is_some())
+            },
+        ));
     }
 
     /// 配置热更新（设置页）：重建 Provider / Runtime / Orchestrator
@@ -1400,6 +1425,15 @@ impl Core {
                 }
             }
         }
+        // 会话授权探针重挂（approval-ergonomics）：orchestrator 重建后 ToolGateway
+        // 是新实例,旧探针闭包指向旧网关——用缓存的 Weak<Core> 重新注入。
+        if let Some(weak) = self.self_weak.read().clone() {
+            orch.tools.set_session_grant_probe(std::sync::Arc::new(
+                move |sid: &str, cmd: &str| {
+                    weak.upgrade().is_some_and(|c| c.session_granted(sid, cmd).is_some())
+                },
+            ));
+        }
     }
 
     /// 暂存图片附件（随该会话下一轮对话注入规划；每轮取走即清）
@@ -1437,7 +1471,37 @@ impl Core {
 
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
         crate::orchestrator::unmark_im_session(id);
+        // 会话删除连带清理审批授权（grant 生命周期 = 会话生命周期）
+        self.session_grants.lock().remove(id);
         self.store.delete_session(id)
+    }
+
+    /// 会话审批授权写入（approval-ergonomics「本会话允许」档）：
+    /// 前缀口径见 allowlist::command_head。红线校验在 approval_decide 调用侧——
+    /// [root] 提权单与破坏性命令不会走到这里。
+    pub fn grant_session(&self, session_id: &str, prefix: &str) {
+        if prefix.is_empty() {
+            return;
+        }
+        self.session_grants
+            .lock()
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(prefix.to_string(), ());
+    }
+
+    /// 会话授权命中判定：命令前缀在授权表内即视为已批准。
+    /// 返回命中的前缀（调试/审计可见），未命中返回 None。
+    pub fn session_granted(&self, session_id: &str, cmd: &str) -> Option<String> {
+        let head = crate::tools::command_head(cmd);
+        if head.is_empty() {
+            return None;
+        }
+        self.session_grants
+            .lock()
+            .get(session_id)?
+            .contains_key(&head)
+            .then_some(head)
     }
 
     /// 会话置顶切换（列表置顶分组数据源）
@@ -1594,6 +1658,21 @@ impl Core {
         id: &str,
         approve: bool,
     ) -> anyhow::Result<ApprovalRequest> {
+        self.approval_decide_scoped(id, ApprovalScope::Once { approve }).await
+    }
+
+    /// 审批决定（approval-ergonomics 三档粒度）：
+    /// - Once：本次执行（旧行为，缺省档）
+    /// - Session：本次执行 + 同命令前缀本会话后续自动放行（内存态）
+    /// - Allowlist：本次执行 + 前缀写入 security.execAllowlist（持久）
+    ///
+    /// 红线：[root] 等特殊前缀单与破坏性命令不支持 Session/Allowlist 档——
+    /// 越权档位自动降级 Once。
+    pub async fn approval_decide_scoped(
+        &self,
+        id: &str,
+        decision: ApprovalScope,
+    ) -> anyhow::Result<ApprovalRequest> {
         let mut req = self
             .store
             .get_approval(id)?
@@ -1601,6 +1680,24 @@ impl Core {
         if req.status != "pending" {
             anyhow::bail!("审批单已处理: {}", req.status);
         }
+        // 红线校验：特殊前缀单与破坏性命令不允许升档（拒绝类决定不受限）
+        let effective = if decision.is_approve() {
+            let special = req.command.starts_with('[');
+            let destructive =
+                crate::tools::is_destructive_command(&req.command.to_lowercase());
+            if matches!(
+                decision,
+                ApprovalScope::Session | ApprovalScope::Allowlist
+            ) && (special || destructive)
+            {
+                ApprovalScope::Once { approve: true }
+            } else {
+                decision
+            }
+        } else {
+            ApprovalScope::Once { approve: false }
+        };
+        let approve = effective.is_approve();
         // 视频动作审批单（[video] 前缀）：批准 = 回调代发执行器，拒绝 = 记录跳过
         if req.command.starts_with("[video]") {
             let payload = req.command.trim_start_matches("[video]").trim().to_string();
@@ -1705,8 +1802,22 @@ impl Core {
             let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
             req.status = if out.ok { "executed".into() } else { "failed".into() };
             let text = if out.ok { out.output } else { out.error.unwrap_or_default() };
-            req.result =
-                Some(format!("[root 执行] {eff_cmd}\n{}", text).chars().take(4000).collect());
+            // 红线降级注明（approval-ergonomics）：[root] 提权单不允许升档,
+            // 越权档位自动降级 once——审批结果注明让裁决者知情
+            let downgrade_note = if matches!(
+                decision,
+                ApprovalScope::Session | ApprovalScope::Allowlist
+            ) {
+                "\n[红线] 提权单不支持会话授权/白名单档，已按本次执行"
+            } else {
+                ""
+            };
+            req.result = Some(
+                format!("[root 执行] {eff_cmd}\n{}{downgrade_note}", text)
+                    .chars()
+                    .take(4000)
+                    .collect(),
+            );
             self.store.update_approval(&req)?;
             self.emit_approval_resolved(&req);
             return Ok(req);
@@ -1734,6 +1845,36 @@ impl Core {
             out.error.unwrap_or_default()
         };
         req.result = Some(text.chars().take(4000).collect());
+        // 档位副作用（仅普通命令单走到这里;特殊前缀单已在上方分流 return）。
+        // 执行失败也建授权/白名单?不——失败说明命令本身有问题,放行同类无意义,
+        // 且用户批的是「这类命令可以跑」的意图以成功执行为前提更符合直觉。
+        if out.ok {
+            match effective {
+                ApprovalScope::Session => {
+                    let prefix = crate::tools::command_head(&req.command);
+                    self.grant_session(&req.session_id, &prefix);
+                    req.result = Some(format!(
+                        "{}\n[会话授权] 同前缀命令「{prefix}」本会话内自动放行",
+                        req.result.as_deref().unwrap_or("")
+                    ));
+                }
+                ApprovalScope::Allowlist => {
+                    let prefix = crate::tools::command_head(&req.command);
+                    if !prefix.is_empty() {
+                        let mut cfg = self.config().as_ref().clone();
+                        if !cfg.security.exec_allowlist.iter().any(|p| p == &prefix) {
+                            cfg.security.exec_allowlist.push(prefix.clone());
+                            self.apply_config(cfg)?;
+                        }
+                        req.result = Some(format!(
+                            "{}\n[白名单] 前缀「{prefix}」已写入全局白名单",
+                            req.result.as_deref().unwrap_or("")
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
         self.store.update_approval(&req)?;
         self.emit_approval_resolved(&req);
         Ok(req)
@@ -3302,6 +3443,157 @@ mod root_approval_tests {
         let decided = core.approval_decide(&ap.id, true).await.unwrap();
         assert_eq!(decided.status, "executed");
         assert!(decided.result.as_deref().unwrap_or("").contains("confined"));
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+}
+
+/// 会话级审批授权（approval-ergonomics）：
+/// 三档粒度 / 红线（[root]、破坏性永不入表）/ 会话删除清理 / gate 短路。
+#[cfg(test)]
+mod session_grant_tests {
+    use super::*;
+    use crate::types::ApprovalScope;
+
+    fn grant_core() -> Core {
+        let dir = std::env::temp_dir().join(format!("exm-grant-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn pending_ap(core: &Core, sid: &str, cmd: &str) -> crate::types::ApprovalRequest {
+        let ap = crate::types::ApprovalRequest {
+            id: crate::types::new_id()[..8].to_string(),
+            session_id: sid.into(),
+            node_id: None,
+            agent_id: "a1".into(),
+            command: cmd.into(),
+            status: "pending".into(),
+            result: None,
+            created_at: crate::types::now_iso(),
+            decided_at: None,
+            origin_user: None,
+            origin_role: None,
+            meta_json: None,
+        };
+        core.store.add_approval(&ap).unwrap();
+        ap
+    }
+
+    #[tokio::test]
+    async fn session档_建立授权并命中() {
+        let core = grant_core();
+        let sid = core.create_session("授权").unwrap().id;
+        let ap = pending_ap(&core, &sid, "echo hello");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Session)
+            .await
+            .unwrap();
+        assert_eq!(decided.status, "executed");
+        assert!(decided.result.as_deref().unwrap_or("").contains("会话授权"));
+        // 命中判定：前缀（echo hello）后接任意参数命中
+        assert!(core.session_granted(&sid, "echo hello world").is_some());
+        // 次 token 不同即不同类别（口径与白名单「命令+子命令」对齐）
+        assert!(core.session_granted(&sid, "echo world").is_none());
+        // 完全不同的命令不命中
+        assert!(core.session_granted(&sid, "mkdir /tmp/x").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn once档_不建立授权() {
+        let core = grant_core();
+        let sid = core.create_session("单次").unwrap().id;
+        let ap = pending_ap(&core, &sid, "mkdir -p /tmp/x");
+        core.approval_decide_scoped(&ap.id, ApprovalScope::Once { approve: true })
+            .await
+            .unwrap();
+        assert!(core.session_granted(&sid, "mkdir /tmp/y").is_none(), "once 档不建授权");
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn root单_session档被降级() {
+        let core = grant_core();
+        let sid = core.create_session("红线").unwrap().id;
+        let ap = pending_ap(&core, &sid, "[root] sudo id");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Session)
+            .await
+            .unwrap();
+        assert_eq!(decided.status, "executed");
+        // 红线：[root] 单不允许升档——结果无 [会话授权] 注记（有 [红线] 降级说明）,也不建授权
+        assert!(!decided.result.as_deref().unwrap_or("").contains("[会话授权]"));
+        assert!(decided.result.as_deref().unwrap_or("").contains("[红线]"), "应注明降级");
+        assert!(core.session_granted(&sid, "id").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn 破坏性命令_session档被降级() {
+        let core = grant_core();
+        let sid = core.create_session("破坏").unwrap().id;
+        let ap = pending_ap(&core, &sid, "git push --force origin main");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Session)
+            .await
+            .unwrap();
+        // 执行本身按 once 发生(可能失败——force push 无远端;关键是档位被降)
+        assert!(!decided.result.as_deref().unwrap_or("").contains("[会话授权]"));
+        assert!(core.session_granted(&sid, "git push").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn allowlist档_写入配置() {
+        let core = grant_core();
+        let sid = core.create_session("白名单").unwrap().id;
+        let ap = pending_ap(&core, &sid, "echo allowlist-test");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Allowlist)
+            .await
+            .unwrap();
+        assert!(decided.result.as_deref().unwrap_or("").contains("白名单"));
+        // 前缀口径 = 命令名 + 首 token（echo allowlist-test）,与 command_head 一致
+        assert!(core
+            .config()
+            .security
+            .exec_allowlist
+            .iter()
+            .any(|p| p == "echo allowlist-test"), "前缀应写入 execAllowlist");
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn 会话删除后授权失效() {
+        let core = grant_core();
+        let sid = core.create_session("删除").unwrap().id;
+        core.grant_session(&sid, "cargo build");
+        assert!(core.session_granted(&sid, "cargo build --release").is_some());
+        core.delete_session(&sid).unwrap();
+        assert!(core.session_granted(&sid, "cargo build --release").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    /// gate_command 短路：探针注入 + 授权命中 → 不落审批单直接执行
+    #[tokio::test]
+    async fn gate短路_授权命中不落单() {
+        let core = grant_core();
+        let sid = core.create_session("短路").unwrap().id;
+        // 授权前缀与 command_head 口径一致（echo + 首参数 token）
+        core.grant_session(&sid, "echo granted-ok");
+        // 探针注入（生产由 attach_session_grant_probe 完成;测试手动）
+        let core = std::sync::Arc::new(core);
+        core.attach_session_grant_probe();
+        let orch = core.orchestrator.read().clone();
+        let r = orch.tools.gate_command("a1", &sid, "echo granted-ok").await;
+        assert!(r.ok, "授权直通应执行成功: {:?}", r.output);
+        assert!(r.output.contains("granted-ok"));
+        // 无新审批单产生
+        let pendings = core.approval_list(Some("pending"), 10).unwrap();
+        assert!(pendings.is_empty(), "授权命中不应落审批单");
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 }
