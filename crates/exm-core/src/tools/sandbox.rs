@@ -36,7 +36,6 @@ impl ShellOpts {
                 memory_mb: 0,
                 max_processes: 0,
                 cmd_override: None,
-                uid_gid: None,
                 confine_home: None,
             }
         }
@@ -125,6 +124,14 @@ pub(crate) fn bwrap_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Windows：无 bubblewrap（沙箱走作业对象/环境净化），恒不可用。
+/// 保留函数形状使跨平台调用方（tools/mod.rs re-export、sandbox_helpers）
+/// 无需逐处 cfg——「能力探测统一返回 false」比条件编译分散更不易漏。
+#[cfg(target_os = "windows")]
+pub(crate) fn bwrap_available() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------- Windows 作业对象
@@ -220,7 +227,7 @@ impl WinJob {
 
 #[cfg(target_os = "windows")]
 impl Drop for WinJob {
-    pub(crate) fn drop(&mut self) {
+    fn drop(&mut self) {
         use windows_sys::Win32::Foundation::CloseHandle;
         if !self.handle.is_null() {
             // KILL_ON_JOB_CLOSE：关句柄即终止作业内所有进程

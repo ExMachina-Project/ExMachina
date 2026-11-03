@@ -68,6 +68,9 @@ impl ToolGateway {
         };
         #[cfg(unix)]
         let confine = identity.as_ref().map(|id| id.home.clone());
+        // Windows：无执行身份约束（唯一入口 execUser 仅 Linux 生效）
+        #[cfg(not(unix))]
+        let confine: Option<String> = None;
         #[cfg(unix)]
         let uid_gid = identity.as_ref().map(|id| (id.uid, id.gid));
         #[cfg(unix)]
