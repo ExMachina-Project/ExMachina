@@ -18,6 +18,7 @@ import {
   ClockCircleOutlined,
   TeamOutlined,
   CloudUploadOutlined,
+  UnorderedListOutlined,
   AppstoreAddOutlined,
   DeploymentUnitOutlined,
 } from "@ant-design/icons";
@@ -26,6 +27,7 @@ import { useExm } from "./store";
 import { useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
+import { CommandPalette } from "./components/CommandPalette";
 import { DataStream } from "./components/DataStream";
 import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
@@ -36,6 +38,7 @@ import { TelemetryBar } from "./components/TelemetryBar";
 const LoginView = lazy(() => import("./views/LoginView").then((m) => ({ default: m.LoginView })));
 const SetupKeyView = lazy(() => import("./views/SetupKeyView").then((m) => ({ default: m.SetupKeyView })));
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
+const SessionsView = lazy(() => import("./views/SessionsView").then((m) => ({ default: m.SessionsView })));
 const ModelsView = lazy(() => import("./views/ModelsView").then((m) => ({ default: m.ModelsView })));
 const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default: m.GraphView })));
 const LedgerView = lazy(() => import("./views/LedgerView").then((m) => ({ default: m.LedgerView })));
@@ -69,6 +72,7 @@ function ViewSuspense({ children }: { children: React.ReactNode }): React.ReactE
 
 type ViewKey =
   | "chat"
+  | "sessions"
   | "graph"
   | "agent"
   | "groups"
@@ -86,7 +90,7 @@ type ViewKey =
 
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
-  "chat", "agent", "groups", "nexus", "graph", "automations",
+  "chat", "sessions", "agent", "groups", "nexus", "graph", "automations",
   "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
 ];
 
@@ -110,6 +114,7 @@ export const NAV_ITEMS: {
   experimental?: boolean;
 }[] = [
   { key: "chat", en: "CHAT", labelKey: "nav.chat", icon: <MessageOutlined /> },
+  { key: "sessions", en: "SESSIONS", labelKey: "nav.sessions", icon: <UnorderedListOutlined /> },
   { key: "agent", en: "AGENTS", labelKey: "nav.agent", icon: <UserOutlined /> },
   { key: "groups", en: "GROUPS", labelKey: "nav.groups", icon: <TeamOutlined /> },
   { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined />, experimental: true },
@@ -366,6 +371,7 @@ export default function App(): React.ReactElement {
           {/* key 驱动：切视图即重挂载 → 入场动效（淡入 + 上移）每次都完整播放 */}
           <div className="view-stage" key={view}>
             {view === "chat" && <ChatView />}
+            {view === "sessions" && <SessionsView />}
             {view === "graph" && <GraphView />}
             {view === "agent" && <SinglesView />}
             {view === "groups" && <GroupsView />}
@@ -385,6 +391,8 @@ export default function App(): React.ReactElement {
       </main>
       {/* 底边遥测条：position:fixed 通栏贴窗口底，不参与 .app-shell 的 flex 布局 */}
       <TelemetryBar />
+      {/* 全局会话速查（Ctrl/Cmd+K）：Modal 自带 portal，挂根部即可 */}
+      <CommandPalette />
     </div>
   );
 }
