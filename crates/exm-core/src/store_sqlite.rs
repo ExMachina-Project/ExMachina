@@ -141,6 +141,7 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA).context("初始化 schema 失败")?;
         // 旧库列补齐（CREATE TABLE IF NOT EXISTS 不会给已存在的表加新列）
         add_column_if_missing(&conn, "sessions", "pinned", "INTEGER NOT NULL DEFAULT 0");
+        add_column_if_missing(&conn, "sessions", "archived_at", "TEXT");
 
         let store = SqliteStore {
             conn: Mutex::new(conn),
@@ -247,8 +248,8 @@ impl SqliteStore {
 
     fn insert_session_conn(conn: &Connection, s: &Session) -> anyhow::Result<()> {
         conn.execute(
-            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,pinned,ledger,created_at,updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,pinned,archived_at,ledger,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             rusqlite::params![
                 s.id,
                 s.title,
@@ -259,6 +260,7 @@ impl SqliteStore {
                 s.parent_session,
                 s.parent_upto,
                 s.pinned as i64,
+                s.archived_at,
                 serde_json::to_string(&s.ledger)?,
                 s.created_at,
                 s.updated_at,
@@ -279,6 +281,8 @@ impl SqliteStore {
             parent_session: row.get("parent_session")?,
             parent_upto: row.get("parent_upto")?,
             pinned: row.get::<_, i64>("pinned").unwrap_or(0) != 0,
+            archived_at: row.get("archived_at").unwrap_or(None),
+            message_count: None,
             ledger: serde_json::from_str(&row.get::<_, String>("ledger")?).unwrap_or_default(),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -306,6 +310,8 @@ impl SqliteStore {
             last_message_preview: None,
             last_active_at: None,
             pinned: false,
+            archived_at: None,
+            message_count: None,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -324,7 +330,19 @@ impl SqliteStore {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 200")?;
+        // 主列表不含归档态（归档区走 list_archived_sessions）
+        let mut st = conn.prepare(
+            "SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT 200",
+        )?;
+        let rows = st.query_map([], Self::row_session)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 归档区视图：只含归档态，按归档时间倒序
+    pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn
+            .prepare("SELECT * FROM sessions WHERE archived_at IS NOT NULL ORDER BY archived_at DESC")?;
         let rows = st.query_map([], Self::row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -550,6 +568,66 @@ impl SqliteStore {
         )?;
         let rows = st.query_map(rusqlite::params![session_id, lim], Self::row_message)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 会话内容检索（与 FSDB 实现同口径）：标题 + 最近 200 条消息正文，
+    /// 大小写不敏感；标题命中优先、同组按活跃时间倒序；每会话 ≤2 条片段。
+    /// 当前运行时走 FSDB（`crate::store::Store`），此实现保持两存储 API 对等。
+    pub fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchHit>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let q_lower = q.to_lowercase();
+        let limit = limit.max(1);
+        let mut hits: Vec<SessionSearchHit> = Vec::new();
+        for s in self.list_sessions()? {
+            let msgs = self.list_messages(&s.id, 200).unwrap_or_default();
+            let title_match = s.title.to_lowercase().contains(&q_lower);
+            let matched: Vec<&ChatMessage> = msgs
+                .iter()
+                .filter(|m| {
+                    let text = crate::store::message_text(m);
+                    !text.is_empty() && text.to_lowercase().contains(&q_lower)
+                })
+                .collect();
+            if !title_match && matched.is_empty() {
+                continue;
+            }
+            let last_active_at = msgs
+                .last()
+                .map(|m| m.created_at.clone())
+                .unwrap_or_else(|| s.updated_at.clone());
+            let snippets = matched
+                .iter()
+                .take(2)
+                .map(|m| {
+                    let body = crate::store::message_text(m);
+                    MessageSnippet {
+                        message_id: m.id.clone(),
+                        role: m.role,
+                        text: crate::store::snippet_around(&body, &q_lower, 80),
+                        created_at: m.created_at.clone(),
+                        agent_id: m.agent_id.clone(),
+                    }
+                })
+                .collect();
+            hits.push(SessionSearchHit {
+                session_id: s.id.clone(),
+                title: s.title.clone(),
+                title_match,
+                message_matches: matched.len(),
+                snippets,
+                last_active_at,
+            });
+        }
+        hits.sort_by(|a, b| {
+            b.title_match
+                .cmp(&a.title_match)
+                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+        });
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     /// 截断活跃消息流:保留前 keep 条,被截断部分标记归档(可查)
@@ -903,8 +981,9 @@ impl SqliteStore {
     /// 按组列出会话
     pub fn list_sessions_in_group(&self, group_id: &str) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
+        // 组内主列表不含归档态
         let mut st = conn.prepare(
-            "SELECT * FROM sessions WHERE group_id=?1 ORDER BY updated_at DESC LIMIT 200",
+            "SELECT * FROM sessions WHERE group_id=?1 AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 200",
         )?;
         let rows = st.query_map(rusqlite::params![group_id], Self::row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -1117,6 +1196,34 @@ impl SqliteStore {
         }
     }
 
+    /// 显式删除配对码（控制台撤销 / 过期码清理；幂等：不存在也 Ok）
+    pub fn delete_pairing_code(&self, code: &str) -> Result<()> {
+        self.fsdb.delete("pairing_codes", code)
+    }
+
+    // ---------------------------------------------------------------- 通道聊天流（chat flow）
+
+    pub fn put_channel_flow(&self, flow: &ChannelFlow) -> Result<()> {
+        self.fsdb.put("channel_flows", &flow.id, flow)
+    }
+
+    pub fn get_channel_flow(&self, id: &str) -> Result<Option<ChannelFlow>> {
+        self.fsdb.get("channel_flows", id)
+    }
+
+    pub fn list_channel_flows(&self, channel: Option<&str>) -> Result<Vec<ChannelFlow>> {
+        let mut list: Vec<ChannelFlow> = self.fsdb.list("channel_flows")?;
+        if let Some(c) = channel {
+            list.retain(|f| f.channel_id == c);
+        }
+        list.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+        Ok(list)
+    }
+
+    pub fn delete_channel_flow(&self, id: &str) -> Result<()> {
+        self.fsdb.delete("channel_flows", id)
+    }
+
     pub fn put_event_trigger(&self, trigger: &EventTrigger) -> Result<()> {
         self.fsdb.put("event_triggers", &trigger.id, trigger)
     }
@@ -1147,6 +1254,32 @@ mod store_tests {
     fn test_store() -> Store {
         let dir = std::env::temp_dir().join(format!("exm-store-{}", uuid::Uuid::new_v4()));
         Store::open(&dir).expect("打开测试存储失败")
+    }
+
+
+    fn sqlite_test_store() -> SqliteStore {
+        let dir = std::env::temp_dir().join(format!("exm-sqlite-{}", uuid::Uuid::new_v4()));
+        SqliteStore::open(&dir).expect("打开测试 SQLite 存储失败")
+    }
+
+    /// 检索（sqlite 同口径）：正文大小写不敏感命中、空查询无结果
+    #[test]
+    fn 检索_sqlite同口径() {
+        let store = sqlite_test_store();
+        let a = store.create_session("部署方案", "exmachina").unwrap();
+        store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "Kubernetes 滚动发布")],
+            )
+            .unwrap();
+        let hits = store.search_sessions("kubernetes", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, a.id);
+        assert!(!hits[0].snippets.is_empty());
+        assert!(store.search_sessions("   ", 20).unwrap().is_empty());
     }
 
     #[test]

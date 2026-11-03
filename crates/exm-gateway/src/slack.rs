@@ -305,6 +305,12 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         .and_then(|x| x.as_str())
                         .unwrap_or("")
                         .to_string();
+                    // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）。
+                    // Slack 事件载荷只带 user id，显示名需另查 users.info——
+                    // 此处先以 id 标注（身份可区分），显示名增强留待后续
+                    let sender_mark = crate::channel_util::sender_origin(
+                        is_group, "", &external_id,
+                    );
                     let gate_ctx = InboundCtx {
                         text: &text,
                         external_id: &external_id,
@@ -314,7 +320,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         chat_key: channel.as_str(),
                     };
                     match admit(core.as_ref(), &ch, &gate_ctx).await {
-                        GateDecision::Allow => {}
+                        GateDecision::Allow(clean) => {
+                            text = clean;
+                        }
                         GateDecision::Ignore => continue,
                         GateDecision::Deny(reply) => {
                             let client2 = client.clone();
@@ -377,6 +385,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                             &external_id,
                             saved,
                             text.trim(),
+                            sender_mark.as_deref(),
                         )
                         .await;
                     });
@@ -449,6 +458,7 @@ async fn handle_message(
     external_id: &str,
     media: Vec<(String, String, String)>,
     text: &str,
+    sender_mark: Option<&str>,
 ) {
     let Some((run, rx)) = ChannelRun::begin(core, ch, channel).await else {
         return;
@@ -493,6 +503,12 @@ async fn handle_message(
             async move { slack_send_media(&client2, &token2, &chan, item).await }
         },
     );
+    // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
+    let run = if let Some(mark) = sender_mark {
+        run.with_origin(mark)
+    } else {
+        run
+    };
     run.run(&text).await;
     let _ = reply.await;
 }

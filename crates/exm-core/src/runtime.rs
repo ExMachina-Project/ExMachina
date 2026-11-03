@@ -149,6 +149,8 @@ impl AgentRuntime {
         specs = crate::tools::ToolGateway::tool_specs_experiments(
             specs,
             self.experiments.dynamic_compaction,
+            self.experiments.sliding_context_window,
+            self.experiments.meta_agent,
         );
         // 声明式自定义工具（按 agents 可见性）与 MCP 第三方工具一并下发；
         // 仅聊天档连 schema 都不下发——不承诺、不执行任何工具。
@@ -387,6 +389,9 @@ impl AgentRuntime {
         let mut usage_prompt: u64 = 0;
         let mut usage_completion: u64 = 0;
         let mut last_model = String::new();
+        // 元认知反思态（每轮一次上限）
+        let mut consecutive_failures: u32 = 0;
+        let mut reflected = false;
 
         // 原生 function calling：按白名单生成工具 schema + 该个体可见的 MCP 工具
         // （后端未就绪 / 模式不支持的工具不下发——不承诺不存在的能力）
@@ -401,6 +406,8 @@ impl AgentRuntime {
         specs = crate::tools::ToolGateway::tool_specs_experiments(
             specs,
             self.experiments.dynamic_compaction,
+            self.experiments.sliding_context_window,
+            self.experiments.meta_agent,
         );
         // 仅聊天档连自定义 / MCP schema 都不下发
         if scope.allows_tools() {
@@ -484,6 +491,22 @@ impl AgentRuntime {
                                 messages.push(um);
                             }
                         }
+                        // 元认知反思钩子（实验性 metaAgent）：连续失败 ≥2 时触发一次
+                        // 反思调用（策略 JSON 注入后续循环;失败静默降级 continue）
+                        if self.experiments.meta_agent && !reflected && !result.ok {
+                            consecutive_failures += 1;
+                            if consecutive_failures >= 2 {
+                                reflected = true;
+                                if let Some(hint) = self
+                                    .meta_reflect(session_id, &consecutive_failures, &done_tools)
+                                    .await
+                                {
+                                    messages.push(ChatMessage::user(hint));
+                                }
+                            }
+                        } else if result.ok {
+                            consecutive_failures = 0;
+                        }
                         continue;
                     }
                 }
@@ -520,6 +543,53 @@ impl AgentRuntime {
                 done_tools.join("、")
             }
         )
+    }
+
+    /// 元认知反思（实验性 metaAgent）：连续失败触发的单次非流式调用,
+    /// 输出策略 JSON → 注入后续循环的系统提示。失败/解析失败 → None(静默降级)。
+    async fn meta_reflect(
+        &self,
+        session_id: &str,
+        failures: &u32,
+        done_tools: &[String],
+    ) -> Option<String> {
+        let trace = crate::round_trace::snapshot_tool_trace(session_id);
+        let req = crate::provider::ChatRequest::new(
+            self.model.clone(),
+            vec![
+                crate::provider::ChatMessage::system(
+                    "你是元认知反思器。基于本轮工具轨迹判断策略是否需要调整。只输出 JSON:\n{\"strategy\": \"replan\"|\"redirect\"|\"compact\"|\"continue\", \"note\": \"一句话说明\"}\nreplan=重新分解任务;redirect=换工具/换路径;compact=先压缩上下文;continue=保持现策略",
+                ),
+                crate::provider::ChatMessage::user(format!(
+                    "连续失败 {failures} 次。已用工具: {done_tools:?}\n工具轨迹: {trace}"
+                )),
+            ],
+        );
+        let out = self.provider.chat(req).await.ok()?;
+        let trimmed = out.content.trim();
+        let start = trimmed.find('{')?;
+        let end = trimmed.rfind('}')?;
+        let v: serde_json::Value = serde_json::from_str(&trimmed[start..=end]).ok()?;
+        let strategy = v.get("strategy")?.as_str()?.to_string();
+        let note = v
+            .get("note")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let hint = match strategy.as_str() {
+            "replan" => "【元认知】连续失败提示当前分解方式可能有误:请重新审视任务分解,换一条更稳的路径。",
+            "redirect" => "【元认知】连续失败提示该工具/路径不通:请更换工具或调整调用方式。",
+            "compact" => "【元认知】上下文可能已混入大量失败噪声:请先理清已知有效信息,基于确定的事实继续。",
+            _ => return None, // continue = 不注入
+        };
+        let _ = self.tools.events.send(crate::types::CoreEvent {
+            kind: "meta.reflect".into(),
+            session_id: session_id.to_string(),
+            payload: serde_json::json!({
+                "strategy": strategy, "note": note, "consecutiveFailures": failures,
+            }),
+        });
+        Some(format!("{hint}（{note}）"))
     }
 
     /// 同轮工具调用：只读工具并发（join_all），写工具与 MCP 按原顺序串行。

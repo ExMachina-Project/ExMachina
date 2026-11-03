@@ -1,0 +1,37 @@
+# EXMACHINA 生产部署编排（镜像模式,无源码）
+#   适用:服务器上只有部署目录(本目录),不含仓库源码;镜像从注册表拉取。
+#   镜像源:优先环境变量 EXM_IMAGE(如 ghcr.io/exmachina-project/exmachina:latest),
+#           未设置时用下方 image: 字段默认值。
+#   一键更新:WebUI 设置页「检查更新 → 一键更新」;更新 = compose pull + 辅助容器 recreate。
+#   需要更新能力时,取消下方 docker.sock 与 docker cli 两段挂载的注释(更新器经宿主引擎操作)。
+services:
+  exmachina:
+    image: ${EXM_IMAGE:-ghcr.io/exmachina-project/exmachina:latest}
+    container_name: exmachina
+    ports:
+      - "4173:4173"
+    environment:
+      - EXM_LANG=${EXM_LANG:-zh}
+      - EXM_LLM_BASE_URL=${EXM_LLM_BASE_URL:-}
+      - EXM_LLM_API_KEY=${EXM_LLM_API_KEY:-}
+      - EXM_LLM_MODEL_ORCH=${EXM_LLM_MODEL_ORCH:-}
+      - EXM_LLM_MODEL_UNIT=${EXM_LLM_MODEL_UNIT:-}
+      - EXM_AUTH_KEY=${EXM_AUTH_KEY:-}
+      # 上游仓库与分支(更新检查用;与镜像发布源一致)
+      - EXM_UPDATE_REMOTE=${EXM_UPDATE_REMOTE:-https://github.com/ExMachina-Project/ExMachina.git}
+      - EXM_UPDATE_BRANCH=${EXM_UPDATE_BRANCH:-main}
+    volumes:
+      - exmachina-state:/app/.exmachina
+      - exmachina-plugins:/app/plugins
+      - ./entities:/app/entities
+      # 部署目录挂到 /host(更新检查的 image 模式探测 + compose pull 工作目录)
+      - ./:/host
+      # ---- 一键更新(可选):宿主 docker 引擎访问 ----
+      # - /var/run/docker.sock:/var/run/docker.sock
+      # - /usr/bin/docker:/usr/local/bin/docker:ro
+      # - /usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro
+    restart: unless-stopped
+
+volumes:
+  exmachina-state:
+  exmachina-plugins:

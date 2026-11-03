@@ -7,10 +7,12 @@ import { api, type ApprovalRequest } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
+import { useIsNarrow } from "../useIsNarrow";
 
 export function ApprovalsView(): React.ReactElement {
   const t = useT();
   const requestNav = useExm((st) => st.requestNav);
+  const narrow = useIsNarrow();
   const [status, setStatus] = useState<string>("pending");
   const [items, setItems] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(false);
@@ -67,10 +69,12 @@ export function ApprovalsView(): React.ReactElement {
         }
       />
       <Spin spinning={loading}>
+        <div className={narrow ? "tbl-fit" : undefined}>
         <Table<ApprovalRequest>
           size="small"
           rowKey="id"
           pagination={{ pageSize: 12 }}
+          scroll={{ x: narrow ? 560 : undefined }}
           dataSource={items}
           locale={{ emptyText: <BrandEmpty description={t("approvals.empty")} className="pane-empty" /> }}
           columns={[
@@ -94,21 +98,51 @@ export function ApprovalsView(): React.ReactElement {
               title: t("approvals.colCommand"),
               render: (_, r) => (
                 <Space direction="vertical" size={0} className="full-width">
+                  {r.command.startsWith("[root] ") && (
+                    <Tag color="error" style={{ marginBottom: 4 }}>
+                      🚨 {t("approval.rootElevation")}
+                    </Tag>
+                  )}
+                  {r.command.startsWith("[meta] ") && (
+                    <Tag color="purple" style={{ marginBottom: 4 }}>
+                      🧠 {t("approval.metaProposal")}
+                    </Tag>
+                  )}
                   <code className="cmd-code">$ {r.command}</code>
-                  <span className="mono dim">
-                    {r.agentId} · {r.createdAt}
-                  </span>
+                  {/* 窄屏：会话跳转并入元信息行（原独立列已裁、操作列只留批准/拒绝
+                      ——icon 钮在 390px 仍差 10px 出视口，元信息行点击热区更大且省一列宽） */}
+                  {narrow ? (
+                    r.sessionId ? (
+                      <button
+                        className="link-btn mono dim"
+                        onClick={() => requestNav("chat", r.sessionId)}
+                        aria-label={t("approvals.jump")}
+                      >
+                        {r.agentId} · {String(r.createdAt ?? "").replace("T", " ").slice(5, 16)} ↗
+                      </button>
+                    ) : (
+                      <span className="mono dim">{r.agentId} · {String(r.createdAt ?? "").replace("T", " ").slice(5, 16)}</span>
+                    )
+                  ) : (
+                    <span className="mono dim">
+                      {r.agentId} · {String(r.createdAt ?? "").replace("T", " ").slice(5, 16)}
+                    </span>
+                  )}
                 </Space>
               ),
             },
+            // 窄屏降级：结果与所属会话列隐藏（详情在命令 cell 元信息与跳转里可达），
+            // 操作列（批准/拒绝）必须常驻——移动端功能不可达比信息缺失严重
             {
               title: t("approvals.colResult"),
+              responsive: ["md"],
               render: (_, r) =>
                 r.result ? <span className="dim result-cell">{r.result.slice(0, 240)}</span> : <span className="dim">—</span>,
             },
             {
               title: t("approvals.colSession"),
               width: 90,
+              responsive: ["md"],
               render: (_, r) =>
                 r.sessionId ? (
                   <Button
@@ -126,6 +160,8 @@ export function ApprovalsView(): React.ReactElement {
             {
               title: t("approvals.colOps"),
               width: 160,
+              // 窄屏固定右侧：批准/拒绝是审批页核心操作，恒可达（不依赖横滚）
+              fixed: narrow ? "right" : undefined,
               render: (_, r) =>
                 r.status === "pending" ? (
                   <Space>
@@ -135,13 +171,15 @@ export function ApprovalsView(): React.ReactElement {
                     <Button size="small" danger icon={<CloseOutlined />} onClick={() => void decide(r.id, false)}>
                       {t("approvals.reject")}
                     </Button>
+                    {/* 窄屏：跳转已并入命令列元信息行（narrow 分支），操作列只留批准/拒绝 */}
                   </Space>
                 ) : (
-                  <span className="mono dim">{r.decidedAt ?? "—"}</span>
+                  <span className="mono dim" title={r.decidedAt ?? ""}>{r.decidedAt ? String(r.decidedAt).replace("T", " ").slice(5, 16) : "—"}</span>
                 ),
             },
           ]}
         />
+        </div>
       </Spin>
     </div>
   );
