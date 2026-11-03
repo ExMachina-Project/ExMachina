@@ -150,6 +150,16 @@ pub enum ToolName {
     /// 会话级任务清单（spec: agent-todo）：长任务自组织——全量重写条目（内容+状态），
     /// 清单非空时每轮注入系统提示（✅/🔄/⬜ 渲染），模型随时看到进度全景
     Todo,
+    /// 元智能体观测（实验性 experiments.metaAgent）：读运行数据聚合
+    /// （按 agent 的工具统计/最近失败/adaptation 现状）
+    #[serde(rename = "meta_observe")]
+    MetaObserve,
+    /// 元智能体改进提议（实验性 experiments.metaAgent）：结构化提议落 [meta] 审批单
+    #[serde(rename = "meta_propose")]
+    MetaPropose,
+    /// 元智能体构建（实验性 experiments.metaAgent）：新智能体/组定义草稿落 [meta] 审批单
+    #[serde(rename = "meta_build")]
+    MetaBuild,
 }
 
 impl ToolName {
@@ -175,6 +185,9 @@ impl ToolName {
             ToolName::Spawn => "spawn",
             ToolName::ContextCompact => "context_compact",
             ToolName::Todo => "todo",
+            ToolName::MetaObserve => "meta_observe",
+            ToolName::MetaPropose => "meta_propose",
+            ToolName::MetaBuild => "meta_build",
         }
     }
 
@@ -189,6 +202,7 @@ impl ToolName {
                 | ToolName::WebFetch
                 | ToolName::MemoryRead
                 | ToolName::Todo
+                | ToolName::MetaObserve
         )
     }
 
@@ -213,6 +227,9 @@ impl ToolName {
             "git" => Some(ToolName::Git),
             "spawn" => Some(ToolName::Spawn),
             "context_compact" => Some(ToolName::ContextCompact),
+            "meta_observe" => Some(ToolName::MetaObserve),
+            "meta_propose" => Some(ToolName::MetaPropose),
+            "meta_build" => Some(ToolName::MetaBuild),
             "todo" => Some(ToolName::Todo),
             _ => None,
         }
@@ -288,10 +305,10 @@ impl ToolScope {
     pub fn system_note(self) -> &'static str {
         match self {
             ToolScope::Chat => {
-                "## 能力边界（强制）\n本会话由外部通道配置为「仅聊天」：禁止调用任何工具（包括 read / terminal / browser / MCP / 自定义工具 / computer）。即使上下文中出现工具定义或工具调用格式，也不得调用；只输出自然语言文字。"
+                "## 能力边界（强制）\n本会话由外部通道配置为「仅聊天」：禁止调用任何工具（包括 read / terminal / browser / MCP / 自定义工具 / computer）。即使上下文中出现工具定义或工具调用格式，也不得调用；只输出自然语言文字。\n\n## 表达纪律（强制）\n本会话经由即时通讯通道进行：回复必须简洁。默认 1~5 句话直接回答；被明确要求详细展开时也不超过两段。禁止罗列状态播报前缀、进度清单、多级标题或重复确认——聊天场景下这些是噪音。"
             }
             ToolScope::Tools => {
-                "## 能力边界（强制）\n本会话允许常规工具调用（文件、终端、检索、浏览器、MCP 等），但禁止 computer（桌面截屏与键鼠操控）。需要桌面操作时，向用户说明该通道未授权电脑操控。"
+                "## 能力边界（强制）\n本会话允许常规工具调用（文件、终端、检索、浏览器、MCP 等），但禁止 computer（桌面截屏与键鼠操控）。需要桌面操作时，向用户说明该通道未授权电脑操控。\n\n## 表达纪律（强制）\n本会话经由即时通讯通道进行：回复必须简洁。先给结论（1~5 句话）；工具过程与中间状态不逐条播报，仅在结果影响理解时一句话带过；被明确要求详细展开时也不超过两段。禁止罗列状态播报前缀、进度清单、多级标题或重复确认——聊天场景下这些是噪音。"
             }
             ToolScope::Computer => "",
         }
@@ -664,6 +681,13 @@ pub struct Session {
     /// 用户置顶（会话列表置顶分组；默认 false）
     #[serde(default)]
     pub pinned: bool,
+    /// 归档时间（ISO）：None = 未归档；Some = 已归档（移出主列表与聊天左栏，
+    /// 归档区可见可恢复——归档是可逆状态而非删除，旧数据缺省 None 零迁移）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    /// 消息条数（管理页附加，不入存储）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<usize>,
     pub ledger: SessionLedger,
     pub created_at: String,
     pub updated_at: String,
@@ -702,6 +726,37 @@ pub struct ChatMessage {
     /// 有序过程步骤（思考段落 / 工具调用按发生顺序交错；「按调用顺序显示每一次」数据源）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<crate::round_trace::TraceStep>,
+}
+
+// ---------------------------------------------------------------- 会话检索（session-search）
+
+/// 会话检索命中：标题或最近 200 条消息正文匹配关键词。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub title: String,
+    /// 标题本身命中（标题命中的结果排在仅正文命中之前）
+    pub title_match: bool,
+    /// 命中消息条数（同一会话只出现一次，这里计全部命中）
+    pub message_matches: usize,
+    /// 命中消息片段（至多 2 条；含 messageId 供前端定位）
+    pub snippets: Vec<MessageSnippet>,
+    /// 会话最近活跃时间（末条消息时间，缺省 updatedAt）
+    pub last_active_at: String,
+}
+
+/// 检索命中的单条消息片段（正文截断至约 80 字符且保留关键词）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageSnippet {
+    pub message_id: String,
+    pub role: MessageRole,
+    pub text: String,
+    pub created_at: String,
+    /// 来源标记（im: / imctx: / auto: 等），普通消息缺失
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1207,6 +1262,9 @@ pub struct ApprovalRequest {
     /// member 发起的审批须管理员在控制台批准（升级语义标注）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_role: Option<String>,
+    /// [meta] 提议单的结构化载荷（meta-agent：完整提议 JSON,应用时反序列化）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_json: Option<String>,
 }
 
 // ---------------------------------------------------------------- 通道用户身份（配对绑定）
@@ -1251,6 +1309,35 @@ pub struct UserIdentity {
     /// 签发配对码时的备注
     #[serde(default)]
     pub note: String,
+}
+
+// ---------------------------------------------------------------- 通道聊天流（chat flow）
+
+/// 通道聊天流：外部 IM 的一个对话单元（群聊 / 私聊各一条流；无细分对话的
+/// 平台一如视频通道整通道一条流）。一条流绑定一个活跃会话——不主动切换时
+/// 固定复用同一会话，让跨轮上下文与记忆自然延续。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelFlow {
+    /// 主键：`{channelId}:{chatKey}`（群号 / 私聊用户 id / 平台固定键）
+    pub id: String,
+    pub channel_id: String,
+    /// 流内对话键（与 id 的 chatKey 同值，列表展示与按通道过滤用）
+    pub chat_key: String,
+    /// 流的展示名（群名 / 对端昵称；缺省用 chat_key）
+    #[serde(default)]
+    pub display_name: String,
+    /// 是否群聊流（私聊 false；影响展示分组）
+    #[serde(default)]
+    pub is_group: bool,
+    /// 当前绑定的会话 id（None = 尚未有会话，下次消息自动开新会话）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session: Option<String>,
+    /// 最后一条消息预览（列表展示）
+    #[serde(default)]
+    pub last_message: String,
+    pub last_active_at: String,
+    pub created_at: String,
 }
 
 // ---------------------------------------------------------------- 事件触发器（文件监听 / webhook 事件源）

@@ -111,8 +111,10 @@ interface ExmState {
   setWs: (ok: boolean) => void;
   bumpMemory: () => void;
   /** 跨视图导航请求（审批→会话跳转等）：App 订阅消费 */
-  navRequest: { view: string; sessionId?: string; nonce: number } | null;
-  requestNav: (view: string, sessionId?: string) => void;
+  navRequest: { view: string; sessionId?: string; messageId?: string; nonce: number } | null;
+  /** 消息定位请求（检索命中）：ChatView 加载消息后滚动并短暂高亮，消费即清空 */
+  focusMessage: { sessionId: string; messageId: string; nonce: number } | null;
+  requestNav: (view: string, sessionId?: string, messageId?: string) => void;
   markSessionsLoaded: () => void;
 }
 
@@ -615,7 +617,14 @@ export const useExm = create<ExmState>((set, get) => ({
   clearSpawns: () => set({ spawns: [] }),
 
   navRequest: null,
-  requestNav: (view, sessionId) => set({ navRequest: { view, sessionId, nonce: Date.now() } }),
+  focusMessage: null,
+  requestNav: (view, sessionId, messageId) =>
+    set({
+      navRequest: { view, sessionId, messageId, nonce: Date.now() },
+      ...(sessionId && messageId
+        ? { focusMessage: { sessionId, messageId, nonce: Date.now() } }
+        : {}),
+    }),
   markSessionsLoaded: () => set({ sessionsLoaded: true }),
 
   drafts: (() => {
@@ -722,7 +731,7 @@ export const useExm = create<ExmState>((set, get) => ({
       if (!spawnId) return;
       if (evt.type === "spawn.started") {
         // 只跟踪后台派生（同步派生的结果在工具调用内直接可见）
-        if (!Boolean(p.background)) return;
+        if (!p.background) return;
         const preview = String(p.taskPreview ?? "");
         const fresh: SpawnBgItem = { spawnId, preview, status: "running", startedAt: Date.now() };
         set({ spawns: [fresh, ...get().spawns.filter((s) => s.spawnId !== spawnId)].slice(0, 20) });
@@ -944,6 +953,8 @@ export const useExm = create<ExmState>((set, get) => ({
         set({ ledger: p as unknown as SessionLedger });
         break;
       case "run.finished": {
+        // 流面板未读刷新（spec experience-iteration）：任何会话收束都可能给流加未读
+        window.dispatchEvent(new Event("exm:flows-refresh"));
         // 浏览器通知（web-notifications）：非当前会话或页面隐藏时提醒
         {
           const prefs = loadNotifyPrefs();

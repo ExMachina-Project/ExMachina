@@ -8,6 +8,7 @@ import { api, type StoredEvent } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
+import { fullTime, relativeTime } from "../time";
 
 /** 事件行的语义分组类（配 .event-row.ev-* 的左缘色条） */
 function eventGroup(kind: string): string {
@@ -33,7 +34,7 @@ function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; co
   // 事件信封有两层：外层 type="event" 只是投递标记，真实事件名在 payload.type
   // （此前按 payload.kind 取，取不到 → 每一行都退化成「event / 内部事件」）。
   const kind = String(p.type ?? p.kind ?? e.type ?? e.kind ?? "event");
-  let text = "";
+  let text: string;
   switch (kind) {
     case "dispatch":
       text = t("activity.dispatch", {
@@ -157,8 +158,8 @@ function AuditPane(): React.ReactElement {
                 <Tag color={it.ok ? "success" : "error"}>{String(it.ok ? "OK" : "ERR")}</Tag>
                 <span className="mono">{String(it.tool ?? "")}</span>
                 <span className="dim">{String(it.agentId ?? "")}</span>
-                <span className="dim mono" style={{ marginLeft: "auto" }}>
-                  {String(it.createdAt ?? "").replace("T", " ").slice(0, 19)} · {String(it.durationMs ?? 0)}ms
+                <span className="dim mono" style={{ marginLeft: "auto" }} title={fullTime(String(it.createdAt ?? ""))}>
+                  {String(it.createdAt ?? "").replace("T", " ").slice(5, 16)} · {String(it.durationMs ?? 0)}ms
                 </span>
               </div>
               {isOpen && (
@@ -253,7 +254,7 @@ function EventsPane(): React.ReactElement {
                     {d.tag}
                   </Tag>
                   <span className="event-text">{d.text}</span>
-                  <span className="mono dim event-time">{e.createdAt ?? ""}</span>
+                  <span className="mono dim event-time" title={fullTime(e.createdAt)}>{relativeTime(e.createdAt)}</span>
                 </div>
               );
             })}

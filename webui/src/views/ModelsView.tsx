@@ -8,17 +8,19 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Spin, Switch,
+  Button, Card, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch,
   Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
 import { MaskedPasswordInput } from "../components/MaskedInput";
 import {
-  ApiOutlined, CheckCircleOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
+  ApiOutlined, AudioOutlined, CheckCircleOutlined, ClusterOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
 import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../api";
 import { buildCapabilityOptions } from "../models";
+import { getTestRecord, putTestRecord } from "../testLog";
+import { CapabilityBadges, badgesOfModel } from "../components/CapabilityBadges";
 import { PageHeader } from "../components/PageHeader";
 import { useT, type TKey } from "../i18n/core";
 
@@ -53,6 +55,9 @@ const PRESET_LABEL: Partial<Record<string, TKey>> = {
 };
 
 const CUSTOM = "__custom__";
+
+/** 页内分页：提供商 ↔ 功能分配（能力模型拆开，两件事不再混排一页） */
+type Tab = "providers" | "caps";
 
 /** API 协议选项的显示名走 i18n（值为协议标识，与后端契约） */
 const API_FORMAT_KEYS: { value: string; key: TKey }[] = [
@@ -89,10 +94,15 @@ export function ModelsView(): React.ReactElement {
   const [info, setInfo] = useState<LlmProfilesInfo | null>(null);
   const [caps, setCaps] = useState<LlmCapabilities>({ speech: "", transcribe: "", visionRelay: "", embedding: "" });
   const [capSaving, setCapSaving] = useState(false);
+  /** 页内分页：providers = 提供商与模型清单；caps = 功能分配（能力模型） */
+  const [tab, setTab] = useState<Tab>("providers");
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState<LlmProfile | null>(null);
   const [testing, setTesting] = useState<string>("");
+  /** 测试留存版本号：putTestRecord 后自增触发重渲染读新记录 */
+  const [testTick, setTestTick] = useState(0);
+  void testTick;
   const [fetchingModels, setFetchingModels] = useState(false);
   const [saving, setSaving] = useState(false);
   /** 模型选择弹窗：远端清单拉取后先展示，勾选后才进表单（避免全量塞入） */
@@ -350,6 +360,16 @@ export function ModelsView(): React.ReactElement {
     setTesting(key);
     try {
       const r = await api.testLlmProfile(id);
+      // 本地留存（刷新不丢）：失败保留上次成功由展示层合并——记录只反映当次
+      if (id) {
+        putTestRecord(id, {
+          at: new Date().toISOString(),
+          ok: !!r.ok,
+          latencyMs: r.latencyMs,
+          reason: r.ok ? undefined : (r.error ?? r.message ?? `HTTP ${r.status ?? "?"}`).slice(0, 120),
+        });
+        setTestTick((n) => n + 1);
+      }
       if (r.ok) {
         message.success(t("models.testOk", { status: r.status ?? 200 }));
       } else if (r.configured === false || r.mock) {
@@ -382,20 +402,33 @@ export function ModelsView(): React.ReactElement {
     label: string,
     hint: string,
     placeholder: string,
-  ) => (
-    <div className="cap-row" key={key}>
-      <div className="cap-label">{label}</div>
-      <Select
-        allowClear
-        showSearch
-        value={caps[key] || undefined}
-        placeholder={placeholder}
-        options={capOptions}
-        onChange={(v) => setCaps((c) => ({ ...c, [key]: v ?? "" }))}
-      />
-      <div className="dim cap-hint">{hint}</div>
-    </div>
-  );
+    icon: React.ReactNode,
+  ) => {
+    const val = caps[key] || "";
+    return (
+      <div className="cap-slot" key={key}>
+        <div className="cap-slot-head">
+          <span className="cap-slot-icon">{icon}</span>
+          <span className="cap-slot-name">{label}</span>
+          {val ? (
+            <Tag className="tag-ok cap-slot-set">{t("models.capSet")}</Tag>
+          ) : (
+            <Tag className="cap-slot-unset">{t("models.capUnset")}</Tag>
+          )}
+        </div>
+        <Select
+          allowClear
+          showSearch
+          className="cap-slot-select"
+          value={val || undefined}
+          placeholder={placeholder}
+          options={capOptions}
+          onChange={(v) => setCaps((c) => ({ ...c, [key]: v ?? "" }))}
+        />
+        <div className="cap-hint">{hint}</div>
+      </div>
+    );
+  };
 
   const saveCaps = async () => {
     setCapSaving(true);
@@ -421,22 +454,47 @@ export function ModelsView(): React.ReactElement {
       <PageHeader
         en="MODELS"
         title={t("nav.models")}
-        desc={t("models.desc")}
+        desc={tab === "caps" ? t("models.capDesc") : t("models.desc")}
         actions={
           <>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              {t("models.add")}
-            </Button>
-            <Button icon={<ApiOutlined />} onClick={() => void test(undefined)} loading={testing === "__resolved__"}>
-              {t("models.testGlobal")}
-            </Button>
-            <Button icon={<ReloadOutlined />} onClick={() => void load()}>
-              {t("common.refresh")}
-            </Button>
+            {/* 视图切换与动作分组（视觉走查：切换/操作分层，Divider 区隔主次） */}
+            <Space split={<span className="head-divider" />}>
+              <Segmented
+                value={tab}
+                onChange={(v) => setTab(v as Tab)}
+                options={[
+                  { value: "providers", label: t("models.tabProviders") },
+                  { value: "caps", label: t("models.tabCaps") },
+                ]}
+              />
+              {tab === "providers" && (
+                <>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+                    {t("models.add")}
+                  </Button>
+                  <Button icon={<ApiOutlined />} onClick={() => void test(undefined)} loading={testing === "__resolved__"}>
+                    {t("models.testGlobal")}
+                  </Button>
+                </>
+              )}
+              {tab === "caps" && (
+                <Button
+                  type="primary"
+                  loading={capSaving}
+                  onClick={() => void saveCaps()}
+                >
+                  {t("common.save")}
+                </Button>
+              )}
+              <Button icon={<ReloadOutlined />} onClick={() => void load()}>
+                {t("common.refresh")}
+              </Button>
+            </Space>
           </>
         }
       />
 
+      {tab === "providers" && (
       <Spin spinning={loading}>
         <div className="skill-grid">
           {profiles.map((p) => {
@@ -447,7 +505,7 @@ export function ModelsView(): React.ReactElement {
               <Card
                 key={p.id}
                 size="small"
-                className="hud model-card"
+                className={`hud model-card ${active ? "model-card-active" : ""}`}
                 title={
                   <div className="model-head">
                     <span>{p.name}</span>
@@ -456,6 +514,7 @@ export function ModelsView(): React.ReactElement {
                 }
                 extra={
                   <Space size={4}>
+                    {active && <Tag className="tag-ok model-active-tag">{t("models.globalDefault")}</Tag>}
                     {!active && (
                       <Tooltip title={t("models.setDefaultTip")}>
                         <Button size="small" icon={<CheckCircleOutlined />} onClick={() => void activate(p.id)}>
@@ -475,6 +534,47 @@ export function ModelsView(): React.ReactElement {
                   </Space>
                 }
               >
+                {/* 默认模型：卡内主角（大字 mono），一眼看清这家端点跑的是谁 */}
+                <div className="model-default">
+                  <span className="model-default-name mono">{p.model || <span className="dim">{t("models.noDefaultModel")}</span>}</span>
+                  {active ? (
+                    <Tag className="tag-ok">{t("models.inUse")}</Tag>
+                  ) : null}
+                </div>
+                {/* 档案状态行（model-settings-ux）：不进编辑表单即可见的关键状态 */}
+                <div className="model-status-row">
+                  <span className="model-status-item">
+                    <span className="k">{t("models.keyLabel")}</span>
+                    {hasKey ? (
+                      <Tag className="tag-ok">{t("models.keyPoolHealth", { ok: keyCount, total: keyCount })}</Tag>
+                    ) : (
+                      <Tag color="warning">{t("models.keyMissing")}</Tag>
+                    )}
+                  </span>
+                  <span className="model-status-item">
+                    <span className="k">{t("models.modelList")}</span>
+                    <span className="mono">{t("models.modelCount", { n: p.models.length })}</span>
+                  </span>
+                  <span className={`model-status-item test-state ${(() => {
+                    const rec = getTestRecord(p.id);
+                    return rec ? (rec.ok ? "ok" : "fail") : "";
+                  })()}`}>
+                    <span className="k">{t("models.statusLabel")}</span>
+                    {(() => {
+                      const rec = getTestRecord(p.id);
+                      if (!rec) return <span className="dim">{t("models.followGlobal")}</span>;
+                      const time = new Date(rec.at);
+                      const rel = `${Math.max(1, Math.round((Date.now() - time.getTime()) / 60000))}min`;
+                      return rec.ok ? (
+                        <span className="mono test-ok">{t("models.lastTestOk", { ms: rec.latencyMs ?? "?" })} · {rel}</span>
+                      ) : (
+                        <Tooltip title={t("models.lastTestFail", { reason: rec.reason ?? "?" })}>
+                          <span className="test-fail-text">{t("models.lastTestFail", { reason: (rec.reason ?? "?").slice(0, 40) })}</span>
+                        </Tooltip>
+                      );
+                    })()}
+                  </span>
+                </div>
                 <div className="model-kv">
                   <span className="k">{t("models.endpoint")}</span>
                   <span className="mono">{p.baseUrl}</span>
@@ -492,8 +592,7 @@ export function ModelsView(): React.ReactElement {
                         <Tag key={m.model}>
                           {m.model === p.model ? <CheckCircleOutlined /> : null}
                           {m.model}
-                          {m.vision ? <EyeOutlined style={{ marginLeft: 4 }} /> : null}
-                          {m.audio ? <SoundOutlined style={{ marginLeft: 4 }} /> : null}
+                          <CapabilityBadges items={badgesOfModel(m)} />
                         </Tag>
                       ))
                     ) : (
@@ -525,25 +624,28 @@ export function ModelsView(): React.ReactElement {
         </div>
         {!loading && profiles.length === 0 && <BrandEmpty description={t("models.none")} className="pane-empty" />}
       </Spin>
+      )}
 
-      <Card
-        size="small"
-        className="hud cap-card"
-        title={t("models.capTitle")}
-        extra={
-          <Button size="small" type="primary" loading={capSaving} onClick={() => void saveCaps()}>
-            {t("common.save")}
-          </Button>
-        }
-      >
-        <div className="dim cap-hint" style={{ marginBottom: 10 }}>{t("models.capGlobalHint")}</div>
-        <div className="cap-grid">
-          {capField("speech", t("models.capSpeech"), t("models.capSpeechHint"), t("models.capUnset"))}
-          {capField("transcribe", t("models.capStt"), t("models.capSttHint"), t("models.capUnset"))}
-          {capField("visionRelay", t("models.capVisionRelay"), t("models.capVisionHint"), t("models.capUnset"))}
-          {capField("embedding", t("models.capEmbed"), t("models.capEmbedHint"), t("models.capEmbedPh"))}
-        </div>
-      </Card>
+      {tab === "caps" && (
+        <Card
+          size="small"
+          className="hud cap-card"
+          title={t("models.capTitle")}
+          extra={
+            <Button size="small" type="primary" loading={capSaving} onClick={() => void saveCaps()}>
+              {t("common.save")}
+            </Button>
+          }
+        >
+          <div className="dim cap-hint" style={{ marginBottom: 10 }}>{t("models.capGlobalHint")}</div>
+          <div className="cap-grid">
+            {capField("speech", t("models.capSpeech"), t("models.capSpeechHint"), t("models.capUnset"), <SoundOutlined />)}
+            {capField("transcribe", t("models.capStt"), t("models.capSttHint"), t("models.capUnset"), <AudioOutlined />)}
+            {capField("visionRelay", t("models.capVisionRelay"), t("models.capVisionHint"), t("models.capUnset"), <EyeOutlined />)}
+            {capField("embedding", t("models.capEmbed"), t("models.capEmbedHint"), t("models.capEmbedPh"), <ClusterOutlined />)}
+          </div>
+        </Card>
+      )}
 
       <Modal
         open={modal}
@@ -556,6 +658,7 @@ export function ModelsView(): React.ReactElement {
         width={620}
       >
         <Form form={form} layout="vertical" onFinish={() => void submit()}>
+          {/* 基础节常驻（认知负荷最低的核心三件：预设 → 端点 → 命名） */}
           <Form.Item name="preset" label={t("models.presetLabel")} rules={[{ required: true }]}>
             <Select options={presetOptions} onChange={(k) => applyPreset(k)} />
           </Form.Item>
@@ -566,37 +669,67 @@ export function ModelsView(): React.ReactElement {
           >
             <Input placeholder="https://api.deepseek.com/v1" />
           </Form.Item>
-
-          <Form.Item label="API Key" style={{ marginBottom: 0 }}>
-            <Form.List name="keys">
-              {(fields, { add, remove }) => (
-                <>
-                  {fields.map(({ key, name, ...rest }) => (
-                    <div key={key} className="key-row">
-                      <Form.Item {...rest} name={[name, "value"]} noStyle>
-                        <MaskedPasswordInput placeholder="sk-…" />
-                      </Form.Item>
-                      {fields.length > 1 && (
-                        <Button
-                          type="text"
-                          icon={<MinusCircleOutlined />}
-                          onClick={() => remove(name)}
-                          aria-label={t("models.removeKey")}
-                        />
-                      )}
-                    </div>
-                  ))}
-                  <Button type="dashed" block icon={<PlusOutlined />} onClick={() => add("")}>
-                    {t("models.addKey")}
-                  </Button>
-                  <div className="ant-form-item-extra" style={{ marginTop: 6 }}>
-                    {t("models.keysExtra")}
-                    {editing ? t("models.keysExtraEdit") : t("models.keysExtraNew")}
-                  </div>
-                </>
-              )}
-            </Form.List>
+          <div className="form-grid-2">
+            <Form.Item name="name" label={t("models.displayName")}>
+              <Input placeholder={t("models.displayNamePlaceholder")} />
+            </Form.Item>
+            <Form.Item
+              name="id"
+              label={t("models.profileId")}
+              rules={[{ pattern: /^[A-Za-z0-9_-]{1,48}$/, message: t("models.idPattern") }]}
+            >
+              <Input placeholder={t("models.idAuto")} disabled={Boolean(editing)} />
+            </Form.Item>
+          </div>
+          <Form.Item name="apiFormat" label={t("models.apiFormat")} extra={t("models.apiFormatExtra")}>
+            <Select options={apiFormats} />
           </Form.Item>
+
+          {/* 密钥池独立小节（增删/掩码/三态语义说明） */}
+          <Collapse
+            size="small"
+            className="form-section"
+            items={[{
+              key: "keys",
+              label: `${t("models.sectionKeys")}${(() => {
+                const rows = (form.getFieldValue("keys") ?? []) as { value?: string }[];
+                const n = rows.filter((r) => (r?.value ?? "").trim() && (r?.value ?? "") !== KEY_MASK).length;
+                return n > 0 ? ` · ${n}` : "";
+              })()}`,
+              children: (
+                <Form.Item label="API Key" style={{ marginBottom: 0 }}>
+                  <Form.List name="keys">
+                    {(fields, { add, remove }) => (
+                      <>
+                        {fields.map(({ key, name, ...rest }) => (
+                          <div key={key} className="key-row">
+                            <Form.Item {...rest} name={[name, "value"]} noStyle>
+                              <MaskedPasswordInput placeholder="sk-…" />
+                            </Form.Item>
+                            {fields.length > 1 && (
+                              <Button
+                                type="text"
+                                icon={<MinusCircleOutlined />}
+                                onClick={() => remove(name)}
+                                aria-label={t("models.removeKey")}
+                              />
+                            )}
+                          </div>
+                        ))}
+                        <Button type="dashed" block icon={<PlusOutlined />} onClick={() => add("")}>
+                          {t("models.addKey")}
+                        </Button>
+                        <div className="ant-form-item-extra" style={{ marginTop: 6 }}>
+                          {t("models.keysExtra")}
+                          {editing ? t("models.keysExtraEdit") : t("models.keysExtraNew")}
+                        </div>
+                      </>
+                    )}
+                  </Form.List>
+                </Form.Item>
+              ),
+            }]}
+          />
 
           <Form.Item
             name="model"
@@ -614,93 +747,105 @@ export function ModelsView(): React.ReactElement {
             />
           </Form.Item>
 
-          <Form.Item
-            label={t("models.modelList")}
-            tooltip={t("models.fetchModelsTip")}
-            style={{ marginBottom: 0 }}
-          >
-            <Button
-              size="small"
-              icon={<CloudDownloadOutlined />}
-              loading={fetchingModels}
-              onClick={() => void fetchModels()}
-              style={{ marginBottom: 8 }}
-            >
-              {t("models.fetchModels")}
-            </Button>
-            <Form.List name="models">
-              {(fields, { add, remove }) => (
-                <>
-                  {fields.map(({ key, name, ...rest }) => (
-                    <div key={key} className="model-row">
-                      <Form.Item
-                        {...rest}
-                        name={[name, "model"]}
-                        noStyle
-                        rules={[{ required: true, whitespace: true, message: t("models.modelNameRequired") }]}
-                      >
-                        <Input placeholder="gpt-4o" />
-                      </Form.Item>
-                      <label className="cap-switch">
-                        <Form.Item {...rest} name={[name, "vision"]} valuePropName="checked" noStyle>
-                          <Switch size="small" />
-                        </Form.Item>
-                        <EyeOutlined />
-                        {t("models.visionCap")}
-                      </label>
-                      <label className="cap-switch">
-                        <Form.Item {...rest} name={[name, "audio"]} valuePropName="checked" noStyle>
-                          <Switch size="small" />
-                        </Form.Item>
-                        <SoundOutlined />
-                        {t("models.audioCap")}
-                      </label>
-                      <Button
-                        type="text"
-                        icon={<MinusCircleOutlined />}
-                        onClick={() => remove(name)}
-                        aria-label={t("common.delete")}
-                      />
-                    </div>
-                  ))}
+          {/* 模型清单独立小节 */}
+          <Collapse
+            size="small"
+            className="form-section"
+            items={[{
+              key: "models",
+              label: `${t("models.sectionModels")}${(() => {
+                const rows = (form.getFieldValue("models") ?? []) as { model?: string }[];
+                const n = rows.filter((m) => (m?.model ?? "").trim()).length;
+                return n > 0 ? ` · ${n}` : "";
+              })()}`,
+              children: (
+                <Form.Item
+                  label={t("models.modelList")}
+                  tooltip={t("models.fetchModelsTip")}
+                  style={{ marginBottom: 0 }}
+                >
                   <Button
-                    type="dashed"
-                    block
-                    icon={<PlusOutlined />}
-                    onClick={() => add({ model: "", vision: false, audio: false })}
+                    size="small"
+                    icon={<CloudDownloadOutlined />}
+                    loading={fetchingModels}
+                    onClick={() => void fetchModels()}
+                    style={{ marginBottom: 8 }}
                   >
-                    {t("models.addModel")}
+                    {t("models.fetchModels")}
                   </Button>
-                  <div className="ant-form-item-extra" style={{ marginTop: 6 }}>
-                    {t("models.modelListExtra")}
-                  </div>
-                </>
-              )}
-            </Form.List>
-          </Form.Item>
+                  <Form.List name="models">
+                    {(fields, { add, remove }) => (
+                      <>
+                        {fields.map(({ key, name, ...rest }) => (
+                          <div key={key} className="model-row">
+                            <Form.Item
+                              {...rest}
+                              name={[name, "model"]}
+                              noStyle
+                              rules={[{ required: true, whitespace: true, message: t("models.modelNameRequired") }]}
+                            >
+                              <Input placeholder="gpt-4o" />
+                            </Form.Item>
+                            <label className="cap-switch">
+                              <Form.Item {...rest} name={[name, "vision"]} valuePropName="checked" noStyle>
+                                <Switch size="small" />
+                              </Form.Item>
+                              <EyeOutlined />
+                              {t("models.visionCap")}
+                            </label>
+                            <label className="cap-switch">
+                              <Form.Item {...rest} name={[name, "audio"]} valuePropName="checked" noStyle>
+                                <Switch size="small" />
+                              </Form.Item>
+                              <SoundOutlined />
+                              {t("models.audioCap")}
+                            </label>
+                            <Button
+                              type="text"
+                              icon={<MinusCircleOutlined />}
+                              onClick={() => remove(name)}
+                              aria-label={t("common.delete")}
+                            />
+                          </div>
+                        ))}
+                        <Button
+                          type="dashed"
+                          block
+                          icon={<PlusOutlined />}
+                          onClick={() => add({ model: "", vision: false, audio: false })}
+                        >
+                          {t("models.addModel")}
+                        </Button>
+                        <div className="ant-form-item-extra" style={{ marginTop: 6 }}>
+                          {t("models.modelListExtra")}
+                        </div>
+                      </>
+                    )}
+                  </Form.List>
+                </Form.Item>
+              ),
+            }]}
+          />
 
-          <div className="form-grid-2">
-            <Form.Item name="name" label={t("models.displayName")}>
-              <Input placeholder={t("models.displayNamePlaceholder")} />
-            </Form.Item>
-            <Form.Item
-              name="id"
-              label={t("models.profileId")}
-              rules={[{ pattern: /^[A-Za-z0-9_-]{1,48}$/, message: t("models.idPattern") }]}
-            >
-              <Input placeholder={t("models.idAuto")} disabled={Boolean(editing)} />
-            </Form.Item>
-          </div>
-          <Form.Item name="apiFormat" label={t("models.apiFormat")} extra={t("models.apiFormatExtra")}>
-            <Select options={apiFormats} />
-          </Form.Item>
-          <Form.Item
-            name="fallback"
-            label={t("models.fallback")}
-            extra={t("models.fallbackExtra")}
-          >
-            <Select allowClear placeholder={t("models.noFallback")} options={fallbackOptions} />
-          </Form.Item>
+          {/* 高级项默认折叠（低频配置） */}
+          <Collapse
+            size="small"
+            className="form-section"
+            items={[{
+              key: "advanced",
+              label: t("models.sectionAdvanced"),
+              children: (
+                <Form.Item
+                  name="fallback"
+                  label={t("models.fallback")}
+                  extra={t("models.fallbackExtra")}
+                  style={{ marginBottom: 0 }}
+                >
+                  <Select allowClear placeholder={t("models.noFallback")} options={fallbackOptions} />
+                </Form.Item>
+              ),
+            }]}
+          />
         </Form>
       </Modal>
 

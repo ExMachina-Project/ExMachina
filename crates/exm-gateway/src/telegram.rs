@@ -232,6 +232,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
             if text.trim().is_empty() {
                 continue;
             }
+            let mut text = text;
             // 入站媒体（组 6.4）：photo / document 下载落 inbox，随消息注入
             let mut media: Vec<(String, String, String)> = Vec::new();
             if let Some(photos) = u.pointer("/message/photo").and_then(|v| v.as_array()) {
@@ -338,7 +339,14 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
             )
             .await
             {
-                GateDecision::Allow => {
+                GateDecision::Allow(clean) => {
+                    text = clean;
+                    // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）
+                    let sender_mark = crate::channel_util::sender_origin(
+                        is_group,
+                        &display,
+                        &from_id,
+                    );
                     // 内置命令（/new /status）：闸门放行后、进入会话执行前拦截——与其他适配器同口径
                     if let Some(reply) =
                         crate::channel_util::builtin_command(&core, &ch, &chat_key, &text).await
@@ -353,6 +361,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             &from_id,
                             inbound_media.unwrap_or_default(),
                             &text,
+                            sender_mark.as_deref(),
                         )
                         .await
                     }
@@ -492,6 +501,7 @@ async fn handle_message(
     external_id: &str,
     media: Vec<(String, String, String)>,
     text: &str,
+    sender_mark: Option<&str>,
 ) {
     // typing 指示（组 6.5）：平台支持即发送，处理结束随回帖自然覆盖
     if caps("telegram").typing {
@@ -536,6 +546,12 @@ async fn handle_message(
             async move { tg_send_media(&token, chat_id, item).await }
         },
     );
+    // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
+    let run = if let Some(mark) = sender_mark {
+        run.with_origin(mark)
+    } else {
+        run
+    };
     run.run(&text).await;
     let _ = reply.await;
 }

@@ -100,6 +100,42 @@ export interface Session {
   lastActiveAt?: string;
   /** 用户置顶（列表置顶分组） */
   pinned?: boolean;
+  /** 归档时间（ISO）：有值 = 归档态（主列表/左栏不显示，归档区可见） */
+  archivedAt?: string;
+  /** 消息条数（管理页附加） */
+  messageCount?: number;
+}
+
+/** 会话检索命中片段（session-search） */
+export interface SessionSearchSnippet {
+  messageId: string;
+  role: string;
+  text: string;
+  createdAt: string;
+  /** 来源标记（im: / imctx: / auto: 等） */
+  agentId?: string;
+}
+
+/** 会话检索命中（标题或最近 200 条消息正文） */
+export interface SessionSearchHit {
+  sessionId: string;
+  title: string;
+  titleMatch: boolean;
+  messageMatches: number;
+  snippets: SessionSearchSnippet[];
+  lastActiveAt: string;
+}
+
+/** 轮次快照（历史检查点；preview = 该轮用户输入摘要） */
+export interface SessionSnapshot {
+  turn: number;
+  messageCount: number;
+  status: string;
+  checkpointIds: string[];
+  promptTokens: number;
+  completionTokens: number;
+  createdAt: string;
+  preview: string;
 }
 
 export type TaskStatus =
