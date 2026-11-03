@@ -98,6 +98,16 @@ export function ApprovalsView(): React.ReactElement {
               title: t("approvals.colCommand"),
               render: (_, r) => (
                 <Space direction="vertical" size={0} className="full-width">
+                  {r.command.startsWith("[root] ") && (
+                    <Tag color="error" style={{ marginBottom: 4 }}>
+                      🚨 {t("approval.rootElevation")}
+                    </Tag>
+                  )}
+                  {r.command.startsWith("[meta] ") && (
+                    <Tag color="purple" style={{ marginBottom: 4 }}>
+                      🧠 {t("approval.metaProposal")}
+                    </Tag>
+                  )}
                   <code className="cmd-code">$ {r.command}</code>
                   {/* 窄屏：会话跳转并入元信息行（原独立列已裁、操作列只留批准/拒绝
                       ——icon 钮在 390px 仍差 10px 出视口，元信息行点击热区更大且省一列宽） */}

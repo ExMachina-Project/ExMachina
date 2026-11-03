@@ -180,7 +180,33 @@ impl ToolGateway {
         if !cand_canon.starts_with(&group_canon) && !cand_canon.starts_with(&ws_canon) {
             bail!("路径越界（仅允许工作区内的路径）: {raw}");
         }
+        // 执行身份约束第二道防线（agent-exec-confinement）：约束开启时 fs 目标
+        // 必须落在 execHome 内——即使 workspace 校验通过,越过身份边界的读写也拒绝。
+        // 终端子进程有内核级 uid 圈禁,这里是 fs 工具的显式路径校验双保险。
+        if !self.security.exec_user.trim().is_empty() {
+            if let Some(home) = self.exec_confine_home() {
+                let home_canon = canonicalize_best(&PathBuf::from(&home));
+                if !cand_canon.starts_with(&home_canon) {
+                    bail!(
+                        "路径越界（执行身份约束: 仅允许 {home} 内的路径;系统级操作请走 root 提权审批）: {raw}"
+                    );
+                }
+            }
+        }
         Ok(candidate)
+    }
+
+    /// 身份约束圈禁根目录（缓存解析结果；解析失败 = None → 由终端侧报错,这里只做边界）
+    fn exec_confine_home(&self) -> Option<String> {
+        #[cfg(unix)]
+        {
+            crate::config::resolve_exec_identity(&self.security.exec_user, &self.security.exec_home)
+                .ok()
+                .flatten()
+                .map(|id| id.home)
+        }
+        #[cfg(not(unix))]
+        None
     }
 
     /// 写前快照（检查点）：原文件复制到 .exmachina/checkpoints/<日期>/<相对路径>。

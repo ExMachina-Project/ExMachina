@@ -727,3 +727,117 @@ pub(crate) fn shell_quote(v: &str) -> String {
 
 // ---------------------------------------------------------------- 记忆工具与工具面快照（组 8 单测）
 
+
+// ---------------------------------------------------------------- root 提权识别（agent-exec-confinement）
+
+/// 提权/切换用户命令首 token（agent-exec-confinement）：
+/// sudo/doas/run0 是提权（root 或配置的目标用户）；su/runuser 是切换用户语义；
+/// sudo -u <user> 是定向切换。首 token 命中即整段按提权处理——白名单匹配的是
+/// 去掉提权前缀后的命令内容,提权前缀本身越权,必须走人工审批。
+pub(crate) const ELEVATION_HEADS: &[&str] = &["sudo", "doas", "run0", "su", "runuser"];
+
+/// 单段命令是否提权（首 token 判定；参数含 -u 切换也算,由首 token 覆盖——
+/// sudo/runuser 本身就是切换语义,无需再看参数）
+pub(crate) fn is_elevation_segment(seg: &str) -> bool {
+    let binding = seg.trim().to_lowercase();
+    let head = binding.split_whitespace().next();
+    head.is_some_and(|h| ELEVATION_HEADS.contains(&h))
+}
+
+/// 整条命令是否含提权段：链式命令任一段提权即整条按提权处理
+/// （`apt list && sudo apt install` 的第二段越权,不能因第一段白名单放行）
+pub(crate) fn is_elevation_command(cmd: &str) -> bool {
+    let bare = strip_quoted(cmd);
+    let has_chain_sep = SHELL_CHAIN_SEPARATORS.iter().any(|m| bare.contains(m));
+    if has_chain_sep {
+        return split_chain_segments(cmd).iter().any(|seg| is_elevation_segment(seg));
+    }
+    is_elevation_segment(cmd)
+}
+
+/// 提权代执行前处理：剥离冗余提权前缀（root 执行时 sudo/doas/run0 是多余壳），
+/// 保留切换语义命令（su/sudo -u/runuser 的目标用户是命令语义的一部分）。
+pub(crate) fn strip_redundant_elevation(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+    let lowered = trimmed.to_lowercase();
+    let Some(first) = trimmed.split_whitespace().next() else {
+        return trimmed.to_string();
+    };
+    match lowered.split_whitespace().next().unwrap_or("") {
+        // 纯提权壳:root 下冗余,剥掉首 token 保留余部
+        "sudo" | "doas" | "run0" => {
+            // sudo -u <user> 是定向切换:保留原样(切换语义)
+            let rest: Vec<&str> = trimmed.split_whitespace().skip(1).collect();
+            if rest.first() == Some(&"-u") {
+                trimmed.to_string()
+            } else {
+                rest.join(" ")
+            }
+        }
+        // su/runuser:切换用户是命令语义,原样保留
+        _ => first.to_string() + &trimmed[first.len()..],
+    }
+}
+
+#[cfg(test)]
+mod elevation_tests {
+    use super::*;
+
+    #[test]
+    fn 识别各提权前缀() {
+        assert!(is_elevation_command("sudo apt install -y tmux"));
+        assert!(is_elevation_command("doas apk add curl"));
+        assert!(is_elevation_command("run0 systemctl restart nginx"));
+        assert!(is_elevation_command("su - postgres -c 'psql -c \"select 1\"'"));
+        assert!(is_elevation_command("runuser -u www -- nginx -t"));
+        assert!(is_elevation_command("sudo -u deploy git pull"));
+    }
+
+    #[test]
+    fn 普通命令不误报() {
+        assert!(!is_elevation_command("apt install -y tmux"));
+        assert!(!is_elevation_command("git status"));
+        assert!(!is_elevation_command("sudoers edit /etc/sudoers"));
+        // "su" 出现在参数位置不是提权
+        assert!(!is_elevation_command("echo su"));
+        assert!(!is_elevation_command("cat /etc/sudoers"));
+    }
+
+    #[test]
+    fn 链式命令任一段提权即整条提权() {
+        assert!(is_elevation_command("apt list && sudo apt install -y tmux"));
+        assert!(is_elevation_command("git pull; su - root"));
+        assert!(!is_elevation_command("git pull && git status"));
+    }
+
+    #[test]
+    fn 引号内分隔符不误判链式() {
+        // 引号内的 | 不是链分隔符
+        assert!(is_elevation_command("sudo sh -c 'echo a | b'"));
+        assert!(!is_elevation_command("echo 'sudo apt install'"));
+    }
+
+    #[test]
+    fn 剥离冗余提权壳() {
+        assert_eq!(strip_redundant_elevation("sudo apt install -y tmux"), "apt install -y tmux");
+        assert_eq!(strip_redundant_elevation("doas apk add curl"), "apk add curl");
+        assert_eq!(strip_redundant_elevation("run0 systemctl restart nginx"), "systemctl restart nginx");
+    }
+
+    #[test]
+    fn 切换语义保留原样() {
+        assert_eq!(
+            strip_redundant_elevation("su - postgres -c 'psql -c \"select 1\"'"),
+            "su - postgres -c 'psql -c \"select 1\"'"
+        );
+        assert_eq!(strip_redundant_elevation("sudo -u deploy git pull"), "sudo -u deploy git pull");
+        assert_eq!(strip_redundant_elevation("runuser -u www -- nginx -t"), "runuser -u www -- nginx -t");
+    }
+
+    #[test]
+    fn 大小写不敏感() {
+        assert!(is_elevation_command("SUDO apt install"));
+        assert!(is_elevation_command("Sudo apt install"));
+        assert_eq!(strip_redundant_elevation("SUDO id"), "id");
+    }
+}

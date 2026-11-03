@@ -32,7 +32,7 @@ pub use gateway::{SpawnExec, PluginCredResolver, ToolGateway};
 // #[allow(unused_imports)]：这些符号经 `use super::*` glob 链被各子模块使用，
 // rustc 的 unused lint 不把 glob 使用归因到具体 re-export 行，会误报。
 #[allow(unused_imports)]
-pub(crate) use allowlist::{contains_shell_chain, chain_allowed, shell_unsafe_char, shell_quote, terminal_allowed, split_chain_segments, strip_quoted};
+pub(crate) use allowlist::{contains_shell_chain, chain_allowed, shell_unsafe_char, shell_quote, terminal_allowed, split_chain_segments, strip_quoted, is_elevation_command, strip_redundant_elevation};
 #[allow(unused_imports)]
 pub(crate) use sandbox::{ENV_ALLOW, bwrap_available};
 #[allow(unused_imports)]
@@ -59,6 +59,8 @@ mod git;
 mod spawn;
 mod terminal;
 mod todo;
+mod meta;
+pub(crate) use meta::MetaProposal;
 mod computer;
 mod approval;
 mod external_wrap;

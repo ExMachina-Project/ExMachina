@@ -51,6 +51,12 @@ COPY --from=rust-builder /build/target/release/exmachina /usr/local/bin/exmachin
 COPY --from=rust-builder /build/target/release/exm-gateway /usr/local/bin/exm-gateway
 COPY --from=webui-builder /build/dist ./webui/dist
 COPY entities ./entities
+# 一键更新脚本:精简部署目录无 scripts/,网关回落 /app/scripts/apply-update.sh
+COPY scripts/apply-update.sh ./scripts/apply-update.sh
+RUN chmod +x ./scripts/apply-update.sh
+# 执行身份约束专用用户(agent-exec-confinement):固定 uid 911、建主目录;
+# 默认不启用(网关仍 root 跑,子进程降权由 security.execUser 显式开启)
+RUN useradd -r -m -d /home/exm -u 911 exm 2>/dev/null || true
 ENV EXM_LANG=zh
 ENV RUST_LOG=info
 # git 短哈希:runtime 阶段才注入(进程运行时读取)——若放 builder 阶段,每个 commit 都会作废整条 Rust 编译缓存
