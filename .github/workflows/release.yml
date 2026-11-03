@@ -184,9 +184,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      # 只拉发布产物：docker job 会留下 buildx 的 <repo>~<repo>~<hash>.dockerbuild
+      # 内部记录（0 MB、非 zip），无过滤下载会在解包它时重试耗尽导致整个 publish 失败。
+      - name: 下载 server 产物
+        uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: server-*
+          merge-multiple: true
+      - name: 下载 desktop 产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: desktop-*
+          merge-multiple: true
       - name: 展平产物
         run: |
           mkdir -p release
