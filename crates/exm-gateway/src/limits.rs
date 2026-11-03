@@ -42,6 +42,13 @@ impl RateLimiter {
             .unwrap_or(0)
     }
 
+    /// 清空主体的窗口（配对码兑换成功后清失败计数用）
+    pub fn reset(key: &str) {
+        let store = store();
+        let mut w = store.windows.lock().unwrap();
+        w.remove(key);
+    }
+
     /// 全部键的窗口内计数（管理视图）
     pub fn snapshot(window_ms: u64, now_ms: u64) -> Vec<(String, usize)> {
         let store = store();

@@ -442,9 +442,10 @@ fn digest_exec(core: Arc<Core>, ch: Channel) -> exm_core::tools::DynamicToolExec
             for (name, url) in selected {
                 match fetch_feed(url).await {
                     Ok(items) => {
-                        out.push_str(&format!("[{name}]\n"));
+                        // 外部内容隔离包装（inbound-sanitization）：条目文本视为数据而非指令
+                        let mut body = String::new();
                         for it in items.iter().take(5) {
-                            out.push_str(&format!(
+                            body.push_str(&format!(
                                 "- {}（{}）{}\n",
                                 it.title,
                                 it.published,
@@ -455,6 +456,10 @@ fn digest_exec(core: Arc<Core>, ch: Channel) -> exm_core::tools::DynamicToolExec
                                 }
                             ));
                         }
+                        out.push_str(&exm_core::tools::wrap_external_for(
+                            "RSS", name, &body, 8000,
+                        ));
+                        out.push('\n');
                     }
                     Err(e) => out.push_str(&format!("[{name}] 拉取失败：{e}\n")),
                 }
@@ -598,6 +603,8 @@ mod tests {
                 ("intervalMinutes".to_string(), "30".to_string()),
             ]),
             group_gate: None,
+            proactive_reply: None,
+            proactive_rate: None,
             capability: "chat".into(),
             memory_isolation: true,
             created_at: String::new(),

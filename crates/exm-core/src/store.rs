@@ -61,6 +61,8 @@ impl Store {
             last_message_preview: None,
             last_active_at: None,
             pinned: false,
+            archived_at: None,
+            message_count: None,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -90,6 +92,8 @@ impl Store {
             last_message_preview: None,
             last_active_at: None,
             pinned: false,
+            archived_at: None,
+            message_count: None,
             ledger: SessionLedger::default(),
             created_at: now.clone(),
             updated_at: now,
@@ -110,12 +114,27 @@ impl Store {
         }
     }
 
+    /// 会话归档 / 恢复（archived_at = Some(时间) 即归档态；None 即恢复）。
+    /// 归档是可逆状态：不删消息，只把会话移出主列表与聊天左栏。
+    pub fn set_session_archived(&self, id: &str, archived: bool) -> Result<()> {
+        match self.get_session(id)? {
+            Some(mut s) => {
+                s.archived_at = if archived { Some(now_iso()) } else { None };
+                self.db.put("sessions", &s.id, &s)?;
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("会话不存在: {id}")),
+        }
+    }
+
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.db.get("sessions", id)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let mut list: Vec<Session> = self.db.list("sessions")?;
+        let all: Vec<Session> = self.db.list("sessions")?;
+        // 主列表不含归档态（归档区走 list_archived_sessions 专用视图）
+        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_none()).collect();
         // 置顶优先，组内按活跃时间倒序（列表结构 = 置顶分组 + 时间分组）
         list.sort_by(|a, b| {
             b.pinned
@@ -124,6 +143,26 @@ impl Store {
         });
         list.truncate(200);
         Ok(list)
+    }
+
+    /// 归档区视图：只含归档态，按归档时间倒序（最近归档在前）
+    pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
+        let all: Vec<Session> = self.db.list("sessions")?;
+        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_some()).collect();
+        list.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
+        Ok(list)
+    }
+
+    /// 会话消息条数（JSONL 非空行计数；无文件 = 0）。与管理页「消息数」列同口径。
+    pub fn message_count(&self, session_id: &str) -> usize {
+        let path = self
+            .db
+            .root()
+            .join("messages")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::read_to_string(path)
+            .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
     }
 
     /// 会话最后一条消息的纯文本预览（末行 JSONL 直接取，避免整文件反序列化）
@@ -314,6 +353,72 @@ impl Store {
         self.db.read_lines("messages", session_id, limit)
     }
 
+    // ---------------- 会话内容检索（session-search） ----------------
+
+    /// 检索未归档会话：标题 + 最近 200 条消息正文，大小写不敏感子串匹配。
+    /// 标题命中优先，同组按活跃时间倒序；每会话最多 2 条片段，`limit` 为结果会话上限。
+    /// 只读、无索引：扫描上界与消息读取窗口一致（≤200 会话 × 最近 200 条），
+    /// 保证命中片段一定能被 `GET /sessions/:id/messages` 的窗口加载到。
+    pub fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchHit>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let q_lower = q.to_lowercase();
+        let limit = limit.max(1);
+        let mut sessions = self.list_sessions()?;
+        sessions.truncate(200);
+        let mut hits: Vec<SessionSearchHit> = Vec::new();
+        for s in sessions {
+            // 读取失败按无命中处理：单会话损坏不应拖垮全量检索
+            let msgs = self.list_messages(&s.id, 200).unwrap_or_default();
+            let title_match = s.title.to_lowercase().contains(&q_lower);
+            let matched: Vec<&ChatMessage> = msgs
+                .iter()
+                .filter(|m| {
+                    let text = message_text(m);
+                    !text.is_empty() && text.to_lowercase().contains(&q_lower)
+                })
+                .collect();
+            if !title_match && matched.is_empty() {
+                continue;
+            }
+            let last_active_at = msgs
+                .last()
+                .map(|m| m.created_at.clone())
+                .unwrap_or_else(|| s.updated_at.clone());
+            let snippets = matched
+                .iter()
+                .take(2)
+                .map(|m| {
+                    let body = message_text(m);
+                    MessageSnippet {
+                        message_id: m.id.clone(),
+                        role: m.role,
+                        text: snippet_around(&body, &q_lower, 80),
+                        created_at: m.created_at.clone(),
+                        agent_id: m.agent_id.clone(),
+                    }
+                })
+                .collect();
+            hits.push(SessionSearchHit {
+                session_id: s.id.clone(),
+                title: s.title.clone(),
+                title_match,
+                message_matches: matched.len(),
+                snippets,
+                last_active_at,
+            });
+        }
+        hits.sort_by(|a, b| {
+            b.title_match
+                .cmp(&a.title_match)
+                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     // ---------------- 消息历史管控（undo / 编辑重发 / fork 基座） ----------------
 
     /// 截断活跃消息流：保留前 keep 条，被截断部分**先归档**（归档可查，spec 硬性要求）
@@ -458,6 +563,19 @@ impl Store {
         result_summary: &str,
         duration_ms: u64,
     ) -> Result<()> {
+        self.audit_tool_ex(agent_id, tool, args, result_summary, duration_ms, true)
+    }
+
+    /// 带 ok 位审计（meta-agent 聚合层的失败判定依赖；旧条目缺省视为成功）
+    pub fn audit_tool_ex(
+        &self,
+        agent_id: &str,
+        tool: &str,
+        args: &serde_json::Value,
+        result_summary: &str,
+        duration_ms: u64,
+        ok: bool,
+    ) -> Result<()> {
         let entry = serde_json::json!({
             "id": new_id(),
             "agentId": agent_id,
@@ -465,6 +583,7 @@ impl Store {
             "args": args,
             "resultSummary": result_summary,
             "durationMs": duration_ms,
+            "ok": ok,
             "createdAt": now_iso(),
         });
         self.db.append_line("tool_audit", agent_id, &entry)?;
@@ -588,7 +707,10 @@ impl Store {
     /// 按组列出会话（组是交互对象：会话归属创建时的激活组）
     pub fn list_sessions_in_group(&self, group_id: &str) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
-        let mut list: Vec<Session> = all.into_iter().filter(|s| s.group_id == group_id).collect();
+        let mut list: Vec<Session> = all
+            .into_iter()
+            .filter(|s| s.group_id == group_id && s.archived_at.is_none())
+            .collect();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list.truncate(200);
         Ok(list)
@@ -769,6 +891,34 @@ impl Store {
         }
     }
 
+    /// 显式删除配对码（控制台撤销 / 过期码清理；幂等：不存在也 Ok）
+    pub fn delete_pairing_code(&self, code: &str) -> Result<()> {
+        self.db.delete("pairing_codes", code)
+    }
+
+    // ---------------------------------------------------------------- 通道聊天流（chat flow）
+
+    pub fn put_channel_flow(&self, flow: &ChannelFlow) -> Result<()> {
+        self.db.put("channel_flows", &flow.id, flow)
+    }
+
+    pub fn get_channel_flow(&self, id: &str) -> Result<Option<ChannelFlow>> {
+        self.db.get("channel_flows", id)
+    }
+
+    pub fn list_channel_flows(&self, channel: Option<&str>) -> Result<Vec<ChannelFlow>> {
+        let mut list: Vec<ChannelFlow> = self.db.list("channel_flows")?;
+        if let Some(c) = channel {
+            list.retain(|f| f.channel_id == c);
+        }
+        list.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+        Ok(list)
+    }
+
+    pub fn delete_channel_flow(&self, id: &str) -> Result<()> {
+        self.db.delete("channel_flows", id)
+    }
+
     // ---------------------------------------------------------------- 事件触发器（文件监听 / webhook 事件源）
 
     pub fn put_event_trigger(&self, trigger: &EventTrigger) -> Result<()> {
@@ -791,6 +941,88 @@ impl Store {
     pub fn delete_event_trigger(&self, id: &str) -> Result<()> {
         self.db.delete("event_triggers", id)
     }
+}
+
+// ---------------------------------------------------------------- 检索片段工具（session-search）
+
+/// 消息正文（多陈述句合并；检索与片段共用同一口径）
+pub(crate) fn message_text(m: &ChatMessage) -> String {
+    m.statements
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 命中位置附近的片段：命中前后各取若干字符，总长 ≤max（含省略号），空白折叠。
+/// 快速路径（小写串与原文等长，ASCII/CJK 常见）按字节下标直接切片；
+/// Unicode 小写展开等罕见情形退化为字符窗口比较，保证不 panic、不产生非法切片。
+pub(crate) fn snippet_around(text: &str, q_lower: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() || max == 0 || q_lower.is_empty() {
+        return flat.chars().take(max).collect();
+    }
+    let lower = flat.to_lowercase();
+    if lower.len() == flat.len() {
+        if let Some(pos) = lower.find(q_lower) {
+            // 等长时小写串的字节下标与原文一一对应
+            return cut_window(&flat, pos, pos + q_lower.len(), max);
+        }
+    }
+    if let Some((start, end)) = find_char_window(&flat, q_lower) {
+        return cut_window(&flat, char_to_byte(&flat, start), char_to_byte(&flat, end), max);
+    }
+    flat.chars().take(max).collect()
+}
+
+/// 以命中区间为中心截取字符窗口：前后各分 `(max-命中字符数)/2` 个字符，
+/// 首尾越界加省略号；总字符数不超过 max。
+fn cut_window(text: &str, m_start: usize, m_end: usize, max: usize) -> String {
+    let match_chars = text[m_start..m_end].chars().count();
+    let side = max.saturating_sub(match_chars).saturating_sub(2) / 2;
+    let mut start = m_start;
+    for _ in 0..side {
+        match text[..start].char_indices().next_back() {
+            Some((i, _)) => start = i,
+            None => break,
+        }
+    }
+    let mut end = m_end;
+    for _ in 0..side {
+        match text[end..].chars().next() {
+            Some(c) => end += c.len_utf8(),
+            None => break,
+        }
+    }
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&text[start..end]);
+    if end < text.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// 慢路径：按字符窗口做小写比较定位命中区间（返回字符下标）。
+fn find_char_window(text: &str, q_lower: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let q_chars = q_lower.chars().count();
+    if q_chars == 0 || q_chars > chars.len() {
+        return None;
+    }
+    for i in 0..=(chars.len() - q_chars) {
+        let window: String = chars[i..i + q_chars].iter().collect();
+        if window.to_lowercase() == q_lower {
+            return Some((i, i + q_chars));
+        }
+    }
+    None
+}
+
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
 }
 
 #[cfg(test)]
@@ -940,4 +1172,159 @@ mod store_tests {
         store.delete_event_trigger("t2").unwrap();
         assert!(store.get_event_trigger("t2").unwrap().is_none());
     }
+
+    /// 检索：标题 / 正文 / 大小写 / 同会话去重 / 片段截断
+    #[test]
+    fn 检索_标题正文与片段() {
+        let store = test_store();
+        let a = store.create_session("部署方案复盘", "exmachina").unwrap();
+        store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "周末讨论 Kubernetes 滚动发布（同步）")],
+            )
+            .unwrap();
+        store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "另外 kube-proxy 也要升级")],
+            )
+            .unwrap();
+        let b = store.create_session("闲聊", "exmachina").unwrap();
+        store
+            .add_message(
+                &b.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "今天天气不错（同步）")],
+            )
+            .unwrap();
+
+        // 正文命中（大小写不敏感）：同会话多条只出现一次，片段 ≤2
+        let hits = store.search_sessions("KUBERNETES", 20).unwrap();
+        assert_eq!(hits.len(), 1, "只应有会话 a 命中");
+        assert_eq!(hits[0].session_id, a.id);
+        assert!(!hits[0].title_match);
+        assert_eq!(hits[0].message_matches, 1);
+        assert_eq!(hits[0].snippets.len(), 1);
+        assert!(hits[0].snippets[0].text.contains("Kubernetes"), "片段应含关键词");
+        assert!(!hits[0].snippets[0].message_id.is_empty());
+
+        // 标题命中优先于仅正文命中
+        let h2 = store.search_sessions("部署", 20).unwrap();
+        assert_eq!(h2[0].session_id, a.id);
+        assert!(h2[0].title_match);
+
+        // limit 生效：两会话均命中「同步」时，limit 0 至少保留 1 条
+        assert_eq!(store.search_sessions("同步", 20).unwrap().len(), 2);
+        assert_eq!(store.search_sessions("同步", 0).unwrap().len(), 1);
+    }
+
+
+    /// 检索性能上界（手动运行，默认 ignore）：200 会话 × 200 条消息，单次 <1s。
+    #[test]
+    #[ignore]
+    fn 检索_基准() {
+        let store = test_store();
+        for i in 0..200 {
+            let s = store
+                .create_session(&format!("基准会话 {i}"), "exmachina")
+                .unwrap();
+            for j in 0..200 {
+                store
+                    .add_message(
+                        &s.id,
+                        MessageRole::User,
+                        None,
+                        vec![Statement::new(
+                            SpeechTag::要求,
+                            format!("消息 {j} 内容 needle-{i}-{j}"),
+                        )],
+                    )
+                    .unwrap();
+            }
+        }
+        let start = std::time::Instant::now();
+        let hits = store.search_sessions("needle-199-199", 20).unwrap();
+        let dur = start.elapsed();
+        println!("检索耗时: {:?}，命中 {}", dur, hits.len());
+        assert_eq!(hits.len(), 1, "应命中唯一针眼");
+        assert!(dur.as_millis() < 1000, "检索耗时超界: {dur:?}");
+    }
+
+    /// 检索：归档会话排除、200 条窗口边界、空查询、Unicode 小写展开不 panic
+    #[test]
+    fn 检索_归档窗口与边界() {
+        let store = test_store();
+        let archived = store.create_session("归档针眼", "exmachina").unwrap();
+        store
+            .add_message(
+                &archived.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "unique-needle-archived")],
+            )
+            .unwrap();
+        store.set_session_archived(&archived.id, true).unwrap();
+        assert!(
+            store.search_sessions("unique-needle-archived", 20).unwrap().is_empty(),
+            "归档会话不得命中"
+        );
+
+        // 窗口边界：最旧一条放入 200 条窗口之外 → 不命中；最新一条 → 命中
+        let old = store.create_session("长会话", "exmachina").unwrap();
+        store
+            .add_message(
+                &old.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "窗口外针眼-outside-window")],
+            )
+            .unwrap();
+        for i in 0..200 {
+            store
+                .add_message(
+                    &old.id,
+                    MessageRole::User,
+                    None,
+                    vec![Statement::new(SpeechTag::要求, format!("普通消息 {i}"))],
+                )
+                .unwrap();
+        }
+        // 现在共 201 条：最近 200 条窗口不含最旧的 outside-window
+        assert!(
+            store.search_sessions("outside-window", 20).unwrap().is_empty(),
+            "窗口外消息不得命中"
+        );
+        store
+            .add_message(
+                &old.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "最新针眼-window-needle")],
+            )
+            .unwrap();
+        let hits = store.search_sessions("window-needle", 20).unwrap();
+        assert_eq!(hits.len(), 1, "窗口内最新消息应命中");
+        assert!(store.search_sessions("   ", 20).unwrap().is_empty(), "空查询无结果");
+
+        // Unicode 小写展开（İ → i̇，字节变长）：不得 panic，仍能定位/截取
+        let u = store.create_session("Unicode", "exmachina").unwrap();
+        store
+            .add_message(
+                &u.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, "İstanbul 会议纪要")],
+            )
+            .unwrap();
+        let hits = store.search_sessions("stanbul", 20).unwrap();
+        assert_eq!(hits.len(), 1, "Unicode 展开文本应能命中");
+        assert!(!hits[0].snippets.is_empty());
+    }
+
 }

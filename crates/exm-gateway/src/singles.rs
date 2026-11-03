@@ -53,11 +53,20 @@ pub async fn set_target(
     Json(b): Json<TargetBody>,
 ) -> impl IntoResponse {
     let result = match b.mode.as_str() {
+        // 回组模式：id 可选（WebUI 切组时携带）。先清单智能体上下文，
+        // 再切指定组——缺省时维持当前激活组
         "group" => st
             .core
             .registry()
             .set_active_single(None)
-            .map(|_| json!({ "mode": "group" })),
+            .and_then(|_| match b.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(g) => st
+                    .core
+                    .registry()
+                    .set_active_group(g)
+                    .map(|_| json!({ "mode": "group" })),
+                None => Ok(json!({ "mode": "group" })),
+            }),
         "single" => {
             let id = b.id.clone().unwrap_or_default();
             st.core
@@ -192,7 +201,7 @@ pub async fn delete_single(
 pub async fn update_single(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Json(b): Json<crate::AgentUpdateBody>,
+    Json(b): Json<crate::agents_admin::AgentUpdateBody>,
 ) -> impl IntoResponse {
     // 连结体代理绑定校验（与 update_agent 同口径）
     if let Some(link_id) = b.link.as_deref().map(str::trim).filter(|v| !v.is_empty()) {

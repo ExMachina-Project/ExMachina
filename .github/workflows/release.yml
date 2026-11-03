@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: release-main
@@ -203,6 +204,48 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           generate_release_notes: true
           files: release/*
+
+  # ── 容器镜像：发 ghcr（生产镜像部署的注册表通道）────────────────────────────
+  # 镜像命名与 deploy/ 模板默认值一致：ghcr.io/exmachina-project/exmachina:latest
+  # GIT_HASH 构建参数注入运行镜像 EXM_GIT_HASH——一键更新的 SHA 比对依赖它。
+  # secrets 缺失（如 fork）时跳过推送，仅本地构建验证 Dockerfile 可用性。
+  docker:
+    needs: version
+    if: needs.version.outputs.exists == 'no'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 读取版本号
+        id: ver
+        run: |
+          VER=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: 判断推送条件（registry 可用才推）
+        id: pushable
+        run: |
+          if [ -n "${{ secrets.REGISTRY_TOKEN }}" ] || [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
+            echo "push=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=no" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 登录 ghcr
+        if: steps.pushable.outputs.push == 'yes'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ steps.pushable.outputs.push == 'yes' }}
+          build-args: |
+            GIT_HASH=${{ steps.ver.outputs.sha }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/exmachina:latest
+            ghcr.io/${{ github.repository_owner }}/exmachina:${{ steps.ver.outputs.tag }}
 
   # ── 发版后补步：把 main 的 squash 发版提交 merge 回 dev，补回发版线祖先 ────────
   # 背景：main 为线性历史（squash 落地），PR 的原始提交永远不在 main 祖先里。

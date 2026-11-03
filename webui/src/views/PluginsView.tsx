@@ -5,7 +5,6 @@ import {
   Card,
   Descriptions,
   Drawer,
-  Empty,
   Input,
   Popconfirm,
   Space,
@@ -19,6 +18,7 @@ import {
 import { CloudDownloadOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { api, type PluginDetail, type PluginSummary } from "../api";
 import { PageHeader } from "../components/PageHeader";
+import { BrandEmpty } from "../components/BrandEmpty";
 import { MaskedPasswordInput } from "../components/MaskedInput";
 import { useT } from "../i18n/core";
 
@@ -248,7 +248,7 @@ export function PluginsView(): React.ReactElement {
       />
       <Spin spinning={loading}>
         {plugins.length === 0 && !loading ? (
-          <Empty description="plugins/ 目录为空——从下方目录安装，或放入插件包" />
+          <BrandEmpty description="plugins/ 目录为空——从下方目录安装，或放入插件包" className="pane-empty" />
         ) : (
           <div className="card-grid">
             {plugins.map((p) => (
@@ -323,9 +323,9 @@ export function PluginsView(): React.ReactElement {
           }
         />
         {indexError ? (
-          <Empty description={t("plugins.catalog.fetchFail", { err: indexError })} />
+          <BrandEmpty description={t("plugins.catalog.fetchFail", { err: indexError })} className="pane-empty" />
         ) : filteredIndex.length === 0 && !indexLoading ? (
-          <Empty description={search ? t("plugins.catalog.noMatch") : t("plugins.catalog.empty")} />
+          <BrandEmpty description={search ? t("plugins.catalog.noMatch") : t("plugins.catalog.empty")} className="pane-empty" />
         ) : (
           <Table
             rowKey="id"
