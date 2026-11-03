@@ -28,6 +28,8 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
         "security": {
             "execApproval": cfg.security.exec_approval,
             "execAllowlist": cfg.security.exec_allowlist,
+            "execUser": cfg.security.exec_user,
+            "execHome": cfg.security.exec_home,
             "authKey": if cfg.security.auth_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "terminalTimeoutSecs": cfg.security.terminal_timeout_secs,
             "toolOutputSpillChars": cfg.security.tool_output_spill_chars,
