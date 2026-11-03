@@ -75,6 +75,15 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
         }
     }
 
+    // Meta Agent（实验性，experiments.metaAgent）：周期巡检（数据聚合 → Eval →
+    // 自主会话落提议单）。独立 meta_state 周期判定,与 Auto Agent 互不干扰。
+    if core.config().experiments.meta_agent {
+        let minute = now.timestamp() / 60;
+        if core.meta_agent_tick(minute).await.is_some() {
+            changed = true;
+        }
+    }
+
     if changed {
         let _ = core.events.send(CoreEvent {
             kind: "cron.updated".into(),

@@ -1850,6 +1850,7 @@ async fn create_act_approval(
         decided_at: None,
         origin_user: None,
         origin_role: None,
+        meta_json: None,
     };
     core.store.add_approval(&req)?;
     let _ = core.events.send(exm_core::types::CoreEvent {

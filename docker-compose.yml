@@ -1,9 +1,12 @@
-# EXMACHINA 部署编排
+# EXMACHINA 开发栈编排（仓库根）
+#   开发用途:build 源码、项目名 exmachina-dev、端口 4174——与生产部署目录
+#   (deploy/ 模板,项目名 exmachina、端口 4173)完全隔离,可同机共存互不干扰。
 #   部署语言：EXM_LANG=zh（默认）| en —— en 时默认智能体提示词装载英文变体
-#   模型接入：首次启动后访问 http://localhost:4173 提供商 [PROVIDERS] 页配置（或挂载已有 .exmachina/config.json）
+#   模型接入：首次启动后访问 http://localhost:4174 提供商 [PROVIDERS] 页配置（或挂载已有 .exmachina/config.json）
 #   版本追溯：GIT_HASH 烘进镜像（/api/version 的 gitHash）。直连构建务必带当前哈希：
 #     GIT_HASH=$(git rev-parse --short HEAD) docker compose build && docker compose up -d
 #     （省略时回落 dev，生产版本将不可追溯；scripts/apply-update.sh 已自动带上）
+name: exmachina-dev
 services:
   exmachina:
     build:
@@ -11,10 +14,10 @@ services:
       args:
         GIT_HASH: ${GIT_HASH:-dev}
         EXM_LANG: ${EXM_LANG:-zh}
-    image: exmachina:latest
-    container_name: exmachina
+    image: exmachina-dev:latest
+    container_name: exmachina-dev
     ports:
-      - "4173:4173"
+      - "4174:4173"
     environment:
       - EXM_LANG=${EXM_LANG:-zh}
       # 可选：环境变量优先级最高，直接注入厂商密钥
@@ -25,10 +28,10 @@ services:
       # 后台访问密钥（.env 注入，不入库）：非空时 WebUI 出登录门、全部 /api 需 X-Auth-Key
       - EXM_AUTH_KEY=${EXM_AUTH_KEY:-}
     volumes:
-      - exmachina-state:/app/.exmachina
+      - exmachina-dev-state:/app/.exmachina
       # 插件目录独立卷：进程/声明式插件安装产物持久化（容器重建不丢，
       # 与 .exmachina 分离——镜像升级不连带插件目录语义）
-      - exmachina-plugins:/app/plugins
+      - exmachina-dev-plugins:/app/plugins
       # 编成数据挂载（组/智能体/技能/提示词可持久化编辑）
       - ./entities:/app/entities
       # 一键更新:仓库根(读写,git pull 用)+ 宿主 docker 引擎
@@ -40,5 +43,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  exmachina-state:
-  exmachina-plugins:
+  exmachina-dev-state:
+  exmachina-dev-plugins:

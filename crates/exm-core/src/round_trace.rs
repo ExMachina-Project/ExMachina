@@ -98,6 +98,22 @@ pub fn drain(session_id: &str) -> (Option<String>, Vec<ToolCallRecord>, Vec<Trac
     (thinking, tools, steps)
 }
 
+/// 只读快照：工具轨迹摘要（元认知反思钩子输入——不取走数据，不打扰轮次收束）。
+/// 输出「工具名(ok/failed)」序列，失败一目了然；截断到最近 12 条防提示膨胀。
+pub fn snapshot_tool_trace(session_id: &str) -> String {
+    let map = states().lock();
+    let Some(st) = map.get(session_id) else {
+        return String::new();
+    };
+    let n = st.tools.len();
+    let start = n.saturating_sub(12);
+    st.tools[start..]
+        .iter()
+        .map(|t| format!("{}({})", t.tool, if t.ok { "ok" } else { "failed" }))
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
 /// 会话运行标志：chat 开始时置存在、结束移除（存在 = 有运行中轮次）
 pub fn begin(session_id: &str) {
     states().lock().entry(session_id.to_string()).or_default();

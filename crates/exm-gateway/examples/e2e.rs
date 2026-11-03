@@ -172,6 +172,50 @@ async fn main() -> anyhow::Result<()> {
         health["ok"] == true && health["agents"].as_u64().unwrap_or(0) >= 13,
     );
 
+    // 版本与更新检查（双模式契约:deployMode 合法值;e2e 环境无 /host → none）
+    let version: serde_json::Value = client
+        .get(format!("{base}/version"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "version 契约字段齐备",
+        version["version"].is_string() && version["gitHash"].is_string(),
+    );
+    let vcheck: serde_json::Value = client
+        .get(format!("{base}/version/check"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let dm = vcheck["deployMode"].as_str().unwrap_or("");
+    c.check(
+        "version/check deployMode 合法",
+        matches!(dm, "git" | "image" | "none"),
+    );
+    if dm == "none" {
+        c.check(
+            "none 模式带说明且 updateAvailable 为 null",
+            vcheck["note"].is_string() && vcheck["updateAvailable"].is_null(),
+        );
+    }
+    let vstatus: serde_json::Value = client
+        .get(format!("{base}/version/apply/status"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "apply/status 契约字段齐备(phase 小写)",
+        vstatus["running"].is_boolean()
+            && vstatus["log"].is_string()
+            && matches!(
+                vstatus["phase"].as_str().unwrap_or(""),
+                "idle" | "pulling" | "building" | "recreating" | "done" | "failed"
+            ),
+    );
+
     let agents: serde_json::Value = client
         .get(format!("{base}/agents"))
         .send()
@@ -1460,6 +1504,19 @@ async fn main() -> anyhow::Result<()> {
     c.check(
         "自主性实验 schema 收录（设置页可配）",
         schema_text.contains("superAgent") && schema_text.contains("autoAgent"),
+    );
+
+    // 元智能体实验（experiments.metaAgent）：管理面契约——开关下发 + schema 收录
+    // （提议/审批/应用全链路在 exm-core meta_approval_tests 集成测试；此处锚定设置页可达）
+    let meta_down = cfg_view["experiments"]["metaAgent"].is_boolean();
+    let meta_interval = cfg_view["automation"]["metaIntervalMin"].is_u64();
+    c.check(
+        "元智能体实验开关下发（metaAgent + 周期）",
+        meta_down && meta_interval,
+    );
+    c.check(
+        "元智能体 schema 收录（设置页可配）",
+        schema_text.contains("metaAgent") && schema_text.contains("metaIntervalMin"),
     );
 
     // 通道平台校验 + 掩码回显语义（supervisor 只在 serve() 拉起，e2e 内无适配器连接行为，全部确定性）

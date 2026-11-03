@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// 沙箱执行参数：程序 + 参数 + 环境（净化后）
+/// 沙箱执行参数：程序 + 参数 + 环境（净化后）+ 身份（execUser 约束）
 pub struct ShellOpts {
     pub program: String,
     pub args: Vec<String>,
@@ -15,6 +15,12 @@ pub struct ShellOpts {
     pub max_processes: u32,
     /// 覆盖实际执行的命令文本（如加 ulimit 前缀）；None = 用调用方传入的 cmd
     pub cmd_override: Option<String>,
+    /// 执行身份（Linux execUser 约束）：spawn 侧 uid()/gid() 降权 + cwd 圈禁。
+    /// None = 不约束（旧行为）。bwrap 路径不设此项（身份经 bwrap --uid/--gid 传入）
+    #[cfg(unix)]
+    pub uid_gid: Option<(u32, u32)>,
+    /// 圈禁根目录（execHome）：子进程 cwd + HOME 边界
+    pub confine_home: Option<String>,
 }
 
 impl ShellOpts {
@@ -30,6 +36,8 @@ impl ShellOpts {
                 memory_mb: 0,
                 max_processes: 0,
                 cmd_override: None,
+                uid_gid: None,
+                confine_home: None,
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -42,6 +50,8 @@ impl ShellOpts {
                 memory_mb: 0,
                 max_processes: 0,
                 cmd_override: None,
+                uid_gid: None,
+                confine_home: None,
             }
         }
     }
@@ -312,8 +322,27 @@ pub async fn execute_shell_with(
     if opts.memory_mb > 0 {
         let _ = process.env("EXM_MEM_LIMIT_MB", opts.memory_mb.to_string());
     }
+    // 执行身份约束（Linux execUser）：cwd 圈禁 execHome + spawn 侧 uid/gid 降权。
+    // 网关非 root 且目标 uid ≠ 自身时 spawn 会 EPERM——由上层在配置解析时拦截,
+    // 这里只在确有身份时设置(约束开启即必然可解析)。
+    #[cfg(target_os = "linux")]
+    if let Some((uid, gid)) = opts.uid_gid {
+        // Linux:tokio 的 unix CommandExt(sealed trait,经预导入路径直接可用)。
+        // 本环境 tokio 版本的 uid/gid 为安全 API(无 unsafe 签名);setuid 竞态由
+        // 父进程单线程 spawn 序列保证。
+        process.uid(uid).gid(gid);
+    }
+    // cwd:身份约束开启时圈禁到 execHome(覆盖 workspace_root——身份是更强的边界)
+    let cwd: std::path::PathBuf = match &opts.confine_home {
+        Some(home) => {
+            let p = std::path::PathBuf::from(home);
+            let _ = std::fs::create_dir_all(&p);
+            p
+        }
+        None => workspace_root.to_path_buf(),
+    };
     let spawned = process
-        .current_dir(workspace_root)
+        .current_dir(&cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
