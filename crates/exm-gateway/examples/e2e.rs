@@ -1780,6 +1780,102 @@ async fn main() -> anyhow::Result<()> {
         approve_missing.status().as_u16() == 404,
     );
 
+    // ---- 三档放行（approval-ergonomics）：once 不建授权 / session 建授权 /
+    // ---- allowlist 写配置 + 未知档位 400 + 兼容旧无 body 调用
+    {
+        use exm_core::types::{now_iso, ApprovalRequest};
+        let mk_ap = |core: &Core, sid: &str, cmd: &str| {
+            let ap = ApprovalRequest {
+                id: exm_core::types::new_id()[..8].to_string(),
+                session_id: sid.into(),
+                node_id: None,
+                agent_id: "e2e".into(),
+                command: cmd.into(),
+                status: "pending".into(),
+                result: None,
+                created_at: now_iso(),
+                decided_at: None,
+                origin_user: None,
+                origin_role: None,
+                meta_json: None,
+            };
+            core.store.add_approval(&ap).unwrap();
+            ap.id
+        };
+        let mk_session = |core: &Core| core.create_session("档位测试").unwrap().id;
+        // once：不建授权
+        let sid = mk_session(&core);
+        let once_id = mk_ap(&core, &sid, "echo once-scope");
+        let r: serde_json::Value = client
+            .post(format!("{base}/approvals/{once_id}/approve"))
+            .json(&serde_json::json!({ "scope": "once" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("once 档执行成功", r["status"] == "executed");
+        c.check(
+            "once 档不建会话授权",
+            !r["result"].as_str().unwrap_or("").contains("会话授权"),
+        );
+        // session：建授权,同前缀第二次免审批直通
+        let ap2 = mk_ap(&core, &sid, "echo session-scope");
+        let r2: serde_json::Value = client
+            .post(format!("{base}/approvals/{ap2}/approve"))
+            .json(&serde_json::json!({ "scope": "session" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("session 档执行成功", r2["status"] == "executed");
+        c.check(
+            "session 档建会话授权",
+            r2["result"].as_str().unwrap_or("").contains("会话授权"),
+        );
+        c.check(
+            "同前缀命令命中授权",
+            core.session_granted(&sid, "echo session-scope again").is_some(),
+        );
+        // allowlist：前缀写入配置可读回
+        let sid3 = mk_session(&core);
+        let ap3 = mk_ap(&core, &sid3, "echo allowlist-scope");
+        let r3: serde_json::Value = client
+            .post(format!("{base}/approvals/{ap3}/approve"))
+            .json(&serde_json::json!({ "scope": "allowlist" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("allowlist 档执行成功", r3["status"] == "executed");
+        let cfg_now = core.config();
+        c.check(
+            "allowlist 档写入配置",
+            cfg_now
+                .security
+                .exec_allowlist
+                .iter()
+                .any(|p| p == "echo allowlist-scope"),
+        );
+        drop(cfg_now);
+        // 未知档位 → 400
+        let sid4 = mk_session(&core);
+        let ap4 = mk_ap(&core, &sid4, "echo bad-scope");
+        let bad: reqwest::Response = client
+            .post(format!("{base}/approvals/{ap4}/approve"))
+            .json(&serde_json::json!({ "scope": "forever" }))
+            .send()
+            .await?;
+        c.check("未知档位返回 400", bad.status().as_u16() == 400);
+        // 旧客户端无 body 兼容（缺省 once）
+        let r5: serde_json::Value = client
+            .post(format!("{base}/approvals/{ap4}/approve"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("无 body 兼容缺省 once", r5["status"] == "executed");
+    }
+
     // ---- 经验优化（docs/10 §5）：合成要点 → 后续派发携带修订号 → 重置 ----
     // 模拟规划器按 identifier 序取前几名派发：动态选取排序后第 2 个子个体，保证其必被派发
     let target = {

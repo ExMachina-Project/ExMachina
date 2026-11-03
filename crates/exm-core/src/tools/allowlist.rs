@@ -779,6 +779,25 @@ pub(crate) fn strip_redundant_elevation(cmd: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------- 会话授权前缀（approval-ergonomics）
+
+/// 会话授权的命令前缀口径：命令名 + 首子命令（剥提权前缀）。
+/// 与白名单「命令 + 子命令」逐段匹配口径对齐——grant 的放行面不宽于
+/// 用户批准时所见的命令类别（`cargo build --release` → `cargo build`）。
+/// 破坏性/提权判定不在此处：grant 表写入侧（approval_decide）负责红线校验。
+pub fn command_head(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+    // 剥提权壳（sudo/doas/run0 非定向切换；su/runuser 是切换语义,不剥——
+    // 但这类命令按红线根本进不了 grant 表,此处仅保守处理）
+    let stripped = strip_redundant_elevation(trimmed);
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
+    match tokens.len() {
+        0 => String::new(),
+        1 => tokens[0].to_lowercase(),
+        _ => format!("{} {}", tokens[0], tokens[1]).to_lowercase(),
+    }
+}
+
 #[cfg(test)]
 mod elevation_tests {
     use super::*;
@@ -839,5 +858,49 @@ mod elevation_tests {
         assert!(is_elevation_command("SUDO apt install"));
         assert!(is_elevation_command("Sudo apt install"));
         assert_eq!(strip_redundant_elevation("SUDO id"), "id");
+    }
+}
+
+#[cfg(test)]
+mod command_head_tests {
+    use super::*;
+
+    #[test]
+    fn 普通命令取名加首子命令() {
+        assert_eq!(command_head("cargo build --release"), "cargo build");
+        assert_eq!(command_head("mkdir -p /tmp/x"), "mkdir -p");
+        assert_eq!(command_head("git status"), "git status");
+    }
+
+    #[test]
+    fn 单命令只取名() {
+        assert_eq!(command_head("ls"), "ls");
+        assert_eq!(command_head("pytest"), "pytest");
+    }
+
+    #[test]
+    fn 提权壳剥除后取头() {
+        assert_eq!(command_head("sudo apt install -y tmux"), "apt install");
+        assert_eq!(command_head("doas apk add curl"), "apk add");
+    }
+
+    #[test]
+    fn 切换语义命令保留原头() {
+        // su/runuser/sudo -u 是切换语义,不剥首 token(这类命令按红线进不了 grant,
+        // 口径上仍保持「用户所见即所批」)
+        assert_eq!(command_head("su - postgres -c 'psql'"), "su -");
+        assert_eq!(command_head("sudo -u deploy git pull"), "sudo -u");
+    }
+
+    #[test]
+    fn 空白与空命令容错() {
+        assert_eq!(command_head("   "), "");
+        assert_eq!(command_head(""), "");
+        assert_eq!(command_head("  cargo   build  "), "cargo build");
+    }
+
+    #[test]
+    fn 大小写归一() {
+        assert_eq!(command_head("Cargo BUILD --release"), "cargo build");
     }
 }
