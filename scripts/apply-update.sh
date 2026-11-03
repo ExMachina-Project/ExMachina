@@ -60,10 +60,20 @@ PYEOF
 
 trap 'finish 1' HUP INT TERM
 
-# docker cli 需要 config.json(拉取镜像时解析仓库认证用);容器内默认没有,造一个空的
+# docker cli 需要 config.json(拉取镜像时解析仓库认证用)。
+# 私有注册表(ghcr 私有包等)场景:部署目录放 .docker/config.json(docker login 产物),
+# 更新时复制到容器内临时 DOCKER_CONFIG——凭据只留在部署目录,不进镜像、不进仓库。
+# 无凭据文件时造空 config,公开镜像照常拉取。
 export DOCKER_CONFIG="${DOCKER_CONFIG:-/tmp/.docker}"
 mkdir -p "$DOCKER_CONFIG"
-[ -f "$DOCKER_CONFIG/config.json" ] || echo '{}' > "$DOCKER_CONFIG/config.json"
+DEPLOY_DOCKER_CONFIG="/host/.docker/config.json"
+if [ -f "$DEPLOY_DOCKER_CONFIG" ]; then
+    cp "$DEPLOY_DOCKER_CONFIG" "$DOCKER_CONFIG/config.json"
+    chmod 600 "$DOCKER_CONFIG/config.json" 2>/dev/null || true
+    echo "▸ 已加载部署目录注册表凭据(.docker/config.json)"
+else
+    [ -f "$DOCKER_CONFIG/config.json" ] || echo '{}' > "$DOCKER_CONFIG/config.json"
+fi
 
 # 辅助容器在宿主侧运行:-v 的源必须是部署目录的宿主真实路径(/host 只是本容器内的挂载点),
 # 从网关容器自身的 mount 信息反解,不硬编码
@@ -72,6 +82,9 @@ resolve_host_repo() {
 }
 
 # 经一次性辅助容器执行 compose 重启(独立于本容器生命周期)
+# 只操作网关自身服务:同项目里的附属服务(如 napcat)生命周期独立,
+# 不该因版本更新被 pull/recreate(实测会把 275MB 无关镜像一起拉)。
+SERVICE="exmachina"
 recreate_via_helper() {
     docker pull -q "$HELPER_IMAGE"
     docker rm -f exmachina-updater 2>/dev/null || true
@@ -81,7 +94,7 @@ recreate_via_helper() {
     docker run --rm --name exmachina-updater \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v "$HOST_REPO:/host" -w /host \
-        "$HELPER_IMAGE" compose -p "$PROJECT" up -d --force-recreate
+        "$HELPER_IMAGE" compose -p "$PROJECT" up -d --force-recreate --no-deps "$SERVICE"
 }
 
 if [ -d /host/.git ]; then
@@ -103,7 +116,7 @@ else
     cd /host || finish 1
     echo "▸ [image 模式] 步骤 1/2:拉取最新镜像"
     set_phase pulling
-    docker compose -p "$PROJECT" pull || finish 1
+    docker compose -p "$PROJECT" pull "$SERVICE" || finish 1
     echo "▸ [image 模式] 步骤 2/2:重启容器(经一次性辅助容器执行)"
     recreate_via_helper || finish 1
 fi
