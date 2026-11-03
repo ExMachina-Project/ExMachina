@@ -1,5 +1,5 @@
 /** REST 客户端 —— 契约见 docs/04 §7 */
-import type { AgentDefinition, ChatMessage, EvidenceItem, Session, TaskGraph } from "./types";
+import type { AgentDefinition, ChatMessage, EvidenceItem, Session, SessionSearchHit, SessionSnapshot, TaskGraph } from "./types";
 import { tr } from "./i18n/core";
 
 /** 密钥掩码哨兵（与后端 llm_admin::KEY_MASK / 通道脱敏同一契约）：提交时收到此值 = 沿用服务端旧值 */
@@ -79,6 +79,10 @@ export interface GatewayConfig {
     toolOutputSpillChars?: number;
     /** 审批等待（秒）：拦截后原地等待人工决定的时长；0 = 直接受阻 */
     approvalWaitSecs?: number;
+    /** 执行身份约束（Linux）：终端子进程降权到此用户（用户名或数字 uid；空 = 不约束） */
+    execUser?: string;
+    /** 圈禁根目录（绝对路径；空 = 自动推导） */
+    execHome?: string;
   };
   /** Computer Use（截屏 + 键鼠控制本机；默认关闭） */
   computer?: { enabled: boolean; approval: boolean; maxEdge: number; actionIntervalMs: number };
@@ -382,11 +386,41 @@ export interface Channel {
   admins?: string[];
   /** 群聊唤醒门控逐通道覆盖：true = 群内仅提及/回复触发；缺省 = 跟随全局默认 */
   groupGate?: boolean;
+  /** 主动回复（实验性）：群聊免 @ 时经决策模型判断是否回应；缺省/false = 关 */
+  proactiveReply?: boolean;
+  /** 主动回复率 0~100（决策模型前的概率采样闸门；缺省 100 = 全量交决策模型） */
+  proactiveRate?: number;
   /** 能力边界：chat = 仅聊天；tools = 可调工具；computer = 电脑操控（缺省） */
   capability?: "chat" | "tools" | "computer";
   /** 记忆隔离：true = 本通道独立记忆；false/缺省 = 同组跨平台共享 */
   memoryIsolation?: boolean;
   createdAt: string;
+}
+
+/** 通道聊天流（chat flow）：外部 IM 的一个对话单元（群聊/私聊各一条；无细分对话的平台整通道一条）。
+ *  一条流绑定一个活跃会话——不主动切换固定复用同一会话，跨轮上下文与记忆自然延续。 */
+export interface ChannelFlow {
+  id: string;
+  channelId: string;
+  chatKey: string;
+  displayName: string;
+  isGroup: boolean;
+  /** 当前绑定的会话 id（空 = 尚未有会话，下条消息自动开新） */
+  activeSession?: string;
+  /** 未读数：智能体在流绑定会话产出回复且用户未打开该会话时累积；打开即清零 */
+  unread?: number;
+  lastMessage: string;
+  lastActiveAt: string;
+  createdAt: string;
+}
+
+/** 流内会话条目（流会话切换）：与通道 /sessions 指令同口径 */
+export interface FlowSessionInfo {
+  id: string;
+  label: string;
+  createdAt: string;
+  updatedAt: string;
+  active: boolean;
 }
 
 /** 通道运行状态（内置适配器上报；桥接类型无运行时不产生条目） */
@@ -497,6 +531,16 @@ export const api = {
   dismissKeySetup: () => req<{ ok: boolean }>("/auth/dismiss", { method: "POST" }),
   health: () => req<{ ok: boolean; mock: boolean; agents: number }>("/health"),
   listSessions: () => req<Session[]>("/sessions"),
+  /** 管理视角全量会话（含所有组；归档态默认排除） */
+  listAllSessions: () => req<Session[]>("/sessions?all=true"),
+  /** 归档区列表（仅归档态，按归档时间倒序） */
+  listArchivedSessions: () => req<Session[]>("/sessions?archived=true"),
+  /** 批量操作（archive / unarchive / delete）：返回作用计数与失败明细 */
+  batchSessions: (action: "archive" | "unarchive" | "delete", ids: string[]) =>
+    req<{ ok: boolean; affected: number; failed: { id: string; error: string }[] }>("/sessions/batch", {
+      method: "POST",
+      body: JSON.stringify({ action, ids }),
+    }),
   createSession: (title: string) =>
     req<Session>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
   getSession: (id: string) => req<Session>(`/sessions/${id}`),
@@ -528,8 +572,12 @@ export const api = {
       body: JSON.stringify({ turn }),
     }),
   sessionArchive: (id: string) => req<ChatMessage[]>(`/sessions/${id}/archive`),
-  sessionSnapshots: (id: string) =>
-    req<{ turn: number; messageCount: number; status: string }[]>(`/sessions/${id}/snapshots`),
+  sessionSnapshots: (id: string) => req<SessionSnapshot[]>(`/sessions/${id}/snapshots`),
+  /** 会话内容检索：标题 + 最近 200 条消息（空 q 由服务端 400，前端不发） */
+  searchSessions: (q: string, limit = 20) =>
+    req<{ query: string; hits: SessionSearchHit[] }>(
+      `/sessions/search?${new URLSearchParams({ q, limit: String(limit) }).toString()}`,
+    ),
   messages: (id: string) =>
     req<ChatMessage[]>(`/sessions/${id}/messages`).then((list) =>
       // 服务端 ToolCallRecord 用 ok:bool（收束落库形态），前端统一水合为 status 三态；
@@ -575,15 +623,19 @@ export const api = {
   listTemplates: () => req<{ templates: TemplateInfo[] }>("/templates"),
   /** 本机版本 */
   versionInfo: () => req<{ version: string; gitHash: string }>("/version"),
-  /** 一键更新(后台执行 git pull → build → up -d,经 /host + docker.sock) */
+  /** 一键更新(image 模式:compose pull + 辅助容器 up -d;git 模式:pull → build → up -d) */
   applyUpdate: () => req<{ started: boolean }>("/version/apply", { method: "POST" }),
-  /** 一键更新状态 */
-  updateStatus: () => req<{ running: boolean; log: string }>("/version/apply/status"),
-  /** 更新检查(分支感知:本地在什么分支就对比该分支的上游);updateAvailable = true/false/null(无法判定) */
+  /** 一键更新状态(phase: pulling/building/recreating/done/failed/idle) */
+  updateStatus: () =>
+    req<{ running: boolean; phase: string; exitCode: number | null; log: string; deployMode: string }>(
+      "/version/apply/status",
+    ),
+  /** 更新检查(双模式:git=源码部署比对上游分支,image=镜像部署比对注册表发布源 SHA) */
   versionCheck: () =>
     req<{
       version: string;
       gitHash: string;
+      deployMode?: "git" | "image" | "none";
       branch?: string;
       upstream?: { ref: string; sha: string; short: string; url: string; date: string };
       updateAvailable?: boolean | null;
@@ -783,6 +835,12 @@ export const api = {
 
   listChannels: () => req<Channel[]>("/channels"),
   channelStatus: () => req<Record<string, ChannelStatus>>("/channels/status"),
+  /** 聊天流列表（按最后活跃倒序；?channel= 过滤单通道） */
+  listChannelFlows: () => req<ChannelFlow[]>("/channels/flows"),
+  readChannelFlow: (id: string) => req<{ ok: boolean }>(`/channels/flows/${encodeURIComponent(id)}/read`, { method: "POST" }),
+  listFlowSessions: (id: string) => req<FlowSessionInfo[]>(`/channels/flows/${encodeURIComponent(id)}/sessions`),
+  setFlowActiveSession: (id: string, sessionId: string) =>
+    req<{ ok: boolean; sessionId: string }>(`/channels/flows/${encodeURIComponent(id)}/active`, { method: "PUT", body: JSON.stringify({ sessionId }) }),
   /** B 站扫码登录：出码（返回二维码内容 URL）→ 前端渲染二维码 → 轮询到 confirmed 拿登录 Cookie */
   biliQrStart: () => req<{ qrcodeKey: string; url: string }>("/channels/bili-qr", { method: "POST" }),
   biliQrPoll: (key: string) =>
@@ -802,11 +860,13 @@ export const api = {
     allowedChats?: string[];
     admins?: string[];
     groupGate?: boolean;
+    proactiveReply?: boolean;
+    proactiveRate?: number;
     capability?: "chat" | "tools" | "computer";
     memoryIsolation?: boolean;
     config?: Record<string, string>;
   }) => req<Channel>("/channels", { method: "POST", body: JSON.stringify(body) }),
-  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
+  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; proactiveReply?: boolean; proactiveRate?: number; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
     req<Channel>(`/channels/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
 
@@ -817,7 +877,7 @@ export const api = {
   activateLlmProfile: (id: string) =>
     req<{ ok: boolean; active: string; mock: boolean }>("/llm/active", { method: "PUT", body: JSON.stringify({ id }) }),
   testLlmProfile: (id?: string) =>
-    req<{ ok: boolean; mock?: boolean; configured?: boolean; status?: number; snippet?: string; message?: string; error?: string }>("/llm/test", {
+    req<{ ok: boolean; mock?: boolean; configured?: boolean; status?: number; latencyMs?: number; snippet?: string; message?: string; error?: string }>("/llm/test", {
       method: "POST",
       body: JSON.stringify(id ? { id } : {}),
     }),
@@ -930,6 +990,16 @@ export function identityUnbind(id: string): Promise<{ ok: boolean }> {
   return req(`/identity/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
+/** 通道身份：撤销配对码（过期清理 / 误签发撤销；幂等） */
+export function identityRevokeCode(code: string): Promise<{ ok: boolean }> {
+  return req(`/identity/code/${encodeURIComponent(code)}`, { method: "DELETE" });
+}
+
+/** 通道身份：一键清理全部过期配对码 */
+export function identityPurgeCodes(): Promise<{ ok: boolean; purged: number }> {
+  return req(`/identity/codes/purge`, { method: "POST", body: JSON.stringify({}) });
+}
+
 export interface LimitsStats {
   enabled: boolean;
   windowSecs: number;
@@ -943,4 +1013,13 @@ export interface LimitsStats {
 /** 用量治理：限流计数快照 + 配置口径 */
 export function limitsStats(): Promise<LimitsStats> {
   return req(`/limits/stats`);
+}
+
+/** 消毒命中统计（inbound-sanitization 设置页安全区）：模式 → 计数（进程级） */
+export interface SanitizeStats {
+  stats: { pattern: string; count: number }[];
+}
+
+export function sanitizeStats(): Promise<SanitizeStats> {
+  return req(`/config/sanitize-stats`);
 }

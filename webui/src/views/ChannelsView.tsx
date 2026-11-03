@@ -1,7 +1,7 @@
 /** 通道网关：多平台多账号接入（QQ 官方机器人 / NapCat / Telegram / Discord / Slack / Matrix / webhook 桥接），每个账号可绑定不同智能体组 */
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  Button, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch, Table, Tag, Tooltip, message,
+  Button, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Slider, Space, Spin, Switch, Table, Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
 import { PlusOutlined, QrcodeOutlined, ReloadOutlined } from "@ant-design/icons";
@@ -12,6 +12,8 @@ import { MaskedPasswordInput } from "../components/MaskedInput";
 import { BiliQrLoginModal } from "../components/BiliQrLoginModal";
 import { useExm } from "../store";
 import { useT, type TKey } from "../i18n/core";
+import { useIsNarrow } from "../useIsNarrow";
+import { fullTime, relativeTime } from "../time";
 
 /** 平台目录：表单字段、凭证判定、回复形态全部由目录驱动 —— 接新平台加一条即可 */
 interface ChanField {
@@ -288,6 +290,8 @@ function platformDefaults(kind: string): Record<string, unknown> {
 
 export function ChannelsView(): React.ReactElement {
   const t = useT();
+  // 窄屏降级（移动端查漏）：次要列 md+ 才显示，主列收窄
+  const narrow = useIsNarrow();
   // 插件清单动态并入平台目录：插件声明的 channel kinds（凭据字段按清单渲染）
   const [extraPlats, setExtraPlats] = useState<ChanPlat[]>([]);
   useEffect(() => {
@@ -377,6 +381,7 @@ export function ChannelsView(): React.ReactElement {
       platform: "qqbot",
       capability: "computer",
       memoryIsolation: false,
+      proactiveReply: false,
       config: platformDefaults("qqbot"),
     });
     setModal(true);
@@ -409,6 +414,8 @@ export function ChannelsView(): React.ReactElement {
       admins: (c.admins ?? []).join(", "),
       capability: c.capability ?? "computer",
       memoryIsolation: c.memoryIsolation ?? false,
+      proactiveReply: c.proactiveReply ?? false,
+      proactiveRate: c.proactiveRate ?? 100,
       config: cfg,
       configJson: Object.keys(extra).length > 0 ? JSON.stringify(extra, null, 2) : "",
     });
@@ -479,6 +486,8 @@ export function ChannelsView(): React.ReactElement {
         .filter(Boolean),
       capability: v.capability ?? "computer",
       memoryIsolation: Boolean(v.memoryIsolation),
+      proactiveReply: Boolean(v.proactiveReply),
+      proactiveRate: v.proactiveReply ? Number(v.proactiveRate ?? 100) : undefined,
     };
     try {
       if (editing) {
@@ -592,11 +601,12 @@ export function ChannelsView(): React.ReactElement {
         {tab === "identity" ? (
           <IdentityPanel expanded />
         ) : (
+          <div className={narrow ? "tbl-fit" : undefined}>
           <Table<Channel>
           size="small"
           rowKey="id"
           pagination={false}
-          scroll={{ x: "max-content" }}
+          scroll={{ x: narrow ? "max-content" : "max-content" }}
           dataSource={channels}
           locale={{ emptyText: <BrandEmpty description={t("channels.empty")} className="pane-empty" /> }}
           columns={[
@@ -607,13 +617,17 @@ export function ChannelsView(): React.ReactElement {
                   <b>
                     {c.account ?? c.id} {c.account ? <span className="mono dim">{c.id}</span> : null}
                   </b>
-                  <span className="mono dim">{c.createdAt}</span>
+                  <Tooltip title={fullTime(c.createdAt)}>
+                    <span className="mono dim">{relativeTime(c.createdAt) || c.createdAt}</span>
+                  </Tooltip>
                 </Space>
               ),
             },
             { title: t("channels.colPlatform"), render: (_, c) => platformTag(c.type) },
+            // 窄屏降级：绑定目标的标签组信息密度高但非首要，md+ 显示
             {
               title: t("channels.colGroup"),
+              responsive: ["md"],
               render: (_, c) => {
                 const cap = c.capability ?? "computer";
                 const isSingle = c.group?.startsWith("single:");
@@ -644,10 +658,13 @@ export function ChannelsView(): React.ReactElement {
                 );
               },
             },
-            { title: t("channels.colSecret"), render: (_, c) => credTag(c) },
-            { title: t("channels.colStatus"), width: 280, render: (_, c) => statusCell(c) },
+            { title: t("channels.colSecret"), responsive: ["md"], render: (_, c) => credTag(c) },
+            // 窄屏状态列也收进 md+（150px 文案列 + 4 列在 390px 装不下；启用/编辑/删除优先）
+            { title: t("channels.colStatus"), responsive: ["md"], width: narrow ? 150 : 280, render: (_, c) => statusCell(c) },
+            // 窄屏降级：测试/回复方式/启用开关收进 md+；操作列常驻（编辑/删除可达性优先）
             {
               title: t("channels.colTest"),
+              responsive: ["md"],
               width: 110,
               render: (_, c) => {
                 const st = testResult[c.id];
@@ -692,6 +709,7 @@ export function ChannelsView(): React.ReactElement {
             },
             {
               title: t("channels.colReply"),
+              responsive: ["md"],
               render: (_, c) => {
                 const plat = catalog.find((x) => x.key === c.type);
                 if (plat?.proactive) return <Tag color="purple">{t("channels.replyProactive")}</Tag>;
@@ -709,6 +727,9 @@ export function ChannelsView(): React.ReactElement {
             {
               title: t("channels.colOps"),
               width: 140,
+              // 窄屏固定右侧（移动端查漏）：嵌套横滚下「删除」曾滚到底仍出视口，
+              // fixed right 保证编辑/删除恒可达（antd 固定列 + scroll.x 标准方案）
+              fixed: narrow ? "right" : undefined,
               render: (_, c) => (
                 <Space>
                   <Button size="small" onClick={() => openEdit(c)}>
@@ -724,6 +745,7 @@ export function ChannelsView(): React.ReactElement {
             },
           ]}
         />
+        </div>
         )}
       </Spin>
 
@@ -863,6 +885,34 @@ export function ChannelsView(): React.ReactElement {
                     extra={t("channels.f.memoryIsolationHelp")}
                   >
                     <Switch size="small" />
+                  </Form.Item>
+                  {/* 主动回复（群聊免 @）：开关 + 回复率（回复率仅开启时有意义） */}
+                  <Form.Item
+                    noStyle
+                    shouldUpdate={(a, b) => a.proactiveReply !== b.proactiveReply}
+                  >
+                    {({ getFieldValue }) => (
+                      <>
+                        <Form.Item
+                          name="proactiveReply"
+                          valuePropName="checked"
+                          label={t("channels.f.proactiveReply")}
+                          extra={t("channels.f.proactiveReplyHelp")}
+                        >
+                          <Switch size="small" />
+                        </Form.Item>
+                        {getFieldValue("proactiveReply") && (
+                          <Form.Item
+                            name="proactiveRate"
+                            label={t("channels.f.proactiveRate")}
+                            extra={t("channels.f.proactiveRateHelp")}
+                            initialValue={100}
+                          >
+                            <Slider min={0} max={100} step={5} marks={{ 0: "0", 50: "50", 100: "100" }} />
+                          </Form.Item>
+                        )}
+                      </>
+                    )}
                   </Form.Item>
                   {/* 管理者账号：主体区直接可见（判权跟人走，任何通道配了都全局生效） */}
                   <Form.Item

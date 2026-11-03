@@ -4,7 +4,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, Input, Popconfirm, Space, Table, Tag, Typography, message } from "antd";
 import { CodeOutlined, ReloadOutlined } from "@ant-design/icons";
-import { identityIssue, identityList, identitySetRole, identityUnbind } from "../api";
+import { identityIssue, identityList, identityPurgeCodes, identityRevokeCode, identitySetRole, identityUnbind } from "../api";
 import { useT } from "../i18n/core";
 
 interface IdentityItem {
@@ -86,6 +86,28 @@ export function IdentityPanel({ expanded = false }: { expanded?: boolean }): Rea
     }
   };
 
+  const revokeCode = async (code: string) => {
+    try {
+      await identityRevokeCode(code);
+      message.success(t("identity.revoked"));
+      await load();
+    } catch (e) {
+      message.error(String(e).slice(0, 160));
+    }
+  };
+
+  const purgeExpired = async () => {
+    try {
+      const r = await identityPurgeCodes();
+      message.success(t("identity.purged", { n: r.purged }));
+      await load();
+    } catch (e) {
+      message.error(String(e).slice(0, 160));
+    }
+  };
+
+  const expiredCount = (data?.codes ?? []).filter((c) => c.expired).length;
+
   const liveCodes = (data?.codes ?? []).filter((c) => !c.expired).length;
   const bound = data?.identities.length ?? 0;
 
@@ -138,6 +160,21 @@ export function IdentityPanel({ expanded = false }: { expanded?: boolean }): Rea
                 dataIndex: "expired",
                 render: (x: boolean) =>
                   x ? <Tag color="default">{t("identity.expired")}</Tag> : <Tag color="processing">{t("identity.active")}</Tag>,
+              },
+              {
+                title: "",
+                key: "op",
+                width: 80,
+                render: (_: unknown, r: CodeItem) => (
+                  <Popconfirm
+                    title={r.expired ? t("identity.revokeExpiredConfirm") : t("identity.revokeConfirm")}
+                    onConfirm={() => void revokeCode(r.code)}
+                  >
+                    <Button size="small" type="text" danger>
+                      {t("identity.revoke")}
+                    </Button>
+                  </Popconfirm>
+                ),
               },
             ]}
           />
@@ -202,6 +239,13 @@ export function IdentityPanel({ expanded = false }: { expanded?: boolean }): Rea
       }
       extra={
         <Space size={4}>
+          {expiredCount > 0 && (
+            <Popconfirm title={t("identity.purgeConfirm")} onConfirm={() => void purgeExpired()}>
+              <Button size="small" type="text" danger>
+                {t("identity.purge", { n: expiredCount })}
+              </Button>
+            </Popconfirm>
+          )}
           {(liveCodes > 0 || bound > 0) && (
             <Badge count={liveCodes} title={t("identity.codeCount", { n: liveCodes })}>
               <Tag style={{ marginInlineEnd: 0 }} color={liveCodes ? "processing" : "default"}>
