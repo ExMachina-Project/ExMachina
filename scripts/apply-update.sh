@@ -10,7 +10,9 @@
 set -u
 
 STATE_FILE="${EXM_UPDATE_STATE:-/tmp/exm-update.state}"
-HELPER_IMAGE="docker:27.5.1-cli"
+# 辅助容器镜像:需要 docker + compose 插件。默认官方 cli 镜像,可用
+# EXM_UPDATE_HELPER_IMAGE 覆盖(离线/受限网络环境预置本地镜像即可免拉取)。
+HELPER_IMAGE="${EXM_UPDATE_HELPER_IMAGE:-docker:27.5.1-cli}"
 PROJECT="${EXM_COMPOSE_PROJECT:-exmachina}"
 
 # 推进 phase:读-改-写保留 pid/startedAt/exitCode(与网关 write_update_state 同契约)
@@ -86,16 +88,28 @@ resolve_host_repo() {
 # 经一次性辅助容器执行 compose 重启(独立于本容器生命周期)
 # 只操作网关自身服务:同项目里的附属服务(如 napcat)生命周期独立,
 # 不该因版本更新被 pull/recreate(实测会把 275MB 无关镜像一起拉)。
+#
+# 关键:辅助容器必须把部署目录挂到**宿主上的原始绝对路径**再 -w 进去,
+# 不能挂到 /host。compose 里的相对路径(./entities、./skills)是按 compose 文件
+# 所在目录解析的;若挂到 /host,这些相对路径会落到宿主 /host/entities(空目录),
+# 重建后容器挂载全指向错误位置——实测导致智能体/编成数据整体归零。
 SERVICE="exmachina"
 recreate_via_helper() {
-    docker pull -q "$HELPER_IMAGE"
+    # 本地已有辅助镜像时不再拉取(受限网络下拉 Docker Hub 可能长时间卡住);
+    # 缺失才拉,且失败不阻断——run 阶段会给出更明确的错误。
+    if docker image inspect "$HELPER_IMAGE" >/dev/null 2>&1; then
+        echo "▸ 辅助镜像已存在,跳过拉取:$HELPER_IMAGE"
+    else
+        echo "▸ 拉取辅助镜像:$HELPER_IMAGE"
+        docker pull -q "$HELPER_IMAGE" || echo "⚠ 辅助镜像拉取失败,尝试直接使用(可能已部分就绪)"
+    fi
     docker rm -f exmachina-updater 2>/dev/null || true
     HOST_REPO=$(resolve_host_repo)
     [ -n "$HOST_REPO" ] || { echo "⛔ 未能从容器 mount 反解出部署目录宿主路径"; finish 1; }
     set_phase recreating
     docker run --rm --name exmachina-updater \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "$HOST_REPO:/host" -w /host \
+        -v "$HOST_REPO:$HOST_REPO" -w "$HOST_REPO" \
         "$HELPER_IMAGE" compose -p "$PROJECT" up -d --force-recreate --no-deps "$SERVICE"
 }
 
