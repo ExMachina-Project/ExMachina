@@ -1471,8 +1471,9 @@ impl Core {
 
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
         crate::orchestrator::unmark_im_session(id);
-        // 会话删除连带清理审批授权（grant 生命周期 = 会话生命周期）
+        // 会话删除连带清理审批授权与工具预算计数（生命周期 = 会话生命周期）
         self.session_grants.lock().remove(id);
+        self.orchestrator().tools.clear_tool_budget(id);
         self.store.delete_session(id)
     }
 

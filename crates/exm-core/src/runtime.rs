@@ -355,6 +355,8 @@ impl AgentRuntime {
     {
         let agent_hint = Some(def.identifier.clone());
         let mut system_prompt = system_prompt;
+        // 单轮工具预算清零（agent-budget-audit）：每轮用户输入一个新预算周期
+        self.tools.reset_turn_tool_budget(session_id);
         let boundary = scope.system_note();
         if !boundary.is_empty() {
             system_prompt.push_str("\n\n");
