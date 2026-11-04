@@ -768,6 +768,32 @@ async fn main() -> anyhow::Result<()> {
         "配置热生效",
         core.config().max_concurrency == 3 && core.config().memory_recall_limit == 6,
     );
+    // 主动搜索纪律开关（proactive-search）：设置面写入 → 热生效读回；
+    // 三态语义与既有 search 字段一致（None=沿用），serde 兼容旧 body 缺字段
+    let put_search = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({
+            "search": { "provider": "tavily", "endpoint": "", "apiKey": "e2e-k", "maxResults": 5, "proactive": false }
+        }))
+        .send()
+        .await?;
+    c.check("search 配置 PUT 200", put_search.status().is_success());
+    c.check(
+        "proactive 开关热生效",
+        !core.config().search.proactive && !core.orchestrator().tools.search_discipline_ready(),
+    );
+    let put_search2 = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({
+            "search": { "provider": "tavily", "endpoint": "", "apiKey": "e2e-k", "maxResults": 5 }
+        }))
+        .send()
+        .await?;
+    c.check("search 旧 body PUT 200", put_search2.status().is_success());
+    c.check(
+        "旧 body 缺 proactive 默认开",
+        core.config().search.proactive && core.orchestrator().tools.search_discipline_ready(),
+    );
     let schema: serde_json::Value = client
         .get(format!("{base}/config/schema"))
         .send()

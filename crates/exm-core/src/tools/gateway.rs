@@ -615,6 +615,12 @@ impl ToolGateway {
         self.search.ready()
     }
 
+    /// 主动搜索纪律注入门控（proactive-search）：后端就绪且开关开启。
+    /// 未配置后端 / 显式关闭时返回 false——提示层零注入（零回归语义）。
+    pub fn search_discipline_ready(&self) -> bool {
+        self.search.ready() && self.search.proactive
+    }
+
     /// 测试可见：审批单断言用
     #[cfg(test)]
     pub(crate) fn store_for_test(&self) -> &Store {
@@ -907,7 +913,7 @@ impl ToolGateway {
         }));
         push(
             ToolName::WebSearch,
-            "联网搜索并返回结果摘要（标题 + 链接 + 摘要）",
+            "联网搜索并返回结果摘要（标题 + 链接 + 摘要）。主动使用：时效性问题（新闻/版本/价格）、待核验的具体事实（数字/日期/参数）、没把握的概念——先搜再答，不要凭训练记忆编造；搜索未果换关键词重试（最多 2 轮）后如实说明",
             serde_json::json!({
                 "type": "object",
                 "properties": {
