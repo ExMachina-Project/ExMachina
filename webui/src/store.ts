@@ -15,7 +15,7 @@ import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedIt
 import { tr } from "./i18n/core";
 
 export interface TimelineItem {
-  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron";
+  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron" | "budget";
   agentId?: string;
   nodeId?: string;
   /** 派发对应的子会话（可点击跳转查看子个体过程流） */
@@ -1025,6 +1025,19 @@ export const useExm = create<ExmState>((set, get) => ({
           timeline: [...get().timeline, { kind: "error", text: tr("store.tl.error", { msg: String(p.message) }) }],
         });
         break;
+      // 工具预算熔断（agent-budget-audit）：消息流内联提示——说明本轮为何停止。
+      // reason 文案后端已定稿；模型收束前可能连续多次拦截，相邻重复只提示一次。
+      case "tool.budget": {
+        const reason = String(p.reason ?? "");
+        const last = get().timeline[get().timeline.length - 1];
+        if (!last || last.kind !== "budget" || last.text !== reason) {
+          set({
+            timelineSession: evt.sessionId,
+            timeline: [...get().timeline, { kind: "budget", text: reason }],
+          });
+        }
+        break;
+      }
     }
   },
 }));

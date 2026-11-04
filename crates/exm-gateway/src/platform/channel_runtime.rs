@@ -1001,10 +1001,25 @@ impl ChannelRun {
                 };
                 Some(text.chars().take(max_chars).collect())
             }
+            // 工具预算熔断内联提示（agent-budget-audit 3.2）：预算耗尽的首次拦截
+            // 内联一条警告（用户感知「为什么停了」）；后续同轮再拦截不重复推——
+            // 模型收束前可能连续多次尝试，逐条推送会刷屏。
+            "tool.budget" => {
+                let reason = evt
+                    .payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("工具调用预算已耗尽");
+                let key = format!("budget-notified:{}", evt.session_id);
+                if self.core.consume_once_flag(&key) {
+                    Some(format!("【警告】{reason}").chars().take(max_chars).collect())
+                } else {
+                    None
+                }
+            }
             // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
             // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
-            "plan.pending" => {
-                let count = evt
+            "plan.pending" => {                let count = evt
                     .payload
                     .get("count")
                     .and_then(|v| v.as_u64())
