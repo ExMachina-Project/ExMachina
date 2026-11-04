@@ -2374,13 +2374,70 @@ mod search_discipline_tests {
         let gw2 = gw_with(search_cfg("tavily", "k-1", false));
         assert!(gw2.search_ready());
         assert!(!gw2.search_discipline_ready(), "显式关闭 → 不注入");
-        // 未配置 → 两个都不（工具面也不下发，零影响）
+        // 未配置后端：注入与否取决于浏览器可探测性（browser-search 通路）
         let gw3 = gw_with(search_cfg("", "", true));
         assert!(!gw3.search_ready());
-        assert!(!gw3.search_discipline_ready(), "未配置后端 → 不注入");
+        assert_eq!(
+            gw3.search_discipline_ready(),
+            gw3.browser_ready(),
+            "未配置后端时浏览器可用即注入（浏览器搜索通路）"
+        );
         // proactive 默认 true（serde 兼容旧配置）
         let legacy: crate::config::SearchConfig =
             serde_json::from_str(r#"{"provider":"tavily","endpoint":"","apiKey":"k","maxResults":5}"#).unwrap();
         assert!(legacy.proactive, "旧配置缺字段默认开");
+        // 浏览器搜索引擎缺省 bing（serde 兼容旧配置）
+        let legacy_browser: crate::config::BrowserConfig =
+            serde_json::from_str(r#"{"executable":"","headless":true,"timeoutSecs":30,"maxChars":8000}"#).unwrap();
+        assert_eq!(legacy_browser.search_engine, "bing", "旧 browser 配置缺字段默认 bing");
+    }
+}
+
+/// 浏览器搜索（browser-search）：真实拉起浏览器导航搜索页。
+/// 环境无浏览器时跳过（find_browser 探测）——CI 与本机均可跑。
+#[cfg(test)]
+mod browser_search_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn 浏览器搜索_返回结果或降级正文() {
+        let dir = std::env::temp_dir().join(format!("exm-bs-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, Default::default());
+        if !gw.browser_ready() {
+            eprintln!("    [skip] 环境无浏览器，跳过浏览器搜索实测");
+            return;
+        }
+        let r = gw
+            .execute_named(
+                "a1",
+                "s-browser-search",
+                &[ToolName::Browser],
+                "browser",
+                &serde_json::json!({ "op": "search", "query": "rust programming language" }),
+            )
+            .await;
+        // 网络可达：要么结构化结果、要么降级整页正文；两者都算搜索通路工作
+        if r.ok {
+            let text = r.output;
+            assert!(
+                text.contains("结果") || text.contains("回退整页正文"),
+                "应含结果列表或降级标注: {text}"
+            );
+            // 结构化结果形态：编号列表 + URL（降级路径另有标注）
+            assert!(
+                text.contains("https://"),
+                "结构化结果应含 URL: {}",
+                &text.chars().take(200).collect::<String>()
+            );
+        } else {
+            // 无外网环境：导航失败可接受，但错误信息应可理解
+            let err = r.error.unwrap_or_default();
+            assert!(!err.is_empty(), "失败也要有原因");
+            println!("    [browser-search] 网络不可达: {err}");
+        }
     }
 }
