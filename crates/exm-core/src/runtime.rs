@@ -115,6 +115,12 @@ impl AgentRuntime {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(boundary);
         }
+        // 主动搜索纪律（proactive-search）：搜索就绪时教会模型「何时该主动搜」——
+        // 工具在表里但模型想不到用，是行为层缺口而非能力层
+        if scope.allows_tools() && self.tools.search_discipline_ready() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::autonomy::SEARCH_DISCIPLINE);
+        }
         let order_json = serde_json::to_string_pretty(order)?;
         let mut messages = vec![
             ChatMessage::system(system_prompt),
@@ -361,6 +367,12 @@ impl AgentRuntime {
         if !boundary.is_empty() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(boundary);
+        }
+        // 主动搜索纪律（proactive-search）：搜索就绪时教会模型「何时该主动搜」——
+        // 工具在表里但模型想不到用，是行为层缺口而非能力层
+        if scope.allows_tools() && self.tools.search_discipline_ready() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::autonomy::SEARCH_DISCIPLINE);
         }
         // 任务清单注入（spec: agent-todo）：清单非空时每轮带上进度全景（✅/🔄/⬜）
         if let Some(todo_block) = crate::todo::render(session_id) {
@@ -1439,6 +1451,160 @@ mod soft_landing_tests {
             provider.calls.load(Ordering::SeqCst) >= 2,
             "工具调用至少走了预算步数"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// 主动搜索纪律注入（proactive-search）：chat_execute 系统提示携带行为准则
+#[cfg(test)]
+mod search_discipline_tests {
+    use super::*;
+    use crate::config::SearchConfig;
+    use crate::provider::{ChatRequest, ChatResponse, StreamDelta};
+    use crate::types::AgentDefinition;
+    use std::sync::Arc;
+
+    /// 回声替身：记录看到的系统提示，直接产出终文本
+    struct PromptProbeProvider {
+        seen: std::sync::Mutex<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for PromptProbeProvider {
+        fn name(&self) -> &'static str {
+            "prompt-probe"
+        }
+        async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            if let Some(m) = req.messages.first() {
+                *self.seen.lock().unwrap() = m.content.clone();
+            }
+            Ok(ChatResponse {
+                content: "收到".into(),
+                reasoning: String::new(),
+                prompt_tokens: 10,
+                completion_tokens: 10,
+                tool_calls: Vec::new(),
+            })
+        }
+        async fn embed(&self, _model: &str, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0f32; 8]).collect())
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            Ok(ChatResponse::default())
+        }
+    }
+
+    fn probe_rig(
+        provider: Arc<PromptProbeProvider>,
+        search: SearchConfig,
+    ) -> (AgentRuntime, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("exm-rt-sd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let reg_dir = base.join("entities");
+        std::fs::create_dir_all(reg_dir.join("prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            capabilities: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(
+            reg_dir.join("group.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        let prompts_dir = reg_dir.join("groups").join("exmachina").join("prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(prompts_dir.join("watch-agent.md"), "# 观众代理\n你是观众代理。").unwrap();
+        let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
+        let store = Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let tools = Arc::new(
+            crate::tools::ToolGateway::new(&base, store, registry.clone(), events, Default::default())
+                .with_search(search),
+        );
+        let rt = AgentRuntime::new(registry, provider, tools, "test-model");
+        (rt, base)
+    }
+
+    fn def() -> AgentDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "观众代理", "identifier": "watch-agent", "domain": "公共",
+            "tier": "unit", "description": "观看演练", "capabilities": ["测试"],
+            "promptFile": "watch-agent.md"
+        }))
+        .unwrap()
+    }
+
+    fn tavily(proactive: bool) -> SearchConfig {
+        SearchConfig {
+            provider: "tavily".into(),
+            endpoint: String::new(),
+            api_key: "k".into(),
+            max_results: 5,
+            proactive,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 搜索就绪_系统提示含纪律() {
+        let probe = Arc::new(PromptProbeProvider { seen: std::sync::Mutex::new(String::new()) });
+        let (rt, base) = probe_rig(probe.clone(), tavily(true));
+        let chain = crate::provider::ModelChain {
+            candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
+            failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
+        };
+        let _ = rt
+            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd1", "t", chain, false, ToolScope::Tools, |_d| {})
+            .await
+            .unwrap();
+        let seen = probe.seen.lock().unwrap().clone();
+        assert!(seen.contains("主动搜索纪律"), "就绪+开启应注入: {seen}");
+        assert!(seen.contains("时效性"), "纪律内容含行为触发条件");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 开关关闭_零注入() {
+        let probe = Arc::new(PromptProbeProvider { seen: std::sync::Mutex::new(String::new()) });
+        let (rt, base) = probe_rig(probe.clone(), tavily(false));
+        let chain = crate::provider::ModelChain {
+            candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
+            failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
+        };
+        let _ = rt
+            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd2", "t", chain, false, ToolScope::Tools, |_d| {})
+            .await
+            .unwrap();
+        let seen = probe.seen.lock().unwrap().clone();
+        assert!(!seen.contains("主动搜索纪律"), "关闭后不应注入: {seen}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 仅聊天档_零注入() {
+        let probe = Arc::new(PromptProbeProvider { seen: std::sync::Mutex::new(String::new()) });
+        let (rt, base) = probe_rig(probe.clone(), tavily(true));
+        let chain = crate::provider::ModelChain {
+            candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
+            failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
+        };
+        // Chat 档无工具面：纪律无意义（web_search 不可达），不注入
+        let _ = rt
+            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd3", "t", chain, false, ToolScope::Chat, |_d| {})
+            .await
+            .unwrap();
+        let seen = probe.seen.lock().unwrap().clone();
+        assert!(!seen.contains("主动搜索纪律"), "Chat 档不应注入: {seen}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
