@@ -2113,3 +2113,163 @@ mod session_tool_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// 工具调用预算（agent-budget-audit）：三值熔断 / 档位联动 / 轮次恢复 / 会话清理。
+#[cfg(test)]
+mod tool_budget_tests {
+    use super::*;
+    use crate::config::ToolCallBudget;
+
+    fn gw_with(budget: ToolCallBudget) -> ToolGateway {
+        let dir = std::env::temp_dir().join(format!("exm-budget-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let sec = SecurityConfig {
+            tool_call_budget: budget,
+            terminal_timeout_secs: 5,
+            ..Default::default()
+        };
+        ToolGateway::new(&dir, store, registry, events, sec)
+    }
+
+    #[test]
+    fn 全零预算_不设限() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 0,
+            per_session: 0,
+            per_window: 0,
+            window_secs: 0,
+        });
+        assert!(gw.security.tool_call_budget.disabled());
+        for _ in 0..100 {
+            assert!(gw.consume_tool_budget("s").is_ok(), "全零 = 关闭");
+        }
+    }
+
+    #[test]
+    fn 单轮预算_熔断与恢复() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 3,
+            ..Default::default()
+        });
+        for i in 0..3 {
+            assert!(gw.consume_tool_budget("s").is_ok(), "第 {} 次应放行", i + 1);
+        }
+        let err = gw.consume_tool_budget("s").unwrap_err();
+        assert!(err.contains("单轮"), "超限说明应指明单轮: {err}");
+        // 轮次重置后恢复
+        gw.reset_turn_tool_budget("s");
+        assert!(gw.consume_tool_budget("s").is_ok(), "新轮次预算恢复");
+    }
+
+    #[test]
+    fn 会话累计_独立于轮次() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 2,
+            per_session: 3,
+            ..Default::default()
+        });
+        // 轮一 2 次
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_ok());
+        gw.reset_turn_tool_budget("s");
+        // 轮二 1 次 → 累计 3 满
+        assert!(gw.consume_tool_budget("s").is_ok());
+        let err = gw.consume_tool_budget("s").unwrap_err();
+        assert!(err.contains("累计"), "会话累计超限说明: {err}");
+        // 单轮重置不能绕过累计上限
+        gw.reset_turn_tool_budget("s");
+        assert!(gw.consume_tool_budget("s").is_err(), "累计上限跨轮生效");
+    }
+
+    #[test]
+    fn 时间窗_滑动过期() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 10,
+            per_window: 2,
+            window_secs: 1,
+            ..Default::default()
+        });
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_err(), "窗内超限");
+        // 快进时间戳:直接改计数器绕过 1 秒等待
+        {
+            let mut map = gw.tool_call_counters.lock();
+            map.get_mut("s").unwrap().window_stamps.clear();
+        }
+        assert!(gw.consume_tool_budget("s").is_ok(), "窗口滑出后恢复");
+    }
+
+    #[test]
+    fn 会话删除_计数清理() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 1,
+            ..Default::default()
+        });
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_err());
+        gw.clear_tool_budget("s");
+        assert!(gw.consume_tool_budget("s").is_ok(), "清理后重置");
+    }
+
+    #[test]
+    fn 档位表_chat严于computer() {
+        let full = ToolCallBudget {
+            per_turn: 48,
+            per_session: 100,
+            per_window: 40,
+            window_secs: 60,
+        };
+        let chat = crate::tools::scope_budget(&full, crate::types::ToolScope::Chat);
+        let tools = crate::tools::scope_budget(&full, crate::types::ToolScope::Tools);
+        let computer = crate::tools::scope_budget(&full, crate::types::ToolScope::Computer);
+        assert_eq!(chat.per_turn, 12, "chat = 全量 1/4");
+        assert_eq!(tools.per_turn, 24, "tools = 全量 1/2");
+        assert_eq!(computer.per_turn, 48);
+        assert!(chat.per_turn < tools.per_turn && tools.per_turn < computer.per_turn);
+        // 窗口秒数不随档位缩
+        assert_eq!(chat.window_secs, 60);
+    }
+
+    #[tokio::test]
+    async fn 执行面_超限受限结果回灌() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 1,
+            ..Default::default()
+        });
+        let dir = gw.workspace_root.clone();
+        // 第 1 次：放行（工具本身可能因参数缺失失败,但不是预算受限）
+        let r1 = gw
+            .execute_named("a1", "s-b", &[], "fs_read", &serde_json::json!({ "path": "x" }))
+            .await;
+        assert!(
+            !r1.error.clone().unwrap_or_default().contains("预算受限"),
+            "首次调用不受预算限制: {:?}",
+            r1.error
+        );
+        // 第 2 次：预算受限（不执行工具本体）
+        let r2 = gw
+            .execute_named("a1", "s-b", &[], "fs_read", &serde_json::json!({ "path": "x" }))
+            .await;
+        assert!(!r2.ok);
+        assert!(r2.error.unwrap_or_default().contains("【预算受限】"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 快照_余量可见() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 5,
+            ..Default::default()
+        });
+        gw.consume_tool_budget("s").unwrap();
+        gw.consume_tool_budget("s").unwrap();
+        let snap = gw.tool_budget_snapshot("s");
+        assert_eq!(snap["enabled"], true);
+        assert_eq!(snap["perTurn"], 5);
+        assert_eq!(snap["turnUsed"], 2);
+    }
+}

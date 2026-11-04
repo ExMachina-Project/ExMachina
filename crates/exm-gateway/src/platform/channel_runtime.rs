@@ -936,6 +936,11 @@ impl ChannelRun {
         // IM 通道会话登记：轮次组装系统提示时注入简洁表达纪律
         // （治理「一次性回复大量内容」：提示层约束 + 通道层截断双保险）
         exm_core::orchestrator::mark_im_session(&session.id);
+        // 会话作用域快照（agent-budget-audit）：工具预算档位按通道 capability
+        // 联动（chat < tools < computer）;begin 时写入,轮次内不变。
+        core.orchestrator()
+            .tools
+            .set_session_scope(&session.id, ch.tool_scope());
         // 记忆隔离即时生效：通道每次执行前把分区键同步到会话；
         // 关闭隔离时清空分区，立即回到同组共享记忆。
         let partition = ch.memory_partition(&scope);

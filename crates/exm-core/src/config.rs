@@ -114,6 +114,10 @@ pub struct SecurityConfig {
     /// 圈禁根目录（绝对路径；空 = 自动推导 /home/<execUser> 或 getpwuid 查询）
     #[serde(default)]
     pub exec_home: String,
+    /// 工具调用预算三值（agent-budget-audit）：默认仅单轮 48（覆盖既有硬上限
+    /// 语义,行为等价收紧）；0 = 单项关闭,全零 = 预算整体关闭
+    #[serde(default)]
+    pub tool_call_budget: ToolCallBudget,
 }
 
 /// 消毒规则开关（全默认开；单项可关）
@@ -151,6 +155,44 @@ fn default_chat_max_steps() -> usize {
     24
 }
 
+/// 工具调用预算三值（agent-budget-audit）：0 = 不限（单项关闭）。
+/// 档位表在 ToolGateway（chat < tools < computer），此处为 computer 档全量值,
+/// 低档位按比例收严。config 显式值直接生效（覆盖档位表）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallBudget {
+    /// 单轮最大工具调用数（一轮用户输入内的工具循环上限）
+    #[serde(default)]
+    pub per_turn: usize,
+    /// 单会话累计上限（进程生命周期内；会话删除不重置——防长会话慢性消耗）
+    #[serde(default)]
+    pub per_session: usize,
+    /// 时间窗内最大调用数（滑动窗口秒数 windowSecs）
+    #[serde(default)]
+    pub per_window: usize,
+    /// 时间窗长度（秒）；0 = 时间窗预算关闭
+    #[serde(default)]
+    pub window_secs: u64,
+}
+
+impl Default for ToolCallBudget {
+    fn default() -> Self {
+        ToolCallBudget {
+            per_turn: 48,
+            per_session: 0,
+            per_window: 0,
+            window_secs: 60,
+        }
+    }
+}
+
+impl ToolCallBudget {
+    /// 全零 = 预算完全关闭（兼容旧行为）
+    pub fn disabled(&self) -> bool {
+        self.per_turn == 0 && self.per_session == 0 && self.per_window == 0
+    }
+}
+
 /// 上下文预算安全线默认值
 fn default_context_budget_ratio() -> f64 {
     0.8
@@ -171,6 +213,7 @@ impl Default for SecurityConfig {
             sanitize_rules: SanitizeRuleConfig::default(),
             exec_user: String::new(),
             exec_home: String::new(),
+            tool_call_budget: ToolCallBudget::default(),
         }
     }
 }
@@ -1200,6 +1243,8 @@ struct SecurityFile {
     exec_user: Option<String>,
     #[serde(default)]
     exec_home: Option<String>,
+    #[serde(default)]
+    tool_call_budget: Option<ToolCallBudget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1379,6 +1424,9 @@ impl ExmConfig {
             sanitize_rules: file_sec.sanitize_rules.clone().unwrap_or_default(),
             exec_user: file_sec.exec_user.clone().unwrap_or_default(),
             exec_home: file_sec.exec_home.clone().unwrap_or_default(),
+            tool_call_budget: file_sec
+                .tool_call_budget
+                .unwrap_or_else(|| SecurityConfig::default().tool_call_budget),
         };
         let automation = AutomationConfig {
             heartbeat_enabled: file_auto
@@ -1618,6 +1666,7 @@ impl ExmConfig {
                 sanitize_rules: Some(self.security.sanitize_rules.clone()),
                 exec_user: Some(self.security.exec_user.clone()),
                 exec_home: Some(self.security.exec_home.clone()),
+                tool_call_budget: Some(self.security.tool_call_budget),
             }),
             computer: Some(self.computer.clone()),
             automation: Some(AutomationFile {
