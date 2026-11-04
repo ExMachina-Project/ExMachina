@@ -1974,10 +1974,17 @@ impl Core {
             return Ok(req);
         }
         // 普通审批单代执行收口（agent-exec-confinement）：与直通执行同一加固路径——
-        // 审批放行的是命令内容,不是特权;execUser 降权/沙箱净化照常生效
+        // 审批放行的是命令内容,不是特权;execUser 降权/沙箱净化照常生效。
+        // [红线] 前缀（agent-budget-audit 3.3 分档闸门标记）不是 shell 语法，
+        // 代执行前剥掉——审批的是命令本身，标记只用于档位溯源
+        let eff_cmd = req
+            .command
+            .strip_prefix("[红线]")
+            .map(|c| c.trim().to_string())
+            .unwrap_or_else(|| req.command.clone());
         let workspace = self.config().workspace_root.clone();
-        let opts = self.orchestrator().tools.shell_opts(&req.command);
-        let out = crate::tools::execute_shell_with(&workspace, &req.command, 300, &opts).await;
+        let opts = self.orchestrator().tools.shell_opts(&eff_cmd);
+        let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
         req.status = if out.ok {
             "executed".into()
         } else {

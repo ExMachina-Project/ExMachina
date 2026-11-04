@@ -80,6 +80,21 @@ impl ToolGateway {
         // 拦截后运行时原地等待人工决定（security.approvalWaitSecs）：
         // 批准 → 系统代执行，输出直接回灌本工具结果，模型继续干活；拒绝/超时 → 受阻回流。
         let mode = self.security.exec_approval.as_str();
+        // 命令分档闸门（agent-budget-audit 3.3）：tier_gate 联动判定
+        // （capability × 审批档 × 命令分档）。Denied 档（rm/format/dd…）无论
+        // 白名单命中与否、审批档位为何，一律走审批——off 档对白名单受控命令宽松，
+        // 对破坏性命令永远不放行。能力边界（仅聊天档）：本工具在 Chat 档不可达
+        // （runtime 执行层全拒），tier_gate 的边界文案兜底防御纵深。
+        let scope = self.session_scope_of(session_id);
+        let (tier_pass, tier_deny_msg) = super::allowlist::tier_gate(&cmd, scope, mode);
+        if let Some(deny_msg) = tier_deny_msg.filter(|_| !tier_pass) {
+            return ToolResult::err(deny_msg);
+        }
+        if !tier_pass {
+            return self
+                .gate_command(agent_id, session_id, &format!("[红线] {cmd}"))
+                .await;
+        }
         if !whitelisted {
             // 白名单外命令：off 档直接拒绝（历史行为）；开启审批闸门时不再硬拒——
             // 转入人工审批（用户批准即由系统代执行）。此前一律硬拒导致 mkdir/go/pytest
