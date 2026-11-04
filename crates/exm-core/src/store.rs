@@ -617,6 +617,33 @@ impl Store {
         self.db.read_lines("tool_audit", agent_id, limit)
     }
 
+    /// 子代理派发审计（agent-budget-audit 3.4）：按主会话追加 jsonl。
+    /// 记录面：派发者会话 / 目标个体 / 任务摘要 / 耗时 / token 消耗 / 结果状态；
+    /// 异常（failed/blocked/timeout）由查询侧按 status 高亮。
+    pub fn audit_dispatch(&self, session_id: &str, entry: &serde_json::Value) -> Result<()> {
+        self.db.append_line("dispatch_audit", session_id, entry)?;
+        // 容量裁剪与 tool_audit 同口径
+        let mut lines: Vec<serde_json::Value> = self.db.read_lines("dispatch_audit", session_id, 0)?;
+        if lines.len() > MAX_AUDIT_LINES {
+            let keep = lines.split_off(lines.len() - MAX_AUDIT_LINES / 2);
+            self.db.rewrite_lines("dispatch_audit", session_id, &keep)?;
+        }
+        Ok(())
+    }
+
+    /// 派发审计查询（按会话；时间倒序 limit 封顶）
+    pub fn list_dispatch_audit(&self, session_id: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+        self.db.read_lines("dispatch_audit", session_id, limit)
+    }
+
+    /// 跨会话派发审计聚合（时间倒序 limit 封顶；审计页数据源）
+    pub fn list_dispatch_audit_all(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let mut all: Vec<serde_json::Value> = self.db.list_all_lines("dispatch_audit")?;
+        all.reverse();
+        all.truncate(limit);
+        Ok(all)
+    }
+
     /// 跨个体聚合的工具审计查询（agent/tool 过滤，时间倒序，limit 封顶）
     pub fn list_tool_audit_filtered(
         &self,

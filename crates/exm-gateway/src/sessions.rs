@@ -327,9 +327,24 @@ pub(crate) struct AuditQuery {
     tool: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// 审计类别：缺省 = 工具审计；dispatch = 子代理派发审计（agent-budget-audit）
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 pub(crate) async fn list_audit(State(st): State<AppState>, Query(q): Query<AuditQuery>) -> impl IntoResponse {
+    // kind=dispatch（agent-budget-audit 3.4）：子代理派发审计（跨会话聚合，
+    // 异常条目由前端按 ok/status 高亮）；缺省 = 既有工具审计
+    if q.kind.as_deref() == Some("dispatch") {
+        return match st.core.store.list_dispatch_audit_all(q.limit.unwrap_or(200).min(1000)) {
+            Ok(items) => Json(json!({ "items": items })).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        };
+    }
     match st.core.store.list_tool_audit_filtered(
         q.agent.as_deref(),
         q.tool.as_deref(),

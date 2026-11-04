@@ -2667,6 +2667,9 @@ impl ExecCtx {
         let node_id = node.id.clone();
         let agent_label = def.identifier.clone();
         let events = o.events.clone();
+        // 派发审计起点（agent-budget-audit 3.4）：耗时口径 = 派发指令组装完成 →
+        // 回流收束（含远程/本地执行全程）；token 取子会话 usage_total。
+        let dispatch_started = std::time::Instant::now();
         // 视觉能力检测：候选链首个模型明确标记不支持视觉时不回灌截图（computer use 降级为“盲操作”）
         let attach_images = {
             let vision = o
@@ -2761,6 +2764,25 @@ impl ExecCtx {
 
         match result {
             Ok(report) => {
+                // 派发审计（agent-budget-audit 3.4）：成功/受阻/仲裁回流都记一条；
+                // token 口径 = 子会话累计（remote/local 执行都会写子会话 usage）
+                let (dp, dc, _) = o.store.usage_total(&trace_key);
+                let _ = o.store.audit_dispatch(
+                    &self.session_id,
+                    &serde_json::json!({
+                        "id": new_id(),
+                        "nodeId": node.id,
+                        "agentId": def.identifier,
+                        "childSessionId": (trace_key != self.session_id).then(|| trace_key.clone()),
+                        "summary": goal_short,
+                        "durationMs": dispatch_started.elapsed().as_millis() as u64,
+                        "promptTokens": dp,
+                        "completionTokens": dc,
+                        "status": format!("{:?}", report.status),
+                        "ok": !matches!(report.status, SyncStatus::Blocked),
+                        "createdAt": now_iso(),
+                    }),
+                );
                 let report_id = match o.store.add_sync_report(&report) {
                     Ok(id) => id,
                     Err(e) => return NodeOutcome::failed(node.id.clone(), e.to_string()),
@@ -2909,6 +2931,25 @@ impl ExecCtx {
                         serde_json::json!({ "agentId": def.identifier, "nodeId": node.id, "failed": true }),
                     );
                 }
+                // 派发审计（agent-budget-audit 3.4）：失败/超时也记——异常高亮数据源
+                let (dp_f, dc_f, _) = o.store.usage_total(&trace_key);
+                let _ = o.store.audit_dispatch(
+                    &self.session_id,
+                    &serde_json::json!({
+                        "id": new_id(),
+                        "nodeId": node.id,
+                        "agentId": def.identifier,
+                        "childSessionId": (trace_key != self.session_id).then(|| trace_key.clone()),
+                        "summary": goal_short,
+                        "durationMs": dispatch_started.elapsed().as_millis() as u64,
+                        "promptTokens": dp_f,
+                        "completionTokens": dc_f,
+                        "status": "Failed",
+                        "ok": false,
+                        "error": e.to_string(),
+                        "createdAt": now_iso(),
+                    }),
+                );
                 crate::round_trace::end(&trace_key);
                 NodeOutcome::failed(node.id.clone(), e.to_string())
             }

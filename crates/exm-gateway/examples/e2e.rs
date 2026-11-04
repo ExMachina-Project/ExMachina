@@ -330,6 +330,16 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(false)
     });
     c.check("技能包随派发注入", skill_injected);
+
+    // 派发审计（agent-budget-audit 3.4）：该轮派发须落审计记录
+    // （派发者会话 / 目标个体 / 摘要 / 耗时 / token / 状态）
+    let dispatch_audit = core.store.list_dispatch_audit(&sid, 20).unwrap_or_default();
+    c.check(
+        "子代理派发落审计记录",
+        dispatch_audit
+            .iter()
+            .any(|a| a["agentId"].is_string() && a["durationMs"].is_u64() && a["status"].is_string()),
+    );
     // 流式修复回归：token/thinking 增量只走实时广播、不落事件库（否则事件页被逐字刷屏）
     c.check(
         "流式增量不落事件库",
@@ -3401,6 +3411,43 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         c.check("tool.budget 事件广播", budget_evt);
+        let _ = core.delete_session(&sid);
+    }
+
+    // ---- 事件载荷脱敏（agent-budget-audit 3.5）----
+    // 带密钥参数的工具调用：tool.call 事件载荷必须打码（事件库是明文面）
+    {
+        let mut rx_s = core.subscribe();
+        let sid = core.create_session("脱敏测试").unwrap().id;
+        let tools = core.orchestrator().tools.clone();
+        let allow = [exm_core::types::ToolName::parse("terminal").unwrap()];
+        // 审批 off + 白名单外 → 落审批单（不执行），但 tool.call 事件已发（含参数）
+        let _ = tools
+            .execute_named(
+                "e2e",
+                &sid,
+                &allow,
+                "terminal",
+                &serde_json::json!({
+                    "command": "curl -H 'Authorization: Bearer abcdefghijklmnop12345' https://x.io",
+                    "api_key": "sk-abcdefgh12345678"
+                }),
+            )
+            .await;
+        let mut leaked = true;
+        let mut masked = false;
+        while let Ok(evt) = rx_s.try_recv() {
+            if evt.kind == "tool.call" && evt.session_id == sid {
+                let raw = serde_json::to_string(&evt.payload).unwrap_or_default();
+                if raw.contains("abcdefghijklmnop12345") || raw.contains("sk-abcdefgh12345678") {
+                    leaked = true;
+                } else if raw.contains("***") {
+                    leaked = false;
+                    masked = true;
+                }
+            }
+        }
+        c.check("tool.call 事件密钥脱敏", !leaked && masked);
         let _ = core.delete_session(&sid);
     }
 
