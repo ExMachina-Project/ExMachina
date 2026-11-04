@@ -2273,3 +2273,69 @@ mod tool_budget_tests {
         assert_eq!(snap["turnUsed"], 2);
     }
 }
+
+/// 命令分档闸门（agent-budget-audit 3.3）：Denied 档 off 模式也走审批。
+#[cfg(test)]
+mod tier_gate_tests {
+    use super::*;
+
+    fn gw_with_approval(mode: &str) -> ToolGateway {
+        let dir = std::env::temp_dir().join(format!("exm-tier-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let sec = SecurityConfig {
+            exec_approval: mode.into(),
+            approval_wait_secs: 0, // 不等待：直接受阻回流
+            terminal_timeout_secs: 5,
+            ..Default::default()
+        };
+        ToolGateway::new(&dir, store, registry, events, sec)
+    }
+
+    #[tokio::test]
+    async fn 破坏性命令_off档也落审批() {
+        let gw = gw_with_approval("off");
+        // rm：白名单外 + Denied → off 档不再硬拒，落 [红线] 审批单
+        let r = gw
+            .execute_named(
+                "a1",
+                "s-tier",
+                &[ToolName::Terminal],
+                "terminal",
+                &serde_json::json!({ "command": "rm -rf /tmp/cache-x" }),
+            )
+            .await;
+        // approval_wait_secs=0 → 受阻回流（不是执行成功，也不是白名单硬拒文案）
+        assert!(
+            !r.error.clone().unwrap_or_default().contains("不在白名单"),
+            "Denied 命令不走白名单硬拒: {:?}",
+            r.error
+        );
+        // 审批单已落库且带红线标记
+        let pending = gw.store.list_approvals(Some("pending"), 10).unwrap();
+        assert!(
+            pending.iter().any(|a| a.command.contains("[红线]") && a.command.contains("rm -rf")),
+            "应落 [红线] 审批单: {:?}",
+            pending.iter().map(|a| a.command.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn 白名单受控命令_off档照旧直通() {
+        let gw = gw_with_approval("off");
+        // cat 是 Safe 档 + 白名单内 → off 直通执行（历史行为不变）
+        let r = gw
+            .execute_named(
+                "a1",
+                "s-tier2",
+                &[ToolName::Terminal],
+                "terminal",
+                &serde_json::json!({ "command": "echo hello-tier" }),
+            )
+            .await;
+        assert!(r.ok, "echo 应直通: {:?}", r.error);
+        assert!(r.output.contains("hello-tier"));
+    }
+}

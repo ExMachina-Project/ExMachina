@@ -626,7 +626,7 @@ export const api = {
     req<NexusProbeResult>(`/nexus/links/${id}/probe`, { method: "POST" }),
   stopSession: (id: string) =>
     req<{ ok: boolean; toolsExecuted: number }>(`/sessions/${id}/stop`, { method: "POST", body: JSON.stringify({}) }),
-  audit: (params: { agent?: string; tool?: string; limit?: number }) =>
+  audit: (params: { agent?: string; tool?: string; kind?: string; limit?: number }) =>
     req<{ items: Array<Record<string, unknown>> }>("/audit?" + new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)])).toString()),
   channelTest: (id: string) =>
     req<{ ok: boolean; category?: string; identity?: string; message?: string; error?: string }>(`/channels/${id}/test`, { method: "POST", body: JSON.stringify({}) }),
