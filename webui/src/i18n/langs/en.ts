@@ -1320,6 +1320,7 @@ export const en: Partial<Dict> = {
   "activity.dispatch": "Dispatch → {agent} ({node})",
   "activity.innerEvent": "Internal event {kind}",
   "activity.sessionCreated": "Session created",
+  "activity.toolBudget": "Tool budget blocked: {tool} — {reason}",
 
   // ── Task Graph ──
   "graph.title": "Task Graph — {session}",
