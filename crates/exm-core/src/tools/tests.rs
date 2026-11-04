@@ -2339,3 +2339,48 @@ mod tier_gate_tests {
         assert!(r.output.contains("hello-tier"));
     }
 }
+
+/// 主动搜索纪律注入门控（proactive-search）：ready × proactive 矩阵
+#[cfg(test)]
+mod search_discipline_tests {
+    use super::*;
+
+    fn search_cfg(provider: &str, key: &str, proactive: bool) -> crate::config::SearchConfig {
+        crate::config::SearchConfig {
+            provider: provider.into(),
+            endpoint: String::new(),
+            api_key: key.into(),
+            max_results: 5,
+            proactive,
+        }
+    }
+
+    fn gw_with(search: crate::config::SearchConfig) -> ToolGateway {
+        let dir = std::env::temp_dir().join(format!("exm-sd-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        ToolGateway::new(&dir, store, registry, events, Default::default()).with_search(search)
+    }
+
+    #[test]
+    fn 注入门控矩阵() {
+        // ready + proactive → 注入
+        let gw = gw_with(search_cfg("tavily", "k-1", true));
+        assert!(gw.search_ready(), "后端就绪");
+        assert!(gw.search_discipline_ready(), "就绪且开启 → 注入");
+        // ready + 关闭 → 不注入（用户显式只要被动搜索）
+        let gw2 = gw_with(search_cfg("tavily", "k-1", false));
+        assert!(gw2.search_ready());
+        assert!(!gw2.search_discipline_ready(), "显式关闭 → 不注入");
+        // 未配置 → 两个都不（工具面也不下发，零影响）
+        let gw3 = gw_with(search_cfg("", "", true));
+        assert!(!gw3.search_ready());
+        assert!(!gw3.search_discipline_ready(), "未配置后端 → 不注入");
+        // proactive 默认 true（serde 兼容旧配置）
+        let legacy: crate::config::SearchConfig =
+            serde_json::from_str(r#"{"provider":"tavily","endpoint":"","apiKey":"k","maxResults":5}"#).unwrap();
+        assert!(legacy.proactive, "旧配置缺字段默认开");
+    }
+}
