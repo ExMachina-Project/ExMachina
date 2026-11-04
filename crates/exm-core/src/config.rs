@@ -361,6 +361,15 @@ pub struct BrowserConfig {
     pub timeout_secs: u64,
     /// 单页正文提取上限（字符）
     pub max_chars: usize,
+    /// 浏览器搜索的搜索引擎（browser-search）：bing | duckduckgo | baidu。
+    /// 无需 API Key——直接导航搜索页取渲染结果，与 search.* 后端互补：
+    /// API 后端给结构化结果，浏览器搜索给「真实网页所见即所得」。
+    #[serde(default = "default_browser_engine")]
+    pub search_engine: String,
+}
+
+fn default_browser_engine() -> String {
+    "bing".into()
 }
 
 impl Default for BrowserConfig {
@@ -370,6 +379,7 @@ impl Default for BrowserConfig {
             headless: true,
             timeout_secs: 30,
             max_chars: 8000,
+            search_engine: default_browser_engine(),
         }
     }
 }
@@ -2009,7 +2019,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "导航与脚本执行的等待上限" },
                     { "key": "browser.maxChars", "label": "正文提取上限（字符）", "kind": "number",
                       "default": "8000", "required": false, "min": 500, "max": 100000,
-                      "help": "browser text 单次返回的正文长度" }
+                      "help": "browser text 单次返回的正文长度" },
+                    { "key": "browser.searchEngine", "label": "浏览器搜索引擎", "kind": "string",
+                      "default": "bing", "required": false,
+                      "help": "browser op=search 用的引擎：bing | duckduckgo | baidu。无需 API Key——直接导航搜索页取渲染结果；与联网搜索后端（tavily 等）互补" }
                 ]
             },
             {
