@@ -74,6 +74,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "headless": cfg.browser.headless,
             "timeoutSecs": cfg.browser.timeout_secs,
             "maxChars": cfg.browser.max_chars,
+            "searchEngine": cfg.browser.search_engine,
         },
         "tools": {
             "custom": cfg.tools.custom,
