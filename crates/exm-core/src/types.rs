@@ -685,6 +685,14 @@ pub struct Session {
     /// 归档区可见可恢复——归档是可逆状态而非删除，旧数据缺省 None 零迁移）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
+    /// 会话来源（session-management，读时派生不入存储）：`console` 或
+    /// `channel:{channelId}:{chatKey}`。由 title 约定解析，新旧会话同口径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// 来源展示名（读时派生）：通道会话 = `流显示名·标签`（流名来自 flow 表，
+    /// 缺省 chat_key）；控制台会话缺省（展示名即 title）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_label: Option<String>,
     /// 消息条数（管理页附加，不入存储）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_count: Option<usize>,

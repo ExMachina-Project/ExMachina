@@ -267,6 +267,54 @@ pub(crate) async fn session_batch(
     .into_response()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FlowArchiveBody {
+    /// 归档范围：flow（单流，channelId+chatKey）/ channel（整通道）
+    scope: String,
+    channel_id: String,
+    #[serde(default)]
+    chat_key: Option<String>,
+}
+
+/// 按流/按通道归档旧会话（POST /api/sessions/flow-archive，session-management）。
+/// 圈定范围 = title 前缀解析；各流活跃绑定会话豁免（下条消息继续复用）。
+/// 返回归档/豁免计数，前端回执展示。
+pub(crate) async fn session_flow_archive(
+    State(st): State<AppState>,
+    Json(b): Json<FlowArchiveBody>,
+) -> impl IntoResponse {
+    let scope = match (b.scope.as_str(), b.chat_key.as_deref()) {
+        ("flow", Some(k)) if !k.is_empty() => exm_core::session_origin::ArchiveScope::Flow {
+            channel_id: b.channel_id.clone(),
+            chat_key: k.to_string(),
+        },
+        ("channel", _) => exm_core::session_origin::ArchiveScope::Channel {
+            channel_id: b.channel_id.clone(),
+        },
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "scope 应为 flow（需 chatKey）或 channel" })),
+            )
+                .into_response();
+        }
+    };
+    match st.core.archive_flow_sessions(scope) {
+        Ok((archived, skipped)) => Json(json!({
+            "ok": true,
+            "archived": archived,
+            "skipped": skipped,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 // ---------------------------------------------------------------- 工具审计聚合（ops-visibility）
 
 /// 工具审计查询（GET /api/audit）：跨个体聚合既有审计分片，服务端过滤

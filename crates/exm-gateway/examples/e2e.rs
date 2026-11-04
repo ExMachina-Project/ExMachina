@@ -3281,6 +3281,86 @@ async fn main() -> anyhow::Result<()> {
         c.check("未知批量动作 400", bad.status().as_u16() == 400);
     }
 
+    // ---- 来源标注与按流归档（session-management）----
+    {
+        // 列表补齐：通道会话带 origin/originLabel，控制台会话 origin=console
+        let all: serde_json::Value = client
+            .get(format!("{base}/sessions?all=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let arr = all.as_array().cloned().unwrap_or_default();
+        let ch_sess = arr.iter().find(|s| s["title"] == "channel:e2e-hook:user-a");
+        c.check(
+            "通道会话带结构化来源",
+            ch_sess
+                .map(|s| s["origin"] == "channel:e2e-hook:user-a" && s["originLabel"].is_string())
+                .unwrap_or(false),
+        );
+        c.check(
+            "控制台会话来源为 console",
+            arr.iter()
+                .any(|s| !s["title"].as_str().unwrap_or("").starts_with("channel:") && s["origin"] == "console"),
+        );
+
+        // 造第二个流会话（不触发执行——直接建会话 + 绑流，模拟历史会话）
+        let old_flow_sess: String = client
+            .post(format!("{base}/sessions"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "title": "channel:e2e-hook:user-a:旧话题" }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        // 按流归档：旧会话归档、活跃绑定豁免
+        let fr: serde_json::Value = client
+            .post(format!("{base}/sessions/flow-archive"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({
+                "scope": "flow", "channelId": "e2e-hook", "chatKey": "user-a"
+            }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "按流归档豁免活跃绑定",
+            fr["ok"] == true && fr["archived"].as_u64().unwrap_or(0) >= 1 && fr["skipped"] == 1,
+        );
+        let all2: serde_json::Value = client
+            .get(format!("{base}/sessions?all=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let active_kept = all2
+            .as_array()
+            .map(|a| a.iter().any(|s| s["title"] == "channel:e2e-hook:user-a"))
+            .unwrap_or(false);
+        c.check("流活跃会话保留主列表", active_kept);
+        // 非法 scope 400
+        let bad_scope: reqwest::Response = client
+            .post(format!("{base}/sessions/flow-archive"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "scope": "flow", "channelId": "e2e-hook" }))
+            .send()
+            .await?;
+        c.check("flow 缺 chatKey 400", bad_scope.status().as_u16() == 400);
+        // 清理旧话题会话
+        let _ = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "delete", "ids": [old_flow_sess] }))
+            .send()
+            .await?;
+    }
+
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {

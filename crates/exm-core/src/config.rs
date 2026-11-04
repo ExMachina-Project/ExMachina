@@ -480,6 +480,10 @@ pub struct AutomationConfig {
     pub auto_agent_backoff_max: u32,
     /// Meta Agent 巡检周期（分钟，experiments.metaAgent 开启才生效;0 = 仅会话召唤）
     pub meta_interval_min: u32,
+    /// 通道流会话闲置归档天数（session-management）：闲置超过该天数的流会话
+    /// 自动归档（活跃绑定会话豁免）。0 = 关闭（默认，零行为变更）。
+    #[serde(default)]
+    pub flow_idle_days: u32,
 }
 
 impl Default for AutomationConfig {
@@ -496,6 +500,7 @@ impl Default for AutomationConfig {
             auto_agent_max_steps: 24,
             auto_agent_backoff_max: 8,
             meta_interval_min: 60,
+            flow_idle_days: 0,
         }
     }
 }
@@ -1270,6 +1275,8 @@ struct AutomationFile {
     auto_agent_backoff_max: Option<u32>,
     #[serde(default)]
     meta_interval_min: Option<u32>,
+    #[serde(default)]
+    flow_idle_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1461,6 +1468,9 @@ impl ExmConfig {
             meta_interval_min: file_auto
                 .meta_interval_min
                 .unwrap_or_else(|| AutomationConfig::default().meta_interval_min),
+            flow_idle_days: file_auto
+                .flow_idle_days
+                .unwrap_or_else(|| AutomationConfig::default().flow_idle_days),
         };
 
         let mut llm = LlmConfig {
@@ -1680,6 +1690,7 @@ impl ExmConfig {
                 auto_agent_max_steps: Some(self.automation.auto_agent_max_steps),
                 auto_agent_backoff_max: Some(self.automation.auto_agent_backoff_max),
                 meta_interval_min: Some(self.automation.meta_interval_min),
+                flow_idle_days: Some(self.automation.flow_idle_days),
             }),
             search: Some(self.search.clone()),
             hooks: Some(self.hooks.clone()),

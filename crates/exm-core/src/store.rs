@@ -48,6 +48,8 @@ impl Store {
             id: new_id(),
             title: title.to_string(),
             status: "active".into(),
+            origin: None,
+            origin_label: None,
             group_id: if group_id.trim().is_empty() {
                 "exmachina".into()
             } else {
@@ -83,6 +85,8 @@ impl Store {
             id: new_id(),
             title: title.to_string(),
             status: "active".into(),
+            origin: None,
+            origin_label: None,
             group_id: parent.group_id.clone(),
             memory_partition: parent.memory_partition.clone(),
             rolling_summary: None,
@@ -255,6 +259,18 @@ impl Store {
         };
         session.title = title.trim().to_string();
         session.updated_at = now_iso();
+        self.db.put("sessions", session_id, &session)
+    }
+
+    /// 直接设置会话活跃时间（测试与数据修正用；不动消息与账目）。
+    /// 闲置归档判定读 updated_at，此入口让测试能把会话拨回任意时点。
+    pub fn set_session_active_at(&self, session_id: &str, iso: &str) -> Result<()> {
+        let _guard = self.ledger_lock.lock().unwrap();
+        let mut session = match self.get_session(session_id)? {
+            Some(s) => s,
+            None => anyhow::bail!("会话不存在: {session_id}"),
+        };
+        session.updated_at = iso.to_string();
         self.db.put("sessions", session_id, &session)
     }
 
