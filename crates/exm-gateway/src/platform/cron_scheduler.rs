@@ -2,6 +2,9 @@
 
 
 use super::*;
+/// 闲置归档当日去重标记行 id（enabled=false 的哨兵行，只借 last_run_minute 记日期）
+const IDLE_ARCHIVE_MARKER: &str = "__idle_archive__";
+
 /// 调度循环：每 20s 扫描到期任务（cron 命中 / 一次性 at 到点）；心跳由配置驱动
 pub fn spawn_cron_scheduler(core: std::sync::Arc<exm_core::Core>) {
     tokio::spawn(async move {
@@ -81,6 +84,55 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
         let minute = now.timestamp() / 60;
         if core.meta_agent_tick(minute).await.is_some() {
             changed = true;
+        }
+    }
+
+    // 闲置流会话归档（session-management）：每日一次（UTC 4 点低谷窗口）。
+    // flowIdleDays=0（默认）不进扫描——关闭态零行为变更。
+    // 当日去重：复用 cron 表存标记行（enabled=false，不会被 job_due 触发）。
+    if core.config().automation.flow_idle_days > 0 {
+        use chrono::Timelike;
+        if (now.hour(), now.minute()) == (4, 0) {
+            let minute_key = exm_core::cron::minute_key(now);
+            let last = core
+                .cron
+                .get(IDLE_ARCHIVE_MARKER)?
+                .and_then(|j| j.last_run_minute)
+                .unwrap_or_default();
+            if last != minute_key {
+                let idle_days = core.config().automation.flow_idle_days;
+                if let Ok((archived, skipped)) = core.archive_idle_flow_sessions(idle_days, now)
+                {
+                    if archived > 0 {
+                        let _ = core.events.send(CoreEvent {
+                            kind: "cron.updated".into(),
+                            session_id: String::new(),
+                            payload: json!({
+                                "idleArchive": { "archived": archived, "skipped": skipped }
+                            }),
+                        });
+                    }
+                }
+                let marker = exm_core::types::CronJob {
+                    id: IDLE_ARCHIVE_MARKER.into(),
+                    name: "闲置流会话归档标记".into(),
+                    prompt: String::new(),
+                    kind: None,
+                    cron: Some("0 4 * * *".into()),
+                    at: None,
+                    target_session: None,
+                    steps: vec![],
+                    group: None,
+                    session_title: None,
+                    enabled: false,
+                    last_run_at: Some(exm_core::types::now_iso()),
+                    last_status: None,
+                    last_run_minute: Some(minute_key),
+                    notify_channels: vec![],
+                    created_at: exm_core::types::now_iso(),
+                };
+                let _ = core.cron.upsert(marker);
+            }
         }
     }
 

@@ -32,6 +32,7 @@ pub mod registry;
 pub mod remote;
 pub mod round_trace;
 pub mod runtime;
+pub mod session_origin;
 pub mod store;
 pub mod store_sqlite;
 pub mod task;
@@ -1094,6 +1095,8 @@ impl Core {
             id: new_id(),
             title: format!("{}（分支·至第 {upto_turn} 轮）", src.title),
             status: "active".into(),
+            origin: None,
+            origin_label: None,
             group_id: src.group_id.clone(), // 权限与组继承
             memory_partition: src.memory_partition.clone(), // 记忆分区随会话继承
             rolling_summary: None,          // 摘要按副本历史重建
@@ -1523,6 +1526,7 @@ impl Core {
             s.last_active_at = Some(s.updated_at.clone());
             s.message_count = Some(self.store.message_count(&s.id));
         }
+        self.attach_session_origins(&mut list);
         Ok(list)
     }
 
@@ -1532,7 +1536,135 @@ impl Core {
         for s in list.iter_mut() {
             s.message_count = Some(self.store.message_count(&s.id));
         }
+        self.attach_session_origins(&mut list);
         Ok(list)
+    }
+
+    /// 会话来源派生补齐（session-management）：title 约定解析 + flow 表 join。
+    /// 通道会话 origin = `channel:{id}:{key}`、origin_label = `流显示名·标签`；
+    /// 控制台会话 origin = `console`、label 缺省（title 即展示名）。
+    fn attach_session_origins(&self, list: &mut [Session]) {
+        // flow 表一次读全（量级 = 流数，远小于会话数），join 在内存完成：
+        // flow_id（channelId:chatKey）→ 流显示名（缺省 chat_key）
+        let flow_names: std::collections::HashMap<String, String> = self
+            .channel_flows(None)
+            .into_iter()
+            .map(|f| {
+                let name = if f.display_name.trim().is_empty() {
+                    f.chat_key.clone()
+                } else {
+                    f.display_name.clone()
+                };
+                (f.id, name)
+            })
+            .collect();
+        for s in list.iter_mut() {
+            let origin = crate::session_origin::parse_session_origin(&s.title);
+            s.origin = Some(origin.key());
+            if let crate::session_origin::SessionOrigin::Channel {
+                channel_id,
+                chat_key,
+                label,
+            } = origin
+            {
+                let flow_id = format!("{channel_id}:{chat_key}");
+                let flow_name = flow_names.get(&flow_id).cloned().unwrap_or(chat_key);
+                s.origin_label = Some(match label {
+                    Some(l) if !l.trim().is_empty() => format!("{flow_name}·{l}"),
+                    _ => flow_name,
+                });
+            } else {
+                s.origin_label = None;
+            }
+        }
+    }
+
+    /// 闲置流会话归档扫描（session-management 生命周期治理）。
+    /// 口径：通道会话（title 约定解析）· 未归档 · `updated_at` 距 `now` 超过
+    /// `idle_days` 天 · 非所在流的活跃绑定会话（flow.active_session 豁免）。
+    /// 返回 (归档数, 豁免数)。批量归档复用同一豁免口径（archive_flow_sessions）。
+    pub fn archive_idle_flow_sessions(
+        &self,
+        idle_days: u32,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<(usize, usize)> {
+        if idle_days == 0 {
+            return Ok((0, 0));
+        }
+        let horizon = now - chrono::Duration::days(idle_days as i64);
+        let horizon_iso = horizon.to_rfc3339();
+        let mut targets: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        for s in self.store.list_sessions()? {
+            if s.archived_at.is_some() {
+                continue;
+            }
+            let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
+                crate::session_origin::parse_session_origin(&s.title)
+            else {
+                continue;
+            };
+            // 活跃绑定豁免：下条消息将继续复用该会话
+            if self
+                .flow_active_session(&channel_id, &chat_key)
+                .as_deref()
+                == Some(s.id.as_str())
+            {
+                skipped += 1;
+                continue;
+            }
+            if s.updated_at < horizon_iso {
+                targets.push(s.id.clone());
+            }
+        }
+        for id in &targets {
+            self.set_session_archived(id, true)?;
+        }
+        if !targets.is_empty() {
+            let _ = self.events.send(CoreEvent {
+                kind: "session.idle_archived".into(),
+                session_id: String::new(),
+                payload: serde_json::json!({ "count": targets.len(), "idleDays": idle_days }),
+            });
+        }
+        Ok((targets.len(), skipped))
+    }
+
+    /// 按流/按通道归档旧会话（session-management 批量工具）：
+    /// 圈定范围内未归档会话全部归档，各流活跃绑定会话豁免。
+    /// 返回 (归档数, 豁免数)。
+    pub fn archive_flow_sessions(
+        &self,
+        scope: crate::session_origin::ArchiveScope,
+    ) -> anyhow::Result<(usize, usize)> {
+        let mut targets: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        for s in self.store.list_sessions()? {
+            if s.archived_at.is_some() {
+                continue;
+            }
+            let origin = crate::session_origin::parse_session_origin(&s.title);
+            if !scope.matches(&origin) {
+                continue;
+            }
+            if let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
+                &origin
+            {
+                if self
+                    .flow_active_session(channel_id, chat_key)
+                    .as_deref()
+                    == Some(s.id.as_str())
+                {
+                    skipped += 1;
+                    continue;
+                }
+            }
+            targets.push(s.id.clone());
+        }
+        for id in &targets {
+            self.set_session_archived(id, true)?;
+        }
+        Ok((targets.len(), skipped))
     }
 
     pub fn create_session(&self, title: &str) -> anyhow::Result<Session> {
@@ -3822,5 +3954,185 @@ mod meta_approval_tests {
             .map(|d| d.description.contains("数据整理"))
             .unwrap_or(false), "worker 描述应被更新");
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+}
+
+/// 会话来源派生（session-management）：title 解析 + flow join 口径。
+#[cfg(test)]
+mod session_origin_tests {
+    use super::*;
+    use crate::types::ChannelFlow;
+
+    fn core() -> Core {
+        let dir = std::env::temp_dir().join(format!("exm-origin-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = ExmConfig::load(&dir);
+        Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn flow(id: &str, key: &str, name: &str) -> ChannelFlow {
+        ChannelFlow {
+            id: format!("{id}:{key}"),
+            channel_id: id.into(),
+            chat_key: key.into(),
+            display_name: name.into(),
+            is_group: true,
+            active_session: None,
+            last_message: String::new(),
+            last_active_at: String::new(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn 列表补齐_通道会话带来源与流名() {
+        let c = core();
+        // 流存在（display_name 提供友好名）
+        c.save_channel_flow(&flow("c-tg", "123", "技术群")).unwrap();
+        c.create_session("channel:c-tg:123").unwrap();
+        c.create_session("channel:c-tg:123:20251101").unwrap();
+        // 流不在 flow 表（已删流）：回落 chat_key
+        c.create_session("channel:c-qq:g9").unwrap();
+        c.create_session("控制台随手记").unwrap();
+
+        let list = c.list_sessions_admin().unwrap();
+        let by_title: std::collections::HashMap<_, _> =
+            list.iter().map(|s| (s.title.clone(), s.clone())).collect();
+
+        let bare = &by_title["channel:c-tg:123"];
+        assert_eq!(bare.origin.as_deref(), Some("channel:c-tg:123"));
+        assert_eq!(bare.origin_label.as_deref(), Some("技术群"));
+
+        let labeled = &by_title["channel:c-tg:123:20251101"];
+        assert_eq!(labeled.origin.as_deref(), Some("channel:c-tg:123"));
+        assert_eq!(labeled.origin_label.as_deref(), Some("技术群·20251101"));
+
+        let orphan = &by_title["channel:c-qq:g9"];
+        assert_eq!(orphan.origin_label.as_deref(), Some("g9"), "无流记录回落 chat_key");
+
+        let console = &by_title["控制台随手记"];
+        assert_eq!(console.origin.as_deref(), Some("console"));
+        assert!(console.origin_label.is_none(), "控制台会话 label 缺省");
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 归档列表_同样补齐() {
+        let c = core();
+        c.save_channel_flow(&flow("c-x", "k1", "测试流")).unwrap();
+        let s = c.create_session("channel:c-x:k1").unwrap();
+        c.set_session_archived(&s.id, true).unwrap();
+        let archived = c.list_archived_sessions().unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].origin.as_deref(), Some("channel:c-x:k1"));
+        assert_eq!(archived[0].origin_label.as_deref(), Some("测试流"));
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+}
+
+/// 闲置归档与按流归档（session-management 生命周期治理）。
+#[cfg(test)]
+mod flow_archive_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn core() -> Core {
+        let dir = std::env::temp_dir().join(format!("exm-idle-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Core::with_config(ExmConfig::load(&dir)).expect("创建 Core 失败")
+    }
+
+    fn at(days_ago: i64) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 4, 4, 0, 0).unwrap() - chrono::Duration::days(days_ago)
+    }
+
+    /// 把会话 updated_at 拨回 N 天前（直接改存储行）
+    fn age(c: &Core, id: &str, days: i64) {
+        let iso = (Utc.with_ymd_and_hms(2026, 11, 4, 4, 0, 0).unwrap()
+            - chrono::Duration::days(days))
+            .to_rfc3339();
+        c.store.set_session_active_at(id, &iso).unwrap();
+    }
+
+    #[test]
+    fn 闲置归档_阈值与豁免() {
+        let c = core();
+        let s_old = c.create_session("channel:c-tg:g1").unwrap();
+        let s_fresh = c.create_session("channel:c-tg:g2").unwrap();
+        let s_bound = c.create_session("channel:c-tg:g3").unwrap();
+        let s_console = c.create_session("控制台会话").unwrap();
+        c.bind_flow_session("c-tg", "g3", &s_bound.id).unwrap();
+        age(&c, &s_old.id, 10);
+        age(&c, &s_bound.id, 10); // 绑定会话同样老旧 → 仍须豁免
+        age(&c, &s_console.id, 10);
+
+        let now = at(0);
+        let (archived, skipped) = c.archive_idle_flow_sessions(7, now).unwrap();
+        assert_eq!(archived, 1, "只有闲置非绑定流会话归档");
+        assert_eq!(skipped, 1, "绑定会话豁免计数");
+        let archived_list = c.list_archived_sessions().unwrap();
+        assert_eq!(archived_list.len(), 1);
+        assert_eq!(archived_list[0].id, s_old.id);
+        // 新鲜流会话与控制台会话不受影响
+        assert!(c.store.get_session(&s_fresh.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c.store.get_session(&s_console.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 闲置归档_零天关闭() {
+        let c = core();
+        let s = c.create_session("channel:c-x:g").unwrap();
+        age(&c, &s.id, 365);
+        let (archived, _) = c.archive_idle_flow_sessions(0, at(0)).unwrap();
+        assert_eq!(archived, 0, "0 = 关闭零行为");
+        assert!(c.store.get_session(&s.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 按流归档_绑定豁免与范围圈定() {
+        let c = core();
+        let f1_active = c.create_session("channel:c-a:g1").unwrap();
+        let f1_old = c.create_session("channel:c-a:g1:旧话题").unwrap();
+        let f2 = c.create_session("channel:c-a:g2").unwrap();
+        let other = c.create_session("channel:c-b:g1").unwrap();
+        c.bind_flow_session("c-a", "g1", &f1_active.id).unwrap();
+
+        let (archived, skipped) = c
+            .archive_flow_sessions(crate::session_origin::ArchiveScope::Flow {
+                channel_id: "c-a".into(),
+                chat_key: "g1".into(),
+            })
+            .unwrap();
+        assert_eq!((archived, skipped), (1, 1), "流内旧会话归档、绑定豁免");
+        assert!(c.store.get_session(&f1_old.id).unwrap().unwrap().archived_at.is_some());
+        assert!(c.store.get_session(&f1_active.id).unwrap().unwrap().archived_at.is_none());
+        // 范围外不受影响
+        assert!(c.store.get_session(&f2.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c.store.get_session(&other.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 按通道归档_全流旧会话() {
+        let c = core();
+        let a1 = c.create_session("channel:c-a:g1:old1").unwrap();
+        let a2 = c.create_session("channel:c-a:g2:old2").unwrap();
+        let bound = c.create_session("channel:c-a:g2").unwrap();
+        let b = c.create_session("channel:c-b:g1").unwrap();
+        c.bind_flow_session("c-a", "g2", &bound.id).unwrap();
+
+        let (archived, skipped) = c
+            .archive_flow_sessions(crate::session_origin::ArchiveScope::Channel {
+                channel_id: "c-a".into(),
+            })
+            .unwrap();
+        assert_eq!((archived, skipped), (2, 1));
+        assert!(c.store.get_session(&a1.id).unwrap().unwrap().archived_at.is_some());
+        assert!(c.store.get_session(&a2.id).unwrap().unwrap().archived_at.is_some());
+        assert!(c.store.get_session(&bound.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c.store.get_session(&b.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 }

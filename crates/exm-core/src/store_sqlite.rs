@@ -274,6 +274,8 @@ impl SqliteStore {
             id: row.get("id")?,
             title: row.get("title")?,
             status: row.get("status")?,
+            origin: None,
+            origin_label: None,
             group_id: row.get("group_id")?,
             memory_partition: None,
             rolling_summary: row.get("rolling_summary")?,
@@ -297,6 +299,8 @@ impl SqliteStore {
             id: new_id(),
             title: title.to_string(),
             status: "active".into(),
+            origin: None,
+            origin_label: None,
             group_id: if group_id.trim().is_empty() {
                 "exmachina".into()
             } else {

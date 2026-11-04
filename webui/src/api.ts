@@ -557,6 +557,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ action, ids }),
     }),
+  /** 按流/按通道归档旧会话（session-management）：scope=flow 时 channelId+chatKey
+   *  圈定单流；scope=channel 时归档该通道全部流的旧会话。流绑定会话豁免。 */
+  archiveSessionsByScope: (scope: "flow" | "channel", channelId: string, chatKey?: string) =>
+    req<{ ok: boolean; archived: number; skipped: number }>("/sessions/flow-archive", {
+      method: "POST",
+      body: JSON.stringify({ scope, channelId, chatKey }),
+    }),
   createSession: (title: string) =>
     req<Session>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
   getSession: (id: string) => req<Session>(`/sessions/${id}`),
