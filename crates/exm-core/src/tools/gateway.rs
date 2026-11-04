@@ -615,10 +615,11 @@ impl ToolGateway {
         self.search.ready()
     }
 
-    /// 主动搜索纪律注入门控（proactive-search）：后端就绪且开关开启。
-    /// 未配置后端 / 显式关闭时返回 false——提示层零注入（零回归语义）。
+    /// 主动搜索纪律注入门控（proactive-search）：任一搜索通路可用
+    /// （API 后端就绪 / 浏览器可探测）且开关开启。全部不可用或显式关闭时
+    /// 返回 false——提示层零注入（零回归语义）。
     pub fn search_discipline_ready(&self) -> bool {
-        self.search.ready() && self.search.proactive
+        self.search.proactive && (self.search.ready() || self.browser_ready())
     }
 
     /// 测试可见：审批单断言用
@@ -947,10 +948,11 @@ impl ToolGateway {
             },
             "required": ["op"]
         }));
-        push(ToolName::Browser, "浏览器自动化（headless Chrome + CDP）：导航网页、取渲染后正文、执行 JS、截图。适合抓动态页面 / 走一遍网页流程 / 留存页面证据", serde_json::json!({
+        push(ToolName::Browser, "浏览器自动化（Chrome + CDP）：搜索网页（无需搜索 API）、导航网页、取渲染后正文、执行 JS、截图。适合抓动态页面 / 走一遍网页流程 / 留存页面证据；搜索后端未配置时 op=search 是联网检索的主路径", serde_json::json!({
             "type": "object",
             "properties": {
-                "op": { "type": "string", "enum": ["open", "text", "eval", "screenshot", "close"], "description": "默认 open" },
+                "op": { "type": "string", "enum": ["open", "search", "text", "eval", "screenshot", "close"], "description": "默认 open" },
+                "query": { "type": "string", "description": "op=search：搜索词（导航搜索引擎取结果，无需 API Key）" },
                 "url": { "type": "string", "description": "op=open：http(s):// 或 file:// 地址" },
                 "expression": { "type": "string", "description": "op=eval：页面内执行的 JS 表达式（可点击/填表：document.querySelector('#x').click()）" },
                 "name": { "type": "string", "description": "op=screenshot：截图文件名（不含扩展名；缺省用时间戳）" },

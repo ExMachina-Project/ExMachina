@@ -794,6 +794,29 @@ async fn main() -> anyhow::Result<()> {
         "旧 body 缺 proactive 默认开",
         core.config().search.proactive && core.orchestrator().tools.search_discipline_ready(),
     );
+    // 浏览器搜索（browser-search）：引擎配置透出 + 旧 browser 配置缺字段默认 bing
+    let cfg_browser: serde_json::Value = client
+        .get(format!("{base}/config"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "browser 配置透出 searchEngine",
+        cfg_browser["browser"]["searchEngine"].is_string(),
+    );
+    let put_browser = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({
+            "browser": { "executable": "", "headless": true, "timeoutSecs": 30, "maxChars": 8000 }
+        }))
+        .send()
+        .await?;
+    c.check("browser 旧 body PUT 200", put_browser.status().is_success());
+    c.check(
+        "browser 旧 body 缺 searchEngine 默认 bing",
+        core.config().browser.search_engine == "bing",
+    );
     let schema: serde_json::Value = client
         .get(format!("{base}/config/schema"))
         .send()
