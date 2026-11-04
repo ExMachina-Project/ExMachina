@@ -1186,11 +1186,14 @@ impl ToolGateway {
         let plugin_attr = crate::plugin::parse_namespaced(name)
             .map(|(p, _)| serde_json::json!(p))
             .unwrap_or(serde_json::Value::Null);
+        // 载荷脱敏（agent-budget-audit 3.5）：密钥类参数（token/sk-/password…）
+        // 进事件与审计前打码——事件库与广播都是明文面，原文只留在工具执行现场。
+        let args_redacted = super::redact::redact_json(args);
         self.emit_and_persist(CoreEvent {
             kind: "tool.call".into(),
             session_id: session_id.to_string(),
             payload: serde_json::json!({
-                "callId": call_id, "agentId": agent_id, "tool": name, "args": args,
+                "callId": call_id, "agentId": agent_id, "tool": name, "args": args_redacted,
                 "plugin": plugin_attr,
             }),
         });
