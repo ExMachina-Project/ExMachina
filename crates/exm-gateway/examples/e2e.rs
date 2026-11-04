@@ -3361,6 +3361,49 @@ async fn main() -> anyhow::Result<()> {
             .await?;
     }
 
+    // ---- 工具预算熔断事件（agent-budget-audit 3.2）----
+    // 模型驱动的 chat 在 Mock 下不发工具调用，走工具执行漏斗的直连路径：
+    // 收紧单轮预算 → execute_named 两次 → 第二次必须受限回灌 + tool.budget 事件广播
+    // （事件页条目 + 通道 take_reply 内联提示的数据源）。
+    {
+        let mut rx_b = core.subscribe();
+        let sid = core.create_session("预算熔断测试").unwrap().id;
+        // 预算收紧：单轮 1（config 快照由 FileGuard 兜底还原；块尾恢复默认）。
+        // 注意先改配置再取 tools 引用——apply_config 重建 orchestrator（新网关带新预算）。
+        let mut cfg_b = (*core.config()).clone();
+        cfg_b.security.tool_call_budget.per_turn = 1;
+        cfg_b.security.tool_call_budget.per_session = 0;
+        cfg_b.security.tool_call_budget.per_window = 0;
+        core.apply_config(cfg_b).unwrap();
+        let tools = core.orchestrator().tools.clone();
+        let allow = [exm_core::types::ToolName::parse("read").unwrap()];
+        let args = serde_json::json!({ "path": "README.md" });
+        let r1 = tools
+            .execute_named("e2e", &sid, &allow, "read", &args)
+            .await;
+        let r2 = tools
+            .execute_named("e2e", &sid, &allow, "read", &args)
+            .await;
+        // 恢复默认预算（后续断言不受影响）
+        let mut cfg_r = (*core.config()).clone();
+        cfg_r.security.tool_call_budget = exm_core::config::ToolCallBudget::default();
+        core.apply_config(cfg_r).unwrap();
+        c.check(
+            "预算首次放行二次受限",
+            !r1.error.clone().unwrap_or_default().contains("预算受限")
+                && r2.error.clone().unwrap_or_default().contains("预算受限"),
+        );
+        // tool.budget 事件广播（熔断条目数据源）
+        let mut budget_evt = false;
+        while let Ok(evt) = rx_b.try_recv() {
+            if evt.kind == "tool.budget" && evt.session_id == sid {
+                budget_evt = true;
+            }
+        }
+        c.check("tool.budget 事件广播", budget_evt);
+        let _ = core.delete_session(&sid);
+    }
+
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {

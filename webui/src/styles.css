@@ -782,6 +782,8 @@ textarea.ant-input:focus,
 .tl-sync::before { background: var(--green); }
 .tl-arbitration::before { background: var(--amber); }
 .tl-error::before { background: var(--red); }
+/* 预算熔断内联提示：警示琥珀（非错误红——预算是受控收束不是失败） */
+.tl-budget::before { background: var(--amber); }
 .tl-memory .tl-text { color: var(--blue); }
 .tl-memory::before { background: var(--blue); }
 .live-card {
