@@ -16,6 +16,7 @@ function eventGroup(kind: string): string {
   if (kind.startsWith("sync") || kind.startsWith("ledger")) return "ev-sync";
   if (kind.includes("arbitration")) return "ev-arbitration";
   if (kind.startsWith("run.error")) return "ev-error";
+  if (kind.startsWith("tool.budget")) return "ev-error";
   if (kind.startsWith("memory")) return "ev-memory";
   if (kind.startsWith("run.finished")) return "ev-finished";
   return "";
@@ -23,7 +24,7 @@ function eventGroup(kind: string): string {
 
 /** 事件语义色：对齐资产行为 —— 灰阶为主、紫点缀（arbitration）、红仅报错误 */
 function colorOf(kind: string): string {
-  if (kind.startsWith("run.error")) return "red";
+  if (kind.startsWith("run.error") || kind.startsWith("tool.budget")) return "red";
   if (kind.includes("arbitration")) return "purple";
   return "default";
 }
@@ -44,6 +45,12 @@ function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; co
       break;
     case "session.created":
       text = t("activity.sessionCreated");
+      break;
+    case "tool.budget":
+      text = t("activity.toolBudget", {
+        tool: String(p.tool ?? ""),
+        reason: String(p.reason ?? ""),
+      });
       break;
     default:
       if (Object.keys(inner).length === 0) {

@@ -88,6 +88,10 @@ pub struct Core {
     /// 聊天流未读计数（流粒度，内存态）：智能体在流绑定会话产出回复且用户未打开
     /// 该会话时累积；打开即清零。未读是瞬时 UI 状态，重启归零合理（D5 单一事实源）。
     flow_unread: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 一次性标记（agent-budget-audit 内联提示去重等）：key → 已置位。
+    /// 进程内存态；key 由调用方自带语义前缀与生命周期（会话删除不清理——
+    /// 预算提示「每进程每会话一次」符合预期）。
+    once_flags: parking_lot::Mutex<std::collections::HashSet<String>>,
     /// 会话级审批授权（approval-ergonomics）：会话 → {命令前缀 → ()}。
     /// 「本会话允许」档批准时写入；内存态（重启即清）、随会话删除清理。
     /// 红线：[root] 提权单与破坏性命令永不入表（写入侧校验）。
@@ -208,6 +212,7 @@ impl Core {
             meta_state: parking_lot::RwLock::new(MetaAgentState { last_tick_minute: 0 }),
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            once_flags: parking_lot::Mutex::new(std::collections::HashSet::new()),
             session_grants: parking_lot::Mutex::new(std::collections::HashMap::new()),
             self_weak: parking_lot::RwLock::new(None),
             mcp: mcp_handle.clone(),
@@ -760,6 +765,12 @@ impl Core {
 
     /// 流未读 +1（智能体在流绑定会话产出回复时调用；spawn_reply 收束点）。
     /// 流不存在时忽略（未绑定流的会话无未读语义）。
+    /// 一次性标记消费（agent-budget-audit 内联提示去重）：首次返回 true 并置位，
+    /// 此后 false。进程内存态。
+    pub fn consume_once_flag(&self, key: &str) -> bool {
+        self.once_flags.lock().insert(key.to_string())
+    }
+
     pub fn bump_flow_unread(&self, channel_id: &str, chat_key: &str) {
         let id = Self::flow_id(channel_id, chat_key);
         if self.store.get_channel_flow(&id).ok().flatten().is_none() {
@@ -4133,6 +4144,25 @@ mod flow_archive_tests {
         assert!(c.store.get_session(&a2.id).unwrap().unwrap().archived_at.is_some());
         assert!(c.store.get_session(&bound.id).unwrap().unwrap().archived_at.is_none());
         assert!(c.store.get_session(&b.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+}
+
+/// 一次性标记（once_flags）：预算内联提示去重等
+#[cfg(test)]
+mod once_flag_tests {
+    use super::*;
+
+    #[test]
+    fn 一次性标记_首次置位后续拒绝() {
+        let dir = std::env::temp_dir().join(format!("exm-once-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Core::with_config(ExmConfig::load(&dir)).expect("创建 Core 失败");
+        let key = "budget-notified:s1";
+        assert!(c.consume_once_flag(key), "首次返回 true");
+        assert!(!c.consume_once_flag(key), "后续返回 false");
+        assert!(!c.consume_once_flag(key));
+        assert!(c.consume_once_flag("budget-notified:s2"), "不同 key 互不影响");
         let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 }

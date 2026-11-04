@@ -1319,6 +1319,7 @@ export const zh = {
   "activity.dispatch": "派发 → {agent}（{node}）",
   "activity.innerEvent": "内部事件 {kind}",
   "activity.sessionCreated": "会话创建",
+  "activity.toolBudget": "工具预算拦截：{tool} —— {reason}",
 
   // ── 任务图页 ──
   "graph.title": "任务图 — {session}",
