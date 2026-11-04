@@ -55,6 +55,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "endpoint": cfg.search.endpoint,
             "apiKey": if cfg.search.api_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "maxResults": cfg.search.max_results,
+            "proactive": cfg.search.proactive,
         },
         "hooks": {
             "preTool": cfg.hooks.pre_tool,
@@ -398,6 +399,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 other => other.to_string(),
             },
             max_results: s.max_results.clamp(1, 20),
+            proactive: s.proactive,
         },
     };
     let hooks = match sec_hooks {

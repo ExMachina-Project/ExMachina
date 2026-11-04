@@ -256,6 +256,11 @@ pub struct SearchConfig {
     pub api_key: String,
     /// 返回条数上限
     pub max_results: usize,
+    /// 主动搜索纪律（proactive-search）：true = 系统提示注入「何时该主动搜」
+    /// 行为准则（时效性问题/事实核验/未知概念先搜再答）。仅提示层——
+    /// 工具下发面由 ready() 决定，与本开关无关。
+    #[serde(default = "default_true")]
+    pub proactive: bool,
 }
 
 impl Default for SearchConfig {
@@ -265,6 +270,7 @@ impl Default for SearchConfig {
             endpoint: String::new(),
             api_key: String::new(),
             max_results: 5,
+            proactive: true,
         }
     }
 }
@@ -1961,7 +1967,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "tavily / brave 需要；searxng 与自建通常留空" },
                     { "key": "search.maxResults", "label": "返回条数上限", "kind": "number",
                       "default": "5", "required": false, "min": 1, "max": 20,
-                      "help": "单次搜索注入上下文的结果条数" }
+                      "help": "单次搜索注入上下文的结果条数" },
+                    { "key": "search.proactive", "label": "主动搜索纪律", "kind": "boolean",
+                      "default": "true", "required": false,
+                      "help": "开启后系统提示注入「何时该主动搜」行为准则（时效/核验/未知概念先搜再答）；关闭 = 模型仅被动响应用户的搜索请求" }
                 ]
             },
             {
