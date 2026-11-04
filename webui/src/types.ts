@@ -104,6 +104,11 @@ export interface Session {
   archivedAt?: string;
   /** 消息条数（管理页附加） */
   messageCount?: number;
+  /** 会话来源（读时派生）：console 或 channel:{channelId}:{chatKey}。
+   *  旧网关不返回该字段（undefined）——分组视图降级隐藏，回落平铺。 */
+  origin?: string;
+  /** 来源展示名（通道会话 = 流显示名·标签；控制台会话缺省） */
+  originLabel?: string;
 }
 
 /** 会话检索命中片段（session-search） */
