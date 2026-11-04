@@ -35,6 +35,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "toolOutputSpillChars": cfg.security.tool_output_spill_chars,
             "approvalWaitSecs": cfg.security.approval_wait_secs,
             "keySetupDismissed": cfg.security.key_setup_dismissed,
+            "toolCallBudget": cfg.security.tool_call_budget,
         },
         "automation": {
             "heartbeatEnabled": cfg.automation.heartbeat_enabled,
@@ -254,6 +255,9 @@ pub(crate) struct PartialSecurity {
     exec_user: Option<String>,
     #[serde(default)]
     exec_home: Option<String>,
+    /// 工具调用预算三值（agent-budget-audit）：缺省沿用现值
+    #[serde(default)]
+    tool_call_budget: Option<exm_core::config::ToolCallBudget>,
 }
 
 /// Computer Use（设置页）：部分更新语义——缺省字段沿用旧值
@@ -356,6 +360,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         sanitize_hidden_unicode: None,
         exec_user: None,
         exec_home: None,
+        tool_call_budget: None,
     });
     let computer = body.computer.clone().unwrap_or(PartialComputer {
         enabled: None,
@@ -504,6 +509,10 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 .exec_home
                 .clone()
                 .unwrap_or_else(|| current.security.exec_home.clone()),
+            // 工具调用预算三值（agent-budget-audit）：缺省沿用现值
+            tool_call_budget: sec
+                .tool_call_budget
+                .unwrap_or(current.security.tool_call_budget),
         },
         computer: exm_core::config::ComputerUseConfig {
             enabled: computer.enabled.unwrap_or(current.computer.enabled),
