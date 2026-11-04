@@ -48,6 +48,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "autoAgentMaxSteps": cfg.automation.auto_agent_max_steps,
             "autoAgentBackoffMax": cfg.automation.auto_agent_backoff_max,
             "metaIntervalMin": cfg.automation.meta_interval_min,
+            "flowIdleDays": cfg.automation.flow_idle_days,
         },
         "search": {
             "provider": cfg.search.provider,
@@ -297,6 +298,8 @@ pub(crate) struct PartialAutomation {
     auto_agent_backoff_max: Option<u32>,
     #[serde(default)]
     meta_interval_min: Option<u32>,
+    #[serde(default)]
+    flow_idle_days: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -379,6 +382,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         auto_agent_max_steps: None,
         auto_agent_backoff_max: None,
         meta_interval_min: None,
+        flow_idle_days: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
@@ -560,6 +564,10 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             meta_interval_min: auto
                 .meta_interval_min
                 .unwrap_or(current.automation.meta_interval_min),
+            // 闲置流会话归档（session-management）：0 = 关；缺省沿用现值
+            flow_idle_days: auto
+                .flow_idle_days
+                .unwrap_or(current.automation.flow_idle_days),
         },
         search,
         hooks,

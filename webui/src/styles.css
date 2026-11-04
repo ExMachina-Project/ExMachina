@@ -3540,6 +3540,27 @@ mark.search-hit {
 }
 /* 表格：CSS 网格行列（role=table 语义 + 自绘样式，与 antd Table 解耦——批量工具条联动更直接） */
 .sessions-table { border: 1px solid var(--border, #20262f); border-radius: 10px; overflow: hidden; }
+/* 分组视图（session-management）：控制台组 + 通道组（组内按流聚簇）；
+   行网格沿用 sessions-tr，组/流头部是轻量标题行 */
+.sessions-groups { display: flex; flex-direction: column; gap: 14px; }
+.sessions-group { border: 1px solid var(--border, #20262f); border-radius: 10px; overflow: hidden; }
+.sessions-group-head {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: var(--bg-slot, #161b22); border-bottom: 1px solid var(--border, #20262f);
+}
+.sessions-group-title { font-weight: 600; font-size: 13px; }
+.sessions-group-count { font-size: 11px; color: var(--text-dim, #59626f); }
+.sessions-flow { padding: 0 0 2px; }
+.sessions-flow-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px 4px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border, #20262f) 45%, transparent);
+}
+.sessions-flow-name {
+  font-size: 12px; font-weight: 500; color: var(--text-dim, #8b95a5);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%;
+}
+.sessions-flow-count { font-size: 11px; color: var(--text-dim, #59626f); }
+.sessions-flow .sessions-row { padding-left: 20px; }
 .sessions-tr {
   display: grid;
   grid-template-columns: 40px minmax(220px, 1fr) 76px minmax(110px, 160px) 110px 84px 96px;
