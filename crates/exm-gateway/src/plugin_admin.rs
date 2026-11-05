@@ -247,7 +247,8 @@ pub async fn delete_plugin(
 ) -> axum::response::Response {
     let pm = st.core.plugins();
     let Some(e) = pm.get(&id) else {
-        return err_not_found(&id).into_response();
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：重复卸载目标已不在 → 成功
+        return Json(json!({ "ok": true })).into_response();
     };
     match e.form.as_str() {
         "builtin" | "virtual" => {
@@ -680,7 +681,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(r.status(), 404);
+        // DELETE 幂等（D4 决议推广，审计 REST P1-2）：重复卸载目标已不在 → 200
+        assert_eq!(r.status(), 200);
     }
 
     /// 凭据区往返（plugin-ecosystem 1.2）：写入 → 回显掩码 → 掩码回传不覆盖 → 空值删除

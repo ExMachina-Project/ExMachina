@@ -121,11 +121,8 @@ pub async fn delete_link(State(st): State<AppState>, Path(id): Path<String>) -> 
     let before = cfg.nexus.links.len();
     cfg.nexus.links.retain(|l| l.id != id);
     if cfg.nexus.links.len() == before {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "连结体不存在" })),
-        )
-            .into_response();
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：重复删除目标已不在 → 成功
+        return Json(json!({ "ok": true, "pruned": 0 })).into_response();
     }
     match st.core.apply_config(cfg) {
         Ok(_) => {
