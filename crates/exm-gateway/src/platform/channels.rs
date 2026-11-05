@@ -838,11 +838,8 @@ pub async fn delete_channel(
     let before = channels.len();
     channels.retain(|c| c.id != id);
     if channels.len() == before {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "通道不存在" })),
-        )
-            .into_response();
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：重复删除目标已不在 → 成功
+        return Json(json!({ "ok": true })).into_response();
     }
     match save_channels(&st.core, &channels) {
         Ok(_) => {

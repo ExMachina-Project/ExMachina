@@ -187,6 +187,12 @@ pub(crate) async fn rename_session(
     }
     match st.core.store.update_session_title(&id, &title) {
         Ok(_) => Json(json!({ "ok": true, "title": title })).into_response(),
+        // 「会话不存在」→ 404（REST 状态码矩阵：路径资源不存在不落 500；审计 REST P1-1）
+        Err(e) if e.to_string().contains("会话不存在") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -208,6 +214,12 @@ pub(crate) async fn pin_session(
 ) -> impl IntoResponse {
     match st.core.toggle_session_pin(&id, b.pinned) {
         Ok(_) => Json(json!({ "ok": true, "pinned": b.pinned })).into_response(),
+        // 「会话不存在」→ 404（REST 状态码矩阵；审计 REST P1-1）
+        Err(e) if e.to_string().contains("会话不存在") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -411,13 +423,16 @@ pub(crate) async fn session_undo(
     {
         Ok(info) => Json(info).into_response(),
         Err(e) => {
-            let busy = e.to_string().contains("处理中");
-            let code = if busy {
+            // 错误分类（REST 状态码矩阵，审计 P1-1）：处理中→409；会话不存在→404；其余→400
+            let msg = e.to_string();
+            let code = if msg.contains("处理中") {
                 StatusCode::CONFLICT
+            } else if msg.contains("会话不存在") || msg.contains("快照不存在") {
+                StatusCode::NOT_FOUND
             } else {
                 StatusCode::BAD_REQUEST
             };
-            (code, Json(json!({ "error": e.to_string() }))).into_response()
+            (code, Json(json!({ "error": msg }))).into_response()
         }
     }
 }
@@ -447,13 +462,16 @@ pub(crate) async fn session_edit(
     match st.core.edit_resend(&id, b.turn, &b.text).await {
         Ok(info) => (StatusCode::ACCEPTED, Json(info)).into_response(),
         Err(e) => {
-            let busy = e.to_string().contains("处理中");
-            let code = if busy {
+            // 错误分类（REST 状态码矩阵，审计 P1-1）：处理中→409；会话/快照不存在→404；其余→400
+            let msg = e.to_string();
+            let code = if msg.contains("处理中") {
                 StatusCode::CONFLICT
+            } else if msg.contains("会话不存在") || msg.contains("快照不存在") {
+                StatusCode::NOT_FOUND
             } else {
                 StatusCode::BAD_REQUEST
             };
-            (code, Json(json!({ "error": e.to_string() }))).into_response()
+            (code, Json(json!({ "error": msg }))).into_response()
         }
     }
 }
@@ -477,11 +495,16 @@ pub(crate) async fn session_fork(
             Json(serde_json::to_value(s).unwrap_or(Value::Null)),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        // 错误分类（REST 状态码矩阵，审计 P1-1）：会话/快照不存在→404；其余（轮次越界等）→400
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.contains("会话不存在") || msg.contains("快照不存在") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({ "error": msg }))).into_response()
+        }
     }
 }
 

@@ -2334,7 +2334,8 @@ impl Core {
                 switched = self.registry.set_active_group(g).is_ok();
             }
         }
-        // 会话复用（限定本组）：按标题匹配已有会话，避免每次运行新建
+        // 会话复用（限定本组）：按标题匹配已有会话，避免每次运行新建。
+        // 创建失败（磁盘满/库忙）不 panic——落 failed 记录 + 事件，调度循环继续（审计 P1-3）
         let gid = self.registry.active_group();
         let existing = self
             .store
@@ -2343,7 +2344,35 @@ impl Core {
             .and_then(|list| list.into_iter().find(|s| s.title == title));
         let session = match existing {
             Some(s) => s,
-            None => self.create_session(&title).expect("定时任务会话创建失败"),
+            None => match self.create_session(&title) {
+                Ok(s) => s,
+                Err(e) => {
+                    if switched {
+                        let _ = self.registry.set_active_group(&prev_group);
+                    }
+                    let err = format!("会话创建失败：{e}");
+                    let _ = self.events.send(CoreEvent {
+                        kind: "cron.finished".into(),
+                        session_id: String::new(),
+                        payload: serde_json::json!({
+                            "jobId": job.id,
+                            "jobName": job.name,
+                            "status": "failed",
+                            "error": err,
+                        }),
+                    });
+                    return CronRun {
+                        id: new_id()[..8].to_string(),
+                        job_id: job.id.clone(),
+                        job_name: job.name.clone(),
+                        session_id: String::new(),
+                        started_at: started,
+                        finished_at: now_iso(),
+                        status: "failed".into(),
+                        summary: err,
+                    };
+                }
+            },
         };
         let result = self.chat(&session.id, &job.prompt).await;
         if switched {
