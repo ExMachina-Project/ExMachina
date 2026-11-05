@@ -96,6 +96,10 @@ pub struct Core {
     /// 双击/多端并发时第二击等先到者收束后返回最新单据（先到者代执行语义），
     /// 命令只执行一次。锁条目不清理（审批单量有限，内存开销可忽略）。
     approval_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 流级互斥（竞态 P1-3）：flow_id → 锁。同 chat_key 并发消息的
+    /// 「查绑定→建会话→回写绑定」与「touch 预览」各自临界区——否则双建会话
+    /// （孤儿+绑定互抹）或 touch 读改写覆盖他方 bind（上下文永久分裂）。
+    flow_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>,
     /// 会话级审批授权（approval-ergonomics）：会话 → {命令前缀 → ()}。
     /// 「本会话允许」档批准时写入；内存态（重启即清）、随会话删除清理。
     /// 红线：[root] 提权单与破坏性命令永不入表（写入侧校验）。
@@ -218,6 +222,7 @@ impl Core {
             flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
             once_flags: parking_lot::Mutex::new(std::collections::HashSet::new()),
             approval_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            flow_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             session_grants: parking_lot::Mutex::new(std::collections::HashMap::new()),
             self_weak: parking_lot::RwLock::new(None),
             mcp: mcp_handle.clone(),
@@ -747,6 +752,88 @@ impl Core {
         format!("{channel_id}:{chat_key}")
     }
 
+    /// 流级锁的 Arc（竞态 P1-3）：同 flow 的「查绑定→建会话→回写绑定」/
+    /// 「touch 预览」临界区互斥。锁粒度 = flow_id（不同流互不影响）；
+    /// std::sync::Mutex——临界区内全是同步 fs 操作，持锁不跨 await。
+    /// 用法：`let lock = self.flow_lock_arc(ch, key); let _g = lock.lock().unwrap();`
+    /// （先 clone Arc 再 lock，guard 借局部 Arc，安全）
+    fn flow_lock_arc(&self, channel_id: &str, chat_key: &str) -> Arc<std::sync::Mutex<()>> {
+        let id = Self::flow_id(channel_id, chat_key);
+        let mut locks = self.flow_locks.lock();
+        locks
+            .entry(id)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// 原子版「查绑定→(缺绑定)建会话→回写绑定」（竞态 P1-3）：
+    /// ensure_flow_session 的 check-then-act 序列整体进同一临界区——
+    /// 并发两条同流消息不再各建会话（孤儿+绑定互抹）。
+    /// scope 由调用方解析（组 id）；title 为会话标题；legacy 认领在锁内。
+    pub fn ensure_flow_session_atomic(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        scope: &str,
+        title: &str,
+        flow_name: Option<&str>,
+        is_group: bool,
+    ) -> Option<String> {
+        let flock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = flock.lock().unwrap();
+        // 锁内直接读流文档（不走 flow_active_session——那会重复拿同一把锁，死锁）：
+        // 绑定有效且会话仍存在 → 复用（他人可能已在此临界区建好绑定）
+        if let Some(flow) = self.channel_flow(channel_id, chat_key) {
+            if let Some(sid) = flow.active_session.clone() {
+                if self.store.get_session(&sid).ok().flatten().is_some() {
+                    // 流名回填（空填不覆盖；与 ensure_flow_named 同语义但在锁内）
+                    if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
+                        if flow.display_name.trim().is_empty() {
+                            let mut f = flow.clone();
+                            f.display_name = n.trim().to_string();
+                            f.is_group = f.is_group || is_group;
+                            let _ = self.store.put_channel_flow(&f);
+                        }
+                    }
+                    return Some(sid);
+                }
+            }
+        }
+        // 旧 title 会话认领（升级迁移），否则新建
+        let legacy = self
+            .store
+            .list_sessions_in_group(scope)
+            .ok()
+            .and_then(|list| list.into_iter().find(|s| s.title == title));
+        let sid = match legacy {
+            Some(s) => s.id,
+            None => self.store.create_session(title, scope).ok()?.id,
+        };
+        // 回写绑定也直接操作（bind_flow_session_named 内部重复拿锁）：
+        // 读流→合并名→写回，单临界区内完成
+        let mut flow = self.channel_flow(channel_id, chat_key).unwrap_or_else(|| ChannelFlow {
+            id: Self::flow_id(channel_id, chat_key),
+            channel_id: channel_id.to_string(),
+            chat_key: chat_key.to_string(),
+            display_name: flow_name.unwrap_or("").trim().to_string(),
+            is_group,
+            active_session: None,
+            last_message: String::new(),
+            last_active_at: String::new(),
+            created_at: now_iso(),
+        });
+        if flow.display_name.trim().is_empty() {
+            if let Some(n) = flow_name {
+                flow.display_name = n.trim().to_string();
+            }
+        }
+        flow.is_group = flow.is_group || is_group;
+        flow.active_session = Some(sid.clone());
+        flow.last_active_at = now_iso();
+        let _ = self.store.put_channel_flow(&flow);
+        Some(sid)
+    }
+
     /// 取流（不存在返回 None）
     pub fn channel_flow(&self, channel_id: &str, chat_key: &str) -> Option<ChannelFlow> {
         self.store
@@ -804,6 +891,10 @@ impl Core {
 
     /// 流绑定的活跃会话；不存在或已删 → None（调用方开新会话后回写绑定）
     pub fn flow_active_session(&self, channel_id: &str, chat_key: &str) -> Option<String> {
+        // 临界区（竞态 P1-3）：查绑定 + 失效清理原子化——与 bind/touch 互斥，
+        // 防止清理与他方回写交错抹掉刚落的绑定
+        let lock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = lock.lock().unwrap();
         let flow = self.channel_flow(channel_id, chat_key)?;
         let sid = flow.active_session?;
         // 会话可能已被用户在控制台删除：失效绑定顺带清理，下次重建
@@ -857,6 +948,10 @@ impl Core {
         display_name: Option<&str>,
         is_group: Option<bool>,
     ) -> anyhow::Result<()> {
+        // 临界区（竞态 P1-3）：读流→建/改→回写原子化——并发 bind（同流两条消息
+        // 各建会话）不再互抹绑定、不再双建流文档
+        let flock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = flock.lock().unwrap();
         let id = Self::flow_id(channel_id, chat_key);
         let mut flow = self
             .channel_flow(channel_id, chat_key)
@@ -892,6 +987,10 @@ impl Core {
         chat_key: &str,
         preview: &str,
     ) -> anyhow::Result<()> {
+        // 临界区（竞态 P1-3）：读改写原子化——touch 的整流写回不再覆盖
+        // 期间他方落的 bind（active_session）
+        let flock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = flock.lock().unwrap();
         if let Some(mut flow) = self.channel_flow(channel_id, chat_key) {
             flow.last_message = preview.chars().take(120).collect();
             flow.last_active_at = now_iso();
@@ -2291,6 +2390,10 @@ impl Core {
         if let Some(g) = group {
             if *g != prev_group && self.group_meta(g).is_some() {
                 switched = self.registry.set_active_group(g).is_ok();
+                // 抢占校验（竞态 P1-2）：切换后立即回读——被并发通道抢走则抢回一次
+                if switched && self.registry.active_group() != *g {
+                    let _ = self.registry.set_active_group(g);
+                }
             }
         }
         let gid = self.registry.active_group();
@@ -2332,6 +2435,10 @@ impl Core {
         if let Some(g) = &job.group {
             if *g != prev_group && self.group_meta(g).is_some() {
                 switched = self.registry.set_active_group(g).is_ok();
+                // 抢占校验（竞态 P1-2）：切换后立即回读——被并发通道抢走则抢回一次
+                if switched && self.registry.active_group() != *g {
+                    let _ = self.registry.set_active_group(g);
+                }
             }
         }
         // 会话复用（限定本组）：按标题匹配已有会话，避免每次运行新建。
