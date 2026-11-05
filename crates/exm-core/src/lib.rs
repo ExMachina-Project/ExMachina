@@ -821,6 +821,42 @@ impl Core {
         chat_key: &str,
         session_id: &str,
     ) -> anyhow::Result<()> {
+        self.bind_flow_session_named(channel_id, chat_key, session_id, None, None)
+    }
+
+    /// 流名维护（会话管理可用性修复 2026-11）：流的展示名（群名 / 对端昵称）
+    /// 只在为空时回填——不覆盖既有值（可能是用户改过的自定义名，或更早来源
+    /// 的更好名称）。适配器每次入站都带最新名调用，首次到达即落名。
+    pub fn ensure_flow_named(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        display_name: &str,
+        is_group: bool,
+    ) {
+        if display_name.trim().is_empty() {
+            return;
+        }
+        let Some(mut flow) = self.channel_flow(channel_id, chat_key) else {
+            return;
+        };
+        if flow.display_name.trim().is_empty() {
+            flow.display_name = display_name.trim().to_string();
+            flow.is_group = flow.is_group || is_group;
+            let _ = self.store.put_channel_flow(&flow);
+        }
+    }
+
+    /// bind_flow_session 带名变体：建流时直接落展示名（避免先建空名流再补名
+    /// 的窗口期——控制台流列表显示裸 chat_key 不可辨认）
+    pub fn bind_flow_session_named(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        session_id: &str,
+        display_name: Option<&str>,
+        is_group: Option<bool>,
+    ) -> anyhow::Result<()> {
         let id = Self::flow_id(channel_id, chat_key);
         let mut flow = self
             .channel_flow(channel_id, chat_key)
@@ -828,13 +864,22 @@ impl Core {
                 id: id.clone(),
                 channel_id: channel_id.to_string(),
                 chat_key: chat_key.to_string(),
-                display_name: String::new(),
-                is_group: false,
+                display_name: display_name.unwrap_or("").trim().to_string(),
+                is_group: is_group.unwrap_or(false),
                 active_session: None,
                 last_message: String::new(),
                 last_active_at: String::new(),
                 created_at: now_iso(),
             });
+        // 既有流只补空名（不覆盖用户自定义）
+        if flow.display_name.trim().is_empty() {
+            if let Some(n) = display_name {
+                flow.display_name = n.trim().to_string();
+            }
+        }
+        if let Some(g) = is_group {
+            flow.is_group = flow.is_group || g;
+        }
         flow.active_session = Some(session_id.to_string());
         flow.last_active_at = now_iso();
         self.store.put_channel_flow(&flow)
@@ -2930,6 +2975,42 @@ mod im_discipline_tests {
         // 不存在的会话：报错不 panic
         assert!(core.set_session_archived("no-such", true).is_err());
     }
+    /// 流名维护（会话管理可用性修复）：空填不覆盖——既有名（用户自定义或
+    /// 更早来源）不被新名冲掉；空名流首名即落。
+    #[test]
+    fn 流名维护_空填不覆盖() {
+        let dir = std::env::temp_dir().join(format!("exm-flowname-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let core = crate::Core::create(&dir).expect("创建 Core 失败");
+        let sid = core.create_session("fn-test").unwrap().id;
+        // 建流带名
+        core.bind_flow_session_named("ch1", "12345", &sid, Some("萝莉领主二群"), Some(true))
+            .unwrap();
+        let f = core.channel_flow("ch1", "12345").unwrap();
+        assert_eq!(f.display_name, "萝莉领主二群");
+        assert!(f.is_group, "群聊标记应落");
+        // 再补名不覆盖（群改名事件到达也不冲掉——展示名以首次为准，
+        // 用户在控制台改名后更不能被冲）
+        core.ensure_flow_named("ch1", "12345", "新群名", true);
+        let f = core.channel_flow("ch1", "12345").unwrap();
+        assert_eq!(f.display_name, "萝莉领主二群", "已有名不得被覆盖");
+        // 空名流首名即落（ensure_flow_named 空填路径）
+        let sid2 = core.create_session("fn-test-2").unwrap().id;
+        core.bind_flow_session_named("ch1", "67890", &sid2, None, None)
+            .unwrap();
+        assert_eq!(
+            core.channel_flow("ch1", "67890").unwrap().display_name,
+            "",
+            "无名建流保持空"
+        );
+        core.ensure_flow_named("ch1", "67890", "终夜", false);
+        assert_eq!(core.channel_flow("ch1", "67890").unwrap().display_name, "终夜");
+        // 空串补名是 no-op（解析失败的适配器不该写入空名）
+        core.ensure_flow_named("ch1", "67890", "", false);
+        assert_eq!(core.channel_flow("ch1", "67890").unwrap().display_name, "终夜");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 流未读计数（spec experience-iteration 未读徽标服务端口径）：
     /// 有流才计数、累积不溢出、清零即除名、无流 bump 静默忽略。
     #[test]
