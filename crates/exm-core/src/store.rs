@@ -123,6 +123,11 @@ impl Store {
     pub fn set_session_archived(&self, id: &str, archived: bool) -> Result<()> {
         match self.get_session(id)? {
             Some(mut s) => {
+                // 同状态幂等（批量端点重试安全，长程迭代 4.3）：重复归档/重复恢复
+                // 不刷新 archived_at——归档区按归档时间倒序，重试不应把旧条目顶到顶部
+                if s.archived_at.is_some() == archived {
+                    return Ok(());
+                }
                 s.archived_at = if archived { Some(now_iso()) } else { None };
                 self.db.put("sessions", &s.id, &s)?;
                 Ok(())
@@ -1300,6 +1305,26 @@ mod store_tests {
     }
 
     /// 检索：归档会话排除、200 条窗口边界、空查询、Unicode 小写展开不 panic
+    #[test]
+    fn 归档幂等_同状态不刷新时间戳() {
+        let store = test_store();
+        let s = store.create_session("幂等归档", "exmachina").unwrap();
+        store.set_session_archived(&s.id, true).unwrap();
+        let first = store.get_session(&s.id).unwrap().unwrap().archived_at.clone();
+        assert!(first.is_some());
+        // 同状态重复归档：成功且时间戳不变（归档区排序稳定，批量重试安全）
+        store.set_session_archived(&s.id, true).unwrap();
+        let second = store.get_session(&s.id).unwrap().unwrap().archived_at.clone();
+        assert_eq!(first, second, "重复归档不刷新 archived_at");
+        // 重复恢复同理
+        store.set_session_archived(&s.id, false).unwrap();
+        store.set_session_archived(&s.id, false).unwrap();
+        let got = store.get_session(&s.id).unwrap().unwrap();
+        assert!(got.archived_at.is_none(), "恢复后归档时间清除");
+        // 不存在的 id 仍报错（错误语义保留：操作者应知道目标消失，进 failed 明细）
+        assert!(store.set_session_archived("no-such", true).is_err());
+    }
+
     #[test]
     fn 检索_归档窗口与边界() {
         let store = test_store();
