@@ -433,6 +433,9 @@ pub(crate) struct InboundCtx<'a> {
     pub mentioned: bool,
     /// 通道会话键（与会话标题 `channel:<id>:<key>` 一致；/stop 定位会话用）
     pub chat_key: &'a str,
+    /// 流展示名（群名 / 对端昵称；适配器尽力提供，None = 未知）——
+    /// 建流/补名用（旁听路径建流也有名可用），见 ensure_flow_named
+    pub flow_name: Option<&'a str>,
 }
 
 pub(crate) enum GateDecision {
@@ -635,7 +638,9 @@ async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_
     if text.is_empty() {
         return;
     }
-    let Some(sid) = ensure_flow_session(core, ch, ctx.chat_key) else {
+    let Some(sid) =
+        ensure_flow_session(core, ch, ctx.chat_key, ctx.flow_name, ctx.is_group)
+    else {
         return;
     };
     let (clean, findings) = crate::sanitize::sanitize_with(
@@ -678,8 +683,18 @@ async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_
 /// 流会话定位/建立（旁听用，与 `ChannelRun::begin` 同口径）：
 /// 有效绑定优先；未绑定则按 title 认领旧会话（升级迁移）或新建并回写绑定。
 /// 不切全局交互上下文——旁听只是记账，不应翻转打开中的工作目标。
-fn ensure_flow_session(core: &exm_core::Core, ch: &Channel, chat_key: &str) -> Option<String> {
+fn ensure_flow_session(
+    core: &exm_core::Core,
+    ch: &Channel,
+    chat_key: &str,
+    flow_name: Option<&str>,
+    is_group: bool,
+) -> Option<String> {
     if let Some(sid) = core.flow_active_session(&ch.id, chat_key) {
+        // 流名回填（空填不覆盖）：流存在但名为空时补（begin_named 同口径）
+        if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
+            core.ensure_flow_named(&ch.id, chat_key, n, is_group);
+        }
         return Some(sid);
     }
     let target = ch
@@ -701,7 +716,7 @@ fn ensure_flow_session(core: &exm_core::Core, ch: &Channel, chat_key: &str) -> O
         Some(s) => s.id,
         None => core.store.create_session(&title, &scope).ok()?.id,
     };
-    let _ = core.bind_flow_session(&ch.id, chat_key, &sid);
+    let _ = core.bind_flow_session_named(&ch.id, chat_key, &sid, flow_name, Some(is_group));
     Some(sid)
 }
 
@@ -890,6 +905,19 @@ impl ChannelRun {
         ch: &Channel,
         chat_key: &str,
     ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
+        Self::begin_named(core, ch, chat_key, None, None).await
+    }
+
+    /// begin 带流名变体（会话管理可用性修复）：适配器把入站事件自带的
+    /// 展示名（群名 / 对端昵称）传进来，建流/补名用——流列表不再显示裸
+    /// chat_key（QQ 号）。名称只空填不覆盖（ensure_flow_named 语义）。
+    pub(crate) async fn begin_named(
+        core: &std::sync::Arc<exm_core::Core>,
+        ch: &Channel,
+        chat_key: &str,
+        flow_name: Option<&str>,
+        is_group: Option<bool>,
+    ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
         let prev_group = core.active_group();
         let prev_single = core.registry().active_single();
         // 绑定目标缺省回落单智能体默认体（machina），未配置单智能体时维持当前上下文
@@ -922,7 +950,7 @@ impl ChannelRun {
                     .ok()
                     .and_then(|list| list.into_iter().find(|s| s.title == title));
                 let s = legacy.or_else(|| core.create_session(&title).ok())?;
-                let _ = core.bind_flow_session(&ch.id, chat_key, &s.id);
+                let _ = core.bind_flow_session_named(&ch.id, chat_key, &s.id, flow_name, is_group);
                 Some(s)
             }
         };
@@ -933,6 +961,10 @@ impl ChannelRun {
             }
             return None;
         };
+        // 流名回填（空填不覆盖）：流已存在但名为空（更早版本建的）时补上
+        if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
+            core.ensure_flow_named(&ch.id, chat_key, n, is_group.unwrap_or(false));
+        }
         // IM 通道会话登记：轮次组装系统提示时注入简洁表达纪律
         // （治理「一次性回复大量内容」：提示层约束 + 通道层截断双保险）
         exm_core::orchestrator::mark_im_session(&session.id);

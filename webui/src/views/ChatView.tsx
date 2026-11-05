@@ -509,7 +509,9 @@ export function ChatView(): React.ReactElement {
           (s) =>
             !sessionFilter ||
             s.title.toLowerCase().includes(sessionFilter.toLowerCase()) ||
-            (s.lastMessagePreview ?? "").toLowerCase().includes(sessionFilter.toLowerCase()),
+            (s.lastMessagePreview ?? "").toLowerCase().includes(sessionFilter.toLowerCase()) ||
+            // 来源名（流显示名·发送者）一并可搜：「萝莉」「张三」都能命中
+            (s.originLabel ?? "").toLowerCase().includes(sessionFilter.toLowerCase()),
         ),
     [sessions, sessionKind, sessionFilter],
   );
@@ -742,6 +744,12 @@ export function ChatView(): React.ReactElement {
                       const isSub = s.title.startsWith("sub:");
                       const subAgent = isSub ? s.title.split(":")[1] : "";
                       const kind = isChannel ? "channel" : isSub ? "sub" : "normal";
+                      // 通道会话主显来源名（流显示名·发送者标签，如「萝莉领主二群·张三」），
+                      // 裸 QQ 号降为次要信息——满屏裸号无法辨认是哪个群/谁（可用性修复）。
+                      // 旧网关无 originLabel 时回落 title 截前缀（原行为）。
+                      const channelLabel =
+                        s.originLabel ||
+                        (isChannel ? s.title.replace(/^channel:[^:]+:/, "") : "");
                       return (
                         <>
                           <span className={`session-avatar kind-${kind}`} aria-hidden="true">
@@ -750,17 +758,21 @@ export function ChatView(): React.ReactElement {
                           <span className="session-main">
                             <span className="session-title">
                               {isChannel
-                                ? s.title.replace(/^channel:[^:]+:/, "↗ ")
+                                ? channelLabel
                                 : isSub
                                   ? s.title.replace(/^sub:[^:]+:/, "")
                                   : s.title}
                             </span>
-                            {/* 副标题 = 末条消息预览（比组名信息量大：组几乎全列表同名）；
-                                预览缺省回落组名（新会话还没有消息） */}
+                            {/* 副标题 = 末条消息预览（信息量大于组名：组几乎全列表同名）；
+                                预览缺省回落——通道会话用发送者标签（originLabel 的 · 后段），
+                                其余回落组名（新会话还没有消息） */}
                             <span className="session-sub">
                               {isSub && !s.lastMessagePreview
                                 ? `@${subAgent} · ${t("chat.subSession")}`
-                                : s.lastMessagePreview || groupNameOf(s.groupId)}
+                                : s.lastMessagePreview ||
+                                  (isChannel
+                                    ? channelLabel.split("·").pop()?.trim() || groupNameOf(s.groupId)
+                                    : groupNameOf(s.groupId))}
                             </span>
                           </span>
                           {/* 置顶标识：标题右侧小图钉（与「⋮」菜单的 pin 开关呼应） */}
