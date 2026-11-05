@@ -449,8 +449,9 @@ mod tests {
     }
 
     /// 外部调用安全口径（10.4）：外部触发的受限命令 → 审批卡出现 → 未批准前返回错误
-    /// （终端白名单只放行单一安全命令，受限口径以 exec_approval=always 覆盖全部命令，
-    ///   与 smoke.rs 的审批闸门用例同口径）
+    /// （终端白名单只放行单一安全命令；样例用高危命令（git reset --hard）——
+    ///   2026-11 语义升级后无害命令直通（审批经济学），高危仍必拦，
+    ///   与 terminal.rs 审批闸门口径一致）
     #[tokio::test]
     async fn 安全口径_受限命令触发审批并返回错误() {
         let (core, dir) = server_with(|cfg| {
@@ -463,7 +464,7 @@ mod tests {
         let resp = rpc(
             &srv,
             "tools/call",
-            json!({ "name": "terminal", "arguments": { "session": s.id, "command": "echo blocked-mcp" } }),
+            json!({ "name": "terminal", "arguments": { "session": s.id, "command": "git reset --hard blocked-mcp" } }),
         )
         .await;
         assert_eq!(
