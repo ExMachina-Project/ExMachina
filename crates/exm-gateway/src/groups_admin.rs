@@ -82,6 +82,12 @@ pub(crate) async fn switch_group(
 ) -> impl IntoResponse {
     match st.core.switch_group(&b.id) {
         Ok(_) => Json(json!({ "ok": true, "active": b.id })).into_response(),
+        // 「组不存在」→ 404（REST 状态码矩阵；审计 REST P1-1）
+        Err(e) if e.to_string().contains("组不存在") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
@@ -97,6 +103,8 @@ pub(crate) async fn activate_group(State(st): State<AppState>, Path(id): Path<St
 pub(crate) async fn delete_group(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.delete_group(&id) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：重复删除目标已不在 → 成功而非 404/400
+        Err(e) if e.to_string().contains("组不存在") => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),

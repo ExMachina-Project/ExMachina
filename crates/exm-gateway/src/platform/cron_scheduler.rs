@@ -5,14 +5,20 @@ use super::*;
 /// 闲置归档当日去重标记行 id（enabled=false 的哨兵行，只借 last_run_minute 记日期）
 const IDLE_ARCHIVE_MARKER: &str = "__idle_archive__";
 
-/// 调度循环：每 20s 扫描到期任务（cron 命中 / 一次性 at 到点）；心跳由配置驱动
+/// 调度循环：每 20s 扫描到期任务（cron 命中 / 一次性 at 到点）；心跳由配置驱动。
+/// 调度体外套 catch_unwind：tick 内任何 panic（未来代码缺陷）只损失当轮扫描，
+/// 不杀死调度任务——否则所有定时任务（含心跳巡检）静默全停（审计 P1-3）。
 pub fn spawn_cron_scheduler(core: std::sync::Arc<exm_core::Core>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let _ = tick_jobs(&core).await;
+            let core2 = core.clone();
+            // JoinError = tick 内 panic：记日志吞掉，下轮继续（调度任务不死）
+            if let Err(join_err) = tokio::task::spawn(async move { tick_jobs(&core2).await }).await {
+                eprintln!("[cron-scheduler] tick panic：{join_err}（已吞掉，下轮继续）");
+            }
         }
     });
 }

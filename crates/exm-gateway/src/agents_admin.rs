@@ -172,6 +172,8 @@ pub(crate) async fn remove_agent_from_group(
 ) -> impl IntoResponse {
     match st.core.registry().remove_agent(&gid, &identifier) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：目标个体/组已删 → 成功
+        Err(e) if e.to_string().contains("不存在") => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
@@ -186,6 +188,8 @@ pub(crate) async fn remove_agent(
 ) -> impl IntoResponse {
     match st.core.remove_agent(&identifier) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：目标已删 → 成功
+        Err(e) if e.to_string().contains("不存在") => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
