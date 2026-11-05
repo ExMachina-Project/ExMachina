@@ -106,8 +106,11 @@ impl Store {
         Ok(child)
     }
 
-    /// 会话置顶切换（会话列表置顶分组数据源）
+    /// 会话置顶切换（会话列表置顶分组数据源）。
+    /// 持 ledger_lock：与 update_ledger/mutate_ledger 等同族读改写互斥——
+    /// 并发时 pin 的整会话写回会把三账/消息数改动静默覆盖（审计竞态 P1-5 场景B）。
     pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> Result<()> {
+        let _guard = self.ledger_lock.lock().unwrap();
         match self.get_session(id)? {
             Some(mut s) => {
                 s.pinned = pinned;

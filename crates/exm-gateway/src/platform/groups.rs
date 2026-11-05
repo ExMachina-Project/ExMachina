@@ -200,12 +200,8 @@ pub async fn reset_adaptation(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match st.core.registry().reset_adaptation(&id) {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "该个体尚无经验要点" })),
-        )
-            .into_response(),
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：本就无经验要点 → 成功
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
