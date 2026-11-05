@@ -889,14 +889,15 @@ impl ToolGateway {
         );
         push(
             ToolName::Filesystem,
-            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）",
+            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）、send_file（把工作区内文件发送给用户——任意类型含二进制，本轮收束时经通道直发；要给用户交付文件时优先用这个）",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["write", "mkdir", "list", "delete", "rename"] },
+                    "op": { "type": "string", "enum": ["write", "mkdir", "list", "delete", "rename", "send_file"] },
                     "path": { "type": "string", "description": "相对工作区的路径" },
                     "content": { "type": "string", "description": "op=write 时的文件内容" },
-                    "newPath": { "type": "string", "description": "op=rename 时的目标路径（相对工作区；目标存在则拒绝）" }
+                    "newPath": { "type": "string", "description": "op=rename 时的目标路径（相对工作区；目标存在则拒绝）" },
+                    "caption": { "type": "string", "description": "op=send_file 时的文件说明（随文件一起展示，可选）" }
                 },
                 "required": ["op", "path"]
             }),

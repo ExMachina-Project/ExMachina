@@ -1,9 +1,9 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
-import { api, type LlmProfile, isDestructiveCommand } from "../api";
+import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
 import { agentIdEn } from "../models";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
@@ -105,6 +105,30 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
           </div>
         ))}
       <Markdown text={m.statements.map((s) => s.text).join("\n\n")} />
+      {/* 产物附件（send-file 能力）：文件/图片卡片，点击下载（工作区相对路径经
+          /api/asset/download；IM 通道直发不进这里，仅控制台会话） */}
+      {m.artifacts && m.artifacts.length > 0 && (
+        <div className="msg-artifacts">
+          {m.artifacts.map((a, i) => {
+            const name = a.path.split("/").pop() || a.path;
+            // 后端登记统一为工作区相对路径；绝对路径兜底截取（旧数据容错）
+            const rel = a.path;
+            const href = `${serverBase()}/api/asset/download?path=${encodeURIComponent(rel)}`;
+            return a.kind === "image" ? (
+              <a key={i} className="msg-artifact image" href={href} target="_blank" rel="noreferrer">
+                <img src={assetUrl(rel)} alt={a.caption || name} />
+                {a.caption && <span className="msg-artifact-caption">{a.caption}</span>}
+              </a>
+            ) : (
+              <a key={i} className="msg-artifact file" href={href} download={name}>
+                <PaperClipOutlined />
+                <span className="msg-artifact-name">{name}</span>
+                {a.caption && <span className="msg-artifact-caption">{a.caption}</span>}
+              </a>
+            );
+          })}
+        </div>
+      )}
     </Card>
   );
 }
