@@ -328,6 +328,20 @@ async fn on_text(
     let tx = tx.clone();
     let raw = v.clone();
     tokio::spawn(async move {
+        // 流展示名（会话管理可用性修复）：群聊取事件自带 group_name，私聊取
+        // 对端昵称——流列表显示「萝莉领主二群」而非裸群号。解析不到则 None
+        // （建流缺名回落 chat_key，后续消息到达再补）。
+        let flow_name: Option<String> = raw
+            .pointer("/group_name")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                raw.pointer("/sender/nickname")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && group_id.is_none())
+            });
         let Some((external_id, text, sender_mark)) =
             napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
         else {
@@ -403,6 +417,7 @@ async fn on_text(
             saved,
             &text,
             sender_mark.as_deref(),
+            flow_name.as_deref(),
         )
         .await;
     });
@@ -472,13 +487,38 @@ async fn napcat_gate(
         .map(|g| g.to_string())
         .or_else(|| user_id.map(|u| u.to_string()))
         .unwrap_or_default();
+    // 发送者真名（card 优先，回落昵称，再回落 QQ 号）——配对/身份判定用
+    // 真名而非裸号（控制台身份页与流内显示可辨认）
+    let sender_name = raw
+        .pointer("/sender/card")
+        .or_else(|| raw.pointer("/sender/nickname"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| external_id.clone());
     let ctx = InboundCtx {
         text,
         external_id: &external_id,
-        display_name: &external_id,
+        display_name: &sender_name,
         is_group,
         mentioned,
         chat_key: &peer,
+        // 流展示名：群名（事件自带）优先；私聊用发送者昵称（对端即流主体）
+        flow_name: raw
+            .pointer("/group_name")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if is_group {
+                    None
+                } else {
+                    raw.pointer("/sender/nickname")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                }
+            }),
     };
     // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）：card 优先，回落昵称，再回落 QQ 号
     let sender_mark = crate::channel_util::sender_origin(
@@ -631,13 +671,16 @@ async fn handle_message(
     media: Vec<(String, String, String)>,
     text: &str,
     sender_mark: Option<&str>,
+    flow_name: Option<&str>,
 ) {
     // 会话键：群聊优先，无群号走私聊
     let peer = group_id
         .map(|g| g.to_string())
         .or(user_id.map(|u| u.to_string()))
         .unwrap_or_default();
-    let Some((run, rx)) = ChannelRun::begin(core, ch, &peer).await else {
+    let Some((run, rx)) =
+        ChannelRun::begin_named(core, ch, &peer, flow_name, Some(group_id.is_some())).await
+    else {
         return;
     };
     core.stamp_session_origin(
