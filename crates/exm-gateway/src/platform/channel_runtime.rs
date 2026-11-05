@@ -129,6 +129,21 @@ pub(crate) fn parse_target(raw: &str) -> (Option<String>, Option<String>) {
     }
 }
 
+/// 目标对应的期望 scope（竞态 P1-2 校验用）：单智能体 = `single:id`，组 = 组 id，
+/// 空目标/目标不存在 = None（维持现状，无需校验）
+pub(crate) fn expected_scope_of(core: &exm_core::Core, target: &str) -> Option<String> {
+    let (single, group) = parse_target(target);
+    if let Some(id) = single {
+        return if core.registry().single(&id).is_some() {
+            Some(format!("single:{id}"))
+        } else {
+            None
+        };
+    }
+    group
+        .filter(|g| core.group_meta(g).is_some())
+}
+
 /// 切换全局交互上下文到通道绑定目标（单智能体或组），返回是否发生了切换。
 /// 目标不存在/未配置时不动当前上下文（回落调用方各自的默认）。
 pub(crate) fn switch_context_to(core: &exm_core::Core, target: &str) -> bool {
@@ -708,16 +723,9 @@ fn ensure_flow_session(
         _ => core.active_group(),
     };
     let title = format!("channel:{}:{chat_key}", ch.id);
-    let legacy = core
-        .list_sessions_in_group(&scope)
-        .ok()
-        .and_then(|list| list.into_iter().find(|s| s.title == title));
-    let sid = match legacy {
-        Some(s) => s.id,
-        None => core.store.create_session(&title, &scope).ok()?.id,
-    };
-    let _ = core.bind_flow_session_named(&ch.id, chat_key, &sid, flow_name, Some(is_group));
-    Some(sid)
+    // 原子版（竞态 P1-3）：查绑定→建会话→回写绑定整体临界区——
+    // 并发同流消息不再各建会话（孤儿+绑定互抹）
+    core.ensure_flow_session_atomic(&ch.id, chat_key, &scope, &title, flow_name, is_group)
 }
 
 /// 聊天流（chat flow）会话管理指令：
@@ -925,45 +933,102 @@ impl ChannelRun {
             .group
             .clone()
             .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(core)));
-        let switched = switch_context_to(core, &target);
-        let scope = core.registry().active_scope();
+        // 切换后校验 + 有限重试（竞态 P1-2 短期缓解）：激活组/单体是进程级全局态，
+        // 并发 begin（多通道同时来消息）会互相切走上下文——switch 后立即快照 scope，
+        // 与目标不符说明被他人切走：重试抢占（最多 3 次，仍不符则用当前 scope 继续，
+        // 消息不丢，只可能落错组——比挂死好）。中期方案：scope 做成 ChannelRun
+        // 显式参数，消灭全局切换。
+        let mut switched = false;
+        let mut scope = core.registry().active_scope();
+        for _ in 0..3 {
+            switched = switch_context_to(core, &target);
+            scope = core.registry().active_scope();
+            let expected = expected_scope_of(core, &target);
+            if expected.as_deref() == Some(scope.as_str()) {
+                break;
+            }
+            // 被并发切换抢走：重试（下轮 switch 回自己的目标）
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         // 聊天流（chat flow）会话定位：流绑定优先——不主动切换时固定复用
         // 同一会话（跨轮上下文与记忆自然延续）。旧数据（按 title 寻址的存量
         // 通道会话）自动认领迁移到流上，行为无缝升级。
+        // 原子版（竞态 P1-3）：查绑定→建会话→回写绑定整体临界区——并发同流
+        // 消息不再各建会话（孤儿+绑定互抹）。组过滤在外层做（换组后旧绑定
+        // 会话不跨组复用，原子版内组不符时按 None 处理重建）。
         let title = format!("channel:{}:{chat_key}", ch.id);
-        let session = match core.flow_active_session(&ch.id, chat_key) {
-            // 绑定有效且仍在当前交互范围内（通道换组后旧绑定会话不跨组复用）
-            Some(sid) => core
-                .store
+        let session = {
+            let sid = core.ensure_flow_session_atomic(
+                &ch.id,
+                chat_key,
+                &scope,
+                &title,
+                flow_name,
+                is_group.unwrap_or(false),
+            )?;
+            core.store
                 .get_session(&sid)
                 .ok()
                 .flatten()
-                .filter(|s| s.group_id == scope),
-            None => None,
-        };
-        let session = match session {
-            Some(s) => Some(s),
-            None => {
-                // 流无有效绑定：认领旧 title 会话（升级迁移），否则开新会话
-                let legacy = core
-                    .list_sessions_in_group(&scope)
-                    .ok()
-                    .and_then(|list| list.into_iter().find(|s| s.title == title));
-                let s = legacy.or_else(|| core.create_session(&title).ok())?;
-                let _ = core.bind_flow_session_named(&ch.id, chat_key, &s.id, flow_name, is_group);
-                Some(s)
-            }
+                .filter(|s| s.group_id == scope)
         };
         let Some(session) = session else {
-            // 会话建立失败也别把交互上下文留在别人身上
-            if switched {
-                restore_context(core, &prev_group, &prev_single);
+            // 绑定会话跨组不符：原子版内已复用绑定，但 scope 过滤后无效——
+            // 新开本组会话并改绑（保守路径：罕见，通道换组才触发）。
+            // create_session 落当前激活组（上面 switch 后即 scope）。
+            let s = core.create_session(&title).ok()?;
+            let _ = core.bind_flow_session_named(&ch.id, chat_key, &s.id, flow_name, is_group);
+            // 建失败也别把交互上下文留在别人身上
+            if core.store.get_session(&s.id).ok().flatten().is_none() {
+                if switched {
+                    restore_context(core, &prev_group, &prev_single);
+                }
+                return None;
             }
-            return None;
+            return Self::finish_begin(
+                core,
+                ch,
+                chat_key,
+                s,
+                flow_name,
+                is_group.unwrap_or(false),
+                prev_group,
+                prev_single,
+                switched,
+            )
+            .await;
         };
+        Self::finish_begin(
+            core,
+            ch,
+            chat_key,
+            session,
+            flow_name,
+            is_group.unwrap_or(false),
+            prev_group,
+            prev_single,
+            switched,
+        )
+        .await
+    }
+
+    /// begin 尾段（会话已定位）：公共装配（流名回填/IM 登记/预算档位/记忆分区/订阅）
+    #[allow(clippy::too_many_arguments)] // 装配参数天然多；收拢成结构体反增噪音
+    async fn finish_begin(
+        core: &std::sync::Arc<exm_core::Core>,
+        ch: &Channel,
+        chat_key: &str,
+        session: exm_core::types::Session,
+        flow_name: Option<&str>,
+        is_group: bool,
+        prev_group: String,
+        prev_single: Option<String>,
+        switched: bool,
+    ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
+        let scope = core.registry().active_scope();
         // 流名回填（空填不覆盖）：流已存在但名为空（更早版本建的）时补上
         if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
-            core.ensure_flow_named(&ch.id, chat_key, n, is_group.unwrap_or(false));
+            core.ensure_flow_named(&ch.id, chat_key, n, is_group);
         }
         // IM 通道会话登记：轮次组装系统提示时注入简洁表达纪律
         // （治理「一次性回复大量内容」：提示层约束 + 通道层截断双保险）

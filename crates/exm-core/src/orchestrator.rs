@@ -2142,8 +2142,14 @@ impl Orchestrator {
             let handle = tokio::spawn(async move { stream_provider.stream(req_clone, tx).await });
 
             let mut acc = String::new();
-            while let Some(delta) = rx.recv().await {
-                match delta {
+            // 收流 idle deadline（审计 错误处理 P1-1）：SSE 端点建连后不发帧不关流时
+            // rx.recv() 永久阻塞 → run 永不收束 → run_lock 永久持有。帧间超过 180s
+            // 无任何增量即判定僵死（正常端点两帧间隔远小于此；总时长上限由请求级
+            // 600s 超时兜底）。超时后中断收流走回退链，流任务由 abort 收尾。
+            let idle = std::time::Duration::from_secs(180);
+            loop {
+                match tokio::time::timeout(idle, rx.recv()).await {
+                    Ok(Some(delta)) => match delta {
                     // 思维链单独成轨：渠道折叠呈现「思考」，不与回答混流
                     StreamDelta::Thinking(t) => {
                         // 思维增量随轮次留存（过程收起栏/落盘数据源）
@@ -2164,6 +2170,28 @@ impl Orchestrator {
                             "orchestrator.thinking"
                         };
                         self.emit(session_id, kind, serde_json::json!({ "delta": t }));
+                    }
+                    },
+                    // 流正常收尾（发送端 drop）：退出收流，等待任务终态
+                    Ok(None) => break,
+                    // 帧间超时：判定端点僵死——中断收流走回退链（任务由下方 abort 收尾）
+                    Err(_) => {
+                        handle.abort();
+                        self.emit(
+                            session_id,
+                            "model.failover",
+                            serde_json::json!({ "from": pid, "reason": "stream idle timeout" }),
+                        );
+                        self.failover
+                            .cool(&pid, crate::provider::FAILOVER_COOLDOWN_SECS);
+                        // 下一轮循环若候选耗尽，last_err 供末次非流式回退的报错语境
+                        #[allow(unused_assignments)]
+                        {
+                            last_err = Some(anyhow::anyhow!(
+                                "流式响应 {pid} 帧间超时（180s 无增量），判定端点僵死"
+                            ));
+                        }
+                        continue;
                     }
                 }
             }

@@ -1145,6 +1145,7 @@ async fn mcp_客户端_http全链() {
         url: Some(format!("http://{addr}/mcp")),
         allowed_agents: vec![],
         enabled: true,
+        call_timeout_secs: 60,
     };
     let reg = McpRegistry::shared();
     reg.configure(&[cfg.clone()]);
@@ -1185,6 +1186,156 @@ async fn mcp_客户端_http全链() {
     assert!(matches!(denied, Some(r) if !r.ok), "白名单外的个体应被拒绝");
     assert!(reg.tool_snapshot_for("other-agent").is_empty());
     assert_eq!(reg.tool_snapshot_for("scout-agent").len(), 1);
+}
+
+/// MCP 调用超时（审计 错误处理 P1-2）：端点收下请求后不回包（模拟僵死）——
+/// 调用在 callTimeoutSecs 内返回失败；另一台正常服务器不被拖死（per-server 锁）。
+#[tokio::test]
+async fn mcp_调用超时_僵死端点不拖死其他服务器() {
+    use exm_core::mcp::{McpRegistry, McpServerConfig};
+    use std::collections::HashMap;
+
+    // 僵死服务器：initialize / tools/list 正常应答（让握手与清单通过），tools/call 挂起不回
+    let stall_app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(async |body: String| {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            if method == "tools/call" {
+                // 僵死：吞掉请求永不响应（挂到测试结束）
+                futures_util::future::pending::<()>().await;
+            }
+            let id = v.get("id").cloned().unwrap_or(serde_json::json!(0));
+            let result = match method {
+                "initialize" => serde_json::json!({ "protocolVersion": "2025-03-26", "capabilities": { "tools": {} } }),
+                "tools/list" => serde_json::json!({ "tools": [{
+                    "name": "echo", "description": "回声",
+                    "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } }
+                }]}),
+                _ => serde_json::Value::Null,
+            };
+            axum::Json(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        }),
+    );
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a1 = l1.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l1, stall_app).await.unwrap() });
+
+    // 正常服务器：echo
+    let ok_app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(async |body: String| {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let id = v.get("id").cloned().unwrap_or(serde_json::json!(0));
+            let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let result = match method {
+                "initialize" => serde_json::json!({ "protocolVersion": "2025-03-26", "capabilities": { "tools": {} } }),
+                "tools/list" => serde_json::json!({ "tools": [{
+                    "name": "echo", "description": "回声",
+                    "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } }
+                }]}),
+                "tools/call" => serde_json::json!({ "content": [{ "type": "text", "text": "回声:ok" }], "isError": false }),
+                _ => serde_json::Value::Null,
+            };
+            axum::Json(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        }),
+    );
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a2 = l2.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l2, ok_app).await.unwrap() });
+
+    let mk = |id: &str, addr: std::net::SocketAddr, timeout: u64| McpServerConfig {
+        id: id.into(),
+        transport: "http".into(),
+        url: Some(format!("http://{addr}/mcp")),
+        allowed_agents: vec![],
+        enabled: true,
+        call_timeout_secs: timeout,
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let reg = McpRegistry::shared();
+    // 僵死端点：1s 超时（测试加速）；正常端点：默认
+    reg.configure(&[mk("stall", a1, 1), mk("ok", a2, 60)]);
+
+    // 僵死端点的调用在 ~1s 内失败（而非永久挂死）
+    let t0 = std::time::Instant::now();
+    let r = reg
+        .call("mcp:stall:echo", "a", &serde_json::json!({ "text": "x" }))
+        .await
+        .expect("应返回结果（失败也返回）");
+    assert!(!r.ok, "僵死端点应失败：{}", r.text);
+    assert!(r.text.contains("超时"), "失败原因应为超时：{}", r.text);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5), "超时应及时返回");
+
+    // 正常服务器不被拖死：立即可用
+    let r2 = reg
+        .call("mcp:ok:echo", "a", &serde_json::json!({ "text": "x" }))
+        .await
+        .expect("正常服务器调用失败");
+    assert!(r2.ok, "正常服务器应成功：{}", r2.text);
+    assert_eq!(r2.text, "回声:ok");
+}
+
+/// 流绑定并发（竞态 P1-3）：同 chat_key 并发 20 条消息走 ensure_flow_session_atomic，
+/// 断言只建 1 个会话且绑定不再互抹（修复前 check-then-act 各建会话→孤儿+后写覆盖）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn 流绑定_并发同流消息只建一个会话() {
+    let dir = std::env::temp_dir().join(format!("exm-flow-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    let core = exm_core::Core::create(&dir).unwrap();
+
+    // 20 线程并发 ensure（模拟 20 条并发消息各查绑定→建会话→回写）
+    let core = std::sync::Arc::new(core);
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let c = core.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            c.ensure_flow_session_atomic(
+                "ch-race",
+                "chat-race",
+                "exmachina",
+                "channel:ch-race:chat-race",
+                Some("并发测试群"),
+                true,
+            )
+            .map(|sid| (i, sid))
+        }));
+    }
+    let mut sids = Vec::new();
+    for h in handles {
+        let (i, sid) = h.await.unwrap().expect("ensure 应成功");
+        sids.push((i, sid));
+    }
+    // 全部拿到同一会话 id（而非各建各的）
+    let first = &sids[0].1;
+    assert!(
+        sids.iter().all(|(_, s)| s == first),
+        "并发 ensure 应收敛到同一会话：{sids:?}"
+    );
+    // 组内 channel:* 会话只有一个（无孤儿）
+    let list = core.list_sessions_in_group("exmachina").unwrap();
+    let ch_sessions: Vec<_> = list
+        .iter()
+        .filter(|s| s.title == "channel:ch-race:chat-race")
+        .collect();
+    assert_eq!(ch_sessions.len(), 1, "应只有 1 个会话，实际 {}", ch_sessions.len());
+    // 绑定稳定（touch 并发不抹 active_session）
+    let handles2: Vec<_> = (0..10)
+        .map(|i| {
+            let c = core.clone();
+            tokio::task::spawn_blocking(move || {
+                c.touch_flow_message("ch-race", "chat-race", &format!("消息{i}")).unwrap();
+            })
+        })
+        .collect();
+    for h in handles2 {
+        h.await.unwrap();
+    }
+    let bound = core.flow_active_session("ch-race", "chat-race").unwrap();
+    assert_eq!(&bound, first, "touch 并发后绑定不变");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// 混合记忆检索：词项无命中时语义兜底；词项命中时语义加成
