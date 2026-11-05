@@ -52,11 +52,60 @@ mod memory_tool_tests {
         TestRig { gw, dir }
     }
 
+    /// send_file（文件投递）：工作区文件 → outbox 登记（收束时投递）；
+    /// 目录拒绝；相对路径口径与 write→outbox 一致。
+    #[tokio::test]
+    async fn 文件投递_send_file_登记与护栏() {
+        let rig = rig();
+        std::fs::write(rig.dir.join("report.md"), "# 报告\n内容").unwrap();
+        let r = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "report.md", "caption": "周报" }),
+            )
+            .await;
+        assert!(r.ok, "send_file 应成功: {:?}", r.error);
+        assert!(r.output.contains("已登记投递"));
+        // outbox 有登记（kind=file + 相对路径 + caption）
+        let items = rig.gw.store.outbox_drain("s-send").unwrap();
+        assert_eq!(items.len(), 1, "应登记一条");
+        assert_eq!(items[0]["kind"], "file");
+        assert_eq!(items[0]["path"], "report.md", "登记必须为工作区相对路径");
+        assert_eq!(items[0]["caption"], "周报");
+        // 目录 → 拒绝
+        let r2 = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "." }),
+            )
+            .await;
+        assert!(!r2.ok, "目录不得投递");
+        // 不存在 → 拒绝
+        let r3 = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "no-such.bin" }),
+            )
+            .await;
+        assert!(!r3.ok, "不存在文件不得投递");
+    }
+
     /// 通道记忆隔离（memory_isolation）：memory_write/read 必须跟随会话分区，
     /// 否则隔离平台的会话会把知识写进共享组、或读到共享组的记忆——隔离形同虚设。
     #[test]
-    fn 记忆隔离_工具读写跟随会话分区() {
-        let r = rig();
+    fn 记忆隔离_工具读写跟随会话分区() {        let r = rig();
         let mk = |title: &str, body: &str| serde_json::json!({ "kind": "fact", "title": title, "body": body });
         // 两个会话同组：shared 共享记忆；iso 开了隔离（模拟通道写入分区键）
         let shared = r.gw.store.create_session("共享会话", "t").unwrap();
