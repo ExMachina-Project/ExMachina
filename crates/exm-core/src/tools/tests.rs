@@ -1509,10 +1509,10 @@ mod terminal_gate_tests {
         assert!(r.error.unwrap_or_default().contains("不在白名单"));
     }
 
-    /// risky 档：白名单外的日常命令转审批单（不等待，受阻回流但审批单已落库）
-    /// ——修复前这条路径是硬拒，agent 无从开发
+    /// risky 档：白名单外**无害**命令直通（审批经济学：无害命令全部放行，
+    /// 审批只拦真危险的东西）——修复前一律转审批，「跑个 mkdir 都要人工介入」
     #[tokio::test]
-    async fn 审批路径_risky档_白名单外命令转审批() {
+    async fn 审批路径_risky档_白名单外无害命令直通() {
         let gw = gw_with_approval("risky", 0);
         let r = gw
             .execute(
@@ -1521,22 +1521,59 @@ mod terminal_gate_tests {
                 &[ToolName::Terminal],
                 ToolName::Terminal,
                 &serde_json::json!({
-                    "command": "terraform apply"
+                    "command": "echo harmless-probe-ok"
                 }),
             )
             .await;
-        assert!(!r.ok, "未批准前不应放行");
-        let err = r.error.unwrap_or_default();
-        assert!(err.contains("审批"), "应转审批而非白名单硬拒: {err}");
-        // 审批单确实落库（用户可在面板批准）
+        assert!(r.ok, "白名单外无害命令应直通: {:?}", r.error);
+        assert!(r.output.contains("harmless-probe-ok"));
+        // 不落审批单
         let pending = gw
             .store
             .list_approvals(Some("pending"), 10)
             .unwrap_or_default();
         assert!(
-            pending.iter().any(|p| p.command.contains("terraform")),
-            "审批单应已落库"
+            !pending.iter().any(|p| p.command.contains("echo")),
+            "无害命令不应产生审批单"
         );
+    }
+
+    /// always 档：全拦语义降级为「高危必拦」——无害命令同样直通
+    #[tokio::test]
+    async fn 审批路径_always档_无害命令直通() {
+        let gw = gw_with_approval("always", 0);
+        let r = gw
+            .execute(
+                "a1",
+                "s-always",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": "echo always-harmless-ok"
+                }),
+            )
+            .await;
+        assert!(r.ok, "always 档无害命令应直通: {:?}", r.error);
+    }
+
+    /// 高危特征命令（risky/always）：照旧进审批——放行无害≠放行危险
+    #[tokio::test]
+    async fn 审批路径_always档_高危命令仍审批() {
+        let gw = gw_with_approval("always", 0);
+        let r = gw
+            .execute(
+                "a1",
+                "s-danger",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": "git reset --hard HEAD~3"
+                }),
+            )
+            .await;
+        assert!(!r.ok, "高危命令未批准前不应放行");
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("审批"), "高危命令应转审批: {err}");
     }
 
     /// risky 档：白名单内安全命令不受影响，照常执行
