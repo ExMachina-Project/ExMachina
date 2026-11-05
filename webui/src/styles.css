@@ -2816,6 +2816,30 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .msg-head .msg-copy { margin-left: 2px; opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
 .msg-bubble:hover .msg-copy { opacity: 1; }
 
+/* 会话产物附件（send-file 能力）：文件卡片 + 图片直览 */
+.msg-artifacts {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
+  padding-top: 10px; border-top: 1px dashed var(--border);
+}
+.msg-artifact {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  color: var(--fg); text-decoration: none; font-size: 13px;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  max-width: 100%;
+}
+.msg-artifact:hover { border-color: var(--accent); color: var(--accent); }
+.msg-artifact .msg-artifact-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;
+}
+.msg-artifact .msg-artifact-caption { color: var(--muted); font-size: 12px; }
+.msg-artifact.image {
+  flex-direction: column; align-items: flex-start; padding: 6px;
+}
+.msg-artifact.image img {
+  max-width: 280px; max-height: 200px; border-radius: var(--r-xs); object-fit: cover;
+}
+
 /* 骨架屏 */
 @keyframes skeleton-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 .skeleton-list, .skeleton-card { display: flex; flex-direction: column; gap: 8px; }
