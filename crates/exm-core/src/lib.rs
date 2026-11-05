@@ -92,6 +92,10 @@ pub struct Core {
     /// 进程内存态；key 由调用方自带语义前缀与生命周期（会话删除不清理——
     /// 预算提示「每进程每会话一次」符合预期）。
     once_flags: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// 审批决定互斥（竞态 P1-1）：审批 id → 执行锁。decide 全程 try_lock 占位，
+    /// 双击/多端并发时第二击等先到者收束后返回最新单据（先到者代执行语义），
+    /// 命令只执行一次。锁条目不清理（审批单量有限，内存开销可忽略）。
+    approval_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 会话级审批授权（approval-ergonomics）：会话 → {命令前缀 → ()}。
     /// 「本会话允许」档批准时写入；内存态（重启即清）、随会话删除清理。
     /// 红线：[root] 提权单与破坏性命令永不入表（写入侧校验）。
@@ -213,6 +217,7 @@ impl Core {
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
             once_flags: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            approval_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             session_grants: parking_lot::Mutex::new(std::collections::HashMap::new()),
             self_weak: parking_lot::RwLock::new(None),
             mcp: mcp_handle.clone(),
@@ -1817,6 +1822,29 @@ impl Core {
         id: &str,
         decision: ApprovalScope,
     ) -> anyhow::Result<ApprovalRequest> {
+        // 决定互斥（竞态 P1-1）：双击批准/WebUI+通道并发时，同一审批单只有一个
+        // 决定流能走下去——否则双执行命令（执行窗口可达数分钟）。占不到锁 =
+        // 另一个决定在途：等它收束后返回最新单据（语义：「你的点击已生效，
+        // 由先到者代执行」而非报错）。
+        let lock = {
+            let mut locks = self.approval_locks.lock();
+            locks
+                .entry(id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let Ok(_guard) = lock.try_lock() else {
+            // 另一个决定在途：轮询等最终态（上限 60s，防永挂）
+            for _ in 0..120 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Some(req) = self.store.get_approval(id)? {
+                    if req.status != "pending" {
+                        return Ok(req);
+                    }
+                }
+            }
+            anyhow::bail!("审批决定超时：另一决定长时间未收束");
+        };
         let mut req = self
             .store
             .get_approval(id)?

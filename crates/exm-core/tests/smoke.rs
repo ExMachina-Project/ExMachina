@@ -357,6 +357,58 @@ async fn 执行审批_高危命令拦截与批准放行() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 审批决定并发互斥_命令只执行一次() {
+    use std::sync::Arc;
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.security.exec_approval = "always".into();
+    cfg.security.approval_wait_secs = 0;
+    let core = Arc::new(Core::with_config(cfg).expect("创建 Core 失败"));
+    // 慢命令（执行 ~1.2s）：制造「决定返回前命令仍在跑」的窗口
+    let sid = core.create_session("并发审批").unwrap().id;
+    let cmd = "sleep 1.2 && echo approval-dup-probe".to_string();
+    let ap = exm_core::types::ApprovalRequest {
+        id: exm_core::types::new_id()[..8].to_string(),
+        session_id: sid.clone(),
+        node_id: None,
+        agent_id: "e2e".into(),
+        command: cmd,
+        status: "pending".into(),
+        result: None,
+        created_at: exm_core::types::now_iso(),
+        decided_at: None,
+        origin_user: None,
+        origin_role: None,
+        meta_json: None,
+    };
+    core.store.add_approval(&ap).unwrap();
+    // 两个并发批准（双击场景）：都应成功返回，但只有先到者真的执行了命令
+    let c1 = core.clone();
+    let c2 = core.clone();
+    let id_a = ap.id.clone();
+    let id_b = ap.id.clone();
+    let (r1, r2) = tokio::join!(
+        async move { c1.approval_decide(&id_a, true).await },
+        async move { c2.approval_decide(&id_b, true).await },
+    );
+    let out1 = r1.expect("第一个决定应成功");
+    // 第二个：等先到者收束后返回最终单据（先到者代执行语义），不是报错
+    let out2 = r2.expect("第二个决定也应返回");
+    assert_eq!(out1.status, "executed");
+    assert_eq!(out2.status, "executed", "并发第二击拿到先到者结果: {out2:?}");
+    // 互斥生效：第二击拿到的是同一份执行结果（结果文本与决定时间戳一致），
+    // 而非两次独立执行
+    assert_eq!(
+        out1.result, out2.result,
+        "并发第二击与先到者返回同一份执行结果"
+    );
+    assert_eq!(
+        out1.decided_at, out2.decided_at,
+        "决定时间戳一致（同一次执行）"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn 执行审批_等待批准_结果回灌与拒绝短路() {
     use std::sync::Arc;
     let _serial = serial_guard();

@@ -3268,6 +3268,60 @@ async fn main() -> anyhow::Result<()> {
             .json()
             .await?;
         c.check("批量归档作用计数=2", bar["affected"] == 2 && bar["ok"] == true);
+        // 幂等（长程迭代 4.3）：重复归档成功、archived_at 不刷新（归档区排序稳定）；
+        // 不存在 id 进 failed 明细（错误语义保留）
+        let arch_first: serde_json::Value = client
+            .get(format!("{base}/sessions?archived=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let at_first = arch_first
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["id"].as_str() == Some(a1.as_str())))
+            .and_then(|s| s["archivedAt"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let bar2: serde_json::Value = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "archive", "ids": [a1] }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("重复归档幂等成功", bar2["affected"] == 1 && bar2["ok"] == true);
+        let arch_again: serde_json::Value = client
+            .get(format!("{base}/sessions?archived=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let at_again = arch_again
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["id"].as_str() == Some(a1.as_str())))
+            .and_then(|s| s["archivedAt"].as_str())
+            .unwrap_or("")
+            .to_string();
+        c.check("重复归档不刷新归档时间", !at_first.is_empty() && at_first == at_again);
+        let bar_missing: serde_json::Value = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "archive", "ids": ["no-such-id"] }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "不存在 id 进 failed 明细",
+            bar_missing["affected"] == 0
+                && bar_missing["failed"]
+                    .as_array()
+                    .map(|f| f.len() == 1 && f[0]["id"] == "no-such-id")
+                    .unwrap_or(false),
+        );
         // 主列表（all 视角）不再含这两条
         let main: serde_json::Value = client
             .get(format!("{base}/sessions?all=true"))

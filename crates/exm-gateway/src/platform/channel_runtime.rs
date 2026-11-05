@@ -1348,7 +1348,15 @@ where
     let run = run.clone();
     tokio::spawn(async move {
         let mut rx = rx;
-        while let Ok(evt) = rx.recv().await {
+        // 收流容错（竞态 P1-4）：Lagged = 广播环溢出丢了一批旧事件，新事件仍在
+        // 环里——必须继续收，退出会让本轮回复静默丢失（用户视角：发了消息
+        // 永远没回）。Closed = 发送端全关（进程收束），正常退出。
+        loop {
+            let evt = match rx.recv().await {
+                Ok(evt) => evt,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             if evt.session_id != run.session_id {
                 continue;
             }
