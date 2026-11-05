@@ -32,10 +32,18 @@ pub struct McpServerConfig {
     /// 启用
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 单次调用超时秒数（审计 错误处理 P1-2）：端点僵死时调用方挂死且持有注册表锁，
+    /// 拖死全部 MCP 调用。缺省 60s；超时判定失败并冷却该连接。
+    #[serde(default = "default_call_timeout_secs")]
+    pub call_timeout_secs: u64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_call_timeout_secs() -> u64 {
+    60
 }
 
 /// 工具调用结果（MCP content 块规约为文本）
@@ -84,7 +92,13 @@ impl HttpClient {
     fn new(url: &str) -> Self {
         HttpClient {
             url: url.to_string(),
-            client: reqwest::Client::new(),
+            // 连接级超时（审计 错误处理 P1-2）：建连 15s + 请求总 60s——
+            // 与 call_raw 的应用层超时双保险（后者覆盖 read 响应体的挂死）
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             session_id: std::sync::Mutex::new(None),
         }
     }
@@ -318,10 +332,32 @@ impl McpConnection {
     ) -> anyhow::Result<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
-        match &mut self.transport {
-            Some(Transport::Http(c)) => c.call_raw(id, method, params).await,
-            Some(Transport::Stdio(c)) => c.call_raw(id, method, params).await,
-            None => anyhow::bail!("MCP 未初始化"),
+        // 单调用超时（审计 错误处理 P1-2）：HTTP 端点僵死或 stdio 进程停responding时
+        // send/read_line 永久阻塞且（在注册表内）持锁——超时判定失败，调用方得以释放。
+        // stdio 侧进程可能仍在后台挂着半截请求：下次调用按 id 匹配天然跳过残留行，不修复也不放大。
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + '_>> =
+            match &mut self.transport {
+                Some(Transport::Http(c)) => Box::pin(c.call_raw(id, method, params)),
+                Some(Transport::Stdio(c)) => Box::pin(c.call_raw(id, method, params)),
+                None => anyhow::bail!("MCP 未初始化"),
+            };
+        let timeout_secs = if self.cfg.call_timeout_secs == 0 {
+            60
+        } else {
+            self.cfg.call_timeout_secs
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
+            Ok(r) => r,
+            Err(_) => {
+                // http 侧连接已不可信（请求/响应可能错位）：丢弃传输，下次调用重新握手
+                if matches!(self.transport, Some(Transport::Http(_))) {
+                    self.transport = None;
+                }
+                anyhow::bail!(
+                    "MCP 调用超时（{} {method}，{timeout_secs}s 无响应）",
+                    self.cfg.id
+                )
+            }
         }
     }
 
@@ -582,7 +618,10 @@ impl McpConnection {
 /// MCP 注册表：多服务器连接池 + 同步工具快照缓存
 /// 连接池为异步锁（调用跨 await）；快照缓存为同步锁（规划注入热路径，绝不跨 await）。
 pub struct McpRegistry {
-    conns: tokio::sync::Mutex<HashMap<String, McpConnection>>,
+    /// per-server 连接（审计 错误处理 P1-2）：注册表锁只管查表（短持有），
+    /// 调用/刷新在各自服务器的连接锁内进行——单个僵死服务器只阻塞自己，
+    /// 不再拖死全部 MCP 调用。连接内容互斥（stdio 进程/HTTP 会话不可并发共用）。
+    conns: tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<McpConnection>>>>,
     /// id -> (服务器配置摘要, 工具快照)——同步读取
     snapshot: parking_lot::Mutex<HashMap<String, (McpServerConfig, Vec<ToolSpec>)>>,
 }
@@ -612,28 +651,40 @@ impl McpRegistry {
     pub fn configure(&self, servers: &[McpServerConfig]) {
         let mut next_snapshot = HashMap::new();
         let mut next_conns = HashMap::new();
-        let mut drained: HashMap<String, McpConnection> = match self.conns.try_lock() {
-            Ok(mut guard) => std::mem::take(&mut *guard),
-            Err(_) => HashMap::new(), // 忙碌：跳过连接复用（懒重建）
-        };
+        let mut drained: HashMap<String, std::sync::Arc<tokio::sync::Mutex<McpConnection>>> =
+            match self.conns.try_lock() {
+                Ok(mut guard) => std::mem::take(&mut *guard),
+                Err(_) => HashMap::new(), // 忙碌：跳过连接复用（懒重建）
+            };
         for cfg in servers {
             if !cfg.enabled {
                 continue;
             }
-            let mut conn = drained
+            let conn = drained
                 .remove(&cfg.id)
-                .unwrap_or_else(|| McpConnection::new(cfg.clone()));
-            let unchanged = conn.cfg.command == cfg.command
-                && conn.cfg.args == cfg.args
-                && conn.cfg.url == cfg.url
-                && conn.cfg.transport == cfg.transport;
-            if !unchanged {
-                conn = McpConnection::new(cfg.clone());
-            } else {
-                conn.cfg = cfg.clone();
+                .unwrap_or_else(|| std::sync::Arc::new(tokio::sync::Mutex::new(McpConnection::new(cfg.clone()))));
+            // 连接内容可能正被调用占用：锁内比对配置并按需换新（保持原 Arc 槽位，
+            // 等待中的调用者拿锁后自然看到新连接）
+            match conn.try_lock() {
+                Ok(mut c) => {
+                    let unchanged = c.cfg.command == cfg.command
+                        && c.cfg.args == cfg.args
+                        && c.cfg.url == cfg.url
+                        && c.cfg.transport == cfg.transport;
+                    if !unchanged {
+                        *c = McpConnection::new(cfg.clone());
+                    } else {
+                        c.cfg = cfg.clone();
+                    }
+                    let specs = c.tool_snapshot();
+                    drop(c);
+                    next_snapshot.insert(cfg.id.clone(), (cfg.clone(), specs));
+                }
+                Err(_) => {
+                    // 忙碌：只更新快照，连接内容留给下次调用重建
+                    next_snapshot.insert(cfg.id.clone(), (cfg.clone(), Vec::new()));
+                }
             }
-            let specs = conn.tool_snapshot();
-            next_snapshot.insert(cfg.id.clone(), (cfg.clone(), specs));
             next_conns.insert(cfg.id.clone(), conn);
         }
         if let Ok(mut guard) = self.conns.try_lock() {
@@ -644,13 +695,15 @@ impl McpRegistry {
 
     /// 刷新全部工具清单（启动/手动触发；失败的服务器不阻塞其他）
     pub async fn refresh_all(&self) -> Vec<(String, anyhow::Result<usize>)> {
-        let mut conns = self.conns.lock().await;
+        // 注册表锁只做收集（不跨 await 持有）：逐服务器拿各自的连接锁刷新，
+        // 一个僵死服务器不再拖住其他服务器的刷新（审计 错误处理 P1-2）
+        let entries: Vec<(String, std::sync::Arc<tokio::sync::Mutex<McpConnection>>)> = {
+            let conns = self.conns.lock().await;
+            conns.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
         let mut out = Vec::new();
-        let ids: Vec<String> = conns.keys().cloned().collect();
-        for id in ids {
-            let Some(c) = conns.get_mut(&id) else {
-                continue;
-            };
+        for (id, conn) in entries {
+            let mut c = conn.lock().await;
             let r = c.refresh_tools().await;
             let specs = c.tool_snapshot();
             self.sync_snapshot(&id, &c.cfg.clone(), specs);
@@ -694,8 +747,12 @@ impl McpRegistry {
         if !allowed {
             return None;
         }
-        let mut conns = self.conns.lock().await;
-        let c = conns.get_mut(sid)?;
+        // 注册表锁只查表（短持有）：调用在 per-server 连接锁内——其他服务器不受影响
+        let conn = {
+            let conns = self.conns.lock().await;
+            conns.get(sid)?.clone()
+        };
+        let mut c = conn.lock().await;
         let r = c.call_tool(tool, arguments).await;
         // 清单可能在调用中刷新过：同步快照
         self.sync_snapshot(sid, &c.cfg.clone(), c.tool_snapshot());

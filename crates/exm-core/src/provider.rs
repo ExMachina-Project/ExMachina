@@ -597,7 +597,16 @@ impl OpenAiCompatibleProvider {
             api_format: fmt.into(),
             keys: keys.into_iter().filter(|k| !k.trim().is_empty()).collect(),
             sticky: std::sync::Mutex::new(std::collections::HashMap::new()),
-            client: reqwest::Client::new(),
+            // 全局请求超时（审计 错误处理 P1-1）：端点 TCP 建连后僵死（代理半开/服务商挂起）
+            // 时 reqwest 默认无总超时 → chat/embed 永久阻塞 → run 永不收束、run_lock 永久持有。
+            // 300s = 非流式调用的宽上限（对比 transcribe/speak 已有的 120s）；
+            // 流式不能套总超时（长回答合法超 5 分钟），改在收流处加帧间 deadline
+            // （call_orch_stream 的 idle 超时）+ 建连/首响超时（connect_timeout 30s）。
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -651,6 +660,13 @@ impl OpenAiCompatibleProvider {
             .client
             .post(self.url(model, stream))
             .header(name, value);
+        // 流式请求覆盖总超时为 600s 宽上限：SSE 长回答合法超过 client 的 300s
+        // 非流式上限；帧间卡死由收流侧 idle deadline 兜底（见 call_orch_stream）
+        let rb = if stream {
+            rb.timeout(std::time::Duration::from_secs(600))
+        } else {
+            rb
+        };
         match self.api_format.as_str() {
             "anthropic" => rb.header("anthropic-version", "2023-06-01").json(&body),
             _ => rb.json(&body),
