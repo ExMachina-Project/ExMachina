@@ -26,6 +26,18 @@ export interface ChatMessage {
   thinking?: string;
   /** 有序过程步骤（思考段落 / 工具调用按发生顺序交错；服务端留存） */
   steps?: MessageStep[];
+  /** 本轮产物附件（send-file 能力）：控制台会话在 run.finished 事件携带；
+   *  IM 通道由适配器直发，不进这里 */
+  artifacts?: ArtifactItem[];
+}
+
+/** 会话产物附件（outbox 登记 → 轮次收束排空投递） */
+export interface ArtifactItem {
+  /** image | file | voice */
+  kind: string;
+  /** 工作区相对路径（下载经 /api/asset/download）或绝对路径 */
+  path: string;
+  caption?: string;
 }
 
 /** 有序过程步骤：kind=tool 时 callId 关联 toolCalls 记录 */

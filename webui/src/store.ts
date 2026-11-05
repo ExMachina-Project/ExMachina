@@ -4,6 +4,7 @@ import { message } from "antd";
 import type {
   AgentDefinition,
   ApprovalItem,
+  ArtifactItem,
   ChatMessage,
   Session,
   SessionLedger,
@@ -964,6 +965,9 @@ export const useExm = create<ExmState>((set, get) => ({
           }
         }
         const statements = (p.statements ?? []) as Statement[];
+        // 产物附件（send-file 能力）：控制台会话的文件投递——IM 通道由适配器
+        // 直发（不进消息流），这里只渲染控制台侧
+        const artifacts = (p.artifacts ?? []) as ArtifactItem[];
         const id = get().sessionId!;
         // 权威回填代际：回拉期间若用户切走（selectSession 落了新会话），不得覆盖。
         // 比较选择代际：回拉发起时的序号仍是最新 → 没有更新的选择发生 → 安全落盘。
@@ -986,6 +990,7 @@ export const useExm = create<ExmState>((set, get) => ({
               statements,
               toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
               thinking: thinking.trim() ? thinking : undefined,
+              artifacts: artifacts.length > 0 ? artifacts : undefined,
               createdAt: new Date().toISOString(),
             },
           ],

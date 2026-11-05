@@ -37,7 +37,7 @@ pub mod telegram;
 pub mod triggers;
 pub mod worker_hub;
 // 资源域 handlers（自本文件拆出；build_router 经此引入）
-use assets::{get_asset, health};
+use assets::{download_asset, get_asset, health};
 use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
 use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
 use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
@@ -331,6 +331,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .merge(mcp_mount(core.clone()))
         // 工作区资产（截图 / 工具输出落盘）：沙箱内只读，聊天工具卡内联预览
         .route("/api/asset", get(get_asset))
+        .route("/api/asset/download", get(download_asset))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
