@@ -3554,6 +3554,54 @@ async fn main() -> anyhow::Result<()> {
         let _ = core.delete_session(&sid);
     }
 
+    // ---- 审计与用量端点（e2e 断言补强 5.2）：/audit 工具面 + kind=dispatch 派发面 + /sessions/:id/tokens ----
+    {
+        // 工具审计面：上面预算/脱敏块已产生真实 tool.call 记录 → items 非空且字段齐
+        let audit: serde_json::Value = client
+            .get(format!("{base}/audit?limit=50"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let items = audit["items"].as_array().cloned().unwrap_or_default();
+        c.check("工具审计端点返回条目", !items.is_empty());
+        // 条目结构：agentId + tool + ok（审计页过滤与高亮的数据源）
+        let has_fields = items
+            .iter()
+            .any(|it| it.get("agentId").is_some() && it.get("tool").is_some() && it.get("ok").is_some());
+        c.check("审计条目结构完整（agentId/tool/ok）", has_fields);
+        // 派发审计面（kind=dispatch）：跨会话聚合结构（可能为空——结构断言即可）
+        let dispatch: serde_json::Value = client
+            .get(format!("{base}/audit?kind=dispatch&limit=50"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("派发审计端点结构有效", dispatch["items"].is_array());
+        // 会话用量：既有会话（预算块已跑过工具）→ tokens 返回结构含用量字段
+        let any_sid = core
+            .list_sessions_in_group("exmachina")
+            .unwrap_or_default()
+            .iter()
+            .find(|s| s.title.contains("channel:e2e-hook") || s.title.contains("预算"))
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        let tokens: serde_json::Value = client
+            .get(format!("{base}/sessions/{any_sid}/tokens"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let tok_ok = tokens.get("promptTokens").is_some()
+            || tokens.get("prompt_tokens").is_some()
+            || tokens.get("total").is_some()
+            || tokens.get("used").is_some();
+        c.check("会话用量端点返回结构", tok_ok);
+    }
+
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {
