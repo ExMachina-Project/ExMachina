@@ -42,6 +42,7 @@ mod identity_gate_tests {
             is_group: true,
             mentioned: true,
             chat_key: "g100",
+                    flow_name: None,
         }
     }
 
@@ -53,6 +54,7 @@ mod identity_gate_tests {
             is_group,
             mentioned,
             chat_key: "test",
+                    flow_name: None,
         }
     }
 
@@ -267,6 +269,7 @@ mod identity_gate_tests {
             is_group: true,
             mentioned: true,
             chat_key: "g100",
+                    flow_name: None,
         };
         let r = admit(&core, &ch, &g_ctx).await;
         match r {
@@ -463,6 +466,7 @@ mod ambient_context_tests {
             is_group: true,
             mentioned,
             chat_key: key,
+                    flow_name: None,
         }
     }
 
@@ -537,6 +541,7 @@ mod ambient_context_tests {
             is_group: false,
             mentioned: false,
             chat_key: "p1",
+                    flow_name: None,
         };
         match admit(&core, &ch, &ctx).await {
             GateDecision::Allow(_) => {}
