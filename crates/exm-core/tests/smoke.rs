@@ -240,14 +240,15 @@ async fn 执行审批_高危命令拦截与批准放行() {
         sec_always,
     );
 
-    // 命令拦截 → 审批单挂起 + 事件通知
+    // 命令拦截 → 审批单挂起 + 事件通知（样例用高危命令：2026-11 审批经济学
+    // 语义升级后无害命令直通，always 档降级为「高危必拦」）
     let blocked = gw
         .execute(
             "coding-agent",
             "ses",
             &[ToolName::Terminal],
             ToolName::Terminal,
-            &serde_json::json!({ "command": "echo blocked-test" }),
+            &serde_json::json!({ "command": "git reset --hard blocked-test" }),
         )
         .await;
     assert!(!blocked.ok, "未放行命令应被拦截");
@@ -268,7 +269,8 @@ async fn 执行审批_高危命令拦截与批准放行() {
 
     let pending = core.approval_list(Some("pending"), 10).unwrap();
     assert_eq!(pending.len(), 1, "应产生一张待审批单");
-    assert_eq!(pending[0].command, "echo blocked-test");
+    // git reset 在 DENY 档（破坏性清单）→ 落 [红线] 前缀审批单（分档矩阵语义）
+    assert_eq!(pending[0].command, "[红线] git reset --hard blocked-test");
 
     // 批准 → 系统代执行并记录结果
     let decided = core.approval_decide(&pending[0].id, true).await.unwrap();

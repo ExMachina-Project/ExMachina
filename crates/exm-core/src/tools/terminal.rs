@@ -86,6 +86,7 @@ impl ToolGateway {
         // 对破坏性命令永远不放行。能力边界（仅聊天档）：本工具在 Chat 档不可达
         // （runtime 执行层全拒），tier_gate 的边界文案兜底防御纵深。
         let scope = self.session_scope_of(session_id);
+        let tier = super::allowlist::tier_of_command(&cmd);
         let (tier_pass, tier_deny_msg) = super::allowlist::tier_gate(&cmd, scope, mode);
         if let Some(deny_msg) = tier_deny_msg.filter(|_| !tier_pass) {
             return ToolResult::err(deny_msg);
@@ -96,22 +97,31 @@ impl ToolGateway {
                 .await;
         }
         if !whitelisted {
-            // 白名单外命令：off 档直接拒绝（历史行为）；开启审批闸门时不再硬拒——
-            // 转入人工审批（用户批准即由系统代执行）。此前一律硬拒导致 mkdir/go/pytest
-            // 等大量日常开发命令无路可走，agent 无法完成编码任务。
+            // 白名单外命令（审批经济学）：**无害即直通**——非 Denied 档且无
+            // 高危特征（is_destructive_command）时不进审批。此前 risky/always
+            // 档下白名单外一律进审批，「跑个 mkdir/go/pytest 都要人工介入」。
+            // off 档保持白名单即全部边界的历史语义（无害也不例外——off 的
+            // 语义就是零信任白名单模式）。
+            let harmless = tier != super::allowlist::CommandTier::Denied
+                && !is_destructive_command(&lowered);
             if mode == "off" {
                 return ToolResult::err(format!(
                     "命令不在白名单: {cmd}（白名单按「命令 + 子命令」逐段匹配——链式命令每段都须在白名单；\
                      可将 security.execApproval 设为 risky/always 走人工审批放行）"
                 ));
             }
-            return self.gate_command(agent_id, session_id, &cmd).await;
+            if !harmless {
+                return self.gate_command(agent_id, session_id, &cmd).await;
+            }
         }
         if mode == "risky" || mode == "always" {
             let allowlisted = self.security.exec_allowlist.iter().any(|p| {
                 !p.trim().is_empty() && lowered.starts_with(p.trim().to_lowercase().as_str())
             });
-            let gated = mode == "always" || is_destructive_command(&lowered);
+            // 高危判定不再叠加审批档：risky 拦高危（既有语义），always 档
+            // 高危也拦但**白名单外无害命令已放行**（上一分支）——「全拦」的
+            // 旧语义降级为「高危必拦」，审批只花在真危险的东西上。
+            let gated = is_destructive_command(&lowered);
             if gated && !allowlisted {
                 return self.gate_command(agent_id, session_id, &cmd).await;
             }
