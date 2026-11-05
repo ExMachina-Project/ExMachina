@@ -48,6 +48,14 @@ fn last_degraded_log() -> &'static Mutex<HashMap<String, u64>> {
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 每通道最近一次登录在线确认时间（ms；get_login_info 回包带身份时刷新）。
+/// 登录轮换期（扫码换号/风控下线）WS 层仍连着、事件面自然零消息——
+/// 这不是「事件面未挂载」，不该建议重启（5.4：自检误报）。
+fn last_login_ok() -> &'static Mutex<HashMap<String, u64>> {
+    static T: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// 事件到达打点（on_text 收到 message 事件时调用）
 fn note_event(ch_id: &str) {
     let now = exm_core::types::now_ms();
@@ -70,16 +78,21 @@ fn note_connected(ch_id: &str) {
         .unwrap()
         .insert(ch_id.to_string(), exm_core::types::now_ms());
     last_degraded_log().lock().unwrap().remove(ch_id);
+    // 登录确认打点同步清：新连接的登录态未知，等 exm-login 回包重新确认
+    last_login_ok().lock().unwrap().remove(ch_id);
 }
 
 /// 连接回收时清打点（通道删除/停用/重建）
 fn note_conn_reset(ch_id: &str) {
     last_event_at().lock().unwrap().remove(ch_id);
     last_degraded_log().lock().unwrap().remove(ch_id);
+    last_login_ok().lock().unwrap().remove(ch_id);
 }
 
 /// supervisor 对账环的事件面检查：连结后 30min 零事件 → degraded（限频每小时一条日志）。
 /// 首次连结前（无基线）与刚连结 30min 内不告警。
+/// 登录态分流（5.4 误报修复）：最近 10min 内确认过登录在线 → 零事件大概率是
+/// 「登录轮换期 / 无人说话」，报等待登录（info）而非事件面未挂载（degraded + 重启建议）。
 fn check_event_silence(ch_id: &str) {
     let Some(t0) = last_event_at().lock().unwrap().get(ch_id).copied() else {
         return; // 未连结过：无基线不告警
@@ -87,6 +100,21 @@ fn check_event_silence(ch_id: &str) {
     let now = exm_core::types::now_ms();
     if now.saturating_sub(t0) <= 30 * 60 * 1000 {
         return; // 窗口内：正常
+    }
+    // 登录态先验：近期确认在线 → 等待登录轮换完成（不降级、不建议重启）
+    let login_recent = last_login_ok()
+        .lock()
+        .unwrap()
+        .get(ch_id)
+        .map(|t| now.saturating_sub(*t) <= 10 * 60 * 1000)
+        .unwrap_or(false);
+    if login_recent {
+        report_status(
+            ch_id,
+            "ok",
+            "连接正常、账号在线；近期无消息事件（可能登录轮换或无人发言）",
+        );
+        return;
     }
     let mut logs = last_degraded_log().lock().unwrap();
     if let Some(last) = logs.get(ch_id) {
@@ -227,6 +255,24 @@ async fn connect_loop(core: Arc<Core>, ch: Channel) {
         // 自检：拿机器人身份（回包在读取循环里识别）
         let _ = tx.send(serde_json::json!({ "action": "get_login_info", "echo": "exm-login" }));
 
+        // 登录态周期探测（5.4）：每 5min 重发 get_login_info——登录打点 10min 过期，
+        // 不续发则「在线但无人说话」的超窗检查拿不到在线证据，误报重启建议
+        let probe_tx = tx.clone();
+        let probe = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await; // 首拍立即（interval 首拍是 now）——已被上面的首发覆盖，跳过
+            loop {
+                tick.tick().await;
+                if probe_tx
+                    .send(serde_json::json!({ "action": "get_login_info", "echo": "exm-login" }))
+                    .is_err()
+                {
+                    break; // 连接已断（写任务退出）：探测随之收场
+                }
+            }
+        });
+
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(s)) => on_text(&core, &ch, &tx, &s).await,
@@ -244,6 +290,7 @@ async fn connect_loop(core: Arc<Core>, ch: Channel) {
                 }
             }
         }
+        probe.abort();
         drop(tx);
         let _ = writer.await;
         // 断线退避：指数递增（连接成功时已复位）
@@ -273,6 +320,14 @@ async fn on_text(
                 .pointer("/data/user_id")
                 .and_then(|x| x.as_i64())
                 .unwrap_or(0);
+            // 登录确认打点（5.4）：拿到身份 = 账号在线。零事件窗口的告警分流依据
+            //（在线 → 等待登录轮换文案，而非「事件面未挂载建议重启」）
+            if uid != 0 && !nick.is_empty() && nick != "?" {
+                last_login_ok()
+                    .lock()
+                    .unwrap()
+                    .insert(ch.id.clone(), exm_core::types::now_ms());
+            }
             println!("[napcat:{}] 机器人已连结：{nick}（{uid}）", ch.id);
             report_status(&ch.id, "ok", format!("机器人 {nick}（{uid}）"));
         }
@@ -781,6 +836,53 @@ async fn handle_message(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 登录态分流（5.4 误报修复）：超窗零事件但近期确认在线 → ok（等待登录轮换
+    /// 文案，不降级不建议重启）；登录打点过期/从未确认 → 维持 degraded 原判。
+    #[test]
+    fn 事件自检_在线零事件不误报重启() {
+        let id = format!("napcat-selftest-{}", exm_core::types::new_id());
+        note_connected(&id);
+        // 拨回 31 分钟前（超窗）
+        last_event_at()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
+        // 在线确认 5 分钟前（10min 窗口内）→ 不降级，报等待登录
+        last_login_ok()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), exm_core::types::now_ms() - 5 * 60 * 1000);
+        check_event_silence(&id);
+        let st = crate::platform::status_of(&id);
+        assert_eq!(st.as_ref().map(|s| s.state.as_str()), Some("ok"), "在线零事件不应降级");
+        let detail = st.map(|s| s.detail).unwrap_or_default();
+        assert!(
+            detail.contains("在线") || detail.contains("轮换"),
+            "文案应为等待登录/在线而非重启建议：{detail}"
+        );
+        assert!(!detail.contains("重启"), "不得建议重启：{detail}");
+
+        // 登录打点 15 分钟前（10min 窗口外，视为登录态不明）→ 维持降级判
+        let id2 = format!("napcat-selftest-{}", exm_core::types::new_id());
+        note_connected(&id2);
+        last_event_at()
+            .lock()
+            .unwrap()
+            .insert(id2.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
+        last_login_ok()
+            .lock()
+            .unwrap()
+            .insert(id2.clone(), exm_core::types::now_ms() - 15 * 60 * 1000);
+        check_event_silence(&id2);
+        assert_eq!(
+            crate::platform::status_of(&id2).map(|s| s.state),
+            Some("degraded".into()),
+            "登录态不明 + 超窗零事件应维持降级"
+        );
+        note_conn_reset(&id);
+        note_conn_reset(&id2);
+    }
 
     /// 事件管道自检（D6）：连结正常 + 超窗零事件 → degraded；事件到达 → ok。
     /// 时间面用打点表直接操纵（不对表 mock 时钟）。
