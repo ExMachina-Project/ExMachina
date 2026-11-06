@@ -10,6 +10,7 @@ pub mod install;
 pub mod memory_cmd;
 pub mod panel;
 pub mod tui;
+pub mod term_caps;
 pub mod persona_cmd;
 pub mod platform_cmd;
 pub mod plugin_cmd;

@@ -76,6 +76,8 @@ struct Tui {
     approvals: Vec<ApprovalRow>,
     approval_sel: ListState,
     approval_note: String,
+    /// 宽 ≥120 且有待审单（draw 与键路由共同维护；resize/approve 时重估）
+    side_by_side: bool,
     /// 输入历史（↑↓ 翻）
     history: Vec<String>,
     history_idx: Option<usize>,
@@ -101,6 +103,7 @@ impl Tui {
             approvals: Vec::new(),
             approval_sel,
             approval_note: String::new(),
+            side_by_side: false,
             history: Vec::new(),
             history_idx: None,
         }
@@ -520,7 +523,10 @@ async fn handle_term(
         Event::Key(k) => {
             return handle_key(core, tui, k, evt_tx).await;
         }
-        Event::Resize(_, _) => {} // ratatui 下次 draw 自动按新尺寸重绘
+        Event::Resize(w, _) => {
+            // 并排判定随宽度变化重估（draw 侧同条件；记录供键路由使用）
+            tui.side_by_side = w >= 120 && !tui.approvals.is_empty();
+        }
         _ => {}
     }
     Ok(false)
@@ -548,9 +554,39 @@ async fn handle_key(
         _ => {}
     }
     match tui.page {
-        Page::Chat => handle_chat_key(core, tui, k, evt_tx).await,
+        Page::Chat => {
+            // 并排模式：Ctrl+Y/N 审批直达（先于输入框处理）；其余键照常
+            if tui.side_by_side
+                && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('n') | KeyCode::Char('N'))
+                && k.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                return handle_side_approval_key(core, tui, k).await;
+            }
+            handle_chat_key(core, tui, k, evt_tx).await
+        }
         Page::Approvals => handle_approval_key(core, tui, k).await,
     }
+}
+
+/// 并排模式（宽 ≥120 且有审批单）下对话页的审批直达键：
+/// Ctrl+Y 批准 / Ctrl+N 拒绝当前选中单（与审批页同批操作函数）。
+/// 普通字符不受影响（照常进输入框）——并排时审批面板常驻可见，
+/// 决定性操作用 Ctrl 修饰防误触。
+async fn handle_side_approval_key(
+    core: &Arc<exm_core::Core>,
+    tui: &mut Tui,
+    k: KeyEvent,
+) -> anyhow::Result<bool> {
+    match (k.code, k.modifiers) {
+        (KeyCode::Char('y') | KeyCode::Char('Y'), KeyModifiers::CONTROL) => {
+            decide_approval(core, tui, true, false).await;
+        }
+        (KeyCode::Char('n') | KeyCode::Char('N'), KeyModifiers::CONTROL) => {
+            decide_approval(core, tui, false, false).await;
+        }
+        _ => {}
+    }
+    Ok(false)
 }
 
 /// 对话页按键
@@ -630,18 +666,20 @@ async fn handle_chat_key(
             }
         }
         KeyCode::PageUp => {
-            // 滚动：从底部回退一页
+            // 滚动：从底部回退一页（消息粒度；一页 ≈ 视口高度/3 行的估计）
             let n = tui.msgs.len();
-            let next = tui.scroll.map(|i| i.saturating_sub(10)).unwrap_or(n.saturating_sub(10));
+            let page = 20;
+            let next = tui.scroll.map(|i| i.saturating_sub(page)).unwrap_or(n.saturating_sub(page));
             tui.scroll = Some(next.min(n.saturating_sub(1)));
         }
         KeyCode::PageDown => {
             let n = tui.msgs.len();
+            let page = 20;
             if let Some(i) = tui.scroll {
-                if i + 10 >= n {
+                if i + page >= n {
                     tui.scroll = None; // 回到底部跟随
                 } else {
-                    tui.scroll = Some(i + 10);
+                    tui.scroll = Some(i + page);
                 }
             }
         }
@@ -649,6 +687,28 @@ async fn handle_chat_key(
         _ => {}
     }
     Ok(false)
+}
+
+/// 审批决定公共路径（审批页与并排直达键共用）：decide → note → 刷新列表
+/// （refresh 内重拉 core approvals——消息流与面板两侧同源同步）
+async fn decide_approval(core: &Arc<exm_core::Core>, tui: &mut Tui, approve: bool, _all: bool) {
+    if let Some(i) = tui.approval_sel.selected() {
+        if let Some(row) = tui.approvals.get(i) {
+            let id = row.id.clone();
+            tui.approval_note = "审批处理中…".into();
+            match core.approval_decide(&id, approve).await {
+                Ok(r) => {
+                    tui.approval_note = if approve {
+                        format!("已批准：{}", r.command)
+                    } else {
+                        format!("已拒绝：{}", r.command)
+                    };
+                }
+                Err(e) => tui.approval_note = format!("{}失败：{e}", if approve { "批准" } else { "拒绝" }),
+            }
+            refresh_approvals(core, tui).await;
+        }
+    }
 }
 
 /// 审批页按键
@@ -671,31 +731,10 @@ async fn handle_approval_key(
             }
         }
         KeyCode::Char('y') | KeyCode::Enter => {
-            if let Some(i) = tui.approval_sel.selected() {
-                if let Some(row) = tui.approvals.get(i) {
-                    let id = row.id.clone();
-                    tui.approval_note = "审批处理中…".into();
-                    match core.approval_decide(&id, true).await {
-                        Ok(r) => {
-                            tui.approval_note = format!("已批准：{}", r.command);
-                        }
-                        Err(e) => tui.approval_note = format!("批准失败：{e}"),
-                    }
-                    refresh_approvals(core, tui).await;
-                }
-            }
+            decide_approval(core, tui, true, false).await;
         }
         KeyCode::Char('n') => {
-            if let Some(i) = tui.approval_sel.selected() {
-                if let Some(row) = tui.approvals.get(i) {
-                    let id = row.id.clone();
-                    match core.approval_decide(&id, false).await {
-                        Ok(r) => tui.approval_note = format!("已拒绝：{}", r.command),
-                        Err(e) => tui.approval_note = format!("拒绝失败：{e}"),
-                    }
-                    refresh_approvals(core, tui).await;
-                }
-            }
+            decide_approval(core, tui, false, false).await;
         }
         KeyCode::Char('Y') => {
             // 全部批准
@@ -975,16 +1014,31 @@ fn draw(f: &mut Frame, tui: &mut Tui) {
     let area = f.area();
     let chunks = Layout::vertical([
         Constraint::Length(1),      // 顶栏
-        Constraint::Min(10),        // 主区（消息流 / 审批）
+        Constraint::Min(10),        // 主区（消息流 / 审批 / 并排）
         Constraint::Length(3),      // 输入区
         Constraint::Length(1),      // 状态栏
     ])
     .split(area);
 
     draw_topbar(f, tui, chunks[0]);
-    match tui.page {
-        Page::Chat => draw_chat(f, tui, chunks[1]),
-        Page::Approvals => draw_approvals(f, tui, chunks[1]),
+    // 审批并排（spec cli-tui）：宽 ≥120 列且有待审单时消息流与审批同屏——
+    // 两侧操作后状态经同一 approvals 通道同步（approve 单据消失 + 消息流
+    // 内联结果），无需手动刷新；窄终端回落切换式（Tab 切页）。
+    let side_by_side = area.width >= 120 && !tui.approvals.is_empty();
+    tui.side_by_side = side_by_side;
+    if side_by_side {
+        let cols = Layout::horizontal([
+            Constraint::Percentage(58), // 消息流
+            Constraint::Percentage(42), // 审批
+        ])
+        .split(chunks[1]);
+        draw_chat(f, tui, cols[0]);
+        draw_approvals(f, tui, cols[1]);
+    } else {
+        match tui.page {
+            Page::Chat => draw_chat(f, tui, chunks[1]),
+            Page::Approvals => draw_approvals(f, tui, chunks[1]),
+        }
     }
     draw_input(f, tui, chunks[2]);
     draw_status(f, tui, chunks[3]);
@@ -997,6 +1051,8 @@ fn draw_topbar(f: &mut Frame, tui: &Tui, area: Rect) {
     };
     let pending = if tui.approvals.is_empty() {
         String::new()
+    } else if tui.side_by_side {
+        format!("  待审 {}（Ctrl+Y 批准 · Ctrl+N 拒绝）", tui.approvals.len())
     } else {
         format!("  待审 {}", tui.approvals.len())
     };
@@ -1013,28 +1069,96 @@ fn draw_topbar(f: &mut Frame, tui: &Tui, area: Rect) {
 }
 
 fn draw_chat(f: &mut Frame, tui: &mut Tui, area: Rect) {
-    // 全部消息行 → 单一 Paragraph；滚动由 scroll 偏移实现
+    // 渲染窗口策略（spec cli-tui 长会话性能）：只对视口附近的消息做折行渲染，
+    // 视口外的消息只做廉价行数估计（长度 ÷ 宽度上取整 + 结构行）——
+    // 2000 条消息的会话每帧折行量从 O(全部) 降到 O(视口±窗口)。
+    let width = area.width as usize;
+    let visible = area.height.saturating_sub(2) as usize; // 边框占 2
+
+    // 消息级行数估计（每条上限按实际折行同口径：正文 chars().count() 保守上取整）
+    let est_lines = |m: &Msg| -> usize {
+        let body = match m {
+            Msg::User(t) | Msg::System(t) | Msg::Plan(t) | Msg::Running(t) => t.chars().count(),
+            Msg::Assistant { text, .. } => text.chars().count(),
+            Msg::Tool { out, .. } => out.chars().count(),
+        };
+        let w = width.saturating_sub(2).max(20);
+        let text_rows = body.div_ceil(w.max(1));
+        text_rows + 2 // 结构行（框线/署名）+ 间隔
+    };
+
+    // 跟随底部：从尾部向前收集直到盖满视口 + 缓冲；手动滚动：从锚点消息向两侧。
+    // 缓冲（视口外多渲染 N 条）保证 PageUp/PageDown 连续滚动无闪空。
+    const WINDOW_PAD: usize = 40;
+    let need = visible + WINDOW_PAD;
+    let (start, end) = match tui.scroll {
+        None => {
+            let mut acc = 0usize;
+            let mut s = tui.msgs.len();
+            for (i, m) in tui.msgs.iter().enumerate().rev() {
+                acc += est_lines(m);
+                if acc >= need {
+                    s = i;
+                    break;
+                }
+            }
+            (s, tui.msgs.len())
+        }
+        Some(anchor) => {
+            // 锚点 = 消息索引（PgUp/PgDn 按消息粒度移动）
+            let a = anchor.min(tui.msgs.len().saturating_sub(1));
+            let mut acc = est_lines(&tui.msgs[a]);
+            let mut s = a;
+            let mut e = a + 1;
+            // 向前扩（到锚点顶部盖满 need 或到头）
+            while acc < need && s > 0 {
+                s -= 1;
+                acc += est_lines(&tui.msgs[s]);
+            }
+            // 向后扩（盖住视口本体）
+            let mut tail = 0usize;
+            while tail < visible && e < tui.msgs.len() {
+                tail += est_lines(&tui.msgs[e]);
+                e += 1;
+            }
+            (s, e)
+        }
+    };
+
+    // 只折行窗口内消息；窗口外以空行占位（保持 Paragraph scroll 语义简单：
+    // 窗口内内容从自己视口顶部画起，不依赖全局行偏移）
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for m in &tui.msgs {
-        lines.extend(msg_lines(m, area.width as usize));
+    if tui.scroll.is_some() && start > 0 {
+        lines.push(Line::styled(
+            format!("  ⋯ 已省略前 {} 条消息（PgDn 向下浏览）", start),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    for m in &tui.msgs[start..end] {
+        lines.extend(msg_lines(m, width));
     }
     // 运行中追加指示
-    if tui.running {
+    if tui.running && tui.scroll.is_none() {
         if let Some(Msg::Running(_)) = tui.msgs.last() {
             // 已含运行行
         } else {
             lines.push(Line::styled("  ⏳ 运行中…", Style::new().fg(Color::Magenta)));
         }
     }
-    let total = lines.len();
-    let visible = area.height.saturating_sub(2) as usize; // 边框占 2
-    let scroll = match tui.scroll {
-        None => total.saturating_sub(visible), // 跟随底部
-        Some(i) => {
-            // 消息索引 → 行索引近似（取消息起始行）；简化为总行数比例
-            let _ = i;
-            total.saturating_sub(visible).saturating_mul(0)
-        }
+    if tui.scroll.is_some() && end < tui.msgs.len() {
+        lines.push(Line::styled(
+            format!("  ⋯ 后续还有 {} 条消息（PgUp/PgDn 滚动，滚到底自动跟随）", tui.msgs.len() - end),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+
+    // 跟随底部：窗口内容从底部对齐（scroll 把尾部顶进视口）；
+    // 手动滚动：窗口以锚点为顶，从 0 画即可。
+    let total_lines = lines.len();
+    let scroll = if tui.scroll.is_none() {
+        total_lines.saturating_sub(visible)
+    } else {
+        0
     };
     let para = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" 对话 "))
@@ -1112,7 +1236,7 @@ fn draw_input(f: &mut Frame, tui: &mut Tui, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, tui: &Tui, area: Rect) {
-    let note = if !tui.approval_note.is_empty() && tui.page == Page::Approvals {
+    let note = if !tui.approval_note.is_empty() && (tui.page == Page::Approvals || tui.side_by_side) {
         tui.approval_note.clone()
     } else if tui.running {
         "运行中…".into()
@@ -1124,9 +1248,58 @@ fn draw_status(f: &mut Frame, tui: &Tui, area: Rect) {
         Span::styled(format!(" [{mode}] "), Style::new().fg(Color::Black).bg(if mode == "PLAN" { Color::Yellow } else { Color::Green })),
         Span::styled(format!("会话 {} ", &tui.session_id[..8.min(tui.session_id.len())]), Style::new().fg(Color::DarkGray)),
         Span::styled(note, Style::new().fg(Color::DarkGray)),
+        Span::styled(format!("  {}", crate::term_caps::caps_summary()), Style::new().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
 
 #[allow(dead_code)]
 fn unused(_: Buffer) {}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    /// 7.3 验收：2000 条消息会话的滚动帧渲染 <100ms。
+    /// 用 TestBackend 等价真实 draw 路径（同一 draw_chat + 窗口策略），
+    /// 跟随底部与手动滚动各测一次，取真实耗时断言。
+    #[test]
+    fn 大会话滚动帧渲染_低于100ms() {
+        let mut tui = Tui::new("s1".into(), "大会话".into(), false);
+        // 构造 2000 条混合消息（用户/助手/工具——折行与结构行都走到）
+        for i in 0..2000 {
+            match i % 3 {
+                0 => tui.push(Msg::User(format!("第 {i} 轮任务：请分析当前模块的实现并给出改进建议，这条消息刻意写长以模拟真实对话的内容量"))),
+                1 => tui.push(Msg::Assistant { agent: "指挥体".into(), text: format!("第 {i} 轮答复：已完成分析。核心结论有三点：其一架构分层清晰；其二错误处理覆盖完整；其三性能在可接受范围内，后续可按需优化。") }),
+                _ => tui.push(Msg::Tool { name: "terminal".into(), args: format!("{{\"command\": \"cargo test #{i}\"}}"), ok: true, out: "test result: ok. 389 passed".into() }),
+            }
+        }
+        // 80×24 常见终端；再测 160×50 宽终端（并排/折行更密）
+        for (w, h) in [(80u16, 24u16), (160, 50)] {
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            // 跟随底部（terminal.draw 走生产同一 draw 分派：含 topbar/主区/input/status）
+            let start = std::time::Instant::now();
+            for _ in 0..10 {
+                term.draw(|f| draw(f, &mut tui)).unwrap();
+            }
+            let follow = start.elapsed().as_millis() as f64 / 10.0;
+            // 手动滚动（中部锚点——两侧扩展路径）
+            tui.scroll = Some(1000);
+            let start = std::time::Instant::now();
+            for _ in 0..10 {
+                term.draw(|f| draw(f, &mut tui)).unwrap();
+            }
+            let anchored = start.elapsed().as_millis() as f64 / 10.0;
+            tui.scroll = None;
+            assert!(
+                follow < 100.0,
+                "{w}x{h} 跟随底部帧 {follow:.1}ms 超标（应 <100ms）"
+            );
+            assert!(
+                anchored < 100.0,
+                "{w}x{h} 锚点滚动帧 {anchored:.1}ms 超标（应 <100ms）"
+            );
+        }
+    }
+}
