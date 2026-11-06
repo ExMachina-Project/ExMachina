@@ -18,12 +18,13 @@
 use crate::fsdb::FsDb;
 use crate::types::*;
 use anyhow::Result;
+use parking_lot::Mutex;
 use std::path::Path;
 
 pub struct Store {
     db: FsDb,
     /// 三账为读-改-写热点（并发节点同时回流），此锁保证不丢更新
-    ledger_lock: std::sync::Mutex<()>,
+    ledger_lock: Mutex<()>,
 }
 
 const MAX_AUDIT_LINES: usize = 2000;
@@ -32,7 +33,7 @@ impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         Ok(Store {
             db: FsDb::open(root)?,
-            ledger_lock: std::sync::Mutex::new(()),
+            ledger_lock: Mutex::new(()),
         })
     }
 
@@ -110,7 +111,7 @@ impl Store {
     /// 持 ledger_lock：与 update_ledger/mutate_ledger 等同族读改写互斥——
     /// 并发时 pin 的整会话写回会把三账/消息数改动静默覆盖（审计竞态 P1-5 场景B）。
     pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         match self.get_session(id)? {
             Some(mut s) => {
                 s.pinned = pinned;
@@ -199,7 +200,7 @@ impl Store {
     }
 
     pub fn update_ledger(&self, session_id: &str, ledger: &SessionLedger) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -214,7 +215,7 @@ impl Store {
     where
         F: FnOnce(&mut SessionLedger),
     {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -240,7 +241,7 @@ impl Store {
         session_id: &str,
         partition: Option<&str>,
     ) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -260,7 +261,7 @@ impl Store {
     /// 更新会话滚动摘要（上下文压缩，docs/架构与设计.md）
     /// 更新会话标题（重命名）
     pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -273,7 +274,7 @@ impl Store {
     /// 直接设置会话活跃时间（测试与数据修正用；不动消息与账目）。
     /// 闲置归档判定读 updated_at，此入口让测试能把会话拨回任意时点。
     pub fn set_session_active_at(&self, session_id: &str, iso: &str) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -284,7 +285,7 @@ impl Store {
 
     /// 更新会话滚动摘要（上下文压缩，docs/架构与设计.md）
     pub fn update_compaction(&self, session_id: &str, summary: &str, upto: usize) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),

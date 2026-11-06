@@ -5,6 +5,7 @@
 use axum::response::IntoResponse;
 use axum::Json;
 use exm_core::{config::ExmConfig, Core};
+use parking_lot::Mutex;
 #[allow(unused_imports)]
 use serde_json::json;
 use std::sync::Arc;
@@ -1339,15 +1340,15 @@ async fn main() -> anyhow::Result<()> {
     c.check("定时任务已删除", cron_gone.status().as_u16() == 404);
 
     // webhook 通道：入站受理 + 出站回调（本进程内起一个接收器捕获回调载荷）
-    let captured: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured: std::sync::Arc<Mutex<Option<serde_json::Value>>> =
+        std::sync::Arc::new(Mutex::new(None));
     let captured_for_handler = captured.clone();
     let reply = axum::Router::new().route(
         "/reply",
         axum::routing::post(move |Json(payload): Json<serde_json::Value>| {
             let captured = captured_for_handler.clone();
             async move {
-                *captured.lock().unwrap() = Some(payload);
+                *captured.lock() = Some(payload);
                 "ok"
             }
         }),
@@ -1390,7 +1391,7 @@ async fn main() -> anyhow::Result<()> {
     let mut delivered = false;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        if captured.lock().unwrap().is_some() {
+        if captured.lock().is_some() {
             delivered = true;
             break;
         }
@@ -2655,12 +2656,12 @@ async fn main() -> anyhow::Result<()> {
         .await;
 
     // ---- 多 Key 粘性负载均衡（docs/11 §1）：k1 恒 429 → 切 k2 并粘住 ----
-    let key_stats: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key_stats: std::sync::Arc<Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::Arc::new(Mutex::new(std::collections::HashMap::new()));
     let ks_for_handler = key_stats.clone();
     // 记录每次到达 fake 的 system prompt（单体人设注入验证用）
-    let prompt_log: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let prompt_log: std::sync::Arc<Mutex<Vec<String>>> =
+        std::sync::Arc::new(Mutex::new(Vec::new()));
     let pl_for_handler = prompt_log.clone();
     let fake = axum::Router::new().route(
         "/v1/chat/completions",
@@ -2686,8 +2687,8 @@ async fn main() -> anyhow::Result<()> {
                                 .join("\n")
                         })
                         .unwrap_or_default();
-                    pl.lock().unwrap().push(system_text);
-                    let mut seen = ks.lock().unwrap();
+                    pl.lock().push(system_text);
+                    let mut seen = ks.lock();
                     let first_time = !seen.contains_key(&key);
                     *seen.entry(key.clone()).or_insert(0) += 1;
                     drop(seen);
@@ -2784,7 +2785,7 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    let stats = key_stats.lock().unwrap().clone();
+    let stats = key_stats.lock().clone();
     println!("    [key stats] {:?}", stats);
     // 首次请求 429 → 轮换到另一把并粘住；第二轮不再触碰首次失败的键位顺序
     c.check(
@@ -2888,7 +2889,7 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    let tok_stats = key_stats.lock().unwrap().clone();
+    let tok_stats = key_stats.lock().clone();
     c.check(
         "替换后的主 Key 已在运行时生效（fake 端点捕获）",
         tok_stats.contains_key("sk-tok-new") && !tok_stats.contains_key("sk-tok-old"),
@@ -2960,7 +2961,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
     {
-        let pl = prompt_log.lock().unwrap().clone();
+        let pl = prompt_log.lock().clone();
         let tail = pl.iter().rev().take(3).cloned().collect::<Vec<_>>();
         c.check(
             "单体人设注入：plan/converge 的 system prompt 均含人设文本",
@@ -2983,7 +2984,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
     {
-        let pl = prompt_log.lock().unwrap().clone();
+        let pl = prompt_log.lock().clone();
         let tail = pl.iter().rev().take(2).cloned().collect::<Vec<_>>();
         c.check(
             "单体人设重置：回落默认人设且不再含自定义文本",

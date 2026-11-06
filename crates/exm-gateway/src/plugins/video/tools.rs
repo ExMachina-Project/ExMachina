@@ -13,7 +13,8 @@ use exm_core::config::CustomTool;
 use exm_core::tools::{dynamic_exec_images, DynamicToolExec};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::{Arc};
 
 /// 单个观看会话的运行期状态（工具间共享：已见评论/视频/步数/配额引用）
 #[derive(Default)]
@@ -41,7 +42,7 @@ fn watch_sessions() -> &'static Mutex<std::collections::HashMap<String, Arc<Mute
 
 /// 取（或创建）会话的观看状态
 pub(crate) fn session_state(session_id: &str) -> Arc<Mutex<WatchSession>> {
-    let mut map = watch_sessions().lock().unwrap();
+    let mut map = watch_sessions().lock();
     map.entry(session_id.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(WatchSession::default())))
         .clone()
@@ -49,7 +50,7 @@ pub(crate) fn session_state(session_id: &str) -> Arc<Mutex<WatchSession>> {
 
 /// 会话结束清理（轮次收束后调用；防内存缓慢增长）
 pub(crate) fn drop_session(session_id: &str) {
-    watch_sessions().lock().unwrap().remove(session_id);
+    watch_sessions().lock().remove(session_id);
 }
 
 // ---------------------------------------------------------------- videoId 归一解析
@@ -144,7 +145,7 @@ async fn resolve_video_id(st: &Arc<Mutex<WatchSession>>, input: &str) -> String 
         return raw;
     }
     // 缓存命中
-    if let Some(hit) = st.lock().unwrap().resolved_ids.get(&raw) {
+    if let Some(hit) = st.lock().resolved_ids.get(&raw) {
         return hit.clone();
     }
     let mut id = normalize_video_id(&raw);
@@ -153,7 +154,7 @@ async fn resolve_video_id(st: &Arc<Mutex<WatchSession>>, input: &str) -> String 
             id = expanded;
         }
     }
-    st.lock().unwrap().resolved_ids.insert(raw, id.clone());
+    st.lock().resolved_ids.insert(raw, id.clone());
     id
 }
 
@@ -317,7 +318,7 @@ pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
         .map(|(k, ch)| (k.clone(), super::fingerprint(ch)))
         .collect();
     {
-        let last = ondemand_fp().lock().unwrap();
+        let last = ondemand_fp().lock();
         if *last == Some(fp.clone()) {
             return; // 无变化
         }
@@ -350,7 +351,7 @@ pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
             gateway.register_dynamic_tool(spec, exec);
         }
     }
-    *ondemand_fp().lock().unwrap() = Some(fp);
+    *ondemand_fp().lock() = Some(fp);
 }
 
 /// 全局工具执行入口的兜底：工具已注册但通道已停用/删除（注册表尚未收敛）时
@@ -964,7 +965,7 @@ async fn tool_comments(
             if replies.is_empty() {
                 return Ok(format!("没有更多评论（第 {page} 页为空；共 {total} 条）"));
             }
-            let mut st_lock = st.lock().unwrap();
+            let mut st_lock = st.lock();
             let mut body = format!("评论区（第 {page} 页，热度排序）共 {total} 条：\n");
             for r in &replies {
                 let id = r
@@ -1031,7 +1032,7 @@ async fn tool_comments(
                 return Ok(format!("没有更多评论（第 {page} 页为空）"));
             }
             let window: Vec<Value> = items.into_iter().skip(start).take(COMMENTS_PAGE).collect();
-            let mut st_lock = st.lock().unwrap();
+            let mut st_lock = st.lock();
             let mut body = format!("评论区（第 {page} 页）：\n");
             for x in &window {
                 let Some(sn) = x.pointer("/snippet/topLevelComment") else {
@@ -1481,19 +1482,17 @@ fn fmt_mmss(sec: u64) -> String {
 pub(crate) fn register_act_gate(session_id: &str, gate: ActGate) {
     act_gates()
         .lock()
-        .unwrap()
         .insert(session_id.to_string(), Arc::new(gate));
 }
 
 pub(crate) fn drop_act_gate(session_id: &str) {
-    act_gates().lock().unwrap().remove(session_id);
+    act_gates().lock().remove(session_id);
 }
 
 /// act 后回取当日计数（runner 同步回 VideoState）
 pub(crate) fn act_gate_count(session_id: &str) -> u32 {
     act_gates()
         .lock()
-        .unwrap()
         .get(session_id)
         .map(|g| g.actions_today.load(std::sync::atomic::Ordering::SeqCst))
         .unwrap_or(0)
@@ -1573,7 +1572,7 @@ async fn build_ondemand_gate(
 /// 点播会话配额即时回写：点播无 runner 收束，计数须当场落 VideoState。
 /// 轮次会话（act_gates 有注册）由 ask_agent 收束时统一回写，此处跳过。
 fn sync_ondemand_quota(core: &Arc<Core>, ch: &Channel, session: &str, gate: &ActGate) {
-    if act_gates().lock().unwrap().contains_key(session) {
+    if act_gates().lock().contains_key(session) {
         return; // 轮次会话：收束时统一回写
     }
     let mut state = super::VideoState::load(core, &ch.id);
@@ -1601,7 +1600,7 @@ async fn tool_act(
     }
     // 闸门获取：轮次会话有注册闸门；点播会话（非轮次）按通道配置 + 会话来源角色
     // 即时构建一次性闸门——判权失败直接拒绝并给绑定/提权指引。
-    let registered = act_gates().lock().unwrap().get(session).cloned();
+    let registered = act_gates().lock().get(session).cloned();
     let gate = match registered {
         Some(g) => g, // 轮次闸门（ask_agent 注册；随轮次收束清理）
         None => match build_ondemand_gate(core, ch, session).await? {
@@ -1634,7 +1633,7 @@ async fn tool_act(
             return Ok("已拒绝：本通道未开启回复（config.reply=false）".into());
         }
         // 闸门 1：回复目标必须来自本会话已见评论（防编造 id）
-        if !st.lock().unwrap().seen_comments.contains(&reply_target) {
+        if !st.lock().seen_comments.contains(&reply_target) {
             return Ok(format!(
                 "已拒绝：目标评论未见（id={reply_target} 不在本会话已获取的评论集合内）。请先用 video__comments 获取评论再回复"
             ));
@@ -1712,7 +1711,7 @@ async fn tool_act(
         gate.actions_today
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         sync_ondemand_quota(core, ch, session, &gate);
-        st.lock().unwrap().acted += 1;
+        st.lock().acted += 1;
         return Ok(format!(
             "[dry-run] 拟{}：{}{}｜目标视频 {}（{}）\n（dry-run 模式开启，未发送至平台；正式发送请在通道配置关闭 dryRun）",
             kind, text,
@@ -1750,7 +1749,7 @@ async fn tool_act(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     sync_ondemand_quota(core, ch, session, &gate);
     {
-        let mut s = st.lock().unwrap();
+        let mut s = st.lock();
         s.acted += 1;
         s.acted_notes.push(format!(
             "{kind}：{}",
@@ -1880,7 +1879,7 @@ async fn create_act_approval(
             "executed" => {
                 gate.actions_today
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                st.lock().unwrap().acted += 1;
+                st.lock().acted += 1;
                 return Ok(format!(
                     "{kind}已被用户批准并代发：{}",
                     latest.result.unwrap_or_default()
@@ -1894,7 +1893,6 @@ async fn create_act_approval(
             }
             "denied" => {
                 st.lock()
-                    .unwrap()
                     .skipped
                     .push(format!("{kind}被用户拒绝（审批单 {}）", req.id));
                 return Ok(format!("{kind}被用户拒绝（审批单 {}），本轮跳过", req.id));
@@ -1961,7 +1959,7 @@ mod tests {
         let a = resolve_video_id(&st, "BV1xx411c7mD").await;
         let b = resolve_video_id(&st, "BV1xx411c7mD").await;
         assert_eq!(a, b);
-        assert_eq!(st.lock().unwrap().resolved_ids.len(), 1, "同输入只解析一次");
+        assert_eq!(st.lock().resolved_ids.len(), 1, "同输入只解析一次");
         drop_session("test-resolve-cache");
     }
 

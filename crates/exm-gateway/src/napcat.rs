@@ -13,7 +13,8 @@ use crate::platform::{
 use exm_core::Core;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
@@ -66,7 +67,7 @@ fn last_login_ok() -> &'static Mutex<HashMap<String, u64>> {
 /// 事件到达打点（on_text 收到 message 事件时调用）
 fn note_event(ch_id: &str) {
     let now = exm_core::types::now_ms();
-    let mut m = last_event_at().lock().unwrap();
+    let mut m = last_event_at().lock();
     let was_silent = m
         .get(ch_id)
         .map(|t| now.saturating_sub(*t) > 30 * 60 * 1000)
@@ -82,19 +83,18 @@ fn note_event(ch_id: &str) {
 fn note_connected(ch_id: &str) {
     last_event_at()
         .lock()
-        .unwrap()
         .insert(ch_id.to_string(), exm_core::types::now_ms());
-    last_degraded_log().lock().unwrap().remove(ch_id);
+    last_degraded_log().lock().remove(ch_id);
     // 登录确认打点同步清：新连接的登录态未知，等 exm-login 回包重新确认
-    last_login_ok().lock().unwrap().remove(ch_id);
+    last_login_ok().lock().remove(ch_id);
 }
 
 /// 连接回收时清打点（通道删除/停用/重建）
 fn note_conn_reset(ch_id: &str) {
-    last_event_at().lock().unwrap().remove(ch_id);
-    last_degraded_log().lock().unwrap().remove(ch_id);
-    last_login_ok().lock().unwrap().remove(ch_id);
-    last_probe_ok().lock().unwrap().remove(ch_id);
+    last_event_at().lock().remove(ch_id);
+    last_degraded_log().lock().remove(ch_id);
+    last_login_ok().lock().remove(ch_id);
+    last_probe_ok().lock().remove(ch_id);
 }
 
 /// supervisor 对账环的事件面检查：连结后 30min 零事件 → degraded（限频每小时一条日志）。
@@ -102,7 +102,7 @@ fn note_conn_reset(ch_id: &str) {
 /// 登录态分流（5.4 误报修复）：最近 10min 内确认过登录在线 → 零事件大概率是
 /// 「登录轮换期 / 无人说话」，报等待登录（info）而非事件面未挂载（degraded + 重启建议）。
 fn check_event_silence(ch_id: &str) {
-    let Some(t0) = last_event_at().lock().unwrap().get(ch_id).copied() else {
+    let Some(t0) = last_event_at().lock().get(ch_id).copied() else {
         return; // 未连结过：无基线不告警
     };
     let now = exm_core::types::now_ms();
@@ -112,7 +112,6 @@ fn check_event_silence(ch_id: &str) {
     // 登录态先验：近期确认在线 → 等待登录轮换完成（不降级、不建议重启）
     let login_recent = last_login_ok()
         .lock()
-        .unwrap()
         .get(ch_id)
         .map(|t| now.saturating_sub(*t) <= 10 * 60 * 1000)
         .unwrap_or(false);
@@ -129,11 +128,10 @@ fn check_event_silence(ch_id: &str) {
     // 探测也无回包 = 协议端口假死（容器假活），指引重启 NapCat 容器。
     let probe_recent = last_probe_ok()
         .lock()
-        .unwrap()
         .get(ch_id)
         .map(|t| now.saturating_sub(*t) <= 15 * 60 * 1000)
         .unwrap_or(false);
-    let mut logs = last_degraded_log().lock().unwrap();
+    let mut logs = last_degraded_log().lock();
     if let Some(last) = logs.get(ch_id) {
         if now.saturating_sub(*last) < 60 * 60 * 1000 {
             return; // 一小时内已告警过：限频
@@ -186,7 +184,7 @@ async fn reconcile(core: &Arc<Core>) {
         .filter(|c| c.kind == "napcat" && c.enabled && c.cfg("url").is_some())
         .collect();
 
-    let mut guards = conns().lock().unwrap();
+    let mut guards = conns().lock();
     let stale: Vec<String> = guards
         .iter()
         .filter(|(id, c)| match desired.iter().find(|d| &d.id == *id) {
@@ -344,7 +342,6 @@ async fn on_text(
         // = 协议端口真活（WS 层活着但协议端假死的容器假活拿不到回包）
         last_probe_ok()
             .lock()
-            .unwrap()
             .insert(ch.id.clone(), exm_core::types::now_ms());
         if echo == "exm-login" {
             let nick = v
@@ -360,11 +357,10 @@ async fn on_text(
             let confirmed = uid != 0 && !nick.is_empty() && nick != "?";
             // 日志口径：仅首连（打点表中该通道尚无在线记录）打「已连结」全量日志；
             // 5min 周期探测的回包静默续打点——否则探测每次都刷屏连接日志（生产实测噪音）
-            let first = !last_login_ok().lock().unwrap().contains_key(&ch.id);
+            let first = !last_login_ok().lock().contains_key(&ch.id);
             if confirmed {
                 last_login_ok()
                     .lock()
-                    .unwrap()
                     .insert(ch.id.clone(), exm_core::types::now_ms());
             }
             if confirmed && first {
@@ -887,12 +883,10 @@ mod tests {
         // 拨回 31 分钟前（超窗）
         last_event_at()
             .lock()
-            .unwrap()
             .insert(id.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
         // 在线确认 5 分钟前（10min 窗口内）→ 不降级，报等待登录
         last_login_ok()
             .lock()
-            .unwrap()
             .insert(id.clone(), exm_core::types::now_ms() - 5 * 60 * 1000);
         check_event_silence(&id);
         let st = crate::platform::status_of(&id);
@@ -909,11 +903,9 @@ mod tests {
         note_connected(&id2);
         last_event_at()
             .lock()
-            .unwrap()
             .insert(id2.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
         last_login_ok()
             .lock()
-            .unwrap()
             .insert(id2.clone(), exm_core::types::now_ms() - 15 * 60 * 1000);
         check_event_silence(&id2);
         assert_eq!(
@@ -935,11 +927,9 @@ mod tests {
         note_connected(&id);
         last_event_at()
             .lock()
-            .unwrap()
             .insert(id.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
         last_probe_ok()
             .lock()
-            .unwrap()
             .insert(id.clone(), exm_core::types::now_ms() - 5 * 60 * 1000);
         check_event_silence(&id);
         let st = crate::platform::status_of(&id);
@@ -964,7 +954,6 @@ mod tests {
         note_connected(&id2);
         last_event_at()
             .lock()
-            .unwrap()
             .insert(id2.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
         // 不写 last_probe_ok：探测从未拿到回包
         check_event_silence(&id2);
@@ -1003,7 +992,6 @@ mod tests {
         // 基线拨回 31 分钟前：超窗 → degraded
         last_event_at()
             .lock()
-            .unwrap()
             .insert(id.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
         check_event_silence(&id);
         assert_eq!(
@@ -1025,7 +1013,7 @@ mod tests {
 
         // 回收清打点（不残留到下个同名通道）
         note_conn_reset(&id);
-        assert!(last_event_at().lock().unwrap().get(&id).is_none());
+        assert!(last_event_at().lock().get(&id).is_none());
     }
 
     /// 文本提取：数组段拼接 text；at 段转写为 `@<名字|qq>` 内联（@ 语义不丢）

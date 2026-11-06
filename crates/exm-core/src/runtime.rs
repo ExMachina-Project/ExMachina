@@ -984,6 +984,7 @@ mod timeout_tests {
 #[cfg(test)]
 mod tool_loop_tests {
     use super::*;
+    use parking_lot::Mutex;
     use crate::config::SecurityConfig;
     use crate::provider::{ChatResponse, FailoverState, ToolCall};
     use crate::types::{DispatchBoundary, DispatchConstraints, DispatchInput, SyncStatus};
@@ -993,14 +994,14 @@ mod tool_loop_tests {
     struct ScriptedProvider {
         step: AtomicUsize,
         /// 每步收到的消息列表快照（role 序列），供回灌断言
-        seen_roles: std::sync::Mutex<Vec<Vec<String>>>,
+        seen_roles: Mutex<Vec<Vec<String>>>,
     }
 
     impl ScriptedProvider {
         fn new() -> Self {
             ScriptedProvider {
                 step: AtomicUsize::new(0),
-                seen_roles: std::sync::Mutex::new(Vec::new()),
+                seen_roles: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1030,7 +1031,6 @@ mod tool_loop_tests {
         ) -> anyhow::Result<ChatResponse> {
             self.seen_roles
                 .lock()
-                .unwrap()
                 .push(req.messages.iter().map(|m| m.role.clone()).collect());
             let step = self.step.fetch_add(1, Ordering::SeqCst);
             let s = match step {
@@ -1198,7 +1198,7 @@ mod tool_loop_tests {
         );
 
         // 工具结果以 role=tool 回灌，assistant 的 tool_calls 有被记录
-        let seen = provider.seen_roles.lock().unwrap();
+        let seen = provider.seen_roles.lock();
         assert!(seen.len() >= 4, "应有多轮交互，实际 {} 轮", seen.len());
         let last = seen.last().unwrap();
         assert!(
@@ -1459,6 +1459,7 @@ mod soft_landing_tests {
 #[cfg(test)]
 mod search_discipline_tests {
     use super::*;
+    use parking_lot::Mutex;
     use crate::config::SearchConfig;
     use crate::provider::{ChatRequest, ChatResponse, StreamDelta};
     use crate::types::AgentDefinition;
@@ -1466,7 +1467,7 @@ mod search_discipline_tests {
 
     /// 回声替身：记录看到的系统提示，直接产出终文本
     struct PromptProbeProvider {
-        seen: std::sync::Mutex<String>,
+        seen: Mutex<String>,
     }
 
     #[async_trait::async_trait]
@@ -1476,7 +1477,7 @@ mod search_discipline_tests {
         }
         async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
             if let Some(m) = req.messages.first() {
-                *self.seen.lock().unwrap() = m.content.clone();
+                *self.seen.lock() = m.content.clone();
             }
             Ok(ChatResponse {
                 content: "收到".into(),
@@ -1557,7 +1558,7 @@ mod search_discipline_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 搜索就绪_系统提示含纪律() {
-        let probe = Arc::new(PromptProbeProvider { seen: std::sync::Mutex::new(String::new()) });
+        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
         let (rt, base) = probe_rig(probe.clone(), tavily(true));
         let chain = crate::provider::ModelChain {
             candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
@@ -1567,7 +1568,7 @@ mod search_discipline_tests {
             .chat_execute(&def(), "系统提示".into(), vec![], "s-sd1", "t", chain, false, ToolScope::Tools, |_d| {})
             .await
             .unwrap();
-        let seen = probe.seen.lock().unwrap().clone();
+        let seen = probe.seen.lock().clone();
         assert!(seen.contains("主动搜索纪律"), "就绪+开启应注入: {seen}");
         assert!(seen.contains("时效性"), "纪律内容含行为触发条件");
         let _ = std::fs::remove_dir_all(&base);
@@ -1575,7 +1576,7 @@ mod search_discipline_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 开关关闭_零注入() {
-        let probe = Arc::new(PromptProbeProvider { seen: std::sync::Mutex::new(String::new()) });
+        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
         let (rt, base) = probe_rig(probe.clone(), tavily(false));
         let chain = crate::provider::ModelChain {
             candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
@@ -1585,14 +1586,14 @@ mod search_discipline_tests {
             .chat_execute(&def(), "系统提示".into(), vec![], "s-sd2", "t", chain, false, ToolScope::Tools, |_d| {})
             .await
             .unwrap();
-        let seen = probe.seen.lock().unwrap().clone();
+        let seen = probe.seen.lock().clone();
         assert!(!seen.contains("主动搜索纪律"), "关闭后不应注入: {seen}");
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 仅聊天档_零注入() {
-        let probe = Arc::new(PromptProbeProvider { seen: std::sync::Mutex::new(String::new()) });
+        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
         let (rt, base) = probe_rig(probe.clone(), tavily(true));
         let chain = crate::provider::ModelChain {
             candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
@@ -1603,7 +1604,7 @@ mod search_discipline_tests {
             .chat_execute(&def(), "系统提示".into(), vec![], "s-sd3", "t", chain, false, ToolScope::Chat, |_d| {})
             .await
             .unwrap();
-        let seen = probe.seen.lock().unwrap().clone();
+        let seen = probe.seen.lock().clone();
         assert!(!seen.contains("主动搜索纪律"), "Chat 档不应注入: {seen}");
         let _ = std::fs::remove_dir_all(&base);
     }

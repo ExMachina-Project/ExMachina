@@ -670,6 +670,7 @@ dependencies = [
  "exm-gateway",
  "libc",
  "owo-colors",
+ "parking_lot",
  "ratatui",
  "serde",
  "serde_json",

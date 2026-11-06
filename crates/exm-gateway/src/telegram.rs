@@ -8,7 +8,8 @@ use crate::platform::{
 };
 use exm_core::Core;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::{Arc, OnceLock};
 use tokio::task::JoinHandle;
 
 struct Poller {
@@ -54,7 +55,7 @@ async fn reconcile(core: &Arc<Core>) {
         })
         .collect();
 
-    let mut guards = pollers().lock().unwrap();
+    let mut guards = pollers().lock();
     // 回收：已删除 / 停用 / token 变更 / 已退出的账号
     let stale: Vec<String> = guards
         .iter()
@@ -466,7 +467,7 @@ async fn tg_send_media(token: &str, chat_id: i64, item: MediaItem) -> bool {
 async fn bot_info(token: &str) -> (String, String) {
     static CACHE: OnceLock<Mutex<HashMap<String, (String, String)>>> = OnceLock::new();
     let map = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(v) = map.lock().unwrap().get(token) {
+    if let Some(v) = map.lock().get(token) {
         return v.clone();
     }
     let info = match reqwest::Client::new()
@@ -490,7 +491,7 @@ async fn bot_info(token: &str) -> (String, String) {
         },
         Err(_) => (String::new(), String::new()),
     };
-    map.lock().unwrap().insert(token.to_string(), info.clone());
+    map.lock().insert(token.to_string(), info.clone());
     info
 }
 
