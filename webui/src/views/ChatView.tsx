@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
 import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
-import { GuideCard } from "../components/GuideCard";
+
 import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
 import { agentIdEn } from "../models";
 import { useExm, type TimelineItem } from "../store";
@@ -868,9 +868,6 @@ export function ChatView(): React.ReactElement {
 
       {/* 右侧：消息流 + 输入 */}
       <div className="chat-wrap">
-        {/* 空态引导卡（onboarding-selfcheck）：自检有 error/warn 缺口时置顶指引；
-            error 不可关（硬缺口），warn 可关且关闭态 localStorage 持久 */}
-        <GuideCard />
         <div className="console-bar">
           <span className="console-title">{t("nav.chat")}</span>
           <span className="page-en">CHAT</span>
