@@ -8,7 +8,7 @@
  *  右侧选中流的绑定会话消息流（StatementList 只读渲染）。窄屏单列切换。
  *  数据与通道侧/WebUI 同源（/channels/flows 系端点 + /sessions/:id/messages）。
  */
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Skeleton, Tag } from "antd";
 import {
   ArrowLeftOutlined,
@@ -54,6 +54,8 @@ export function FlowsView(): React.ReactElement {
   /** 流内会话切换面板（每流独立展开态） */
   const [sessionsFor, setSessionsFor] = useState<string | null>(null);
   const [flowSessions, setFlowSessions] = useState<{ id: string; label: string; active: boolean }[]>([]);
+  /** 消息流容器：加载/新消息后滚到底（只读页最新消息在底部） */
+  const msgBoxRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -111,6 +113,10 @@ export function FlowsView(): React.ReactElement {
     window.addEventListener("exm:bound-refresh", reloadBound as EventListener);
     return () => window.removeEventListener("exm:bound-refresh", reloadBound as EventListener);
   }, [reloadBound]);
+  /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新） */
+  useEffect(() => {
+    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
+  }, [messages, msgLoading, selected?.id]);
 
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
   const openFlow = (f: ChannelFlow) => {
@@ -287,7 +293,7 @@ export function FlowsView(): React.ReactElement {
                   : t("flows.unbound")}
               </span>
             </div>
-            <div className="flows-messages">
+            <div className="flows-messages" ref={msgBoxRef}>
               {msgLoading && <Skeleton active paragraph={{ rows: 4 }} />}
               {!msgLoading && !selected.activeSession && (
                 <Empty description={t("flows.unboundHint")} style={{ marginTop: 80 }} />
