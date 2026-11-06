@@ -21,6 +21,8 @@ import {
   UnorderedListOutlined,
   AppstoreAddOutlined,
   DeploymentUnitOutlined,
+  WechatOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { api } from "./api";
 import { useExm } from "./store";
@@ -38,6 +40,8 @@ import { TelemetryBar } from "./components/TelemetryBar";
 const LoginView = lazy(() => import("./views/LoginView").then((m) => ({ default: m.LoginView })));
 const SetupKeyView = lazy(() => import("./views/SetupKeyView").then((m) => ({ default: m.SetupKeyView })));
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
+const FlowsView = lazy(() => import("./views/FlowsView").then((m) => ({ default: m.FlowsView })));
+const TasksView = lazy(() => import("./views/TasksView").then((m) => ({ default: m.TasksView })));
 const SessionsView = lazy(() => import("./views/SessionsView").then((m) => ({ default: m.SessionsView })));
 const ModelsView = lazy(() => import("./views/ModelsView").then((m) => ({ default: m.ModelsView })));
 const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default: m.GraphView })));
@@ -72,6 +76,8 @@ function ViewSuspense({ children }: { children: React.ReactNode }): React.ReactE
 
 type ViewKey =
   | "chat"
+  | "flows"
+  | "tasks"
   | "sessions"
   | "graph"
   | "agent"
@@ -90,7 +96,7 @@ type ViewKey =
 
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
-  "chat", "sessions", "agent", "groups", "nexus", "graph", "automations",
+  "chat", "flows", "tasks", "sessions", "agent", "groups", "nexus", "graph", "automations",
   "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
 ];
 
@@ -114,10 +120,12 @@ export const NAV_ITEMS: {
   experimental?: boolean;
 }[] = [
   { key: "chat", en: "CHAT", labelKey: "nav.chat", icon: <MessageOutlined /> },
-  { key: "sessions", en: "SESSIONS", labelKey: "nav.sessions", icon: <UnorderedListOutlined /> },
+  { key: "flows", en: "FLOWS", labelKey: "nav.flows", icon: <WechatOutlined /> },
+  { key: "tasks", en: "TASKS", labelKey: "nav.tasks", icon: <ThunderboltOutlined /> },
   { key: "agent", en: "AGENTS", labelKey: "nav.agent", icon: <UserOutlined /> },
   { key: "groups", en: "GROUPS", labelKey: "nav.groups", icon: <TeamOutlined /> },
   { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined />, experimental: true },
+  { key: "sessions", en: "SESSIONS", labelKey: "nav.sessions", icon: <UnorderedListOutlined /> },
   { key: "graph", en: "DAG", labelKey: "nav.dag", icon: <ApartmentOutlined /> },
   { key: "automations", en: "CRON", labelKey: "nav.cron", icon: <ClockCircleOutlined /> },
   { key: "skills", en: "SKILLS", labelKey: "nav.skills", icon: <DeploymentUnitOutlined /> },
@@ -371,6 +379,8 @@ export default function App(): React.ReactElement {
           {/* key 驱动：切视图即重挂载 → 入场动效（淡入 + 上移）每次都完整播放 */}
           <div className="view-stage" key={view}>
             {view === "chat" && <ChatView />}
+            {view === "flows" && <FlowsView />}
+            {view === "tasks" && <TasksView />}
             {view === "sessions" && <SessionsView />}
             {view === "graph" && <GraphView />}
             {view === "agent" && <SinglesView />}

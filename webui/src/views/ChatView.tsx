@@ -6,6 +6,7 @@ import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 
 import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
 import { agentIdEn } from "../models";
+import { isAutoSessionTitle } from "../session";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
 import { relativeTime } from "../time";
@@ -26,7 +27,7 @@ import { SkeletonList } from "../components/SkeletonList";
 import { OrbitRings } from "../components/OrbitRings";
 import { TurnOps } from "../components/HistoryOps";
 import { Emblem } from "../components/Emblem";
-import { FlowRailSection } from "../components/FlowRailSection";
+
 import type { ChatMessage } from "../types";
 
 function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
@@ -276,8 +277,6 @@ export function ChatView(): React.ReactElement {
   });
   const screen: "list" | "thread" = narrow ? screenPref : "thread";
   const setScreen = setScreenPref;
-  /** 会话类型过滤（2.2）：all / normal / channel */
-  const [sessionKind, setSessionKind] = useState("all");
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const [usage, setUsage] = useState<{
     estimate: number;
@@ -527,9 +526,10 @@ export function ChatView(): React.ReactElement {
   const visibleSessions = useMemo(
     () =>
       sessions
-        .filter((s) =>
-          sessionKind === "all" ? true : sessionKind === "channel" ? s.title.startsWith("channel:") : !s.title.startsWith("channel:"),
-        )
+        // 对话页 = 用户直接发起的会话（信息架构 2026-11）：通道流会话（channel:）
+        // 与系统任务会话（job-* / 心跳巡检）不在这里——分别在「聊天」「任务」页，
+        // 无输入框；对话页每条会话都可输入。
+        .filter((s) => !s.title.startsWith("channel:") && !isAutoSessionTitle(s.title))
         .filter(
           (s) =>
             !sessionFilter ||
@@ -538,7 +538,7 @@ export function ChatView(): React.ReactElement {
             // 来源名（流显示名·发送者）一并可搜：「萝莉」「张三」都能命中
             (s.originLabel ?? "").toLowerCase().includes(sessionFilter.toLowerCase()),
         ),
-    [sessions, sessionKind, sessionFilter],
+    [sessions, sessionFilter],
   );
 
   /** 分组：置顶 / 今天 / 昨天 / 更早（置顶常驻列表头，不受时间分组沉底影响） */
@@ -672,7 +672,7 @@ export function ChatView(): React.ReactElement {
           )}
         </div>
         {/* 聊天流（chat flow）：外部 IM 的对话单元——一个群/私聊一条流，点流跳到绑定会话 */}
-        <FlowRailSection t={t} />
+        {/* 聊天流已迁「聊天」页（信息架构 2026-11：对话页只留用户直连会话） */}
         <div className="rail-section grow">
           {/* 工具条：搜索 + 类型过滤（同行紧凑排布，见样式表） */}
           <div className="rail-toolbar">
@@ -684,19 +684,6 @@ export function ChatView(): React.ReactElement {
               className="session-search"
               value={sessionFilter}
               onChange={(e) => setSessionFilter(e.target.value)}
-            />
-            {/* 会话类型过滤（2.2）：全部 / 普通 / 通道（segment 紧凑形态，宽度自适应） */}
-            <Select
-              size="small"
-              value={sessionKind}
-              onChange={setSessionKind}
-              className="session-kind"
-              popupMatchSelectWidth={false}
-              options={[
-                { value: "all", label: t("chat.kind.all") },
-                { value: "normal", label: t("chat.kind.normal") },
-                { value: "channel", label: t("chat.kind.channel") },
-              ]}
             />
             {/* 会话管理入口（session-management）：管理职能解耦到管理页，左栏留直达 */}
             <Button
