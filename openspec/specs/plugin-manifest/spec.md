@@ -7,7 +7,7 @@
 
 ### Requirement: 插件目录与清单布局
 
-仓库根 `plugins/` 目录（独立于 `entities/`），每个插件一个子目录，内含必需的 `plugin.json` 清单。插件子目录内可含插件自有资源（提示词、技能 JSON、可执行文件）。
+插件 SHALL 布局于仓库根 `plugins/` 目录（独立于 `entities/`），每个插件一个子目录，内含必需的 `plugin.json` 清单。插件子目录内可含插件自有资源（提示词、技能 JSON、可执行文件）。
 
 #### Scenario: 合法清单被加载
 - **WHEN** Core 启动或热装载扫描 `plugins/`，某子目录含可解析的 `plugin.json` 且 `id` 唯一

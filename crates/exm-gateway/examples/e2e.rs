@@ -3663,6 +3663,91 @@ async fn main() -> anyhow::Result<()> {
         c.check("自检：error 项必附指引", err_hint_ok);
     }
 
+    // ---- Nexus 拓扑与连边（nexus-topology-admin）：graph 聚合 + bind/unbind + 冲突语义 ----
+    {
+        // 造连结体 + 智能体
+        let r: reqwest::Response = client
+            .post(format!("{base}/nexus/links"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({
+                "id": "e2e-link", "name": "E2E 连结", "kind": "exmachina",
+                "endpoint": "http://127.0.0.1:59999", "enabled": true
+            }))
+            .send()
+            .await?;
+        c.check("连结体：创建", r.status().as_u16() == 200);
+
+        let g: serde_json::Value = client
+            .get(format!("{base}/nexus/graph"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "拓扑：节点含新建连结体",
+            g["nodes"].as_array().map(|a| a.iter().any(|n| n["id"] == "e2e-link")).unwrap_or(false),
+        );
+
+        // bind 个体 → 边出现
+        let r: serde_json::Value = client
+            .put(format!("{base}/nexus/edges"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "bind", "agentId": "machina", "linkId": "e2e-link" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("连边：绑定成功", r["ok"] == true);
+        let g: serde_json::Value = client
+            .get(format!("{base}/nexus/graph"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "拓扑：边出现",
+            g["edges"].as_array().map(|a| a.iter().any(|e| e["agentId"] == "machina" && e["linkId"] == "e2e-link")).unwrap_or(false),
+        );
+
+        // 重复 bind → 409
+        let r: reqwest::Response = client
+            .put(format!("{base}/nexus/edges"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "bind", "agentId": "machina", "linkId": "e2e-link" }))
+            .send()
+            .await?;
+        c.check("连边：重复绑定 409", r.status().as_u16() == 409);
+
+        // unbind → 边消失
+        let r: reqwest::Response = client
+            .put(format!("{base}/nexus/edges"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "unbind", "agentId": "machina", "linkId": "e2e-link" }))
+            .send()
+            .await?;
+        c.check("连边：解绑成功", r.status().as_u16() == 200);
+        let g: serde_json::Value = client
+            .get(format!("{base}/nexus/graph"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "拓扑：边已清",
+            g["edges"].as_array().map(|a| !a.iter().any(|e| e["linkId"] == "e2e-link")).unwrap_or(false),
+        );
+
+        // 清理
+        let _: reqwest::Response = client
+            .delete(format!("{base}/nexus/links/e2e-link"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?;
+    }
+
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {

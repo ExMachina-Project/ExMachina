@@ -18,6 +18,12 @@
     "shot": "docs/审计/截图/2026-11-06/models.png"
   },
   {
+    "view": "nexus",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-06/nexus.png"
+  },
+  {
     "view": "channels",
     "ok": true,
     "missing": [],
