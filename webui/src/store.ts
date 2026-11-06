@@ -1025,6 +1025,8 @@ export const useExm = create<ExmState>((set, get) => ({
           const status = String(p.status ?? "");
           fireNotificationLocal(`定时任务${status === "done" ? "完成" : "失败"}：${name}`, String(p.summary ?? status), undefined);
         }
+        // 任务会话列表刷新（任务页监听）：cron 收束可能新建/更新任务会话
+        window.dispatchEvent(new Event("exm:flows-refresh"));
         set({
           timelineSession: evt.sessionId,
           timeline: [...get().timeline, { kind: "cron", text: tr("store.tl.cron", { name: String(p.jobName ?? ""), status: String(p.status ?? "") }) }],
