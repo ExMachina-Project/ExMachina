@@ -3733,7 +3733,6 @@ mark.search-hit {
 }
 
 /* ---- 空态引导卡（onboarding-selfcheck）：置顶体检指引，error 不可关 ---- */
-.guide-card { margin: 0 0 10px; border-radius: 6px; }
 .guide-item { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; line-height: 1.7; }
 .guide-item b { font-weight: 600; }
 .guide-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; }
