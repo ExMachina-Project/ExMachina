@@ -956,6 +956,8 @@ export const useExm = create<ExmState>((set, get) => ({
       case "run.finished": {
         // 流面板未读刷新（spec experience-iteration）：任何会话收束都可能给流加未读
         window.dispatchEvent(new Event("exm:flows-refresh"));
+        // 只读页实时刷新（聊天/任务页旁观视角）：携带收束会话 id，仅呈现中的会话重拉消息
+        window.dispatchEvent(new CustomEvent<string | undefined>("exm:bound-refresh", { detail: evt.sessionId }));
         // 浏览器通知（web-notifications）：非当前会话或页面隐藏时提醒
         {
           const prefs = loadNotifyPrefs();

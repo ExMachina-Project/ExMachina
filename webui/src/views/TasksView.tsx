@@ -34,6 +34,11 @@ export function TasksView(): React.ReactElement {
     try {
       const all = await api.listAllSessions();
       setSessions(all.filter((s) => !s.archivedAt && isAutoSessionTitle(s.title)));
+      // 跨页跳转落地：全局会话是任务会话且尚未选中 → 直接选中（右侧立即呈现）
+      const cur = useExm.getState().sessionId;
+      if (!cur) return;
+      const hit = all.find((s) => s.id === cur && !s.archivedAt && isAutoSessionTitle(s.title));
+      setSelected((prev) => prev ?? hit ?? null);
     } catch {
       // 网关不可用：空态
     } finally {
@@ -62,6 +67,16 @@ export function TasksView(): React.ReactElement {
       .catch(() => setMessages([]))
       .finally(() => setMsgLoading(false));
   }, [selId]);
+  /** 任务会话新轮次收束 → 静默重拉（任务页盯运行进度不需要手动刷新） */
+  const reloadTask = useCallback((e?: Event) => {
+    if (!selId) return;
+    if (e && "detail" in e && (e as CustomEvent<string | undefined>).detail && (e as CustomEvent<string | undefined>).detail !== selId) return;
+    void api.messages(selId).then(setMessages).catch(() => undefined);
+  }, [selId]);
+  useEffect(() => {
+    window.addEventListener("exm:bound-refresh", reloadTask as EventListener);
+    return () => window.removeEventListener("exm:bound-refresh", reloadTask as EventListener);
+  }, [reloadTask]);
 
   const openTask = (s: Session) => {
     setSelected(s);

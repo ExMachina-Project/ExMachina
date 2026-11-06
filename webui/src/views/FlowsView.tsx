@@ -60,8 +60,13 @@ export function FlowsView(): React.ReactElement {
       const [f, c] = await Promise.all([api.listChannelFlows(), api.listChannels()]);
       setFlows(f);
       setChannels(c);
-      // 选中态纠偏：当前选中流不存在（被删）→ 回落第一条
-      setSelected((prev) => prev && f.some((x) => x.id === prev.id) ? prev : f[0] ?? null);
+      // 选中态纠偏：当前选中流不存在（被删）→ 回落；优先选中绑定会话与
+      // 全局会话一致的流（跨页跳转 requestNav 落地时右侧直接呈现目标流）
+      setSelected((prev) => {
+        if (prev && f.some((x) => x.id === prev.id)) return prev;
+        const cur = useExm.getState().sessionId;
+        return f.find((x) => x.activeSession && x.activeSession === cur) ?? f[0] ?? null;
+      });
     } catch {
       // 接口不可用（无通道部署）：空态呈现
     } finally {
@@ -95,6 +100,17 @@ export function FlowsView(): React.ReactElement {
       .catch(() => setMessages([]))
       .finally(() => setMsgLoading(false));
   }, [activeSid]);
+  /** 绑定会话新轮次收束（run.finished）→ 静默重拉消息（聊天页旁观视角保持实时） */
+  const reloadBound = useCallback((e?: Event) => {
+    const sid = selected?.activeSession;
+    if (!sid) return;
+    if (e && "detail" in e && (e as CustomEvent<string | undefined>).detail && (e as CustomEvent<string | undefined>).detail !== sid) return;
+    void api.messages(sid).then(setMessages).catch(() => undefined);
+  }, [selected?.activeSession]);
+  useEffect(() => {
+    window.addEventListener("exm:bound-refresh", reloadBound as EventListener);
+    return () => window.removeEventListener("exm:bound-refresh", reloadBound as EventListener);
+  }, [reloadBound]);
 
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
   const openFlow = (f: ChannelFlow) => {
