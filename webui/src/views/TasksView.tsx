@@ -81,7 +81,7 @@ export function TasksView(): React.ReactElement {
   }, [reloadTask]);
   /** 消息加载完成/更新 → 滚到底（盯运行进度默认关注最新） */
   useEffect(() => {
-    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
+    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, msgLoading, selected?.id]);
 
   const openTask = (s: Session) => {
