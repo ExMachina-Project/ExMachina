@@ -20,6 +20,7 @@ const CRON_TEMPLATES: { expr: string; labelKey: "cron.tpl.daily" | "cron.tpl.wee
 export function AutomationsView(): React.ReactElement {
   const t = useT();
   const { groups, activeGroup, sessions } = useExm();
+  const requestNav = useExm((st) => st.requestNav);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(false);
@@ -219,7 +220,15 @@ export function AutomationsView(): React.ReactElement {
               <span className="mono dim">{r.startedAt}</span>
             </div>
             <div className="dim">
-              {t("cron.sessionLabel")} <span className="mono">{r.sessionId.slice(0, 8)}</span> · {r.summary}
+              {t("cron.sessionLabel")}{" "}
+              <button
+                className="link-btn mono dim"
+                title={t("tasks.pickOne")}
+                onClick={() => requestNav("chat", r.sessionId)}
+              >
+                {r.sessionId.slice(0, 8)}
+              </button>{" "}
+              · {r.summary}
             </div>
           </div>
         ))}
