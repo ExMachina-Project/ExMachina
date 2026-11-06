@@ -49,6 +49,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "autoAgentBackoffMax": cfg.automation.auto_agent_backoff_max,
             "metaIntervalMin": cfg.automation.meta_interval_min,
             "flowIdleDays": cfg.automation.flow_idle_days,
+            "memoryDigestMinTurns": cfg.automation.memory_digest_min_turns,
         },
         "search": {
             "provider": cfg.search.provider,
@@ -91,6 +92,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "superAgent": cfg.experiments.super_agent,
             "autoAgent": cfg.experiments.auto_agent,
             "metaAgent": cfg.experiments.meta_agent,
+            "autoMemoryDigest": cfg.experiments.auto_memory_digest,
         },
         "mock": st.core.is_mock(),
     }))
@@ -163,6 +165,8 @@ pub(crate) struct PartialExperiments {
     auto_agent: Option<bool>,
     #[serde(default)]
     meta_agent: Option<bool>,
+    #[serde(default)]
+    auto_memory_digest: Option<bool>,
 }
 
 /// 回收站保留契约（部分更新：缺省沿用旧值；0 视为未提供回默认）
@@ -302,6 +306,8 @@ pub(crate) struct PartialAutomation {
     meta_interval_min: Option<u32>,
     #[serde(default)]
     flow_idle_days: Option<u32>,
+    #[serde(default)]
+    memory_digest_min_turns: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -385,6 +391,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         auto_agent_backoff_max: None,
         meta_interval_min: None,
         flow_idle_days: None,
+        memory_digest_min_turns: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
@@ -571,6 +578,9 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             flow_idle_days: auto
                 .flow_idle_days
                 .unwrap_or(current.automation.flow_idle_days),
+            memory_digest_min_turns: auto
+                .memory_digest_min_turns
+                .unwrap_or(current.automation.memory_digest_min_turns),
         },
         search,
         hooks,
@@ -609,6 +619,9 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 super_agent: e.super_agent.unwrap_or(current.experiments.super_agent),
                 auto_agent: e.auto_agent.unwrap_or(current.experiments.auto_agent),
                 meta_agent: e.meta_agent.unwrap_or(current.experiments.meta_agent),
+                auto_memory_digest: e
+                    .auto_memory_digest
+                    .unwrap_or(current.experiments.auto_memory_digest),
             }
         },
         ..(*current).clone()

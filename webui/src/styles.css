@@ -1035,6 +1035,7 @@ textarea.ant-input:focus,
 }
 .memory-hits { margin-top: 12px; max-height: 320px; overflow: auto; }
 .memory-reason { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.memory-debug { color: var(--muted); font-size: 12px; font-family: var(--mono); opacity: 0.9; }
 .memory-body { color: var(--text); font-size: 12.5px; }
 .memory-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; }
 .memory-filter-kinds { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
