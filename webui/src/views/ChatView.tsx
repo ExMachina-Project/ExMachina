@@ -573,12 +573,13 @@ export function ChatView(): React.ReactElement {
     return buckets.filter((b) => b.items.length > 0);
   }, [visibleSessions]);
 
-  // 桌面端初始自动选中（chat-ergonomics）：init 落在左栏首个会话时 store 会话可能
-  // 已是通道/任务会话（新 IA 过滤后不在左栏）——对齐为左栏最近会话，右侧不悬空。
-  // 窄屏跳过：列表页是主视觉，自动进会话页反而打断。
+  // 桌面端对齐选中（chat-ergonomics）：store 全局会话若不是左栏可见会话
+  // （如刚在「聊天」页打开过通道流）——对齐为左栏最近会话，右栏不残留
+  // 通道/任务会话（那两类在本页无输入语义）；窄屏跳过：列表页是主视觉。
   useEffect(() => {
     if (narrow) return;
-    if (!sessionId && sessionsLoaded && visibleSessions.length > 0) {
+    if (!sessionsLoaded || visibleSessions.length === 0) return;
+    if (!sessionId || !visibleSessions.some((s) => s.id === sessionId)) {
       void selectSession(visibleSessions[0].id);
     }
   }, [narrow, sessionId, sessionsLoaded, visibleSessions, selectSession]);
