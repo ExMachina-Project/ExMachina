@@ -84,14 +84,15 @@ pub(crate) async fn download_asset(
     }
     let root = st.core.config().workspace_root.clone();
     let candidate = root.join(raw);
-    // 路径校验与 /api/asset 同口径（相对路径 + 无 .. + canonicalize 后在工作区内）
-    let ok = std::path::Path::new(raw).is_relative()
-        && !raw.split(['/', '\\']).any(|seg| seg == "..")
-        && std::fs::canonicalize(&candidate)
-            .map(|c| c.starts_with(std::fs::canonicalize(&root).unwrap_or(root.clone())))
-            .unwrap_or(false);
-    if !ok {
+    // 路径校验与 /api/asset 同口径（相对路径 + 无 .. + 目标必须已存在于工作区内）
+    // 语义区分（REST 通用约定）：不存在的文件 → 404；路径越界（绝对路径/..）→ 403
+    let rel_ok =
+        std::path::Path::new(raw).is_relative() && !raw.split(['/', '\\']).any(|seg| seg == "..");
+    if !rel_ok {
         return (StatusCode::FORBIDDEN, "路径越界（仅允许工作区内的文件）").into_response();
+    }
+    if !candidate.exists() {
+        return (StatusCode::NOT_FOUND, "文件不存在").into_response();
     }
     let meta = match tokio::fs::metadata(&candidate).await {
         Ok(m) if m.is_file() => m,
