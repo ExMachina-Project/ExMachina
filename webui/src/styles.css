@@ -3841,3 +3841,17 @@ mark.search-hit {
   .flows-shell:not(.thread) .flows-thread { display: none; }
   .flows-rail { width: 100%; border-right: none; }
 }
+
+/* ── 会话任务图内嵌卡（graph-inline）：聊天页消息流置顶，可折叠 ── */
+.dag-inline { margin: 0 14px 8px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--bg-raise); }
+.dag-inline-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 12px;
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; color: var(--text);
+  text-align: left;
+}
+.dag-inline-head:hover { background: var(--hover); }
+.dag-inline-meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted-dim); }
+.dag-inline-caret { color: var(--muted); }
+.dag-inline .graph-wrap { border-top: 1px solid var(--line); max-height: 300px; overflow: auto; padding: 8px; }

@@ -125,6 +125,8 @@ export const en: Partial<Dict> = {
   "chat.unset": "unset",
   "chat.sessions": "Sessions",
   "chat.flows": "Chat Flows",
+  "dag.inlineTitle": "Session Task Graph",
+  "dag.inlineRunning": "{n} in flight",
   "chat.flowEmpty": "No messages yet — next one starts a session",
   "chat.flowSessions": "Sessions in this flow",
   // ── Flows / Tasks pages (IA 2026-11) ──

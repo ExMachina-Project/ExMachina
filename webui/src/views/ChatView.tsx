@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 
 import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
@@ -14,6 +14,7 @@ import { relativeTime } from "../time";
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
 import { StatementList } from "../components/Statements";
 import { PlanCard } from "../components/PlanCard";
+import { TaskGraphDag } from "../components/TaskGraphDag";
 import { Markdown } from "../components/Markdown";
 import { AsciiMeter } from "../components/Ascii";
 import { ToolCallList } from "../components/ToolCall";
@@ -181,7 +182,11 @@ export function ChatView(): React.ReactElement {
     plan, planApplied, planPending, decidePlan, setPlanMode,
     todo,
     spawns, clearSpawns,
+    graph,
   } = useExm();
+  // 会话任务图内嵌（graph-inline）：当前会话有任务图时在消息流上方给可折叠卡——
+  // 看图不必跳「任务图」页（那页保留全局会话切换视角）
+  const [dagOpen, setDagOpen] = useState(true);
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
@@ -960,6 +965,21 @@ export function ChatView(): React.ReactElement {
             onReject={() => void decidePlan("reject")}
           />
         )}
+        {/* 会话任务图内嵌卡（graph-inline）：当前会话有图时置顶——运行中任务的
+            节点状态/依赖一目了然，不必跳「任务图」页；折叠态只留一行摘要 */}
+        {graph?.nodes?.length ? (
+          <div className="dag-inline">
+            <button className="dag-inline-head" onClick={() => setDagOpen((v) => !v)}>
+              <ApartmentOutlined />
+              <span>{t("dag.inlineTitle")}</span>
+              <span className="dag-inline-meta">
+                {graph.nodes.length} · {t("dag.inlineRunning", { n: String(graph.nodes.filter((n) => ["running", "dispatched", "syncing"].includes(n.status)).length) })}
+              </span>
+              <span className="dag-inline-caret">{dagOpen ? "▾" : "▸"}</span>
+            </button>
+            {dagOpen && <TaskGraphDag graph={graph} />}
+          </div>
+        ) : null}
         <div className="chat-scroll">
           {/* 空态：当前会话尚无消息且未在运行 —— 目标捕获盘（与桌面端空态同源母题） */}
           {renderMessages.length === 0 && !running && (
