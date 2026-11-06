@@ -3739,3 +3739,28 @@ mark.search-hit {
 .guide-error { background: var(--danger, #ff4d4f); }
 .guide-warn { background: var(--warn, #faad14); }
 .guide-btn { margin-top: 6px; align-self: flex-start; }
+
+/* ---- Nexus 拓扑图（nexus-topology-admin）：确定性环形布局自绘 SVG ---- */
+.nexus-topo { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.nexus-topo-canvas { flex: 1 1 420px; min-width: 420px; overflow-x: auto; border: 1px solid var(--line, #333); border-radius: 8px; padding: 8px; background: var(--bg-2, #0d0d10); }
+.topo-edge { stroke: var(--line-strong, #555); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.topo-edge-sel { stroke: var(--accent, #7c6ff0); stroke-dasharray: none; stroke-width: 1.8; }
+.topo-dim { opacity: 0.25; }
+.topo-node { cursor: pointer; }
+.topo-node-circle { fill: #17171c; stroke: var(--accent, #7c6ff0); stroke-width: 1.6; }
+.topo-node-off .topo-node-circle { stroke: var(--line-strong, #555); }
+.topo-node-sel .topo-node-circle { stroke-width: 3; filter: drop-shadow(0 0 6px rgba(124, 111, 240, 0.55)); }
+.topo-node-label { fill: var(--fg, #eee); font-size: 12.5px; font-weight: 600; }
+.topo-node-meta { fill: var(--fg-dim, #888); font-size: 10.5px; letter-spacing: 0.4px; }
+.topo-agent rect { fill: #17171c; stroke: var(--fg-dim, #888); stroke-width: 1.2; }
+.topo-agent-label { fill: var(--fg-dim, #aaa); font-size: 11px; }
+.nexus-topo-detail { flex: 0 1 300px; border: 1px solid var(--line, #333); border-radius: 8px; padding: 12px 14px; background: var(--bg-2, #0d0d10); }
+.topo-detail-head { display: flex; gap: 8px; align-items: center; }
+.topo-detail-sub { font-size: 11px; margin: 4px 0 10px; }
+.topo-detail-edges { display: flex; flex-direction: column; gap: 6px; }
+.topo-edge-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; font-size: 12.5px; }
+@media (max-width: 760px) {
+  .nexus-topo-canvas { min-width: 340px; }
+  .nexus-topo-detail { flex-basis: 100%; }
+}
+.nexus-topo-empty { display: flex; align-items: center; justify-content: center; min-height: 200px; }

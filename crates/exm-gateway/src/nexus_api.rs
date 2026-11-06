@@ -9,7 +9,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use exm_core::config::{ExmConfig, LinkTarget};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn links_of(st: &AppState) -> Vec<LinkTarget> {
     st.core.config().nexus.links.clone()
@@ -153,6 +153,149 @@ pub async fn probe_link_handler(
     }
 }
 
+/// 拓扑聚合视图（GET /api/nexus/graph）：节点（连结体）+ 边（个体→连结体绑定）。
+/// 拓扑图与管理页同源（nexus-topology-admin）：节点带名称/类型/启用态，
+/// 边带个体 id/名称与绑定方向（个体 → 连结体，任务转交方向）。
+pub async fn graph(State(st): State<AppState>) -> impl IntoResponse {
+    let cfg = st.core.config();
+    let nodes: Vec<Value> = cfg
+        .nexus
+        .links
+        .iter()
+        .map(|l| {
+            json!({
+                "id": l.id, "name": l.name, "kind": l.kind, "enabled": l.enabled,
+                "endpoint": if l.kind == "exmachina" { l.endpoint.clone() } else { String::new() },
+            })
+        })
+        .collect();
+    // 边：所有个体的 link 绑定（智能体 + 组内个体）
+    let mut edges: Vec<Value> = Vec::new();
+    let mut push_edge = |agent: &exm_core::types::AgentDefinition, link: &str| {
+        edges.push(json!({
+            "agentId": agent.identifier, "agentName": agent.name, "linkId": link,
+        }));
+    };
+    for a in st.core.registry().list_singles() {
+        if let Some(link) = a.link.as_deref() {
+            if link.is_empty() { continue; }
+            push_edge(&a, link);
+        }
+    }
+    for g in st.core.registry().list_groups() {
+        for a in st.core.registry().agents_in_group(&g.id) {
+            if let Some(link) = a.link.as_deref() {
+                if link.is_empty() { continue; }
+                push_edge(&a, link);
+            }
+        }
+    }
+    Json(json!({ "nodes": nodes, "edges": edges })).into_response()
+}
+
+/// 连边编辑（PUT /api/nexus/edges）：建立 / 解除个体与连结体的绑定。
+///
+/// - action=bind：绑定（个体已有到**其他**连结体的边 = 换绑，属正常编辑；
+///   到**同一**连结体的重复边 = 409，提示已是绑定态而非静默成功）
+/// - action=unbind：解绑（未绑定时 409——操作语义与当前态冲突）
+///
+/// 落盘走 registry::set_agent_link（校验连结体存在性，404 口径）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeBody {
+    pub action: String,
+    pub agent_id: String,
+    pub link_id: String,
+}
+
+pub async fn edit_edge(
+    State(st): State<AppState>,
+    Json(b): Json<EdgeBody>,
+) -> impl IntoResponse {
+    if b.agent_id.trim().is_empty() || b.link_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agentId 与 linkId 不能为空" })),
+        )
+            .into_response();
+    }
+    // 当前绑定态（判断重复边 / 冲突）
+    let current = st
+        .core
+        .registry()
+        .single(&b.agent_id)
+        .map(|d| d.link.clone())
+        .or_else(|| {
+            st.core
+                .registry()
+                .agents_in_group(&st.core.registry().active_group())
+                .iter()
+                .find(|d| d.identifier == b.agent_id)
+                .map(|d| d.link.clone())
+        })
+        .flatten();
+    match b.action.as_str() {
+        "bind" => {
+            if current.as_deref() == Some(b.link_id.as_str()) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": format!("个体 {} 已绑定该连结体", b.agent_id) })),
+                )
+                    .into_response();
+            }
+        }
+        "unbind" => {
+            if current.as_deref() != Some(b.link_id.as_str()) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": format!("个体 {} 未绑定该连结体", b.agent_id) })),
+                )
+                    .into_response();
+            }
+        }
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("未知动作: {other}") })),
+            )
+                .into_response();
+        }
+    }
+    // 连结体存在性校验（404）→ 绑定落盘
+    let valid: std::collections::HashSet<String> = st
+        .core
+        .config()
+        .nexus
+        .links
+        .iter()
+        .map(|l| l.id.clone())
+        .collect();
+    let result = if b.action == "bind" {
+        st.core
+            .registry()
+            .set_agent_link(&b.agent_id, Some(&b.link_id), &valid)
+    } else {
+        st.core
+            .registry()
+            .set_agent_link(&b.agent_id, None, &valid)
+    };
+    match result {
+        Ok(def) => Json(json!({
+            "ok": true, "agentId": def.identifier, "linkId": def.link,
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.contains("不存在") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({ "error": msg }))).into_response()
+        }
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/nexus/links", get(list_links).post(save_link))
@@ -161,6 +304,8 @@ pub fn routes() -> Router<AppState> {
             "/api/nexus/links/:id/probe",
             axum::routing::post(probe_link_handler),
         )
+        .route("/api/nexus/graph", get(graph))
+        .route("/api/nexus/edges", axum::routing::put(edit_edge))
 }
 
 #[cfg(test)]
@@ -322,4 +467,114 @@ mod tests {
             .expect("个体应保留");
         assert_eq!(proxy.link, None, "死绑定应被清理");
     }
+    /// 拓扑聚合与连边编辑（nexus-topology-admin）：graph 返回节点+边；
+    /// bind/unbind 落盘 + 重复边 409 + 未绑定解绑 409 + 连结体不存在 404
+    #[tokio::test]
+    async fn 连边编辑_拓扑聚合与冲突语义() {
+        let st = test_state();
+
+        // 造一个连结体 + 一个智能体
+        let (code, v) = call(
+            mk_app(&st),
+            json_req(
+                "POST",
+                "/api/nexus/links",
+                Some(serde_json::json!({
+                    "id": "l1", "name": "远端", "kind": "exmachina",
+                    "endpoint": "http://127.0.0.1:59999", "enabled": true
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v:?}");
+        let def = exm_core::types::AgentDefinition {
+            name: "边测".into(),
+            identifier: "edge-agent".into(),
+            domain: "测试".into(),
+            tier: exm_core::types::Tier::Orchestrator,
+            description: "连边编辑验证".into(),
+            tools: vec![],
+            when_to_call: String::new(),
+            prompt_file: "edge-agent.md".into(),
+            capabilities: vec![],
+            dependencies: vec![],
+            composable_with: vec![],
+            input_schema: Default::default(),
+            output_schema: Default::default(),
+            link: None,
+            max_steps: None,
+            model_hint: None,
+        };
+        st.core.registry().upsert_single(def, None).unwrap();
+
+        // graph：1 节点 0 边
+        let (_, g) = call(mk_app(&st), json_req("GET", "/api/nexus/graph", None)).await;
+        assert_eq!(g["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(g["edges"].as_array().unwrap().len(), 0);
+        assert_eq!(g["nodes"][0]["name"], "远端");
+
+        // bind：建立边 → graph 1 边
+        let (code, v) = call(
+            mk_app(&st),
+            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
+                "action": "bind", "agentId": "edge-agent", "linkId": "l1"
+            }))),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v:?}");
+        let (_, g) = call(mk_app(&st), json_req("GET", "/api/nexus/graph", None)).await;
+        let edges = g["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["agentId"], "edge-agent");
+        assert_eq!(edges[0]["linkId"], "l1");
+
+        // 重复 bind 同一连结体 → 409
+        let (code, v) = call(
+            mk_app(&st),
+            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
+                "action": "bind", "agentId": "edge-agent", "linkId": "l1"
+            }))),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{v:?}");
+
+        // 不存在的连结体 → 404
+        let (code, _) = call(
+            mk_app(&st),
+            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
+                "action": "bind", "agentId": "edge-agent", "linkId": "no-such"
+            }))),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+
+        // unbind → 边清零；再 unbind → 409
+        let (code, _) = call(
+            mk_app(&st),
+            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
+                "action": "unbind", "agentId": "edge-agent", "linkId": "l1"
+            }))),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        let (code, _) = call(
+            mk_app(&st),
+            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
+                "action": "unbind", "agentId": "edge-agent", "linkId": "l1"
+            }))),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT);
+
+        // 未知动作 → 400
+        let (code, _) = call(
+            mk_app(&st),
+            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
+                "action": "rebind", "agentId": "edge-agent", "linkId": "l1"
+            }))),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
 }

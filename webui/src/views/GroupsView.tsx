@@ -399,7 +399,12 @@ export function GroupsView(): React.ReactElement {
                     dataIndex: "tools",
                     key: "tools",
                     width: 300,
-                    render: (tools: string[]) => (tools ?? []).map((tl) => <Tag key={tl}>{tl}</Tag>),
+                    // 生效工具面（agent-tool-surface）：声明清单 Tag 展示；
+                    // 空清单 = 未声明（默认全量），显式标注而非留白
+                    render: (tools: string[]) =>
+                      tools?.length
+                        ? tools.map((tl) => <Tag key={tl}>{tl}</Tag>)
+                        : <Tag color="geekblue">{t("agents.toolsFull")}</Tag>,
                   },
                   {
                     title: t("agents.colState"),
