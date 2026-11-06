@@ -1,7 +1,7 @@
 # ui-visual-language Specification
 
 ## Purpose
-TBD - created by archiving change ui-brand-alignment. Update Purpose after archive.
+WebUI 统一视觉语言：品牌视觉令牌、等宽排版体系、状态点与图表语汇、大数字读数，保证各页面表达一致。
 
 ## Requirements
 

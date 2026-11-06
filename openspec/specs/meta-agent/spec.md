@@ -1,7 +1,7 @@
 # meta-agent Specification
 
 ## Purpose
-TBD - created by archiving change meta-agent. Update Purpose after archive.
+元智能体（Meta Agent）双轨运行：聚合运行数据、经提议-审批-应用管线驱动配置演进，并在轮内做元认知反思，审计全程可观测。
 
 ## Requirements
 

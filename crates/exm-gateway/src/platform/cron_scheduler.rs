@@ -231,9 +231,33 @@ pub(crate) async fn notify_cron_result(
         if !ch.enabled || !job.notify_channels.contains(&ch.id) {
             continue;
         }
-        let ok = push_channel_text(&ch, &text).await;
+        // 投递契约（update-pipeline 规格「webhook 投递超时与重试」）：
+        // 单次 15s 超时（push_channel_text 内控）+ 退避重试 2 次（共 3 次尝试），
+        // 最终失败 MUST 落审计事件（含目标与原因摘要），MUST NOT 静默吞掉。
+        let mut ok = push_channel_text(&ch, &text).await;
+        let mut attempts = 1u32;
+        while !ok && attempts < 3 {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                500u64 * (1 << (attempts - 1)), // 0.5s → 1s 退避
+            ))
+            .await;
+            ok = push_channel_text(&ch, &text).await;
+            attempts += 1;
+        }
         if !ok {
-            eprintln!("[cron-notify] 通道 {} 推送失败", ch.id);
+            eprintln!("[cron-notify] 通道 {} 推送失败（重试 {} 次后放弃）", ch.id, attempts);
+            core.orchestrator()
+                .emit(
+                    "",
+                    "notify.delivery_failed",
+                    serde_json::json!({
+                        "channel": ch.id,
+                        "job": job.id,
+                        "jobName": job.name,
+                        "attempts": attempts,
+                        "reason": "投递重试耗尽（端点超时或非 2xx 响应）",
+                    }),
+                );
         }
     }
 }

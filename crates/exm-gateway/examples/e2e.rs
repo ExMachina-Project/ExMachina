@@ -3602,6 +3602,22 @@ async fn main() -> anyhow::Result<()> {
         c.check("会话用量端点返回结构", tok_ok);
     }
 
+    // ---- 资产下载语义（REST 通用约定：404 不存在 / 403 越界口径分离）----
+    {
+        let dl404: reqwest::Response = client
+            .get(format!("{base}/asset/download?path=no-such-file.txt"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?;
+        c.check("资产下载：不存在文件 404", dl404.status().as_u16() == 404);
+        let dl403: reqwest::Response = client
+            .get(format!("{base}/asset/download?path=../../etc/passwd"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?;
+        c.check("资产下载：路径越界 403", dl403.status().as_u16() == 403);
+    }
+
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {
