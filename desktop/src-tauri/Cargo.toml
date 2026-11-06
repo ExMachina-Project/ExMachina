@@ -1,6 +1,6 @@
 [package]
 name = "exmachina-desktop"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 description = "EXMACHINA 桌面端：自带本地网关（单端口交付），亦可直连远程网关"
 
