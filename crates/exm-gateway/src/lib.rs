@@ -63,6 +63,7 @@ pub mod persona;
 pub mod playbooks;
 pub mod sessions;
 pub mod agents_admin;
+pub mod selfcheck;
 pub mod version;
 pub mod voice;
 pub mod ws;
@@ -220,6 +221,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
     let state = AppState { core: core.clone() };
     let mut router = Router::new()
         .route("/api/health", get(health))
+        .route("/api/selfcheck", get(selfcheck::selfcheck))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/search", get(search_sessions))
         .route("/api/sessions/:id", get(get_session).delete(delete_session))

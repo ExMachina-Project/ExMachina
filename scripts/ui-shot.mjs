@@ -35,7 +35,8 @@ const KEY = process.env.EXM_KEY ?? "exmachina";
 
 /** 页面清单：hash → 结构断言（选择器存在性；不锚文案） */
 const VIEWS = [
-  { name: "chat", hash: "#/chat", selectors: [".chat-rail", ".session-list"] },
+  // wait: 首屏数据量差异——chat 页拉会话列表+编排目标+遥测，冷启动常超 1.8s（实测 3~4s）
+  { name: "chat", hash: "#/chat", wait: 5000, selectors: [".chat-rail", ".session-list"] },
   { name: "sessions", hash: "#/sessions", selectors: [".sessions-toolbar", ".sessions-table", ".sessions-th"] },
   { name: "models", hash: "#/models", selectors: [".model-status-row", ".cap-badge"] },
   { name: "channels", hash: "#/channels", selectors: [".page-head"] },
@@ -63,7 +64,17 @@ try {
     const entry = { view: v.name, ok: true, missing: [], shot: null };
     try {
       await page.goto(`${BASE}/${v.hash}`, { waitUntil: "domcontentloaded", timeout: 20000 });
-      await new Promise((r) => setTimeout(r, 1800));
+      // 选择器轮询等待（最长 v.wait ?? 6000ms，200ms 间隔）：比固定 sleep 稳——
+      // 冷启动（vite 按需编译/接口慢）时自动等到出现，快时不白等
+      const waitMs = v.wait ?? 6000;
+      const deadline = Date.now() + waitMs;
+      for (const sel of v.selectors) {
+        while (Date.now() < deadline) {
+          if (await page.$(sel)) break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+      // 断言前的最终检查（轮询超时的选择器在此落账）
       for (const sel of v.selectors) {
         const hit = await page.$(sel);
         if (!hit) entry.missing.push(sel);

@@ -20,6 +20,9 @@ curl http://localhost:4173/api/version   # version + gitHash
 
 ```ini
 EXM_AUTH_KEY=<后台访问密钥>
+# LLM 环境变量（可选——也可启动后在 WebUI「模型」页配置，二者等价）
+# EXM_LLM_BASE_URL=https://<openai 兼容端点>
+# EXM_LLM_API_KEY=<密钥>
 # 可选:覆盖镜像源
 # EXM_IMAGE=ghcr.io/exmachina-project/exmachina:latest
 ```
@@ -66,6 +69,32 @@ chmod 600 .docker/config.json
 一键更新脚本（`scripts/apply-update.sh`）检测到 `/host/.docker/config.json` 会自动复制到容器内
 临时 `DOCKER_CONFIG` 再 `compose pull`；无该文件时按匿名拉取处理（公开镜像）。
 `.docker/config.json` 已在仓库 `.gitignore` 中，不会被提交。
+
+### 本地构建回退（拉不动注册表时）
+
+网络受限（注册表大层被重置 / 私有环境）时，在任一有源码的机器本地构建镜像再切 `.env`：
+
+```bash
+# 1. 在源码仓库构建（GIT_HASH 带进 /api/version 便于核对）
+docker build --build-arg GIT_HASH=<commit> -t exmachina:<commit> .
+
+# 2. 部署目录 .env 切换镜像源
+#    EXM_IMAGE=exmachina:<commit>
+
+# 3. 借道一次性辅助容器 recreate（不能在容器内直接 up -d——compose 客户端
+#    会随旧容器一起被杀，recreate 做一半；辅助容器独立于其生命周期）
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v <部署目录绝对路径>:<同绝对路径> -w <同绝对路径> \
+  docker:27.5.1-cli compose -p exmachina up -d --force-recreate --no-deps exmachina
+
+# 4. 验证
+curl http://localhost:4173/api/version   # gitHash 应为 <commit>
+```
+
+> 注意 `-p exmachina`（项目名）与「部署目录挂**宿主原始绝对路径**」两处不能省：
+> 省略 `-p` 会让 compose 按挂载目录名起项目、误建新卷；挂到 `/host` 之类非原始路径
+> 则 compose 里的相对挂载（`./entities` 等）会解析到错误位置。
 
 ## 从源码部署迁移到镜像部署
 
