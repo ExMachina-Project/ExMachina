@@ -234,6 +234,38 @@ impl ToolName {
             _ => None,
         }
     }
+
+    /// 全量工具面（agent-tool-surface 口径：编成未声明 tools = 沿用全量）。
+    /// 运行时可见性仍按既有开关收窄：搜索/浏览器/Computer 按探测与配置、
+    /// meta 组按实验开关（gateway tool_specs 内判定）——全集只是「声明白名单
+    /// 为空时的默认值」，与显式声明全量等价。
+    pub fn full_set() -> Vec<Self> {
+        vec![
+            ToolName::Read,
+            ToolName::Filesystem,
+            ToolName::Terminal,
+            ToolName::Edit,
+            ToolName::Patch,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::WebSearch,
+            ToolName::WebFetch,
+            ToolName::AgentManage,
+            ToolName::Schedule,
+            ToolName::Browser,
+            ToolName::Computer,
+            ToolName::MemoryRead,
+            ToolName::MemoryWrite,
+            ToolName::MemoryLink,
+            ToolName::Git,
+            ToolName::Spawn,
+            ToolName::ContextCompact,
+            ToolName::Todo,
+            ToolName::MetaObserve,
+            ToolName::MetaPropose,
+            ToolName::MetaBuild,
+        ]
+    }
 }
 
 /// 外部通道路径的能力边界（通道级）：只聊天 / 可调工具 / 可电脑操控。

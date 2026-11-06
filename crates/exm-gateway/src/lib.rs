@@ -533,6 +533,33 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             "未构建（运行 npm run build:webui 后可由本网关托管）".to_string()
         }
     );
+    // 通道能力摘要（协议与契约·通道能力矩阵）：启动时一行说清各启用通道的
+    // 出站能力面——配置了媒体不可直发的平台，用户在投递降级时能对上号
+    {
+        let chans = platform::load_channels(&core);
+        let enabled: Vec<_> = chans.iter().filter(|c| c.enabled).collect();
+        if enabled.is_empty() {
+            println!("[gateway]   通道  无启用通道（控制台会话可直接使用）");
+        } else {
+            let lines: Vec<String> = enabled
+                .iter()
+                .map(|c| {
+                    let cp = platform::channel_runtime::caps(&c.kind);
+                    let media = |b: bool| if b { "✓" } else { "—" };
+                    format!(
+                        "{}[{}] {}（图{} 文{} 语{}）",
+                        c.kind,
+                        if c.enabled { "启用" } else { "停用" },
+                        c.account.as_deref().unwrap_or(&c.id),
+                        media(cp.image),
+                        media(cp.file),
+                        media(cp.voice)
+                    )
+                })
+                .collect();
+            println!("[gateway]   通道  {}", lines.join("｜"));
+        }
+    }
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
