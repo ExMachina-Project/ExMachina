@@ -853,6 +853,11 @@ fn short_id(id: &str) -> String {
 }
 
 /// 运行收束事件 → 纯文本回帖（telegram / napcat / qqbot 三个适配器共用）。
+/// 收束语句平铺（IM 投递形态）：`【tag】text` 逐行拼接，截断到平台上限。
+///
+/// 沉默约定（IM silence）：模型按旁听纪律输出 `<沉默/>`（可能独立成行或与
+/// 少量文字混行）= 本轮无话可说——投递层整轮丢弃（返回空串，由调用方
+/// 决定不发送 / 不记未读），群聊里不再出现「不参与群聊闲聊」这类废话。
 pub(crate) fn flatten_statements(payload: &serde_json::Value, max_chars: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(list) = payload.get("statements").and_then(|v| v.as_array()) {
@@ -869,7 +874,21 @@ pub(crate) fn flatten_statements(payload: &serde_json::Value, max_chars: usize) 
     if text.trim().is_empty() {
         text = "（本轮无收束输出）".into();
     }
+    if is_silence(&text) {
+        return String::new();
+    }
     text.chars().take(max_chars).collect()
+}
+
+/// 沉默标记判定：语句里出现 `<沉默/>`（允许全角变体与空白）即整轮沉默。
+/// 保守口径——只在标记明确出现时丢轮，避免误杀正常回复。
+pub(crate) fn is_silence(text: &str) -> bool {
+    let t = text.trim();
+    t.contains("<沉默/>")
+        || t.contains("<沉默 />")
+        || t.contains("＜沉默/＞")
+        || t.contains("＜沉默 ／＞")
+        || t.contains("〈沉默/〉")
 }
 
 // ---------------------------------------------------------------- 通道消息统一执行
@@ -1079,7 +1098,16 @@ impl ChannelRun {
     /// 收束事件 → 回帖文本（非收束事件返回 None；已按平台上限截断）
     pub(crate) fn take_reply(&self, evt: &CoreEvent, max_chars: usize) -> Option<String> {
         match evt.kind.as_str() {
-            "run.finished" => Some(flatten_statements(&evt.payload, max_chars)),
+            "run.finished" => {
+                let text = flatten_statements(&evt.payload, max_chars);
+                // 沉默约定（IM silence）：模型宣告无话可说 → None（不投递），
+                // 所有直调方（spawn_reply / rss / video 插件）统一免发送。
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
             "run.error" => {
                 let msg = evt
                     .payload
