@@ -12,7 +12,7 @@ use crate::types::*;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -152,7 +152,6 @@ impl SqliteStore {
         let migrated: bool = store
             .conn
             .lock()
-            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM meta WHERE k='migrated' AND v='1'",
                 [],
@@ -161,7 +160,7 @@ impl SqliteStore {
             .unwrap_or(false);
         if !migrated {
             let n = store.migrate_from_fsdb()?;
-            let conn = store.conn.lock().unwrap();
+            let conn = store.conn.lock();
             conn.execute(
                 "INSERT OR REPLACE INTO meta(k,v) VALUES('migrated','1')",
                 [],
@@ -183,7 +182,7 @@ impl SqliteStore {
     fn migrate_from_fsdb(&self) -> Result<usize> {
         let legacy = FsDb::open(&self.root)?;
         let mut n = 0usize;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         // 会话
         for s in legacy.list::<Session>("sessions").unwrap_or_default() {
             let _ = Self::insert_session_conn(&conn, &s);
@@ -320,20 +319,20 @@ impl SqliteStore {
             created_at: now.clone(),
             updated_at: now,
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         Self::insert_session_conn(&conn, &s)?;
         Ok(s)
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut st = conn.prepare("SELECT * FROM sessions WHERE id=?1")?;
         let mut rows = st.query(rusqlite::params![id])?;
         Ok(rows.next()?.map(Self::row_session).transpose()?)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         // 主列表不含归档态（归档区走 list_archived_sessions）
         let mut st = conn.prepare(
             "SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT 200",
@@ -344,7 +343,7 @@ impl SqliteStore {
 
     /// 归档区视图：只含归档态，按归档时间倒序
     pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut st = conn
             .prepare("SELECT * FROM sessions WHERE archived_at IS NOT NULL ORDER BY archived_at DESC")?;
         let rows = st.query_map([], Self::row_session)?;
@@ -353,7 +352,7 @@ impl SqliteStore {
 
     /// 会话最后一条消息的纯文本预览
     pub fn last_message_preview(&self, session_id: &str, max_chars: usize) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let statements: String = conn
             .query_row(
                 "SELECT statements FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq DESC LIMIT 1",
@@ -382,7 +381,7 @@ impl SqliteStore {
     where
         F: FnOnce(&mut SessionLedger),
     {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut session = Self::get_session_conn(&conn, session_id)?
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
         f(&mut session.ledger);
@@ -393,7 +392,7 @@ impl SqliteStore {
     }
 
     pub fn ledger_of(&self, session_id: &str) -> Result<SessionLedger> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         Ok(Self::get_session_conn(&conn, session_id)?
             .map(|s| s.ledger)
             .unwrap_or_default())
@@ -406,7 +405,7 @@ impl SqliteStore {
     }
 
     pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE sessions SET title=?2, updated_at=?3 WHERE id=?1",
             rusqlite::params![title.trim(), now_iso(), session_id],
@@ -415,7 +414,7 @@ impl SqliteStore {
     }
 
     pub fn update_compaction(&self, session_id: &str, summary: &str, upto: usize) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE sessions SET rolling_summary=?2, summary_upto=?3, updated_at=?4 WHERE id=?1",
             rusqlite::params![
@@ -520,7 +519,7 @@ impl SqliteStore {
             last_message_preview: None,
             last_active_at: None,
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let seq: i64 = conn.query_row(
             "SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE session_id=?1 AND archived=0",
             rusqlite::params![session_id],
@@ -554,7 +553,7 @@ impl SqliteStore {
         msg.thinking = thinking.filter(|s| !s.trim().is_empty());
         msg.tool_calls = tool_calls;
         msg.steps = steps;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let seq: i64 = conn.query_row(
             "SELECT seq FROM messages WHERE id=?1",
             rusqlite::params![msg.id],
@@ -565,7 +564,7 @@ impl SqliteStore {
     }
 
     pub fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<ChatMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let lim: i64 = if limit == 0 { -1 } else { limit as i64 };
         let mut st = conn.prepare(
             "SELECT * FROM (SELECT * FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq DESC LIMIT ?2) ORDER BY seq ASC",
@@ -636,7 +635,7 @@ impl SqliteStore {
 
     /// 截断活跃消息流:保留前 keep 条,被截断部分标记归档(可查)
     pub fn truncate_messages(&self, session_id: &str, keep: usize) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let n = conn.execute(
             "UPDATE messages SET archived=1 WHERE session_id=?1 AND archived=0 AND id NOT IN (
                 SELECT id FROM messages WHERE session_id=?1 AND archived=0 ORDER BY seq ASC LIMIT ?2
@@ -647,7 +646,7 @@ impl SqliteStore {
     }
 
     pub fn list_archived_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut st = conn.prepare(
             "SELECT * FROM messages WHERE session_id=?1 AND archived=1 ORDER BY seq ASC",
         )?;
@@ -664,7 +663,7 @@ impl SqliteStore {
     ) -> Result<usize> {
         let msgs = self.list_messages(src_session, 0)?;
         let prefix: Vec<ChatMessage> = msgs.into_iter().take(keep).collect();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         for (i, m) in prefix.iter().enumerate() {
             let mut copy = m.clone();
             copy.id = new_id(); // 主键 = id:跨会话副本必须换新 id,否则 REPLACE 会"搬走"源消息
@@ -712,14 +711,14 @@ impl SqliteStore {
     }
 
     pub fn insert_session(&self, session: &Session) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         Self::insert_session_conn(&conn, session)
     }
 
     // ------------------------------------------------- 任务图
 
     pub fn save_graph(&self, graph: &TaskGraph) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let json = serde_json::to_string(graph)?;
         conn.execute(
             "INSERT OR REPLACE INTO graphs(session_id, graph, updated_at) VALUES(?1,?2,?3)",
@@ -744,7 +743,7 @@ impl SqliteStore {
     }
 
     pub fn latest_graph(&self, session_id: &str) -> Result<Option<TaskGraph>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let json: Option<String> = conn
             .query_row(
                 "SELECT graph FROM graphs WHERE session_id=?1",
@@ -764,7 +763,7 @@ impl SqliteStore {
             obj.insert("id".into(), serde_json::json!(id));
             obj.insert("createdAt".into(), serde_json::json!(now_iso()));
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO sync_reports(id,node_id,report,created_at) VALUES(?1,?2,?3,?4)",
             rusqlite::params![id, report.task_node_id, value.to_string(), now_iso()],
@@ -779,7 +778,7 @@ impl SqliteStore {
     }
 
     pub fn report_for_node(&self, node_id: &str) -> Result<Option<serde_json::Value>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let json: Option<String> = conn
             .query_row(
                 "SELECT report FROM sync_reports WHERE node_id=?1 ORDER BY created_at DESC LIMIT 1",
@@ -823,7 +822,7 @@ impl SqliteStore {
         result_summary: &str,
         duration_ms: u64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO tool_audit(id,agent_id,tool,args,result_summary,duration_ms,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             rusqlite::params![new_id(), agent_id, tool, args.to_string(), result_summary, duration_ms as i64, now_iso()],
@@ -839,7 +838,7 @@ impl SqliteStore {
     }
 
     pub fn list_tool_audit(&self, agent_id: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut st = conn.prepare(
             "SELECT args, result_summary, duration_ms, created_at, agent_id, tool, id FROM tool_audit
              WHERE agent_id=?1 ORDER BY created_at DESC LIMIT ?2",
@@ -865,7 +864,7 @@ impl SqliteStore {
         tool: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut st = conn.prepare(
             "SELECT args, result_summary, duration_ms, created_at, agent_id, tool, id FROM tool_audit
              ORDER BY created_at DESC LIMIT 5000",
@@ -912,7 +911,7 @@ impl SqliteStore {
         if prompt_tokens == 0 && completion_tokens == 0 {
             return Ok(());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO usage(id,session_id,prompt_tokens,completion_tokens,model,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
             rusqlite::params![new_id(), session_id, prompt_tokens as i64, completion_tokens as i64, model, now_iso()],
@@ -921,7 +920,7 @@ impl SqliteStore {
     }
 
     pub fn usage_total(&self, session_id: &str) -> (u64, u64, usize) {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let Ok(mut st) = conn.prepare(
             "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COUNT(*)
              FROM usage WHERE session_id=?1",
@@ -939,7 +938,7 @@ impl SqliteStore {
     }
 
     pub fn usage_recent(&self, session_id: &str, limit: usize) -> Vec<serde_json::Value> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let Ok(mut st) = conn.prepare(
             "SELECT prompt_tokens, completion_tokens, model, created_at FROM usage
              WHERE session_id=?1 ORDER BY created_at DESC LIMIT ?2",
@@ -984,7 +983,7 @@ impl SqliteStore {
 
     /// 按组列出会话
     pub fn list_sessions_in_group(&self, group_id: &str) -> Result<Vec<Session>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         // 组内主列表不含归档态
         let mut st = conn.prepare(
             "SELECT * FROM sessions WHERE group_id=?1 AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 200",
@@ -995,7 +994,7 @@ impl SqliteStore {
 
     /// 删除会话及其派生数据(SQLite 侧 + FsDb 侧)
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         conn.execute(
             "DELETE FROM messages WHERE session_id=?1",
@@ -1072,12 +1071,12 @@ impl SqliteStore {
     }
 
     pub fn put_turn_snapshot(&self, snap: &TurnSnapshot) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         Self::put_snapshot_conn(&conn, snap)
     }
 
     pub fn list_turn_snapshots(&self, session_id: &str) -> Result<Vec<TurnSnapshot>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut st = conn.prepare(
             "SELECT * FROM turn_snapshots WHERE session_id=?1 ORDER BY turn ASC, created_at ASC",
         )?;
@@ -1090,7 +1089,7 @@ impl SqliteStore {
     }
 
     pub fn prune_turn_snapshots_after(&self, session_id: &str, upto_turn: usize) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "DELETE FROM turn_snapshots WHERE session_id=?1 AND turn>?2",
             rusqlite::params![session_id, upto_turn as i64],

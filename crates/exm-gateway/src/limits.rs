@@ -1,7 +1,7 @@
 //! 用量治理（capability-completion 组 4）：滑动窗口限流 + 周期配额计数。
 //! 仅作用于外部入口（通道入站 / HTTP API）；组内派发不计费不限流（设计 D10）。
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::sync::OnceLock;
 
 #[derive(Default)]
@@ -19,7 +19,7 @@ impl RateLimiter {
     /// 记录一次命中并判定是否放行（滑动窗口：清理过期时间戳后计数 < max 则放行）
     pub fn check(key: &str, window_ms: u64, max: u32, now_ms: u64) -> bool {
         let store = store();
-        let mut w = store.windows.lock().unwrap();
+        let mut w = store.windows.lock();
         let entry = w.entry(key.to_string()).or_default();
         entry.retain(|t| now_ms.saturating_sub(*t) < window_ms);
         if entry.len() >= max as usize {
@@ -32,7 +32,7 @@ impl RateLimiter {
     /// 主体在窗口内的当前计数（控制台可见性）
     pub fn count(key: &str, window_ms: u64, now_ms: u64) -> usize {
         let store = store();
-        let w = store.windows.lock().unwrap();
+        let w = store.windows.lock();
         w.get(key)
             .map(|v| {
                 v.iter()
@@ -45,14 +45,14 @@ impl RateLimiter {
     /// 清空主体的窗口（配对码兑换成功后清失败计数用）
     pub fn reset(key: &str) {
         let store = store();
-        let mut w = store.windows.lock().unwrap();
+        let mut w = store.windows.lock();
         w.remove(key);
     }
 
     /// 全部键的窗口内计数（管理视图）
     pub fn snapshot(window_ms: u64, now_ms: u64) -> Vec<(String, usize)> {
         let store = store();
-        let w = store.windows.lock().unwrap();
+        let w = store.windows.lock();
         let mut out: Vec<(String, usize)> = w
             .iter()
             .map(|(k, v)| {
