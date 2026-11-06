@@ -17,15 +17,18 @@
 //!   退出级联终止网关子进程
 //! - 原生通知（11.2）：壳内 WS 事件流 → 审批 / 定时推送 / 任务完成三类通知（类别开关，desktop.rs 映射单测）
 //! - 全局快捷键（11.3）：默认唤起/收起主窗口（可经 desktop.json 或 setDesktopConfig 命令改绑，冲突提示）
+//! - 捆绑网关健康监控（6.3）：子进程退出检测 + 一键重启（复用原端口）+ UI 状态层
+//! - 版本比对（6.2）：壳注入版本（CARGO_PKG_VERSION），UI 启动 + 6h 周期比对 /api/version
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod desktop;
 
+use desktop::{launch_gateway, wait_gateway_ready};
 use std::net::TcpListener;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
@@ -38,6 +41,8 @@ struct GatewayInfo {
     url: String,
     /// 访问密钥（事件桥 WS 鉴权；远程模式来自 --key）
     key: String,
+    /// 远程模式（true = 壳不托管网关进程，健康监控只看连通性不看重启）
+    remote: bool,
 }
 
 fn main() {
@@ -75,23 +80,27 @@ fn main() {
             set_desktop_config,
             min_window,
             max_window,
-            close_window
+            close_window,
+            gateway_restart
         ])
         .setup(move |app| {
+            let remote_mode = remote.is_some();
             let url: String = match remote {
                 Some(r) => r.trim_end_matches('/').to_string(),
                 None => spawn_local_gateway(app.handle())?,
             };
             let key_val = key.clone().unwrap_or_default();
-            app.manage(GatewayInfo { url: url.clone(), key: key_val.clone() });
+            app.manage(GatewayInfo { url: url.clone(), key: key_val.clone(), remote: remote_mode });
 
             // 主界面：壳内嵌的对话式 UI（desktop/ui，经 frontendDist 打进二进制），
             // 网关只做后端（REST/WS）。网关地址与密钥经初始化脚本注入（window.__EXM_GATEWAY__），
             // UI 据此直连环口；管理能力经原生设置视图完成（桌面端零 webui 依赖）。
             let script = format!(
-                "window.__EXM_GATEWAY__ = {{ url: '{url}', key: '{key}' }};",
+                "window.__EXM_GATEWAY__ = {{ url: '{url}', key: '{key}', version: '{ver}', remote: {remote} }};",
                 url = url.replace('\\', "\\\\").replace('\'', "\\'"),
                 key = key_val.replace('\\', "\\\\").replace('\'', "\\'"),
+                ver = env!("CARGO_PKG_VERSION"),
+                remote = remote_mode,
             );
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
                 .title("EXMACHINA · 多智能体系统")
@@ -109,6 +118,12 @@ fn main() {
 
             // 原生通知事件桥（11.2）：WS 事件流 → 三类通知（类别开关见 desktop.json）
             spawn_event_bridge(app.handle().clone());
+
+            // 捆绑网关健康监控（6.3）：本机模式检测子进程退出 → 事件推 UI（状态显示 +
+            // 一键重启）；远程模式不监控进程（只看 UI 侧 WS 连通，退避重连已有）
+            if !remote_mode {
+                spawn_gateway_monitor(app.handle().clone());
+            }
 
             Ok(())
         })
@@ -369,60 +384,86 @@ fn host_of(url: &str) -> String {
 
 // ---------------------------------------------------------------- 本地网关（捆绑交付）
 
+/// 捆绑网关健康监控（6.3）：轮询子进程退出状态，检测到退出即发 `gateway://down`
+/// 事件到主窗口（UI 呈现状态 + 一键重启）。恢复正常（重启成功）发 `gateway://up`。
+/// 退出检测后停止轮询（进程已死，重启由用户经 UI 触发 gateway_restart 命令）。
+fn spawn_gateway_monitor(app: tauri::AppHandle) {
+    std::thread::spawn(move || loop {
+        // 退出判定：子进程已收尸（Some 状态）且槽位被清（重启中/已重启的窗口期不再误报）
+        let exited = {
+            let state = app.state::<GatewayChild>();
+            let mut guard = match state.0.lock() {
+                Ok(g) => g,
+                Err(_) => return, // 锁中毒：监控线程退出（不应发生；壳层 Mutex 无已知 panic 路径）
+            };
+            match guard.as_mut() {
+                None => false, // 槽位空 = 正在重启或尚未拉起
+                Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+            }
+        };
+        if exited {
+            // 收尸并清槽（退出码留日志；重启由 UI 触发）
+            if let Ok(mut guard) = app.state::<GatewayChild>().0.lock() {
+                *guard = None;
+            }
+            eprintln!("[desktop] 捆绑网关进程退出，通知 UI（可一键重启）");
+            use tauri::Emitter;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.emit("gateway://down", ());
+            }
+            return; // 一次性监控：重启命令会重新拉起监控线程
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    });
+}
+
+/// 一键重启捆绑网关（6.3）：复用原端口（UI 与事件桥寻址不变），拉起成功发
+/// `gateway://up` 事件并重启健康监控；失败返回错误文案（UI 呈现原因）。
+/// 远程模式无子进程可重启，直接明示。
+#[tauri::command]
+fn gateway_restart(app: tauri::AppHandle) -> Result<String, String> {
+    let info = app.state::<GatewayInfo>().inner().clone();
+    if info.remote {
+        return Err("远程模式：网关不在本机托管，无法重启（请在远端重启后重连）".into());
+    }
+    // 从当前 URL 提取原端口（重启复用——UI/事件桥寻址不变）
+    let port = desktop::port_of_url(&info.url).ok_or("无法解析网关端口")?;
+    match spawn_gateway_on_port(&app, port) {
+        Ok(p) => {
+            use tauri::Emitter;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.emit("gateway://up", format!("http://127.0.0.1:{p}"));
+            }
+            spawn_gateway_monitor(app.clone());
+            Ok(format!("http://127.0.0.1:{p}"))
+        }
+        Err(e) => Err(format!("网关重启失败：{e}")),
+    }
+}
+
 /// 拉起捆绑的 exm-gateway：空闲端口 + 独立数据目录，就绪后返回 UI 地址（REST / WS / WebUI 同端口）
 fn spawn_local_gateway(app: &tauri::AppHandle) -> Result<String, Box<dyn std::error::Error>> {
+    let port = free_port();
+    spawn_gateway_on_port(app, port).map(|p| format!("http://127.0.0.1:{p}"))
+}
+
+/// 在指定端口拉起捆绑网关（首启随机端口 / 重启复用原端口——UI 与事件桥寻址不变）。
+/// 就绪语义同首启：TCP 可连即就绪（最多 30s；提前退出立即报错）。
+fn spawn_gateway_on_port(
+    app: &tauri::AppHandle,
+    port: u16,
+) -> Result<u16, Box<dyn std::error::Error>> {
     let bin_dir = app.path().resource_dir()?.join("binaries");
     let gateway = ["exm-gateway.exe", "exm-gateway"]
         .iter()
         .map(|n| bin_dir.join(n))
         .find(|p| p.is_file())
         .ok_or("未找到捆绑的 exm-gateway（检查 src-tauri/binaries/，见 desktop/README.md）")?;
-
-    let port = free_port();
-    // 数据目录：Windows %LOCALAPPDATA%/ExMachina；类 Unix XDG_DATA_HOME/ExMachina
     let data_dir = desktop::data_dir().join("ExMachina");
-    std::fs::create_dir_all(data_dir.join("data"))?;
-
-    // 默认工作区 = 用户数据目录下的 workspace/（干活的项目根），
-    // 绝不落在安装目录：agent 的终端/文件工具默认以此为根，搞不坏应用自身
-    let workspace = data_dir.join("workspace");
-    std::fs::create_dir_all(&workspace)?;
-
-    let mut cmd = Command::new(&gateway);
-    cmd.arg("serve")
-        .arg("--port")
-        .arg(port.to_string())
-        .env("EXM_DATA_DIR", data_dir.join("data"))
-        .env("EXM_WORKSPACE_ROOT", &workspace)
-        .current_dir(&workspace);
-    // Windows：网关是控制台子系统程序，GUI 进程无控制台可继承 → 系统会为其新开终端窗口；
-    // CREATE_NO_WINDOW (0x0800_0000) 抑制弹窗（日志经事件桥与 WebUI 可见，无需终端）
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("网关启动失败: {e}"))?;
-
-    // 就绪等待：TCP 可连即视为就绪（最多 30s；提前退出立即报错）
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Ok(Some(_)) = child.try_wait() {
-            let _ = child.kill();
-            return Err("exm-gateway 进程提前退出（多为模型通道未配置或端口被占，详见数据目录日志）".into());
-        }
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            *app.state::<GatewayChild>().0.lock().unwrap() = Some(child);
-            return Ok(format!("http://127.0.0.1:{port}"));
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            return Err("网关 30s 内未就绪".into());
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
+    let mut child = launch_gateway(&gateway, &data_dir, port)?;
+    wait_gateway_ready(&mut child, port).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    *app.state::<GatewayChild>().0.lock().unwrap() = Some(child);
+    Ok(port)
 }
 
 fn free_port() -> u16 {
