@@ -538,6 +538,18 @@ export const useExm = create<ExmState>((set, get) => ({
     });
     try {
       await api.chat(id, text, images, sendMode ?? undefined);
+    } catch (e) {
+      // 发送失败（网络断/网关拒/会话忙）：running 复位 + 时间线错误条 + toast。
+      // HTTP 层失败不会广播 run.error 事件，无此兜底则「执行中」转圈永挂、
+      // 用户不知该重发——本地暂留用户消息作为重发参照。
+      set({
+        running: false,
+        timeline: [
+          ...get().timeline,
+          { kind: "error", text: tr("store.tl.error", { msg: String(e) }) },
+        ],
+      });
+      message.error(String(e));
     } finally {
       // 草稿已发出：清除（chat-ergonomics）。
       // 修 bug：历史版本逐会话存 exm.draft.<id>，现行复合存 exm.drafts JSON——
