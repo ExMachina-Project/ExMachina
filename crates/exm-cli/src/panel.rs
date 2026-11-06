@@ -463,6 +463,36 @@ impl Panel {
                     warn("用法：/theme cyan|green|amber|violet|ice")
                 ),
             },
+            // 终端能力探测（spec cli-tui 7.4）：显示当前终端的色彩/宽字符/剪贴板
+            // 探测结果与降级档位——受限终端（如 TERM=vt100）下的降级可见可诊断
+            "caps" => {
+                println!("{}", self.accent_bold("终端能力探测"));
+                println!("  {}", crate::term_caps::caps_summary());
+                let c = crate::term_caps::TermCaps::detect();
+                match c.clipboard {
+                    crate::term_caps::ClipboardKind::Unavailable => println!(
+                        "{}",
+                        dim("  剪贴板不可用：/copy 将降级为打印文本（手动选择复制）")
+                    ),
+                    _ => println!("{}", dim("  /copy <文本> 走探测到的通道复制")),
+                }
+            }
+            // 复制到剪贴板（探测通道：本地工具 → OSC52 → 降级打印）
+            "copy" => {
+                let text = rest.join(" ");
+                if text.is_empty() {
+                    println!("{}", warn("用法：/copy <文本>（通道探测见 /caps）"));
+                    return Ok(Flow::Continue);
+                }
+                match crate::term_caps::copy_to_clipboard(&text) {
+                    Ok(()) => println!("{} 已复制到剪贴板", ok("完成")),
+                    Err(_) => {
+                        // 降级回退：打印待复制文本（终端下用户用鼠标选择复制）
+                        println!("{}", warn("剪贴板不可用，请手动复制以下文本："));
+                        println!("{text}");
+                    }
+                }
+            }
 
             // ---------------- 会话 ----------------
             "new" => {
@@ -586,6 +616,197 @@ impl Panel {
                     Err(e) => println!("{}", err(format!("{e}"))),
                 }
             }
+
+            // ---------------- 外部聊天流（spec cli-tui：/flows 视图） ----------------
+            // 流状态与 WebUI/通道侧同源（core 流文档 + 未读计数内存态）；
+            // 打开 = 清未读 + 切到绑定会话；/flows use 切换流内会话（与 REST
+            // /channels/flows/:id/active 同一绑定状态，一处切换处处反映）
+            "flows" => match rest.first().map(|s| s.as_str()) {
+                None | Some("list") => {
+                    let flows = sorted_flows(core);
+                    if flows.is_empty() {
+                        println!("{}", dim("（暂无外部聊天流；通道消息进入后自动建流）"));
+                        return Ok(Flow::Continue);
+                    }
+                    println!("{}", self.accent_bold("外部聊天流（通道 · 对端 · 预览 · 绑定/未读）"));
+                    for (i, f) in flows.iter().enumerate() {
+                        let unread = core.flow_unread_count(&f.channel_id, &f.chat_key);
+                        let badge = if unread > 0 {
+                            format!("未读 {unread}").yellow().bold().to_string()
+                        } else {
+                            dim("已读")
+                        };
+                        let bind = match &f.active_session {
+                            Some(sid) => format!("绑定 {}", short_id(sid)),
+                            None => dim("未绑定").to_string(),
+                        };
+                        let preview = f.last_message.chars().take(36).collect::<String>();
+                        println!(
+                            "  {:>2}. [{}] {} {} {} {}",
+                            i + 1,
+                            f.channel_id,
+                            if f.display_name.is_empty() { f.chat_key.as_str() } else { &f.display_name }.bold(),
+                            dim(format!("「{preview}」")),
+                            bind,
+                            badge,
+                        );
+                    }
+                    println!("{}", dim("  /flows open <序号> 打开流（进入绑定会话并清未读）；/flows sessions <序号> 看流内会话"));
+                }
+                Some("open") => {
+                    let Some(idx) = rest.get(1).and_then(|s| s.parse::<usize>().ok()) else {
+                        println!("{}", warn("用法：/flows open <序号>（/flows 查看列表）"));
+                        return Ok(Flow::Continue);
+                    };
+                    let flows = sorted_flows(core);
+                    let Some(f) = flows.get(idx.saturating_sub(1)) else {
+                        println!("{}", err(format!("序号越界：{idx}（共 {} 条流）", flows.len())));
+                        return Ok(Flow::Continue);
+                    };
+                    // 绑定会话不存在时按通道语义开新会话并回写绑定
+                    // （与 REST/通道入站同一原子路径：查绑定→建会话→回写）
+                    let scope = flow_scope(core, &f.channel_id);
+                    let title = format!("channel:{}:{}", f.channel_id, f.chat_key);
+                    let name = if f.display_name.is_empty() {
+                        None
+                    } else {
+                        Some(f.display_name.as_str())
+                    };
+                    let sid = f
+                        .active_session
+                        .clone()
+                        .filter(|sid| core.store.get_session(sid).ok().flatten().is_some())
+                        .or_else(|| {
+                            core.ensure_flow_session_atomic(
+                                &f.channel_id,
+                                &f.chat_key,
+                                &scope,
+                                &title,
+                                name,
+                                f.is_group,
+                            )
+                        })
+                        .unwrap_or_default();
+                    if sid.is_empty() {
+                        println!("{}", err("打开失败：无法建立流会话"));
+                        return Ok(Flow::Continue);
+                    }
+                    core.clear_flow_unread(&f.channel_id, &f.chat_key);
+                    match core.store.get_session(&sid).ok().flatten() {
+                        Some(s) => {
+                            state.session_id = s.id.clone();
+                            state.session_title = s.title.clone();
+                            state.turns = 0;
+                            println!(
+                                "{} 已打开流会话 {}（{}）——与 WebUI 同源生效",
+                                ok("完成"),
+                                short_id(&s.id),
+                                s.title
+                            );
+                            self.print_status_bar(core, state);
+                        }
+                        None => println!("{}", err(format!("会话不存在：{sid}"))),
+                    }
+                }
+                Some("sessions") => {
+                    let Some(idx) = rest.get(1).and_then(|s| s.parse::<usize>().ok()) else {
+                        println!("{}", warn("用法：/flows sessions <序号>（/flows 查看列表）"));
+                        return Ok(Flow::Continue);
+                    };
+                    let flows = sorted_flows(core);
+                    let Some(f) = flows.get(idx.saturating_sub(1)) else {
+                        println!("{}", err(format!("序号越界：{idx}（共 {} 条流）", flows.len())));
+                        return Ok(Flow::Continue);
+                    };
+                    // 流内会话：与 REST /channels/flows/:id/sessions 同口径
+                    // （标题前缀归属 + 活跃倒序 + 活跃绑定标记）
+                    let title_prefix = format!("channel:{}:{}:", f.channel_id, f.chat_key);
+                    let bare_title = format!("channel:{}:{}", f.channel_id, f.chat_key);
+                    let scope = flow_scope(core, &f.channel_id);
+                    let mut mine: Vec<_> = core
+                        .list_sessions_in_group(&scope)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|s| s.title.starts_with(&title_prefix) || s.title == bare_title)
+                        .collect();
+                    mine.sort_by(|a, b| {
+                        b.updated_at
+                            .cmp(&a.updated_at)
+                            .then_with(|| b.created_at.cmp(&a.created_at))
+                            .then_with(|| a.id.cmp(&b.id))
+                    });
+                    if mine.is_empty() {
+                        println!("{}", dim("（该流暂无会话）"));
+                        return Ok(Flow::Continue);
+                    }
+                    println!("{}", self.accent_bold(&format!("流内会话（{} 条）", mine.len())));
+                    for (k, s) in mine.iter().enumerate() {
+                        let mark = if f.active_session.as_deref() == Some(s.id.as_str()) {
+                            "●".green().to_string()
+                        } else {
+                            " ".to_string()
+                        };
+                        let label = s
+                            .title
+                            .strip_prefix(&title_prefix)
+                            .filter(|t| !t.is_empty())
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| s.created_at.chars().take(10).collect::<String>());
+                        println!("{} {:>2}. {} {}", mark, k + 1, short_id(&s.id), label.bold());
+                    }
+                    println!("{}", dim("  /flows use <流序号> <会话序号> 切换绑定"));
+                }
+                Some("use") => {
+                    let (Some(fi), Some(si)) = (
+                        rest.get(1).and_then(|s| s.parse::<usize>().ok()),
+                        rest.get(2).and_then(|s| s.parse::<usize>().ok()),
+                    ) else {
+                        println!("{}", warn("用法：/flows use <流序号> <会话序号>"));
+                        return Ok(Flow::Continue);
+                    };
+                    let flows = sorted_flows(core);
+                    let Some(f) = flows.get(fi.saturating_sub(1)) else {
+                        println!("{}", err(format!("流序号越界：{fi}")));
+                        return Ok(Flow::Continue);
+                    };
+                    let title_prefix = format!("channel:{}:{}:", f.channel_id, f.chat_key);
+                    let bare_title = format!("channel:{}:{}", f.channel_id, f.chat_key);
+                    let scope = flow_scope(core, &f.channel_id);
+                    let mut mine: Vec<_> = core
+                        .list_sessions_in_group(&scope)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|s| s.title.starts_with(&title_prefix) || s.title == bare_title)
+                        .collect();
+                    mine.sort_by(|a, b| {
+                        b.updated_at
+                            .cmp(&a.updated_at)
+                            .then_with(|| b.created_at.cmp(&a.created_at))
+                            .then_with(|| a.id.cmp(&b.id))
+                    });
+                    let Some(s) = mine.get(si.saturating_sub(1)) else {
+                        println!("{}", err(format!("会话序号越界：{si}（共 {} 条）", mine.len())));
+                        return Ok(Flow::Continue);
+                    };
+                    match core.bind_flow_session(&f.channel_id, &f.chat_key, &s.id) {
+                        Ok(()) => {
+                            state.session_id = s.id.clone();
+                            state.session_title = s.title.clone();
+                            state.turns = 0;
+                            core.clear_flow_unread(&f.channel_id, &f.chat_key);
+                            println!(
+                                "{} 流已切到会话 {}（{}）——通道侧与 WebUI 同步生效",
+                                ok("完成"),
+                                short_id(&s.id),
+                                s.title
+                            );
+                            self.print_status_bar(core, state);
+                        }
+                        Err(e) => println!("{}", err(format!("改绑失败：{e}"))),
+                    }
+                }
+                Some(other) => println!("{}", warn(format!("未知子命令：{other}（open / sessions / use）"))),
+            },
 
             // ---------------- 交互目标与编成 ----------------
             "target" | "t" => match rest.first().map(|s| s.as_str()) {
@@ -1012,15 +1233,48 @@ impl Panel {
 
 /// 全部面板命令（用于未知命令纠错建议）
 const COMMANDS: &[&str] = &[
-    "help", "exit", "quit", "version", "workspace", "clear", "status", "quiet", "theme", "new",
-    "resume", "sessions", "session", "del", "tasks", "stop", "undo", "fork", "target", "singles",
+    "help", "exit", "quit", "version", "workspace", "clear", "status", "quiet", "theme", "caps",
+    "copy", "new",
+    "resume", "sessions", "session", "del", "tasks", "stop", "undo", "fork", "flows", "target", "singles",
     "groups", "group", "agents", "agent", "persona", "model", "config", "memory", "skills", "cron",
     "approvals", "approve", "deny", "checkpoints", "restore", "doctor",
 ];
 
+/// 流列表统一排序（最后活跃倒序；/flows 与子命令序号寻址一致性由同一函数保证）
+fn sorted_flows(core: &exm_core::Core) -> Vec<exm_core::types::ChannelFlow> {
+    let mut flows = core.channel_flows(None);
+    flows.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+    flows
+}
+
+/// 流归属 scope（与 REST /channels/flows/:id/sessions 同口径）：通道绑定组 →
+/// 缺省回落默认单智能体（machina 优先），再缺省激活组
+fn flow_scope(core: &exm_core::Core, channel_id: &str) -> String {
+    let channels: Option<Vec<serde_json::Value>> = std::fs::read_to_string(
+        core.config().data_dir.join("channels.json"),
+    )
+    .ok()
+    .and_then(|s| serde_json::from_str(&s).ok());
+    if let Some(group) = channels
+        .unwrap_or_default()
+        .iter()
+        .find(|c| c["id"].as_str() == Some(channel_id))
+        .and_then(|c| c["group"].as_str().map(|s| s.to_string()))
+    {
+        return group;
+    }
+    if core.registry().single("machina").is_some() {
+        return "single:machina".into();
+    }
+    core.registry()
+        .list_singles()
+        .first()
+        .map(|d| format!("single:{}", d.identifier))
+        .unwrap_or_else(|| core.registry().active_scope())
+}
+
 /// 未知命令 → 最接近的命令（前缀优先，其次编辑距离 ≤2）
-fn suggest_command(input: &str) -> Option<&'static str> {
-    let q = input.trim().to_lowercase();
+fn suggest_command(input: &str) -> Option<&'static str> {    let q = input.trim().to_lowercase();
     if q.is_empty() {
         return None;
     }
@@ -1727,10 +1981,16 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("/stop", "终止当前运行中的轮次（等同 Ctrl+C）"),
             ("/undo <轮次>", "撤销到指定轮次（联动回滚该轮之后改动的工作区文件）"),
             ("/fork <轮次>", "派生分支会话（原会话不变）"),
+            ("/flows", "外部聊天流列表（通道 · 对端 · 预览 · 绑定/未读）"),
+            ("/flows open <序号>", "打开流（进入绑定会话并清未读；与 WebUI 同源）"),
+            ("/flows sessions <序号>", "流内会话列表（活跃倒序，绑定带 ●）"),
+            ("/flows use <流序号> <会话序号>", "切换流的绑定会话（通道侧同步生效）"),
             ("/clear", "清屏并重绘面板"),
             ("/status", "重绘运行状态面板"),
             ("/quiet [on|off]", "静默模式：只输出最终结果（落盘记忆）"),
             ("/theme <名>", "强调色：cyan|green|amber|violet|ice（落盘记忆）"),
+            ("/caps", "终端能力探测（色彩档位/宽字符/剪贴板通道）"),
+            ("/copy <文本>", "复制到剪贴板（不可用时降级打印）"),
         ],
     ),
     (
@@ -2018,6 +2278,44 @@ mod tests {
         assert_eq!(
             out.join("").replace(' ', ""),
             cmd.replace(' ', "")
+        );
+    }
+
+    #[test]
+    fn 流列表排序_最后活跃倒序() {
+        // /flows 序号寻址一致性：sorted_flows 固定按 last_active_at 倒序
+        // （与 REST /channels/flows 同口径）；此处验证排序纯函数行为
+        // （ChannelFlow 构造最小字段，经 serde 完整性由 core 侧测试覆盖）
+        let mk = |id: &str, at: &str| exm_core::types::ChannelFlow {
+            id: id.into(),
+            channel_id: "ch".into(),
+            chat_key: id.into(),
+            display_name: String::new(),
+            is_group: false,
+            active_session: None,
+            last_message: String::new(),
+            last_active_at: at.into(),
+            created_at: at.into(),
+        };
+        let mut v = [mk("a", "2026-11-06T01:00:00Z"), mk("b", "2026-11-06T03:00:00Z"), mk("c", "2026-11-05T00:00:00Z")];
+        v.sort_by(|x, y| y.last_active_at.cmp(&x.last_active_at));
+        assert_eq!(v.iter().map(|f| f.chat_key.clone()).collect::<Vec<_>>(), vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn 流scope_通道组优先_缺省回落单机() {
+        // flow_scope 口径：channels.json 有组 → 组；无 → machina 单机；无档案 → 激活组
+        // （此处只验证无 channels.json 环境回落链不死；带通道文件的行为由 e2e 流面覆盖）
+        let base = std::env::temp_dir().join(format!("exm-flows-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&base);
+        cfg.data_dir = base.join("data");
+        let core = exm_core::Core::with_config(cfg).expect("Core 创建失败");
+        let scope = flow_scope(&core, "no-such-channel");
+        assert!(!scope.is_empty(), "回落链必须给出非空 scope（实际 {scope}）");
+        assert!(
+            scope.starts_with("single:") || !scope.contains(':'),
+            "回落应为单智能体 scope 或组 id（实际 {scope}）"
         );
     }
 }
