@@ -11,7 +11,8 @@ use exm_core::config::ExmConfig;
 use exm_core::Core;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::{Arc};
 
 /// 脚本化 OpenAI 兼容端点：
 /// - 规划请求（system 含 OrchestratorPlan）→ 返回单节点计划（派给 coding-agent）
@@ -163,7 +164,7 @@ async fn 端到端_开发任务_从对话到文件落盘() {
                             .iter()
                             .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                             .collect();
-                        *tas.lock().unwrap() = names;
+                        *tas.lock() = names;
                     }
                     uc.fetch_add(1, Ordering::SeqCst);
                     return (axum::http::StatusCode::OK, Json(tool_call_body()));
@@ -207,7 +208,7 @@ async fn 端到端_开发任务_从对话到文件落盘() {
     assert!(converge_calls.load(Ordering::SeqCst) >= 1, "应有收束请求");
 
     // 7) 断言：下发的工具面包含 edit（修复的编成白名单在真实链路生效）
-    let tools = tool_args_seen.lock().unwrap().clone();
+    let tools = tool_args_seen.lock().clone();
     assert!(
         tools.iter().any(|t| t == "edit"),
         "子个体工具面应含 edit（编成修复应在真实链路生效），实际: {tools:?}"

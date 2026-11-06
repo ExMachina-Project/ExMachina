@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 pub const TERM_BUCKETS: usize = 64;
 
@@ -224,7 +224,7 @@ impl FsDb {
         V: DeserializeOwned + Serialize + Clone,
         F: FnMut(&str, &mut std::collections::HashMap<String, V>),
     {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock();
         let dir = self.coll_dir(collection)?;
         let path = dir.join(format!("bucket-{:02}.json", Self::bucket_id(key)));
         let mut map: std::collections::HashMap<String, V> = match std::fs::read(&path) {

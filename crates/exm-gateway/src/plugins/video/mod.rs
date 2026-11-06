@@ -19,7 +19,8 @@ use exm_core::Core;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const UA: &str =
@@ -69,7 +70,7 @@ fn reconcile(core: &Arc<Core>) {
         .map(|c| (c.id.clone(), c))
         .collect();
 
-    let mut map = runners().lock().unwrap();
+    let mut map = runners().lock();
     let stale: Vec<String> = map
         .iter()
         .filter(|(id, r)| {
@@ -463,7 +464,7 @@ async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Resu
     let acted = tools::act_gate_count(&sid);
     let st = tools::session_state(&sid);
     let (skipped, acted_notes) = {
-        let mut g = st.lock().unwrap();
+        let mut g = st.lock();
         (
             std::mem::take(&mut g.skipped),
             std::mem::take(&mut g.acted_notes),
@@ -729,10 +730,10 @@ async fn fetch_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<Vide
 
 /// 倾向词轮换游标：按通道记忆轮次取模，跨轮次推进避免反复搜同一个词
 fn interest_cursor(ch: &Channel, terms: &[String]) -> usize {
-    static CURSORS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+    static CURSORS: OnceLock<Mutex<std::collections::HashMap<String, usize>>> =
         OnceLock::new();
-    let map = CURSORS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mut guard = map.lock().expect("interest cursor lock");
+    let map = CURSORS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock();
     let n = guard.entry(ch.id.clone()).or_insert(0);
     let cur = *n;
     *n = n.wrapping_add(1);
@@ -913,17 +914,16 @@ fn bili_cookie(ch: &Channel) -> String {
 
 /// 通道级 buvid 缓存（共享单例）：(buvid3, Option<buvid4>)
 type BuvidCache =
-    std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>, bool)>>;
+    Mutex<std::collections::HashMap<String, (String, Option<String>, bool)>>;
 fn buvid_cache() -> &'static BuvidCache {
     static CACHE: OnceLock<BuvidCache> = OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 /// 读取缓存的 buvid（无则 None——发评论前应先 bili_prime_buvid）
 fn buvid_cached(ch: &Channel) -> Option<(String, Option<String>)> {
     buvid_cache()
         .lock()
-        .expect("buvid cache lock")
         .get(&ch.id)
         .map(|(b3, b4, _)| (b3.clone(), b4.clone()))
 }
@@ -935,7 +935,7 @@ fn buvid_cached(ch: &Channel) -> Option<(String, Option<String>)> {
 async fn bili_prime_buvid(ch: &Channel) {
     let cache = buvid_cache();
     // 未激活的缓存条目要重试（激活失败常见于网络抖动；指纹一日内有效，成功后不再重跑）
-    let need = match cache.lock().expect("buvid cache lock").get(&ch.id) {
+    let need = match cache.lock().get(&ch.id) {
         None => true,
         Some((_, _, activated)) => !activated,
     };
@@ -980,7 +980,6 @@ async fn bili_prime_buvid(ch: &Channel) {
     let activated = activate_buvid(&b3).await;
     cache
         .lock()
-        .expect("buvid cache lock")
         .insert(ch.id.clone(), (b3, b4, activated));
 }
 
@@ -2072,10 +2071,9 @@ mod watch_loop_tests {
         let sid = "skip-test";
         let st = tools::session_state(sid);
         st.lock()
-            .unwrap()
             .skipped
             .push("候选均不感兴趣：题材重复".into());
-        let skipped = st.lock().unwrap().skipped.clone();
+        let skipped = st.lock().skipped.clone();
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("题材重复"));
         tools::drop_session(sid);

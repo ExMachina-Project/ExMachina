@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// 原生 function calling：暴露给模型的工具定义（parameters = JSON Schema 对象）
@@ -578,7 +579,7 @@ pub struct OpenAiCompatibleProvider {
     api_format: String,
     /// Key 池：多把 Key 负载均衡——按发起方粘性选键，仅限额时前进（保留端点侧 KV 缓存）
     keys: Vec<String>,
-    sticky: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    sticky: Mutex<std::collections::HashMap<String, usize>>,
     client: reqwest::Client,
 }
 
@@ -596,7 +597,7 @@ impl OpenAiCompatibleProvider {
             base_url: base_url.into(),
             api_format: fmt.into(),
             keys: keys.into_iter().filter(|k| !k.trim().is_empty()).collect(),
-            sticky: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sticky: Mutex::new(std::collections::HashMap::new()),
             // 全局请求超时（审计 错误处理 P1-1）：端点 TCP 建连后僵死（代理半开/服务商挂起）
             // 时 reqwest 默认无总超时 → chat/embed 永久阻塞 → run 永不收束、run_lock 永久持有。
             // 300s = 非流式调用的宽上限（对比 transcribe/speak 已有的 120s）；
@@ -680,7 +681,7 @@ impl OpenAiCompatibleProvider {
 
     /// 粘性选键：同 hint 稳定命中同一把；首次按 hint 散列分布（不同个体自然错开不同 Key）
     fn pick_index(&self, hint: &str) -> usize {
-        let mut m = self.sticky.lock().unwrap();
+        let mut m = self.sticky.lock();
         *m.entry(hint.to_string()).or_insert_with(|| {
             let seed: u32 = hint
                 .bytes()
@@ -691,7 +692,7 @@ impl OpenAiCompatibleProvider {
 
     /// 限额切换：前进到下一把并粘住
     fn rotate_index(&self, hint: &str) -> usize {
-        let mut m = self.sticky.lock().unwrap();
+        let mut m = self.sticky.lock();
         let next = (*m.entry(hint.to_string()).or_insert(0) + 1) % self.keys.len().max(1);
         m.insert(hint.to_string(), next);
         next
