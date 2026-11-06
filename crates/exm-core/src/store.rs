@@ -579,6 +579,22 @@ impl Store {
         self.db.read_lines("evidence", session_id, 0)
     }
 
+    /// 尽力而为审计（P2-6 吞错收敛）：审计落库失败不打断业务主流程，
+    /// 但 MUST 留日志痕迹（磁盘满/IO 故障时「无审计痕迹」可从日志发现，
+    /// 而非静默成功——高危操作无审计是安全问题，不能零观测）
+    pub fn audit_tool_best_effort(
+        &self,
+        agent_id: &str,
+        tool: &str,
+        args: &serde_json::Value,
+        result_summary: &str,
+        duration_ms: u64,
+    ) {
+        if let Err(e) = self.audit_tool(agent_id, tool, args, result_summary, duration_ms) {
+            eprintln!("[audit] 审计落库失败（{agent_id}/{tool}）：{e}");
+        }
+    }
+
     pub fn audit_tool(
         &self,
         agent_id: &str,
@@ -1089,14 +1105,14 @@ mod store_tests {
     #[test]
     fn 审计_写入与跨文件过滤读回() {
         let store = test_store();
-        let _ = store.audit_tool(
+        store.audit_tool_best_effort(
             "machina",
             "fs.read",
             &serde_json::json!({"path": "/a"}),
             "ok",
             3,
         );
-        let _ = store.audit_tool(
+        store.audit_tool_best_effort(
             "webui",
             "editor.save",
             &serde_json::json!({"path": "/b"}),

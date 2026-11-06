@@ -239,7 +239,7 @@ pub(crate) async fn dispatch_fs_events(core: &exm_core::Core, events: &[FsEvent]
             .await
         {
             Ok(sid) => {
-                let _ = core.store.audit_tool(
+                core.store.audit_tool_best_effort(
                     "triggers",
                     "file_watch",
                     &json!({ "triggerId": t.id, "events": events.len() }),

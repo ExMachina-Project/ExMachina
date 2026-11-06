@@ -1792,6 +1792,12 @@ impl LlmProvider for UnconfiguredProvider {
 /// 仅在测试代码或显式设置 `EXM_LLM_MOCK=1`（联调流程时）启用；产品运行时不参与推理。
 pub struct MockLlmProvider;
 
+/// Eval→act 通过路径开关（仅测试）：置位后下一次 Auto Agent Eval 产出
+/// act:true（一次性，用毕复位）——auto_agent_tick 的 user 文本固定，无法用
+/// 输入标记驱动；通过路径由测试显式拨动此开关断言全链路。
+pub static MOCK_EVAL_ACT_ONCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 确定性伪嵌入（Mock 通道）：64 维，token 哈希累加后归一——同义文本向量稳定相近
 fn mock_embedding(text: &str) -> Vec<f32> {
     let mut v = vec![0f32; 64];
@@ -1899,6 +1905,20 @@ fn respond(req: &ChatRequest) -> String {
     if system.contains("记忆压缩") {
         let kept: String = user.chars().take(120).collect();
         format!("- 【已压缩】{kept}\n- 细节已归档，按需查阅")
+    } else if system.contains("Auto Agent Eval") {
+        // Auto Agent 自评（9.2 e2e）：确定性两态——开关拨动（一次性）或 user 文本
+        // 带标记时产出「值得做」，否则保守拒绝（与 parse_auto_eval 契约对齐，
+        // 驱动 Eval→act 链路与退避断言）
+        let act = MOCK_EVAL_ACT_ONCE.swap(false, std::sync::atomic::Ordering::SeqCst)
+            || user.contains("值得做");
+        if act {
+            r#"{"act": true, "task": "检查记忆库健康度", "why": "e2e 驱动的确定性自评"}"#.to_string()
+        } else {
+            r#"{"act": false}"#.to_string()
+        }
+    } else if system.contains("自主记忆摘要") {
+        // 记忆归纳（9.1）：确定性摘要输出（不依赖模型质量，驱动去重/落库断言）
+        format!("E2E 会话主题归纳。{}", user.chars().take(60).collect::<String>())
     } else if system.contains("会话压缩") {
         "目标与进展：用户持续在推进当前任务；关键结论与未决事项已由最近对话承载。".to_string()
     } else if system.contains("经验改进要点合成") {

@@ -59,6 +59,10 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// 自主记忆摘要提示词（experiments.autoMemoryDigest，9.1）：单次非流式归纳。
+/// 输出契约：第一行一句话主题，随后 ≤300 字要点（目标/关键结论/未决事项）。
+const DIGEST_SYSTEM_PROMPT: &str = "你是会话记忆归纳器【自主记忆摘要】。把给定会话转录归纳为一条可长期检索的记忆：第一行一句话主题（≤40 字），随后不超过 300 字的要点（目标、关键结论、决策、未决事项）。只输出记忆正文，不要任何前后缀与解释。";
+
 /// Auto Agent 运行态（实验性）：空转连续次数（退避用）+ 上次 Eval 的分钟键
 #[derive(Debug, Default)]
 pub struct AutoAgentState {
@@ -441,6 +445,29 @@ impl Core {
         )
     }
 
+    /// 调试检索（8.4 记忆检索调试视图）：与对话内召回同口径——语义检索
+    /// 启用时嵌入查询向量（词项 + 语义混合命中，分数与 reasons 可解释）；
+    /// 未启用等价 memory_recall（仅词项）。嵌入失败静默回落词项（调试视图
+    /// 不应因嵌入端点抖动把检索本身打挂）。
+    pub async fn memory_recall_debug(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        agent: Option<&str>,
+    ) -> anyhow::Result<Vec<RecallHit>> {
+        let qe = self
+            .orchestrator()
+            .memory_query_embedding(query)
+            .await;
+        let gid = self.registry.active_group();
+        let cfg = self.config();
+        let limit = limit.unwrap_or(cfg.memory_recall_limit);
+        match agent {
+            Some(id) => self.memory.recall_for_agent(id, query, limit, Some(&gid), qe.as_deref()),
+            None => self.memory.recall(query, limit, None, Some(&gid), qe.as_deref()),
+        }
+    }
+
     /// 个体检索：该智能体私有 + 群体共享（范围 = 激活组 + 全局条目）
     pub fn memory_recall_for_agent(
         &self,
@@ -693,7 +720,7 @@ impl Core {
         }
         std::fs::write(&target, content)?;
         // 审计：agent_id = webui，与智能体审计同账本、来源可区分
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "webui",
             "filesystem",
             &serde_json::json!({ "op": "write", "path": norm, "via": "editor" }),
@@ -1175,9 +1202,12 @@ impl Core {
         let archived = self.store.truncate_messages(session_id, cursor)?;
 
         // 上下文重建：截断后滚动摘要失效（摘要覆盖越过游标即重置，按截断后历史重建）
-        let session = self.store.get_session(session_id)?.unwrap();
-        if session.summary_upto.map(|u| u > cursor).unwrap_or(false) {
-            let _ = self.store.update_compaction(session_id, "", 0);
+        // P2-8：上一行存在性校验与此处重查之间会话可被并发删除——不再 unwrap，
+        // 查不到按「无摘要」处理（截断已成功，摘要重建跳过不致命）
+        if let Some(session) = self.store.get_session(session_id)? {
+            if session.summary_upto.map(|u| u > cursor).unwrap_or(false) {
+                let _ = self.store.update_compaction(session_id, "", 0);
+            }
         }
 
         // 检查点联动回滚：该轮之后各快照登记的文件变更，按轮次倒序恢复
@@ -1205,7 +1235,7 @@ impl Core {
 
         // 孤儿快照清理 + 审计 + 事件
         let _ = self.store.prune_turn_snapshots_after(session_id, upto_turn);
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "webui",
             "session_undo",
             &serde_json::json!({ "session": session_id, "uptoTurn": upto_turn, "restoreFiles": restore_files }),
@@ -1276,7 +1306,7 @@ impl Core {
         let copied = self
             .store
             .copy_messages_prefix(session_id, &fork.id, cursor)?;
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "webui",
             "session_fork",
             &serde_json::json!({ "source": session_id, "uptoTurn": upto_turn, "fork": fork.id }),
@@ -1370,7 +1400,7 @@ impl Core {
         }
         crate::round_trace::request_cancel(session_id);
         let n = crate::round_trace::tool_count(session_id);
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "system",
             "session_stop",
             &serde_json::json!({ "session": session_id }),
@@ -2271,7 +2301,10 @@ impl Core {
                     ap.status = "denied".into();
                     ap.decided_at = Some(now_iso());
                     ap.result = Some("计划被拒绝（清单保留可继续修改）".into());
-                    let _ = self.store.update_approval(&ap);
+                    // P2-7：审批了结落库失败必须可见——静默会造内存态/落库态分叉
+                    if let Err(e) = self.store.update_approval(&ap) {
+                        eprintln!("[approval] 计划拒绝落库失败（{}）：{e}", ap.id);
+                    }
                     self.emit_approval_resolved(&ap);
                 }
             }
@@ -2302,7 +2335,10 @@ impl Core {
                     ap.status = "executed".into();
                     ap.decided_at = Some(now_iso());
                     ap.result = Some("计划已批准回放".into());
-                    let _ = self.store.update_approval(&ap);
+                    // P2-7：同上——落库失败留日志防状态分叉
+                    if let Err(e) = self.store.update_approval(&ap) {
+                        eprintln!("[approval] 计划执行落库失败（{}）：{e}", ap.id);
+                    }
                     self.emit_approval_resolved(&ap);
                 }
             }
@@ -2548,31 +2584,27 @@ impl Core {
         let output = match orch.orch_provider.chat(req).await {
             Ok(r) => r.content,
             Err(e) => {
-                let _ = self.events.send(CoreEvent {
-                    kind: "auto.eval".into(),
-                    session_id: String::new(),
-                    payload: serde_json::json!({ "ok": false, "error": e.to_string() }),
-                });
+                orch.emit(
+                    "",
+                    "auto.eval",
+                    serde_json::json!({ "ok": false, "error": e.to_string() }),
+                );
                 return None;
             }
         };
         let Some((task, why)) = crate::autonomy::parse_auto_eval(&output) else {
-            // 无任务：空转计数 +1（退避拉长），发审计事件
+            // 无任务：空转计数 +1（退避拉长），发审计事件（广播 + 落库，事件页可查）
             self.auto_state.write().idle_streak += 1;
-            let _ = self.events.send(CoreEvent {
-                kind: "auto.eval".into(),
-                session_id: String::new(),
-                payload: serde_json::json!({ "ok": true, "act": false }),
-            });
+            orch.emit("", "auto.eval", serde_json::json!({ "ok": true, "act": false }));
             return None;
         };
         // Eval 通过：空传统计复位，开自主行动会话执行
         self.auto_state.write().idle_streak = 0;
-        let _ = self.events.send(CoreEvent {
-            kind: "auto.eval".into(),
-            session_id: String::new(),
-            payload: serde_json::json!({ "ok": true, "act": true, "task": task, "why": why }),
-        });
+        orch.emit(
+            "",
+            "auto.eval",
+            serde_json::json!({ "ok": true, "act": true, "task": task, "why": why }),
+        );
         let title = format!("auto-agent:{}", task.chars().take(30).collect::<String>());
         let session = self.create_session(&title).ok()?;
         let prompt = format!(
@@ -2581,16 +2613,116 @@ impl Core {
             crate::autonomy::auto_act_max_steps(&cfg),
         );
         let result = self.chat(&session.id, &prompt).await;
-        let _ = self.events.send(CoreEvent {
-            kind: "auto.act".into(),
-            session_id: session.id.clone(),
-            payload: serde_json::json!({
+        orch.emit(
+            &session.id,
+            "auto.act",
+            serde_json::json!({
                 "task": task,
                 "status": if result.is_ok() { "done" } else { "failed" },
                 "error": result.err().map(|e| e.to_string()),
             }),
-        });
+        );
         Some((task, why))
+    }
+
+    /// 自主记忆摘要（实验性 experiments.autoMemoryDigest，9.1）：把一个长会话
+    /// 历史归纳为记忆条目。低峰期由调度器对每个达标会话调用（当日全库只跑一次）。
+    /// 返回 Some(标题) = 本次产出/命中记忆；None = 会话不达标或调用失败（留事件）。
+    ///
+    /// 设计约束（任务 9.1）：
+    /// - token 预算：转录每条截 400 字符、最多取 200 条（compaction 同口径），
+    ///   单会话一次非流式调用，无工具循环；
+    /// - 去重：落库走 memory.remember（内容哈希去重——重复摘要提升重要性
+    ///   而非新建条目）；
+    /// - 默认关：关闭态调度器不调用（零任务零 token）。
+    pub async fn memory_digest_session(&self, session_id: &str) -> Option<String> {
+        let cfg = self.config();
+        let min_turns = cfg.automation.memory_digest_min_turns.max(5);
+        let count = self.store.message_count(session_id);
+        if count < min_turns {
+            return None;
+        }
+        let msgs = self
+            .store
+            .list_messages(session_id, 200)
+            .unwrap_or_default();
+        if msgs.is_empty() {
+            return None;
+        }
+        let transcript: String = msgs
+            .iter()
+            .map(|m| {
+                let who = match m.role {
+                    crate::types::MessageRole::User => "用户",
+                    crate::types::MessageRole::Orchestrator => {
+                        m.agent_id.as_deref().unwrap_or("指挥体")
+                    }
+                    crate::types::MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
+                    crate::types::MessageRole::System => "系统",
+                };
+                let body = m
+                    .statements
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("；");
+                format!("[{who}] {}", body.chars().take(400).collect::<String>())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let orch = self.orchestrator();
+        let req = crate::provider::ChatRequest::new(
+            orch.orch_model.clone(),
+            vec![
+                crate::provider::ChatMessage::system(DIGEST_SYSTEM_PROMPT),
+                crate::provider::ChatMessage::user(format!(
+                    "## 会话转录（{count} 条消息）\n{transcript}"
+                )),
+            ],
+        );
+        let output = match orch.orch_provider.chat(req).await {
+            Ok(r) => r.content,
+            Err(e) => {
+                orch.emit(
+                    session_id,
+                    "memory.digest",
+                    serde_json::json!({ "ok": false, "error": e.to_string() }),
+                );
+                return None;
+            }
+        };
+        // 摘要落记忆（内容哈希去重；来源指向会话）
+        let title = format!("会话摘要：{}", output.chars().take(40).collect::<String>());
+        let draft = crate::memory::MemoryDraft::new(
+            crate::memory::MemoryKind::Digest,
+            &title,
+            output.chars().take(600).collect::<String>(),
+        )
+        .session(session_id);
+        match self.memory.remember(&draft) {
+            Ok(entry) => {
+                orch.emit(
+                    session_id,
+                    "memory.digest",
+                    serde_json::json!({
+                        "ok": true,
+                        "entryId": entry.id,
+                        "deduped": entry.updated_at != entry.created_at,
+                        "messageCount": count,
+                    }),
+                );
+                Some(title)
+            }
+            Err(e) => {
+                orch.emit(
+                    session_id,
+                    "memory.digest",
+                    serde_json::json!({ "ok": false, "error": e.to_string() }),
+                );
+                None
+            }
+        }
     }
 
     /// Meta Agent 一次巡检 tick（实验性 experiments.metaAgent）：周期判定 →

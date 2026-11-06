@@ -500,6 +500,14 @@ pub struct AutomationConfig {
     /// 自动归档（活跃绑定会话豁免）。0 = 关闭（默认，零行为变更）。
     #[serde(default)]
     pub flow_idle_days: u32,
+    /// 自主记忆摘要触发轮数下限（experiments.autoMemoryDigest 开启才生效）：
+    /// 会话消息数 ≥ 该值才进入低峰归纳。默认 20。
+    #[serde(default = "default_memory_digest_min_turns")]
+    pub memory_digest_min_turns: usize,
+}
+
+fn default_memory_digest_min_turns() -> usize {
+    20
 }
 
 impl Default for AutomationConfig {
@@ -517,6 +525,7 @@ impl Default for AutomationConfig {
             auto_agent_backoff_max: 8,
             meta_interval_min: 60,
             flow_idle_days: 0,
+            memory_digest_min_turns: default_memory_digest_min_turns(),
         }
     }
 }
@@ -692,6 +701,11 @@ pub struct ExperimentsConfig {
     /// 成员编成）→ [meta] 审批应用;构建新个体;轮内元认知反思。参数见 automation.metaIntervalMin
     #[serde(default)]
     pub meta_agent: bool,
+    /// 自主记忆摘要（实验性）：低峰期（每日 04:30）把长会话历史归纳为记忆条目
+    /// （LLM 单次摘要调用 + 内容哈希去重 + token 上限钳制）。参数见
+    /// automation.memoryDigestMinTurns。默认关——关闭态零任务零 token 消耗。
+    #[serde(default)]
+    pub auto_memory_digest: bool,
 }
 
 // ---------------------------------------------------------------- 插件系统（plugins/ 目录）
@@ -1293,6 +1307,8 @@ struct AutomationFile {
     meta_interval_min: Option<u32>,
     #[serde(default)]
     flow_idle_days: Option<u32>,
+    #[serde(default)]
+    memory_digest_min_turns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1487,6 +1503,9 @@ impl ExmConfig {
             flow_idle_days: file_auto
                 .flow_idle_days
                 .unwrap_or_else(|| AutomationConfig::default().flow_idle_days),
+            memory_digest_min_turns: file_auto
+                .memory_digest_min_turns
+                .unwrap_or_else(|| AutomationConfig::default().memory_digest_min_turns),
         };
 
         let mut llm = LlmConfig {
@@ -1707,6 +1726,7 @@ impl ExmConfig {
                 auto_agent_backoff_max: Some(self.automation.auto_agent_backoff_max),
                 meta_interval_min: Some(self.automation.meta_interval_min),
                 flow_idle_days: Some(self.automation.flow_idle_days),
+                memory_digest_min_turns: Some(self.automation.memory_digest_min_turns),
             }),
             search: Some(self.search.clone()),
             hooks: Some(self.hooks.clone()),
@@ -1959,7 +1979,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "连续「无事可做」次数 N 后自评间隔 × min(N, 上限)；有任务即复位（防空转耗 token）" },
                     { "key": "automation.metaIntervalMin", "label": "Meta Agent 巡检周期（分钟）", "kind": "number",
                       "default": "60", "required": false, "min": 5, "max": 1440,
-                      "help": "（实验性 experiments.metaAgent）元智能体每次巡检的间隔；巡检 = 数据聚合 → 自评 → 有改进点才开会话落提议单" }
+                      "help": "（实验性 experiments.metaAgent）元智能体每次巡检的间隔；巡检 = 数据聚合 → 自评 → 有改进点才开会话落提议单" },
+                    { "key": "automation.memoryDigestMinTurns", "label": "自主记忆摘要触发轮数下限", "kind": "number",
+                      "default": "20", "required": false, "min": 5, "max": 500,
+                      "help": "（实验性 experiments.autoMemoryDigest）会话消息数 ≥ 该值才进入低峰归纳；过短会话不值得摘要" }
                 ]
             },
             {
@@ -2170,6 +2193,9 @@ pub fn config_schema() -> serde_json::Value {
                     { "key": "experiments.autoAgent", "label": "Auto Agent 完全自主", "kind": "boolean",
                       "default": "false", "required": false,
                       "help": "（实验性）无人值守：agent 按周期（automation.autoAgentIntervalMinutes）自评「有没有值得做的事」，有则自主开会话执行，只在有人必须行动时经通知通道说话。配套参数在 automation 段" },
+                    { "key": "experiments.autoMemoryDigest", "label": "自主记忆摘要", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）低峰期（每日 04:30）把长会话（消息数 ≥ automation.memoryDigestMinTurns）历史归纳为记忆条目：LLM 单次摘要 + 内容哈希去重 + token 预算钳制；治理「会话信息随窗口滑走而丢失」" },
                     { "key": "experiments.metaAgent", "label": "Meta Agent 元智能体", "kind": "boolean",
                       "default": "false", "required": false,
                       "help": "（实验性）元智能体：周期巡检运行数据（automation.metaIntervalMin），对高失败率/重复失败/能力缺口提出改进提议（提示词补段/经验要点/成员编成/新个体构建），全部落 [meta] 审批单人工批准后应用；另含轮内元认知反思（连续失败时注入策略调整提示）" }
