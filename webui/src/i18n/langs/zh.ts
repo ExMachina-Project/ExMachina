@@ -125,6 +125,8 @@ export const zh = {
   "chat.flows": "聊天流",
   "dag.inlineTitle": "会话任务图",
   "dag.inlineRunning": "{n} 个在途",
+  "chat.copy": "复制全文",
+  "chat.copied": "已复制",
   "chat.flowEmpty": "暂无消息——下条消息自动开会话",
   "chat.flowSessions": "流内会话",
   // ── 聊天页 / 任务页（信息架构 2026-11）──

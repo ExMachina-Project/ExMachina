@@ -7,7 +7,7 @@
  *  判定口径与 webui/src/session.ts 的 isAutoSessionTitle 一致（保守识别，
  *  cron 自定义标题与用户会话不可区分时归对话页——不影响使用）。
  */
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Skeleton, Tag } from "antd";
 import { ArrowLeftOutlined, ReloadOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { api } from "../api";
@@ -29,6 +29,8 @@ export function TasksView(): React.ReactElement {
   const [selected, setSelected] = useState<Session | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [msgLoading, setMsgLoading] = useState(false);
+  /** 消息流容器：加载/新消息后滚到底（任务会话最新运行产物在底部） */
+  const msgBoxRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -77,6 +79,10 @@ export function TasksView(): React.ReactElement {
     window.addEventListener("exm:bound-refresh", reloadTask as EventListener);
     return () => window.removeEventListener("exm:bound-refresh", reloadTask as EventListener);
   }, [reloadTask]);
+  /** 消息加载完成/更新 → 滚到底（盯运行进度默认关注最新） */
+  useEffect(() => {
+    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
+  }, [messages, msgLoading, selected?.id]);
 
   const openTask = (s: Session) => {
     setSelected(s);
@@ -157,7 +163,7 @@ export function TasksView(): React.ReactElement {
               <span className="flows-thread-name">{selected.title}</span>
               <span className="flows-thread-meta">{t("tasks.autoOnly")}</span>
             </div>
-            <div className="flows-messages">
+            <div className="flows-messages" ref={msgBoxRef}>
               {msgLoading && <Skeleton active paragraph={{ rows: 4 }} />}
               {!msgLoading && messages.length === 0 && (
                 <Empty description={t("flows.noMessages")} style={{ marginTop: 80 }} />
