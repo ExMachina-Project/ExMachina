@@ -1,7 +1,7 @@
 # agent-todo Specification
 
 ## Purpose
-TBD - created by archiving change harness-agent-round3. Update Purpose after archive.
+为智能体提供 Todo 任务清单工具，并默认下发给编码类个体：清单项随执行推进更新状态，使多步工作有显式、可追踪的执行计划，用户与智能体都能随时看到进度全貌。
 
 ## Requirements
 

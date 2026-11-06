@@ -1,7 +1,7 @@
 # agent-exec-confinement Specification
 
 ## Purpose
-TBD - created by archiving change agent-exec-confinement. Update Purpose after archive.
+将 Agent 终端子进程的执行身份、工作目录与提权行为约束在配置范围内：Linux 降权执行、fs 圈禁双保险、root 提权审批与容器内建约束用户，降低智能体误操作对宿主的破坏面。
 
 ## Requirements
 
