@@ -8,14 +8,15 @@ use exm_core::config::ExmConfig;
 use exm_core::memory::{MemoryDraft, MemoryKind};
 use exm_core::types::*;
 use exm_core::Core;
+use parking_lot::{Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 
 /// 测试串行锁：Core 型测试共享仓库工作区（entities/active_group 等运行时文件），并行互踩
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SERIAL: Mutex<()> = Mutex::new(());
 
-fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+fn serial_guard() -> MutexGuard<'static, ()> {
+    SERIAL.lock()
 }
 
 fn test_config() -> ExmConfig {

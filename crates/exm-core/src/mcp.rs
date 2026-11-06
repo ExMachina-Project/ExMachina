@@ -8,6 +8,7 @@ use crate::provider::ToolSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use parking_lot::Mutex;
 
 /// MCP 服务器配置（config.json → mcpServers[]）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +86,7 @@ struct McpToolInfo {
 struct HttpClient {
     url: String,
     client: reqwest::Client,
-    session_id: std::sync::Mutex<Option<String>>,
+    session_id: Mutex<Option<String>>,
 }
 
 impl HttpClient {
@@ -99,7 +100,7 @@ impl HttpClient {
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            session_id: std::sync::Mutex::new(None),
+            session_id: Mutex::new(None),
         }
     }
 
@@ -120,7 +121,7 @@ impl HttpClient {
             .post(&self.url)
             .header("accept", "application/json, text/event-stream")
             .json(&body);
-        if let Some(sid) = self.session_id.lock().unwrap().clone() {
+        if let Some(sid) = self.session_id.lock().clone() {
             rb = rb.header("mcp-session-id", sid);
         }
         let resp = rb
@@ -132,7 +133,7 @@ impl HttpClient {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
         {
-            *self.session_id.lock().unwrap() = Some(sid.to_string());
+            *self.session_id.lock() = Some(sid.to_string());
         }
         let status = resp.status().as_u16();
         let ctype = resp

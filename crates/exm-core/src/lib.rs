@@ -55,7 +55,7 @@ use crate::runtime::AgentRuntime;
 use crate::store::Store;
 use crate::tools::ToolGateway;
 use crate::types::*;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -103,7 +103,7 @@ pub struct Core {
     /// 流级互斥（竞态 P1-3）：flow_id → 锁。同 chat_key 并发消息的
     /// 「查绑定→建会话→回写绑定」与「touch 预览」各自临界区——否则双建会话
     /// （孤儿+绑定互抹）或 touch 读改写覆盖他方 bind（上下文永久分裂）。
-    flow_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>,
+    flow_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
     /// 会话级审批授权（approval-ergonomics）：会话 → {命令前缀 → ()}。
     /// 「本会话允许」档批准时写入；内存态（重启即清）、随会话删除清理。
     /// 红线：[root] 提权单与破坏性命令永不入表（写入侧校验）。
@@ -781,16 +781,14 @@ impl Core {
 
     /// 流级锁的 Arc（竞态 P1-3）：同 flow 的「查绑定→建会话→回写绑定」/
     /// 「touch 预览」临界区互斥。锁粒度 = flow_id（不同流互不影响）；
-    /// std::sync::Mutex——临界区内全是同步 fs 操作，持锁不跨 await。
-    /// 用法：`let lock = self.flow_lock_arc(ch, key); let _g = lock.lock().unwrap();`
+    /// parking_lot::Mutex（锁迁移 5.18：持锁 panic 不中毒）——临界区内全是同步
+    /// fs 操作，持锁不跨 await。
+    /// 用法：`let lock = self.flow_lock_arc(ch, key); let _g = lock.lock();`
     /// （先 clone Arc 再 lock，guard 借局部 Arc，安全）
-    fn flow_lock_arc(&self, channel_id: &str, chat_key: &str) -> Arc<std::sync::Mutex<()>> {
+    fn flow_lock_arc(&self, channel_id: &str, chat_key: &str) -> Arc<Mutex<()>> {
         let id = Self::flow_id(channel_id, chat_key);
         let mut locks = self.flow_locks.lock();
-        locks
-            .entry(id)
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
-            .clone()
+        locks.entry(id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
     /// 原子版「查绑定→(缺绑定)建会话→回写绑定」（竞态 P1-3）：
@@ -807,7 +805,7 @@ impl Core {
         is_group: bool,
     ) -> Option<String> {
         let flock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = flock.lock().unwrap();
+        let _g = flock.lock();
         // 锁内直接读流文档（不走 flow_active_session——那会重复拿同一把锁，死锁）：
         // 绑定有效且会话仍存在 → 复用（他人可能已在此临界区建好绑定）
         if let Some(flow) = self.channel_flow(channel_id, chat_key) {
@@ -921,7 +919,7 @@ impl Core {
         // 临界区（竞态 P1-3）：查绑定 + 失效清理原子化——与 bind/touch 互斥，
         // 防止清理与他方回写交错抹掉刚落的绑定
         let lock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = lock.lock().unwrap();
+        let _g = lock.lock();
         let flow = self.channel_flow(channel_id, chat_key)?;
         let sid = flow.active_session?;
         // 会话可能已被用户在控制台删除：失效绑定顺带清理，下次重建
@@ -978,7 +976,7 @@ impl Core {
         // 临界区（竞态 P1-3）：读流→建/改→回写原子化——并发 bind（同流两条消息
         // 各建会话）不再互抹绑定、不再双建流文档
         let flock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = flock.lock().unwrap();
+        let _g = flock.lock();
         let id = Self::flow_id(channel_id, chat_key);
         let mut flow = self
             .channel_flow(channel_id, chat_key)
@@ -1017,7 +1015,7 @@ impl Core {
         // 临界区（竞态 P1-3）：读改写原子化——touch 的整流写回不再覆盖
         // 期间他方落的 bind（active_session）
         let flock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = flock.lock().unwrap();
+        let _g = flock.lock();
         if let Some(mut flow) = self.channel_flow(channel_id, chat_key) {
             flow.last_message = preview.chars().take(120).collect();
             flow.last_active_at = now_iso();

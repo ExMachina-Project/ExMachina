@@ -17,7 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::{Arc};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1328,12 +1329,10 @@ impl Interrupt {
         }
     }
     fn set_session(&self, id: &str) {
-        if let Ok(mut s) = self.session.lock() {
-            *s = id.to_string();
-        }
+        *self.session.lock() = id.to_string();
     }
     fn current_session(&self) -> String {
-        self.session.lock().map(|s| s.clone()).unwrap_or_default()
+        self.session.lock().clone()
     }
 }
 
