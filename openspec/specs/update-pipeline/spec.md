@@ -74,3 +74,31 @@ WebUI 设置页版本面板 SHALL 展示 `deployMode` 徽标（源码/镜像/未
 #### Scenario: 更新阶段实时可见
 - **WHEN** 更新任务处于 `pulling` → `recreating` 流程中
 - **THEN** 面板按 phase 依次显示对应阶段文案，完成后展示结果
+
+### Requirement: napcat 伴随容器健康口径
+
+生产编排中 napcat 伴随容器（视频 / QQ 通道的协议端）SHALL 有真实健康判定：容器 healthcheck MUST 探测协议端口的真实服务态（HTTP 探针或 ws 握手），而非仅进程存活；连续失败 MUST 将容器置为 unhealthy（编排层面可见）。网关侧通道自检 MUST 能区分「napcat 容器 unhealthy」与「napcat 在线但账号未登录」两类失败并给出不同的修复指引。
+
+#### Scenario: 假活容器被判 unhealthy
+
+- **WHEN** napcat 容器内进程存活但协议端口持续无响应（超过探测窗口）
+- **THEN** 容器状态转为 unhealthy；网关通道自检报告指向容器健康问题而非误导性的「建议重启网关」
+
+#### Scenario: 容器健康但未登录
+
+- **WHEN** napcat 容器协议端口正常但账号处于未登录态
+- **THEN** 通道自检报告「等待账号登录」并指引扫码，不报容器故障
+
+### Requirement: webhook 投递超时与重试
+
+webhook 类投递（notify 配置的外发通知）SHALL 有超时与重试契约：单次投递超时上限固定（不悬挂调用方）；失败 MUST 按退避重试有限次；最终失败 MUST 落审计事件（含目标与原因摘要），MUST NOT 静默吞掉。
+
+#### Scenario: 端点僵死不悬挂
+
+- **WHEN** webhook 目标端点建连后不回包
+- **THEN** 投递在超时上限内失败返回，走重试链；最终失败产生审计事件
+
+#### Scenario: 失败可追溯
+
+- **WHEN** webhook 重试耗尽仍失败
+- **THEN** 审计流中可查该次投递的目标地址与失败原因
