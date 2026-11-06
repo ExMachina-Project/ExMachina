@@ -546,6 +546,15 @@ export const api = {
   /** 「不再提醒」：持久化关闭首启设置引导 */
   dismissKeySetup: () => req<{ ok: boolean }>("/auth/dismiss", { method: "POST" }),
   health: () => req<{ ok: boolean; mock: boolean; agents: number }>("/health"),
+  /** 开箱自检（onboarding-selfcheck）：四类体检分级结果（引导卡数据源） */
+  selfcheck: () =>
+    req<{
+      ok: boolean;
+      overall: "ok" | "warn" | "error";
+      errors: number;
+      warns: number;
+      items: { level: "ok" | "warn" | "error"; name: string; detail: string; hint?: string }[];
+    }>("/selfcheck"),
   listSessions: () => req<Session[]>("/sessions"),
   /** 管理视角全量会话（含所有组；归档态默认排除） */
   listAllSessions: () => req<Session[]>("/sessions?all=true"),
