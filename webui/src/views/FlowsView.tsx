@@ -115,7 +115,7 @@ export function FlowsView(): React.ReactElement {
   }, [reloadBound]);
   /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新） */
   useEffect(() => {
-    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
+    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, msgLoading, selected?.id]);
 
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
