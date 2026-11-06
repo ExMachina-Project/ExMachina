@@ -2519,3 +2519,91 @@ async fn 自定义工具_http与命令模板() {
         r.error
     );
 }
+
+/// 工具面声明（agent-tool-surface）：声明白名单裁剪（声明外调用明确拒绝）
+/// 与未声明全量（空 tools = 全量默认，零回归）两向口径。
+#[tokio::test]
+async fn 工具面声明_白名单裁剪与未声明全量() {
+    use exm_core::types::ToolName;
+
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    let tmp = std::env::temp_dir().join(format!("exm-surface-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    cfg.workspace_root = tmp.clone();
+    cfg.data_dir = tmp.join("data");
+    cfg.config_path = tmp.join("config.json");
+    cfg.memory_md_path = tmp.join("memory.md");
+    cfg.webui_dist = tmp.join("webui-dist");
+    let core = Core::with_config(cfg).expect("创建 Core 失败");
+    let tools = exm_core::tools::ToolGateway::new(
+        &core.config().workspace_root,
+        core.store.clone(),
+        core.registry.clone(),
+        core.events.clone(),
+        core.config().security.clone(),
+    );
+
+    // --- 声明外不可达：allowlist 只给 read，terminal 调用必须明确拒绝 ---
+    let denied = tools
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Read],
+            ToolName::Terminal,
+            &serde_json::json!({ "command": "echo hi" }),
+        )
+        .await;
+    assert!(!denied.ok, "白名单外调用应失败");
+    let denied_err = denied.error.unwrap_or_default();
+    assert!(
+        denied_err.contains("白名单"),
+        "拒绝信息应明确指出白名单口径: {denied_err:?}"
+    );
+
+    // schema 下发同样只含声明工具
+    let specs = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::Read],
+        false, false, false,
+    );
+    assert!(specs.iter().all(|s| s.name == "read"), "schema 只应含 read");
+    assert_eq!(specs.len(), 1);
+
+    // --- 未声明 = 全量：registry 加载时空 tools 补全集 ---
+    let singles = core.registry().list_singles();
+    // test_config 的注册表来自真实 entities 目录（machina 显式声明了 11 个）——
+    // 全量默认在 upsert 路径验证：新建个体不带 tools，落库后应为全集
+    let _ = singles; // （真实 entities 都带显式清单，此处不断言）
+    let new_def = exm_core::types::AgentDefinition {
+        name: "面测个体".into(),
+        identifier: "surface-probe".into(),
+        domain: "测试".into(),
+        tier: exm_core::types::Tier::Unit,
+        description: "工具面默认全量验证".into(),
+        tools: vec![], // 未声明
+        when_to_call: String::new(),
+        prompt_file: "surface-probe.md".into(),
+        capabilities: vec![],
+        dependencies: vec![],
+        composable_with: vec![],
+        input_schema: Default::default(),
+        output_schema: Default::default(),
+        link: None,
+        max_steps: None,
+        model_hint: None,
+    };
+    core.registry()
+        .upsert_single(new_def, None)
+        .expect("新建个体失败");
+    let stored = core
+        .registry()
+        .single("surface-probe")
+        .expect("应能查到新建个体");
+    assert_eq!(
+        stored.tools.len(),
+        ToolName::full_set().len(),
+        "未声明 tools 的个体应落库为全量默认"
+    );
+    assert!(stored.tools.contains(&ToolName::Terminal));
+    assert!(stored.tools.contains(&ToolName::Git));
+}

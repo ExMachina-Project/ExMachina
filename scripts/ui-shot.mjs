@@ -39,6 +39,7 @@ const VIEWS = [
   { name: "chat", hash: "#/chat", wait: 5000, selectors: [".chat-rail", ".session-list"] },
   { name: "sessions", hash: "#/sessions", selectors: [".sessions-toolbar", ".sessions-table", ".sessions-th"] },
   { name: "models", hash: "#/models", selectors: [".model-status-row", ".cap-badge"] },
+  { name: "nexus", hash: "#/nexus", selectors: [".nexus-topo-canvas", ".ant-segmented"] },
   { name: "channels", hash: "#/channels", selectors: [".page-head"] },
   { name: "groups", hash: "#/groups", selectors: [".page-head"] },
   { name: "memory", hash: "#/memory", selectors: [".page-head"] },

@@ -211,6 +211,11 @@ impl LocalRegistry {
             for p in def_files {
                 let def: AgentDefinition = serde_json::from_str(&std::fs::read_to_string(&p)?)
                     .with_context(|| format!("智能体定义校验失败: {}", p.display()))?;
+                // 工具面默认全量（agent-tool-surface）：未声明 = 全量，显式声明才裁剪
+                let mut def = def;
+                if def.tools.is_empty() {
+                    def.tools = ToolName::full_set();
+                }
                 singles.insert(def.identifier.clone(), def);
             }
         }
@@ -275,6 +280,11 @@ impl LocalRegistry {
                 let mut def: AgentDefinition = serde_json::from_str(&raw)
                     .with_context(|| format!("定义 schema 校验失败: {}", path.display()))?;
                 def.domain = normalize_domain(&def.domain);
+                // 工具面默认全量（agent-tool-surface）：未声明 tools = 全量
+                // （serde 缺省空表）——显式声明才裁剪
+                if def.tools.is_empty() {
+                    def.tools = ToolName::full_set();
+                }
                 defs.insert(def.identifier.clone(), def);
             }
         }
@@ -792,6 +802,10 @@ impl LocalRegistry {
             def.prompt_file = format!("{}/PROMPT.md", def.identifier);
         }
         def.domain = normalize_domain(&def.domain);
+        // 工具面默认全量（agent-tool-surface）：创建/更新未带 tools = 沿用全量
+        if def.tools.is_empty() {
+            def.tools = ToolName::full_set();
+        }
         let prompt_path = self.singles_prompt_path(&def.prompt_file);
         if let Some(parent) = prompt_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1491,6 +1505,10 @@ impl LocalRegistry {
         def.domain = normalize_domain(&def.domain);
         if def.name.trim().is_empty() || def.description.trim().is_empty() {
             anyhow::bail!("name/description 不能为空");
+        }
+        // 工具面默认全量（agent-tool-surface）：创建/更新未带 tools = 沿用全量
+        if def.tools.is_empty() {
+            def.tools = ToolName::full_set();
         }
 
         let replacing = g.defs.contains_key(&def.identifier);
