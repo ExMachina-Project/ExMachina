@@ -66,20 +66,18 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
         {ambientSender !== null && <span className="auto-tag ambient-tag">{tb("chat.role.ambient")}</span>}
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
         {time && <span className="msg-time mono">{time}</span>}
-        {!isUser && (
-          <button
-            className="msg-copy"
-            title="复制"
-            onClick={async () => {
-              const text = m.statements.map((st) => st.text).join("\n\n");
-              if (await copyText(text)) {
-                message.success("已复制");
-              }
-            }}
-          >
-            ⧉
-          </button>
-        )}
+        <button
+          className="msg-copy"
+          title={tb("chat.copy")}
+          onClick={async () => {
+            const text = m.statements.map((st) => st.text).join("\n\n");
+            if (await copyText(text)) {
+              message.success(tb("chat.copied"));
+            }
+          }}
+        >
+          ⧉
+        </button>
         {ops && <span className="msg-ops">{ops}</span>}
       </div>
       {hasProcess &&
