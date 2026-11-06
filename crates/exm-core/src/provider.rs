@@ -152,6 +152,38 @@ mod inline_think_tests {
     }
 }
 
+// ---------------------------------------------------------------- 限额错误摘要辅助
+
+/// 从错误文案提取「reset after Nm/Ns」秒数（大小写不敏感；无则 None）。
+fn parse_reset_after(msg: &str) -> Option<u64> {
+    let low = msg.to_lowercase();
+    let idx = low.find("reset after")?;
+    let rest = &low[idx + "reset after".len()..];
+    let digit_pos = rest.find(|c: char| c.is_ascii_digit())?;
+    let after = &rest[digit_pos..];
+    let num_end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
+    let n: u64 = after[..num_end].parse().ok()?;
+    // 单位：m = 分钟，s/缺省 = 秒
+    let unit = after[num_end..]
+        .chars()
+        .find(|c| !c.is_whitespace())
+        .unwrap_or('s');
+    Some(if unit == 'm' { n * 60 } else { n })
+}
+
+/// 秒数 → 人话时长（<1min = N 秒；<1h = N 分钟；其余 = 小时+分）。
+fn human_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs} 秒")
+    } else if secs < 3600 {
+        format!("{} 分钟", secs.div_ceil(60))
+    } else {
+        format!("{} 小时 {} 分", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 // ---------------------------------------------------------------- SSE 流解析
 
 /// SSE 字节流 → 完整行的增量解码器。
@@ -708,6 +740,50 @@ impl OpenAiCompatibleProvider {
             || low.contains("insufficient")
             || low.contains("too many requests")
             || low.contains("resource_exhausted")
+    }
+
+    /// 限额/配额错误 → 人话摘要（IM 可读性）：原始 429 JSON 体直接外发是一坨
+    /// 转义串（部署实测「LLM 请求失败 429: {"error":{"message":…}}」直推群聊）。
+    /// 提取 retry_after / reset after 与上游说明重组为中文一句话；解析失败时
+    /// 回退到去壳纯文本——宁可少信息也不泼原始 JSON。
+    fn quota_error_summary(status: u16, body: &str) -> String {
+        let parsed: serde_json::Value =
+            serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+        let msg = parsed
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        // 模型/提供方前缀：「[minimax-cn/MiniMax-M3.1-Flash] …」→ 括号内内容
+        let model = msg
+            .split('[')
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim())
+            .unwrap_or("");
+        // 重置时间：优先结构化 retry_after（秒），回落 message 里 "reset after 5m"
+        let wait_secs = parsed
+            .get("retry_after")
+            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .or_else(|| parse_reset_after(msg));
+        let mut out = format!("模型服务额度已用尽（HTTP {status}）");
+        if !model.is_empty() {
+            out.push_str(&format!("：{model} 通道"));
+        }
+        if let Some(s) = wait_secs {
+            out.push_str(&format!("，约 {} 后自动恢复", human_secs(s)));
+        }
+        out.push_str("。请稍后再试；频繁出现请检查 API Key 配额或补充备用 Key");
+        // 非 JSON 体（上游直接吐文本）：附上首行原文（截 120 字）保留定位线索
+        if msg.is_empty() {
+            let plain = body.trim().lines().next().unwrap_or("");
+            if !plain.is_empty() && plain.len() < 300 {
+                out.push_str(&format!("（上游：{}", plain.chars().take(120).collect::<String>()));
+                out.push('）');
+            }
+        }
+        out
     }
 
     fn key_for(&self, hint: &str) -> String {
@@ -1374,6 +1450,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     self.rotate_index(&hint);
                     continue; // 限额 → 切换下一把 Key 并粘住
                 }
+                if Self::is_quota_failure(status, &text) {
+                    // 单 Key 也限额：摘要化（IM 直投可读），不泼原始 JSON
+                    anyhow::bail!("模型额度不足：{}", Self::quota_error_summary(status, &text));
+                }
                 anyhow::bail!(
                     "LLM 请求失败 {status}: {}",
                     text.chars().take(300).collect::<String>()
@@ -1443,6 +1523,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     last_quota = Some(status);
                     self.rotate_index(&hint);
                     continue; // 限额 → 切换下一把 Key 并粘住
+                }
+                if Self::is_quota_failure(status, &text) {
+                    anyhow::bail!("模型额度不足：{}", Self::quota_error_summary(status, &text));
                 }
                 anyhow::bail!(
                     "LLM 流式请求失败 {status}: {}",
@@ -2406,5 +2489,42 @@ mod stream_tests {
         }
         assert_eq!(text, "你好，世界");
         assert_eq!(think, "想一想");
+    }
+}
+
+#[cfg(test)]
+mod quota_summary_tests {
+    use super::*;
+
+    /// 真实 429 载荷（部署实测，MiniMax 聚合端点形态）→ 中文摘要：
+    /// 不再直发原始 JSON；含模型通道名与恢复时间；retry_after 秒数人话化。
+    #[test]
+    fn 限额摘要_聚合端点429() {
+        let body = r#"{"error":{"message":"[minimax-cn/MiniMax-M3.1-Flash] All minimax-cn accounts have exhausted their quota (cached quota state, no upstream attempt; earliest reset after 5m) (reset after 5m)","retry_after":300,"reset_at":"2026-11-06T17:12:09.357Z"}}"#;
+        let s = OpenAiCompatibleProvider::quota_error_summary(429, body);
+        assert!(!s.contains("{\"error\""), "不得外发原始 JSON：{s}");
+        assert!(s.contains("429"), "保留状态码：{s}");
+        assert!(s.contains("minimax-cn/MiniMax-M3.1-Flash"), "保留模型通道：{s}");
+        assert!(s.contains("5 分钟"), "retry_after=300s → 5 分钟：{s}");
+    }
+
+    /// 非 JSON 体（上游直吐文本）：回退首行原文截断，保留定位线索。
+    #[test]
+    fn 限额摘要_非JSON体回退原文() {
+        let s = OpenAiCompatibleProvider::quota_error_summary(429, "rate limit exceeded");
+        assert!(s.contains("rate limit exceeded"), "回退原文：{s}");
+        assert!(!s.contains("https://"), "不夹带无关内容：{s}");
+    }
+
+    /// reset after 解析：分钟/秒/缺省单位。
+    #[test]
+    fn reset_after解析() {
+        assert_eq!(parse_reset_after("earliest reset after 5m"), Some(300));
+        assert_eq!(parse_reset_after("reset after 45s"), Some(45));
+        assert_eq!(parse_reset_after("reset after 90"), Some(90));
+        assert_eq!(parse_reset_after("无时间信息"), None);
+        assert_eq!(human_secs(300), "5 分钟");
+        assert_eq!(human_secs(45), "45 秒");
+        assert_eq!(human_secs(5400), "1 小时 30 分");
     }
 }
