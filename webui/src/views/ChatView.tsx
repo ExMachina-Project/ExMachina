@@ -573,16 +573,17 @@ export function ChatView(): React.ReactElement {
     return buckets.filter((b) => b.items.length > 0);
   }, [visibleSessions]);
 
-  // 桌面端对齐选中（chat-ergonomics）：store 全局会话若不是左栏可见会话
-  // （如刚在「聊天」页打开过通道流）——对齐为左栏最近会话，右栏不残留
-  // 通道/任务会话（那两类在本页无输入语义）；窄屏跳过：列表页是主视觉。
+  // 桌面端选中对齐（chat-ergonomics）：store 全局会话若是通道/任务会话（如刚在
+  // 「聊天」页打开过通道流）——本页列表永远不含它，对齐为左栏最近会话，右栏
+  // 不残留无输入语义的会话。只按类型判定、不按过滤后列表判定：左栏搜索临时
+  // 滤掉当前会话时不得抢走用户上下文。窄屏跳过：列表页是主视觉。
   useEffect(() => {
-    if (narrow) return;
-    if (!sessionsLoaded || visibleSessions.length === 0) return;
-    if (!sessionId || !visibleSessions.some((s) => s.id === sessionId)) {
-      void selectSession(visibleSessions[0].id);
-    }
-  }, [narrow, sessionId, sessionsLoaded, visibleSessions, selectSession]);
+    if (narrow || !sessionId) return;
+    const raw = sessions.find((s) => s.id === sessionId);
+    if (!raw) return; // 全表未及（新会话竞态）——不动
+    if (!raw.title.startsWith("channel:") && !isAutoSessionTitle(raw.title)) return;
+    if (visibleSessions.length > 0) void selectSession(visibleSessions[0].id);
+  }, [narrow, sessionId, sessions, visibleSessions, selectSession]);
 
   // ---- 会话历史管控（组 9.5）：撤销 / 编辑重发 / 分叉 ----
   const [editing, setEditing] = useState<{ turn: number; text: string } | null>(null);
