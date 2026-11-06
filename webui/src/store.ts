@@ -1035,7 +1035,8 @@ export const useExm = create<ExmState>((set, get) => ({
         if (prefs.enabled && prefs.cronDone && typeof Notification !== "undefined" && Notification.permission === "granted") {
           const name = String(p.jobName ?? "");
           const status = String(p.status ?? "");
-          fireNotificationLocal(`定时任务${status === "done" ? "完成" : "失败"}：${name}`, String(p.summary ?? status), undefined);
+          // 点击跳会话：cron.finished 携带收束会话 id（会话创建失败路径为空串则不跳）
+          fireNotificationLocal(`定时任务${status === "done" ? "完成" : "失败"}：${name}`, String(p.summary ?? status), evt.sessionId || undefined);
         }
         // 任务会话列表刷新（任务页监听）：cron 收束可能新建/更新任务会话
         window.dispatchEvent(new Event("exm:flows-refresh"));
