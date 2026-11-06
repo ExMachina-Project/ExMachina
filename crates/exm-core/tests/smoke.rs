@@ -2607,3 +2607,146 @@ async fn 工具面声明_白名单裁剪与未声明全量() {
     assert!(stored.tools.contains(&ToolName::Terminal));
     assert!(stored.tools.contains(&ToolName::Git));
 }
+
+#[tokio::test]
+async fn 自主行动_eval通过开会被拒时保守回落() {
+    // 9.2 Eval→act 链路：mock 替身对 Eval 提示词固定产出 act:false（user 文本
+    // 「执行一次自评。」不含「值得做」标记）——断言拒绝路径：不开会、空转递增、
+    // 事件落库；再断言周期判定（退避期内 tick 直接跳过，窗口外再评）。
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.experiments.auto_agent = true;
+    cfg.automation.auto_agent_interval_minutes = 10;
+    cfg.automation.auto_agent_backoff_max = 3;
+    let core = std::sync::Arc::new(exm_core::Core::with_config(cfg).expect("创建 Core 失败"));
+
+    // tick 1（last=0 首评直评）：Eval act:false → 不触发行动
+    let r1 = core.auto_agent_tick(10_000).await;
+    assert!(r1.is_none(), "Eval 拒绝时不应触发行动");
+
+    // tick 2（退避期内：10 分钟基础间隔 × 空转 1 → 10 分钟窗口内）：跳过
+    let r2 = core.auto_agent_tick(10_001).await;
+    assert!(r2.is_none(), "退避期内应跳过");
+
+    // tick 3（窗口外）：再次自评（仍是 act:false，但周期判定应放行完成一次评估）
+    let r3 = core.auto_agent_tick(10_060).await;
+    assert!(r3.is_none(), "Eval 仍拒绝");
+
+    // 事件落库核查：auto.eval 至少两条（tick1/tick3）。
+    // Envelope.payload 内嵌 CoreEvent（kind/sessionId/payload）——按内嵌 kind 过滤
+    let evts = core.store.list_events("").unwrap_or_default();
+    let evals: Vec<_> = evts
+        .iter()
+        .filter(|e| e["payload"]["type"] == "auto.eval")
+        .collect();
+    assert!(
+        evals.len() >= 2,
+        "应有至少两条 auto.eval 事件（实际 {}）",
+        evals.len()
+    );
+    assert!(
+        evals
+            .iter()
+            .all(|e| e["payload"]["payload"]["ok"] == true && e["payload"]["payload"]["act"] == false)
+    );
+}
+
+#[tokio::test]
+async fn 自主行动_eval通过_开会执行并落act事件() {
+    // 9.2 Eval→act 通过路径：拨动 mock 一次性开关 → Eval 产出 act:true →
+    // 开自主会话执行（落普通会话可审计）→ auto.eval(act:true) 与 auto.act(done) 落库
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.experiments.auto_agent = true;
+    cfg.automation.auto_agent_interval_minutes = 10;
+    let core = std::sync::Arc::new(exm_core::Core::with_config(cfg).expect("创建 Core 失败"));
+
+    exm_core::provider::MOCK_EVAL_ACT_ONCE.store(true, std::sync::atomic::Ordering::SeqCst);
+    let acted = core.auto_agent_tick(20_000).await;
+    let (task, _why) = acted.expect("Eval 通过应触发行动");
+    assert!(!task.is_empty(), "任务目标非空");
+
+    // 自主会话已创建（标题 auto-agent: 前缀）
+    let sessions = core.list_sessions_admin().unwrap_or_default();
+    assert!(
+        sessions.iter().any(|s| s.title.starts_with("auto-agent:")),
+        "应存在 auto-agent 会话（实际标题：{:?}）",
+        sessions.iter().map(|s| s.title.as_str()).take(3).collect::<Vec<_>>()
+    );
+
+    // auto.eval(act:true) 落全局（session 空）；auto.act 落行动会话自己的事件流
+    let global_evts = core.store.list_events("").unwrap_or_default();
+    assert!(
+        global_evts
+            .iter()
+            .any(|e| e["payload"]["type"] == "auto.eval" && e["payload"]["payload"]["act"] == true),
+        "应落 auto.eval(act:true) 事件"
+    );
+    let auto_sid = sessions
+        .iter()
+        .find(|s| s.title.starts_with("auto-agent:"))
+        .map(|s| s.id.clone())
+        .expect("auto-agent 会话应存在");
+    let sess_evts = core.store.list_events(&auto_sid).unwrap_or_default();
+    assert!(
+        sess_evts
+            .iter()
+            .any(|e| e["payload"]["type"] == "auto.act" && e["payload"]["payload"]["status"] == "done"),
+        "行动会话应落 auto.act(done) 事件"
+    );
+}
+
+#[tokio::test]
+async fn 自主记忆摘要_达标归纳与去重() {
+    // 9.1 autoMemoryDigest：达标会话归纳落记忆（kind=digest、来源指向会话）；
+    // 未达标配额跳过；同会话二次归纳命中内容哈希去重（不新建条目）。
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.automation.memory_digest_min_turns = 5;
+    let core = std::sync::Arc::new(exm_core::Core::with_config(cfg).expect("创建 Core 失败"));
+
+    use exm_core::types::{MessageRole, SpeechTag, Statement};
+    // 会话 A：6 条消息（≥5 达标）
+    let a = core.create_session("摘要达标").expect("建会话失败");
+    for k in 0..3 {
+        core.store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, format!("问题{k}：部署配置怎么改"))],
+            )
+            .unwrap();
+        core.store
+            .add_message(
+                &a.id,
+                MessageRole::System,
+                None,
+                vec![Statement::report(format!("答复{k}：见部署文档"))],
+            )
+            .unwrap();
+    }
+    // 会话 B：2 条（未达标）
+    let b = core.create_session("太短不摘要").expect("建会话失败");
+    core.store
+        .add_message(&b.id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, "短")])
+        .unwrap();
+
+    let none = core.memory_digest_session(&b.id).await;
+    assert!(none.is_none(), "未达标会话应跳过");
+
+    let first = core.memory_digest_session(&a.id).await;
+    assert!(first.is_some(), "达标会话应产出摘要");
+    // 二次归纳：mock 输出确定性相同 → 内容哈希命中 → 去重（不新建）
+    let second = core.memory_digest_session(&a.id).await;
+    assert!(second.is_some());
+
+    // 记忆库断言：存在 kind=digest 且 sessionId 指向会话 A 的条目；且同内容只一条
+    let entries = core.memory.list(Some(exm_core::memory::MemoryKind::Digest), 50).unwrap_or_default();
+    let a_digests: Vec<_> = entries
+        .iter()
+        .filter(|e| e.session_id.as_deref() == Some(a.id.as_str()))
+        .collect();
+    assert_eq!(a_digests.len(), 1, "同内容二次归纳应去重为一条（实际 {}）", a_digests.len());
+    assert!(a_digests[0].body.contains("E2E 会话主题归纳"));
+}

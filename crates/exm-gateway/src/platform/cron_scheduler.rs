@@ -142,6 +142,53 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
         }
     }
 
+    // 自主记忆摘要（实验性 experiments.autoMemoryDigest，9.1）：每日一次低峰期
+    // （UTC 4:30，避开 4:00 归档窗口）。关闭态不进扫描（零任务零 token）。
+    // 当日去重：同 IDLE_ARCHIVE_MARKER 模式复用 cron 表标记行。
+    if core.config().experiments.auto_memory_digest {
+        use chrono::Timelike;
+        if (now.hour(), now.minute()) == (4, 30) {
+            const DIGEST_MARKER: &str = "__memory_digest_marker__";
+            let minute_key = exm_core::cron::minute_key(now);
+            let last = core
+                .cron
+                .get(DIGEST_MARKER)?
+                .and_then(|j| j.last_run_minute)
+                .unwrap_or_default();
+            if last != minute_key {
+                let sessions = core.list_sessions_admin().unwrap_or_default();
+                let mut digested = 0usize;
+                for s in &sessions {
+                    if core.memory_digest_session(&s.id).await.is_some() {
+                        digested += 1;
+                    }
+                }
+                if digested > 0 {
+                    eprintln!("[memory-digest] 低峰归纳完成：{digested} 个会话产出记忆条目");
+                }
+                let marker = exm_core::types::CronJob {
+                    id: DIGEST_MARKER.into(),
+                    name: "自主记忆摘要标记".into(),
+                    prompt: String::new(),
+                    kind: None,
+                    cron: Some("30 4 * * *".into()),
+                    at: None,
+                    target_session: None,
+                    steps: vec![],
+                    group: None,
+                    session_title: None,
+                    enabled: false,
+                    last_run_at: Some(exm_core::types::now_iso()),
+                    last_status: None,
+                    last_run_minute: Some(minute_key),
+                    notify_channels: vec![],
+                    created_at: exm_core::types::now_iso(),
+                };
+                let _ = core.cron.upsert(marker);
+            }
+        }
+    }
+
     if changed {
         let _ = core.events.send(CoreEvent {
             kind: "cron.updated".into(),
