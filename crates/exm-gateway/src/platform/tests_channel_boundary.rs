@@ -210,4 +210,48 @@ mod channel_boundary_tests {
         let text3 = run.take_reply(&evt3, 500).unwrap();
         assert_eq!(text3, "【警告】会话 token 预算已耗尽");
     }
+
+    /// 沉默约定（IM silence）：模型输出 `<沉默/>` = 无话可说 → take_reply 返回
+    /// None（不投递、不记未读）——群聊里不再出现「不参与群聊闲聊」式废话。
+    /// 独立成行 / 与少量文字混行 / 全半角变体都识别；正常回复不受影响。
+    #[test]
+    fn 回帖_沉默约定整轮丢弃() {
+        let core = exm_core::Core::create(std::env::temp_dir().join(format!(
+            "exm-silence-{}",
+            uuid::Uuid::new_v4()
+        )))
+        .expect("创建 Core 失败");
+        let run = ChannelRun {
+            core: std::sync::Arc::new(core),
+            session_id: "s".into(),
+            prev_group: String::new(),
+            prev_single: None,
+            switched: false,
+            kind: "webhook".into(),
+            scope: exm_core::types::ToolScope::Tools,
+            origin: None,
+            external_id: None,
+            flow: None,
+        };
+        let evt = |text: &str| exm_core::types::CoreEvent {
+            kind: "run.finished".into(),
+            session_id: "s".into(),
+            payload: serde_json::json!({ "statements": [{ "tag": "报告", "text": text }] }),
+        };
+        // 独立成行：整轮丢弃
+        assert!(run.take_reply(&evt("<沉默/>"), 500).is_none());
+        // 混行（前后有解释文字）：仍整轮丢弃
+        assert!(run
+            .take_reply(&evt("刚才群里的对话我没参与。\n<沉默/>"), 500)
+            .is_none());
+        // 全角尖括号变体：识别
+        assert!(run.take_reply(&evt("＜沉默/＞"), 500).is_none());
+        // 正常回复：不误杀
+        assert_eq!(
+            run.take_reply(&evt("已把任务跑完，结果见文件。"), 500).unwrap(),
+            "【报告】已把任务跑完，结果见文件。"
+        );
+        // 文本里偶然提到「沉默」二字（非标记形态）：不误杀
+        assert!(run.take_reply(&evt("我方选择了沉默策略。"), 500).is_some());
+    }
 }
