@@ -742,14 +742,16 @@ impl ToolGateway {
                 .take(200)
                 .collect()
         };
-        let _ = self.store.audit_tool_ex(
+        if let Err(e) = self.store.audit_tool_ex(
             agent_id,
             full_name,
             args,
             &summary,
             started.elapsed().as_millis() as u64,
             result.ok,
-        );
+        ) {
+            eprintln!("[audit] 审计落库失败：{}", e);
+        }
         // 轮次过程轨迹：随收束落盘到最终消息（过程收起栏数据源）
         crate::round_trace::push_tool(
             session_id,
@@ -1297,14 +1299,16 @@ impl ToolGateway {
                         out.clone()
                     };
                     let blocked = ToolResult::err(format!("preTool 钩子拦截：{why}"));
-                    let _ = self.store.audit_tool_ex(
+                    if let Err(e) = self.store.audit_tool_ex(
                         agent_id,
                         name,
                         args,
                         "preTool 钩子拦截",
                         started.elapsed().as_millis() as u64,
                         false,
-                    );
+                    ) {
+            eprintln!("[audit] 审计落库失败：{}", e);
+        }
                     self.emit_tool_result(session_id, &call_id, agent_id, name, &blocked, &started);
                     return blocked;
                 }
@@ -1462,14 +1466,16 @@ impl ToolGateway {
                 .take(200)
                 .collect()
         };
-        let _ = self.store.audit_tool_ex(
+        if let Err(e) = self.store.audit_tool_ex(
             agent_id,
             name,
             args,
             &summary,
             started.elapsed().as_millis() as u64,
             result.ok,
-        );
+        ) {
+            eprintln!("[audit] 审计落库失败：{}", e);
+        }
         // 轮次过程轨迹：与 execute_mcp 一致,内置/自定义工具执行同样随收束落盘到最终消息
         crate::round_trace::push_tool(
             session_id,

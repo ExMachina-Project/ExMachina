@@ -160,7 +160,7 @@ pub fn cleanup_once(core: &Arc<Core>) -> CleanupReport {
     let cfg = core.config().trash.clone();
     let report = run_cleanup(core, &cfg);
     if !report.removed_days.is_empty() {
-        let _ = core.store.audit_tool(
+        core.store.audit_tool_best_effort(
             "system",
             "trash_cleanup",
             &serde_json::json!({

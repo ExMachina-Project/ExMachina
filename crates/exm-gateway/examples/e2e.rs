@@ -885,6 +885,29 @@ async fn main() -> anyhow::Result<()> {
         added["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
     );
 
+    // 调试视图（8.4）：刚写入的条目必然词项命中（标题/正文含「构建」「入口」）
+    let dbg: serde_json::Value = client
+        .post(format!("{base}/memory/search"))
+        .json(&serde_json::json!({"query": "构建 入口", "limit": 5}))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "记忆检索调试字段：命中词项透出",
+        dbg["hits"]
+            .as_array()
+            .map(|a| {
+                a.iter().any(|h| {
+                    h["matchedTerms"]
+                        .as_object()
+                        .map(|m| !m.is_empty())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false),
+    );
+
     // 个体记忆：写入归属 scout-agent 的私有记忆，验证不可见于他人检索
     let priv_add: serde_json::Value = client
         .post(format!("{base}/memory"))
@@ -1565,6 +1588,56 @@ async fn main() -> anyhow::Result<()> {
         schema_text.contains("superAgent") && schema_text.contains("autoAgent"),
     );
 
+    // Auto Agent Eval→act 链路（9.2）：mock 替身对 Eval 提示词确定性两态——
+    // 开关开 + Eval 通过 → 开会话执行并落 auto.eval/auto.act 事件；
+    // Eval 拒绝 → 空转计数递增（退避拉长），只落 auto.eval。
+    {
+        // 订阅全局事件流（auto.* 事件 session 为空，广播可捕获）
+        let mut rx = core.subscribe();
+        // 开开关
+        let _on: serde_json::Value = client
+            .put(format!("{base}/config"))
+            .json(&json!({ "experiments": { "autoAgent": true } }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        // tick 1：Eval 拒绝路径（user 固定文本「执行一次自评。」不含「值得做」→ act:false）
+        let m1 = tokio::time::Instant::now().elapsed().as_secs() as i64 / 60 + 10_000;
+        let rejected = core.auto_agent_tick(m1).await;
+        c.check("Eval 拒绝时不触发行动", rejected.is_none());
+        while let Ok(evt) = rx.try_recv() {
+            if evt.kind == "auto.eval" {
+                c.check("Eval 拒绝事件（act:false）", evt.payload["act"] == false);
+                break;
+            }
+        }
+        // tick 2：周期未到（同分钟粒度内 backoff 未满足）→ 直接跳过不评
+        let skipped = core.auto_agent_tick(m1 + 1).await;
+        c.check("退避期内 tick 被跳过", skipped.is_none());
+
+        // tick 3：Eval 通过路径——距上次足够远（退避上限内），且需让 user 文本带「值得做」
+        // （auto_agent_tick 固定发「执行一次自评。」→ 走 act:false；通过路径由单测替身覆盖，
+        // 此处断言周期判定与事件契约：推进到退避窗口外再 tick，仍应完成一次自评并落事件）
+        let m3 = m1 + 60; // 60 分钟后，必然越过任意配置的退避窗口
+        let _again = core.auto_agent_tick(m3).await;
+        let mut saw_eval = false;
+        while let Ok(evt) = rx.try_recv() {
+            if evt.kind == "auto.eval" {
+                saw_eval = true;
+            }
+        }
+        c.check("退避窗口外再次自评（事件落库）", saw_eval);
+        // 关开关回默认（后续段落不受实验开关影响）
+        let _off: serde_json::Value = client
+            .put(format!("{base}/config"))
+            .json(&json!({ "experiments": { "autoAgent": false } }))
+            .send()
+            .await?
+            .json()
+            .await?;
+    }
+
     // 元智能体实验（experiments.metaAgent）：管理面契约——开关下发 + schema 收录
     // （提议/审批/应用全链路在 exm-core meta_approval_tests 集成测试；此处锚定设置页可达）
     let meta_down = cfg_view["experiments"]["metaAgent"].is_boolean();
@@ -1576,6 +1649,19 @@ async fn main() -> anyhow::Result<()> {
     c.check(
         "元智能体 schema 收录（设置页可配）",
         schema_text.contains("metaAgent") && schema_text.contains("metaIntervalMin"),
+    );
+
+    // 自主记忆摘要实验（experiments.autoMemoryDigest，9.1）：管理面契约——
+    // 开关与触发轮数下发 + schema 收录（归纳/去重全链路在 exm-core 单测）
+    let digest_down = cfg_view["experiments"]["autoMemoryDigest"].is_boolean();
+    let digest_turns = cfg_view["automation"]["memoryDigestMinTurns"].is_u64();
+    c.check(
+        "自主记忆摘要开关下发（autoMemoryDigest + 轮数）",
+        digest_down && digest_turns,
+    );
+    c.check(
+        "自主记忆摘要 schema 收录（设置页可配）",
+        schema_text.contains("autoMemoryDigest") && schema_text.contains("memoryDigestMinTurns"),
     );
 
     // 通道平台校验 + 掩码回显语义（supervisor 只在 serve() 拉起，e2e 内无适配器连接行为，全部确定性）

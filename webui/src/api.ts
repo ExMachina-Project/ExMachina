@@ -163,6 +163,10 @@ export interface RecallHit {
   entry: MemoryEntry;
   score: number;
   reasons: string[];
+  /** 调试视图：命中的查询词项 → 权重贡献（词项召回路径才有） */
+  matchedTerms?: Record<string, number>;
+  /** 调试视图：语义相似分数值（0~1 余弦；语义/混合路径才有） */
+  semanticScore?: number;
 }
 
 export interface AgentStat {

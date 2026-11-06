@@ -515,6 +515,12 @@ impl Orchestrator {
             .next()
     }
 
+    /// 语义查询向量（记忆检索调试视图 8.4）：REST 检索复用——语义检索启用时
+    /// 记忆页搜索与对话内召回同口径（词项 + 语义混合），未启用返回 None
+    pub async fn memory_query_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        self.embed_query(text).await
+    }
+
     /// 解析语义检索目标（组覆盖 → 全局记忆设置指定的档案与模型）；未配置返回 None
     fn semantic_recall(&self) -> Option<(Arc<dyn LlmProvider>, String)> {
         let target = self.capability_target("embedding")?;
@@ -760,7 +766,7 @@ impl Orchestrator {
             tool_calls,
             steps,
         )?;
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "system",
             "session_stop",
             &serde_json::json!({ "session": session_id }),
@@ -2502,13 +2508,19 @@ impl ExecCtx {
                 next_suggestion: Default::default(),
                 confidence,
             };
-            let _ = o.store.add_sync_report(&report);
-            let _ = o.store.add_message(
+            // 子个体回流与报告落库（P2-5 吞错收敛）：这是关键写路径——
+            // 失败=用户看不到子个体产出，不能静默；留日志供事后核对
+            if let Err(e) = o.store.add_sync_report(&report) {
+                eprintln!("[dispatch] SyncReport 落库失败（{}）：{e}", self.session_id);
+            }
+            if let Err(e) = o.store.add_message(
                 &self.session_id,
                 MessageRole::Unit,
                 Some(def.identifier.as_str()),
                 statements,
-            );
+            ) {
+                eprintln!("[dispatch] 子个体回流落库失败（{}）：{e}", self.session_id);
+            }
             o.emit(
                 &self.session_id,
                 "sync.received",

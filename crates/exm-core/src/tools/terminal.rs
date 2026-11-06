@@ -277,6 +277,9 @@ impl ToolGateway {
             chars[start..].iter().collect()
         };
         drop(guard);
+        // 终态回收（P2-4）：轮询即清理——退出超过 30 分钟的终态任务
+        // （输出已被取走，保留只剩泄漏面；运行中任务不受影响）
+        self.reap_finished_bg();
         let status_line = match state {
             None => format!("运行中（已 {elapsed}s）"),
             Some(0) => format!("已完成（exit=0，耗时 {elapsed}s）"),
@@ -286,6 +289,18 @@ impl ToolGateway {
             "{status_line}\n—— 输出（累计 {} 字符）——\n{tail}",
             buf.chars().count()
         ))
+    }
+
+    /// 终态任务回收：进程已退出且退出超过 30 分钟的条目移除（防注册表只进不出；
+    /// 与 spawn 注册表 50 条上限同族治理——终态任务无 abort 需求，超龄即回收）
+    fn reap_finished_bg(&self) {
+        const BG_TOMBSTONE_SECS: u64 = 1800;
+        self.background
+            .lock()
+            .retain(|_, t| match *t.state.lock() {
+                Some(_) => t.started.elapsed().as_secs() < BG_TOMBSTONE_SECS,
+                None => true, // 运行中不回收
+            });
     }
 
     /// 终止后台任务（中止读取任务 → kill_on_drop 连带结束子进程）
