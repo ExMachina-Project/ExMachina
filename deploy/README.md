@@ -24,6 +24,21 @@ EXM_AUTH_KEY=<后台访问密钥>
 # EXM_IMAGE=ghcr.io/exmachina-project/exmachina:latest
 ```
 
+## QQ 通道的 napcat 伴随容器（可选）
+
+需要 QQ 通道时,部署 NapCat 提供 OneBot 11 正向 WS 协议端。`docker-compose.yml`
+内置了注释掉的 `napcat` 服务段（含 healthcheck）,按需启用:
+
+1. 编辑 `docker-compose.yml`,取消 `napcat:` 整段注释;
+2. `docker compose up -d` 拉起;
+3. 浏览器开 `http://<主机>:6100`（NapCat WebUI）完成扫码登录;
+4. 网关通道配置 `url: ws://napcat:3001`（同 compose 网络内直连;跨编排则用宿主映射口 `ws://<主机>:3002`）。
+
+**healthcheck 口径**（假活防护）:探针探测协议端口 3001 本体——进程存活但协议
+端口无响应的「假活」容器会在连续失败后被判 `unhealthy`（`docker ps` 可见）,
+不必等网关侧事件自检才发现。网关侧自检另有细分:容器 unhealthy（协议端口无响应）
+→ 指引重启容器;端口正常但账号未登录 → 指引扫码（无需重启）。
+
 ## 开启一键更新（可选）
 
 默认模板不含 docker.sock 挂载（最小权限）。要使用 WebUI「一键更新」：

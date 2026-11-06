@@ -7,7 +7,7 @@
 
 ### Requirement: 插件列表与详情端点
 
-`GET /api/plugins` 返回插件列表（id、名称、版本、形态 builtin/process、状态 enabled/error、能力面摘要）；`GET /api/plugins/:id` 返回单插件详情（含清单原文、能力明细、进程插件的健康信息与重启计数）。
+`GET /api/plugins` SHALL 返回插件列表（id、名称、版本、形态 builtin/process、状态 enabled/error、能力面摘要）；`GET /api/plugins/:id` SHALL 返回单插件详情（含清单原文、能力明细、进程插件的健康信息与重启计数）。
 
 #### Scenario: 列表含状态与形态
 - **WHEN** 请求 GET /api/plugins
@@ -15,7 +15,7 @@
 
 ### Requirement: 启停与安装卸载端点
 
-`PUT /api/plugins/:id/enabled`（body 含 enabled 布尔）切换启停即时生效；`DELETE /api/plugins/:id` 卸载进程插件（终止进程并移除目录），内置插件不可卸载（返回明确错误）。
+`PUT /api/plugins/:id/enabled`（body 含 enabled 布尔）SHALL 切换启停并即时生效；`DELETE /api/plugins/:id` SHALL 卸载进程插件（终止进程并移除目录），内置插件不可卸载（返回明确错误）。
 
 #### Scenario: 启停即时生效
 - **WHEN** PUT 启停某插件
@@ -27,7 +27,7 @@
 
 ### Requirement: WebUI 插件管理页
 
-WebUI 新增「插件」导航页：插件卡片列表（状态/形态/能力面计数）、详情抽屉（清单、能力明细、进程健康）、启停开关；通道配置页的凭据表单按插件声明的字段清单渲染。
+WebUI SHALL 提供「插件」导航页：插件卡片列表（状态/形态/能力面计数）、详情抽屉（清单、能力明细、进程健康）、启停开关；通道配置页的凭据表单按插件声明的字段清单渲染。
 
 #### Scenario: 插件页可管理
 - **WHEN** 用户打开插件页
@@ -35,7 +35,7 @@ WebUI 新增「插件」导航页：插件卡片列表（状态/形态/能力面
 
 ### Requirement: doctor 诊断
 
-`exm doctor` 输出插件段：已加载/禁用/失败插件计数、失败原因、进程插件健康摘要（运行时长、重启计数）。作为部署自检的一部分。
+`exm doctor` SHALL 输出插件段：已加载/禁用/失败插件计数、失败原因、进程插件健康摘要（运行时长、重启计数）。作为部署自检的一部分。
 
 #### Scenario: doctor 反映插件健康
 - **WHEN** 运行 exm doctor 且存在错误状态插件

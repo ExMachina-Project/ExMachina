@@ -1,7 +1,7 @@
 # update-pipeline Specification
 
 ## Purpose
-TBD - created by archiving change update-pipeline-and-deploy-isolation. Update Purpose after archive.
+更新管线：检查双模式（镜像/源码）、防死锁的更新任务状态机、一键更新（镜像模式为主）与前端版本面板适配，让部署目录无源码也能自助升级。
 
 ## Requirements
 

@@ -1,7 +1,7 @@
 # model-settings-ux Specification
 
 ## Purpose
-TBD - created by archiving change webui-ux-overhaul. Update Purpose after archive.
+模型设置页的体验基线：提供商档案化展示、模型能力徽章、连通性测试即时反馈与分节编辑表单，让模型配置可读可验证。
 
 ## Requirements
 

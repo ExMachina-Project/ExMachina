@@ -1,7 +1,7 @@
 # session-management Specification
 
 ## Purpose
-TBD - created by archiving change webui-ux-overhaul. Update Purpose after archive.
+会话管理页：提供列表视图、批量操作与单会话操作入口（重命名、置顶、归档、导出等），按来源与状态组织过滤，是多会话运维的主界面。
 
 ## Requirements
 

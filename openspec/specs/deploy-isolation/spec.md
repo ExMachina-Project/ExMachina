@@ -1,7 +1,7 @@
 # deploy-isolation Specification
 
 ## Purpose
-TBD - created by archiving change update-pipeline-and-deploy-isolation. Update Purpose after archive.
+镜像注册表发布与零源码生产部署模板：生产目录不含仓库源码、镜像从注册表拉取，开发编排与生产部署互不干扰。
 
 ## Requirements
 

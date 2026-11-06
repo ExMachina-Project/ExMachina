@@ -32,6 +32,26 @@ services:
       # - /usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro
     restart: unless-stopped
 
+  # ---- napcat 伴随容器(可选,QQ/视频通道的协议端) ----
+  # QQ 通道需要 NapCat 提供 OneBot 11 正向 WS(容器内 3001 端口)。
+  # healthcheck 探协议端口本体:进程存活但协议端口无响应(假活)时容器会被判
+  # unhealthy,编排层面可见(而非等网关侧事件自检才发现)。
+  # 探针口径:容器内 curl 探 3001(OneBot WS 端点,端口活即返回 426/任意 HTTP 码;
+  # 仅连接失败或超时才 unhealthy)。6099 为 NapCat WebUI(扫码登录用)。
+  # napcat:
+  #   image: mlikiowa/napcat-docker:latest
+  #   container_name: napcat-exm
+  #   ports:
+  #     - "3002:3001"   # OneBot WS(网关通道 url 填 ws://napcat:3001 或宿主映射口)
+  #     - "6100:6099"   # NapCat WebUI(扫码登录)
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-s", "-o", "/dev/null", "-m", "3", "http://127.0.0.1:3001/"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+  #     start_period: 60s
+  #   restart: unless-stopped
+
 volumes:
   exmachina-state:
   exmachina-plugins:

@@ -48,6 +48,13 @@ fn last_degraded_log() -> &'static Mutex<HashMap<String, u64>> {
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 每通道上次探测回包时间（ms）：连接内存活的连接发 get_login_info 能拿到回包
+/// = 协议端口真活（区别于 WS 层活着但协议端假死——容器假活）。任一 API 回包续打点。
+fn last_probe_ok() -> &'static Mutex<HashMap<String, u64>> {
+    static T: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// 每通道最近一次登录在线确认时间（ms；get_login_info 回包带身份时刷新）。
 /// 登录轮换期（扫码换号/风控下线）WS 层仍连着、事件面自然零消息——
 /// 这不是「事件面未挂载」，不该建议重启（5.4：自检误报）。
@@ -87,6 +94,7 @@ fn note_conn_reset(ch_id: &str) {
     last_event_at().lock().unwrap().remove(ch_id);
     last_degraded_log().lock().unwrap().remove(ch_id);
     last_login_ok().lock().unwrap().remove(ch_id);
+    last_probe_ok().lock().unwrap().remove(ch_id);
 }
 
 /// supervisor 对账环的事件面检查：连结后 30min 零事件 → degraded（限频每小时一条日志）。
@@ -116,6 +124,15 @@ fn check_event_silence(ch_id: &str) {
         );
         return;
     }
+    // 假活分流（1.4）：5min 周期探测发出后 15min 内拿到过任何 API 回包 = 协议端口真活，
+    // 问题定性为「账号未登录」（容器活着、协议端活着，等扫码即可，不建议重启容器）；
+    // 探测也无回包 = 协议端口假死（容器假活），指引重启 NapCat 容器。
+    let probe_recent = last_probe_ok()
+        .lock()
+        .unwrap()
+        .get(ch_id)
+        .map(|t| now.saturating_sub(*t) <= 15 * 60 * 1000)
+        .unwrap_or(false);
     let mut logs = last_degraded_log().lock().unwrap();
     if let Some(last) = logs.get(ch_id) {
         if now.saturating_sub(*last) < 60 * 60 * 1000 {
@@ -123,14 +140,26 @@ fn check_event_silence(ch_id: &str) {
         }
     }
     logs.insert(ch_id.to_string(), now);
+    if probe_recent {
+        eprintln!(
+            "[napcat:{ch_id}] 自检：协议端口正常但账号未登录（探测有回包、登录确认缺失）。\
+             请在 NapCat 侧完成扫码登录，无需重启容器"
+        );
+        report_status(
+            ch_id,
+            "degraded",
+            "协议端口正常但账号未登录；请在 NapCat 完成扫码登录（无需重启容器）",
+        );
+        return;
+    }
     eprintln!(
-        "[napcat:{ch_id}] 事件管道自检：连结后 30 分钟零消息事件（NapCat 侧事件面可能未挂载）。\
+        "[napcat:{ch_id}] 事件管道自检：连结后 30 分钟零消息事件且探测无回包（NapCat 协议端口疑似假死）。\
          建议重启 NapCat 容器：docker restart napcat-exm"
     );
     report_status(
         ch_id,
         "degraded",
-        "连结但 30 分钟无消息事件（NapCat 事件面疑似未挂载）；建议重启 NapCat 容器",
+        "连接与探测均无响应（协议端口疑似假死）；建议重启 NapCat 容器",
     );
 }
 
@@ -311,6 +340,12 @@ async fn on_text(
     };
     // API 回包（带 echo 的响应）：自检回包打日志，其余忽略
     if let Some(echo) = v.get("echo").and_then(|x| x.as_str()) {
+        // 协议端口活性打点（1.4 假活判定）：连接内能拿到任何 API 回包
+        // = 协议端口真活（WS 层活着但协议端假死的容器假活拿不到回包）
+        last_probe_ok()
+            .lock()
+            .unwrap()
+            .insert(ch.id.clone(), exm_core::types::now_ms());
         if echo == "exm-login" {
             let nick = v
                 .pointer("/data/nickname")
@@ -322,13 +357,19 @@ async fn on_text(
                 .unwrap_or(0);
             // 登录确认打点（5.4）：拿到身份 = 账号在线。零事件窗口的告警分流依据
             //（在线 → 等待登录轮换文案，而非「事件面未挂载建议重启」）
-            if uid != 0 && !nick.is_empty() && nick != "?" {
+            let confirmed = uid != 0 && !nick.is_empty() && nick != "?";
+            // 日志口径：仅首连（打点表中该通道尚无在线记录）打「已连结」全量日志；
+            // 5min 周期探测的回包静默续打点——否则探测每次都刷屏连接日志（生产实测噪音）
+            let first = !last_login_ok().lock().unwrap().contains_key(&ch.id);
+            if confirmed {
                 last_login_ok()
                     .lock()
                     .unwrap()
                     .insert(ch.id.clone(), exm_core::types::now_ms());
             }
-            println!("[napcat:{}] 机器人已连结：{nick}（{uid}）", ch.id);
+            if confirmed && first {
+                println!("[napcat:{}] 机器人已连结：{nick}（{uid}）", ch.id);
+            }
             report_status(&ch.id, "ok", format!("机器人 {nick}（{uid}）"));
         }
         return;
@@ -881,6 +922,64 @@ mod tests {
             "登录态不明 + 超窗零事件应维持降级"
         );
         note_conn_reset(&id);
+        note_conn_reset(&id2);
+    }
+
+    /// 假活分流（1.4）：超窗零事件 + 登录不明时——探测近期有回包 = 协议端口活，
+    /// 定性「账号未登录」（指引扫码、不建议重启容器）；探测无回包 = 协议端口假死
+    ///（容器假活，指引重启容器）。两类失败的修复指引必须可区分。
+    #[test]
+    fn 事件自检_假活与未登录分流() {
+        // 分支一：探测 5 分钟前有回包（协议端口活）→ 报未登录，不提重启容器
+        let id = format!("napcat-selftest-{}", exm_core::types::new_id());
+        note_connected(&id);
+        last_event_at()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
+        last_probe_ok()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), exm_core::types::now_ms() - 5 * 60 * 1000);
+        check_event_silence(&id);
+        let st = crate::platform::status_of(&id);
+        assert_eq!(
+            st.as_ref().map(|s| s.state.as_str()),
+            Some("degraded"),
+            "登录不明应降级"
+        );
+        let detail = st.map(|s| s.detail).unwrap_or_default();
+        assert!(
+            detail.contains("未登录") && detail.contains("扫码"),
+            "协议端口活应报未登录并指引扫码：{detail}"
+        );
+        assert!(
+            !detail.contains("建议重启") && !detail.contains("重启 NapCat"),
+            "端口活不得建议重启容器：{detail}"
+        );
+        note_conn_reset(&id);
+
+        // 分支二：探测也无回包（协议端口假死）→ 指引重启容器
+        let id2 = format!("napcat-selftest-{}", exm_core::types::new_id());
+        note_connected(&id2);
+        last_event_at()
+            .lock()
+            .unwrap()
+            .insert(id2.clone(), exm_core::types::now_ms() - 31 * 60 * 1000);
+        // 不写 last_probe_ok：探测从未拿到回包
+        check_event_silence(&id2);
+        let st2 = crate::platform::status_of(&id2);
+        assert_eq!(
+            st2.as_ref().map(|s| s.state.as_str()),
+            Some("degraded"),
+            "假活应降级"
+        );
+        let detail2 = st2.map(|s| s.detail).unwrap_or_default();
+        assert!(
+            detail2.contains("重启"),
+            "协议端口假死应指引重启容器：{detail2}"
+        );
+        assert!(!detail2.contains("未登录"), "假活不得误报未登录：{detail2}");
         note_conn_reset(&id2);
     }
 
