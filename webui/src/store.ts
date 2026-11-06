@@ -570,6 +570,8 @@ export const useExm = create<ExmState>((set, get) => ({
       // 乐观移除（approval.resolved 事件到达时幂等）
       set({ approvals: get().approvals.filter((a) => a.approvalId !== id) });
       void get().refreshPendingApprovals();
+      // 审批页列表自刷新（若正看着该页，行状态即刻流转）
+      window.dispatchEvent(new Event("exm:approvals-refresh"));
     } catch (e) {
       message.error(String(e));
     }
@@ -686,6 +688,8 @@ export const useExm = create<ExmState>((set, get) => ({
     if (evt.type === "approval.required") {
       // 全局计数即时刷新（侧栏角标；不依赖轮询周期）
       void get().refreshPendingApprovals();
+      // 审批页列表自刷新（同链路事件；WS 在线时免手动刷新）
+      window.dispatchEvent(new Event("exm:approvals-refresh"));
       const prefs = loadNotifyPrefs();
       if (prefs.enabled && prefs.approval && document.visibilityState === "hidden" && typeof Notification !== "undefined" && Notification.permission === "granted") {
         fireNotification(
@@ -709,6 +713,8 @@ export const useExm = create<ExmState>((set, get) => ({
     }
     if (evt.type === "approval.resolved") {
       set({ approvals: get().approvals.filter((a) => a.approvalId !== String(p.approvalId)) });
+      void get().refreshPendingApprovals();
+      window.dispatchEvent(new Event("exm:approvals-refresh"));
       return;
     }
     // 任务清单（spec agent-todo）：todo.updated 快照（仅当前会话）

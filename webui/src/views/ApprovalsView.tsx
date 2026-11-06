@@ -28,6 +28,11 @@ export function ApprovalsView(): React.ReactElement {
 
   useEffect(() => {
     void load();
+    // 审批事件驱动刷新：approval.required / 裁决动作都会广播 exm:approvals-refresh
+    // （store 侧发），列表页借同链路自刷新（WS 在线时免手动刷新）
+    const h = () => void load();
+    window.addEventListener("exm:approvals-refresh", h);
+    return () => window.removeEventListener("exm:approvals-refresh", h);
   }, [load]);
 
   const decide = async (id: string, approve: boolean, scope: "once" | "session" | "allowlist" = "once") => {
