@@ -11,7 +11,6 @@ import {
   MenuOutlined,
   MessageOutlined,
   ApiOutlined,
-  RobotOutlined,
   SettingOutlined,
   UserOutlined,
   FundOutlined,
@@ -25,9 +24,10 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { api } from "./api";
+import { isAutoSessionTitle } from "./session";
 import { useExm } from "./store";
 import { useT, type TKey } from "./i18n/core";
-import { ACCENTS, accentColor, themeOf, THEMES, useTheme, type ThemeKey } from "./theme";
+import { ACCENTS, accentColor, THEMES, useTheme, type ThemeKey } from "./theme";
 import { CharStream } from "./components/CharStream";
 import { CommandPalette } from "./components/CommandPalette";
 import { DataStream } from "./components/DataStream";
@@ -144,6 +144,25 @@ export default function App(): React.ReactElement {
   const wsConnected = useExm((s) => s.wsConnected);
   const init = useExm((s) => s.init);
   const pendingApprovals = useExm((s) => s.pendingApprovals);
+  // 聊天未读徽标：通道流未读总数（30s 轮询 + run.finished 事件驱动的刷新链路）
+  const [flowUnread, setFlowUnread] = useState(0);
+  useEffect(() => {
+    let dead = false;
+    const tick = () =>
+      void api
+        .listChannelFlows()
+        .then((fs) => !dead && setFlowUnread(fs.reduce((n, f) => n + (f.unread ?? 0), 0)))
+        .catch(() => undefined);
+    void tick();
+    const h = () => void tick();
+    const iv = setInterval(h, 60000);
+    window.addEventListener("exm:flows-refresh", h);
+    return () => {
+      dead = true;
+      clearInterval(iv);
+      window.removeEventListener("exm:flows-refresh", h);
+    };
+  }, []);
   const refreshPendingApprovals = useExm((s) => s.refreshPendingApprovals);
   // 审批待办轮询（60s 兜底）：WS 丢事件/页面刷新后角标仍可恢复——
   // 审批等待窗内（approvalWaitSecs）错过提示 = 工具受阻，必须有可靠提醒面
@@ -173,9 +192,25 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     if (!navRequest) return;
     if (navRequest.view === "chat" && navRequest.sessionId) {
-      void useExm.getState().selectSession(navRequest.sessionId);
+      // 路由感知（信息架构 2026-11）：目标会话若不是用户直连会话，落到对应页——
+      // 通道流会话 → 「聊天」页；任务会话（job-* / 心跳巡检）→ 「任务」页。
+      // 否则对话页左栏（已过滤这两类）看不到跳转目标，呈现「跳了但没到」。
+      const sid = navRequest.sessionId;
+      void api
+        .getSession(sid)
+        .then((s) => {
+          const dest = s.title.startsWith("channel:")
+            ? "flows"
+            : isAutoSessionTitle(s.title)
+              ? "tasks"
+              : "chat";
+          setView(dest as ViewKey);
+        })
+        .catch(() => setView("chat"));
+      void useExm.getState().selectSession(sid);
+    } else {
+      setView(navRequest.view as ViewKey);
     }
-    setView(navRequest.view as ViewKey);
     useExm.setState({ navRequest: null });
   }, [navRequest]);
   // hashchange：前进/后退导航（hashchange 时不回写 hash，避免回环）
@@ -187,6 +222,45 @@ export default function App(): React.ReactElement {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  // 键盘跳页（kbd-nav）：G 武装后接页首字母（gc=对话 gf=聊天 gt=任务 gs=会话
+  // 管理 ga=智能体 gn=智能连结 gd=任务图 gm=模型 gp=审批），或 1-9 直达前九项。
+  // 输入框/文本域聚焦与修饰键按下时不触发，不干扰正常输入与浏览器快捷键。
+  // 映射手选不自动派生：首字母冲突页（graph/automations 等）一律走数字直达。
+  useEffect(() => {
+    let armed = false;
+    const order: ViewKey[] = NAV_ITEMS.map((i) => i.key);
+    const goMap: Record<string, ViewKey> = {
+      c: "chat",
+      f: "flows",
+      t: "tasks",
+      s: "sessions",
+      a: "agent",
+      n: "nexus",
+      d: "graph",
+      m: "models",
+      p: "approvals",
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      if (e.key === "g" || e.key === "G") {
+        armed = true;
+        return;
+      }
+      if (!armed) return;
+      armed = false;
+      const key = e.key.toLowerCase();
+      const dest = /^[1-9]$/.test(key) ? order[Number(key) - 1] : goMap[key];
+      if (dest && dest !== view) {
+        setViewState(dest);
+        history.replaceState(null, "", "#/" + dest);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view]);
   const [openMenu, setOpenMenu] = useState<"theme" | "accent" | null>(null);
   /** 移动端侧栏抽屉（≤860px 时侧栏覆盖呈现） */
   const [navOpen, setNavOpen] = useState(false);
@@ -210,12 +284,16 @@ export default function App(): React.ReactElement {
         setGate(r.ok ? "open" : "locked");
         if (r.ok) {
           await init();
-          // 会话深链（app-shell-routing）：#/chat/<sessionId> → 选中该会话
+          // 会话深链（app-shell-routing）：#/chat/<sessionId> → 选中该会话；
+          // 目标若是通道/任务会话，视图同步落到「聊天」「任务」页（与 navRequest 同口径）
           const { view, session } = parseHash();
           if (view === "chat" && session) {
             const exists = useExm.getState().sessions.some((s) => s.id === session);
             if (exists) {
+              const s = await api.getSession(session).catch(() => null);
               await useExm.getState().selectSession(session);
+              if (s?.title.startsWith("channel:")) setViewState("flows");
+              else if (s && isAutoSessionTitle(s.title)) setViewState("tasks");
             } else {
               message.info(t("route.sessionGone"));
             }
@@ -300,6 +378,9 @@ export default function App(): React.ReactElement {
                 <span>{t(it.labelKey)}</span> <span className="label-en">[{it.en}]</span>
                 {it.key === "approvals" && pendingApprovals > 0 && (
                   <span className="nav-badge" title={`${pendingApprovals}`}>{pendingApprovals > 99 ? "99+" : pendingApprovals}</span>
+                )}
+                {it.key === "flows" && flowUnread > 0 && (
+                  <span className="nav-badge" title={`${flowUnread}`}>{flowUnread > 99 ? "99+" : flowUnread}</span>
                 )}
               </>
             ),

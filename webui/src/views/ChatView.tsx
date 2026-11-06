@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
-import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 
 import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
@@ -12,7 +12,7 @@ import { useT } from "../i18n/core";
 import { relativeTime } from "../time";
 
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
-import { StatementList } from "../components/Statements";
+
 import { PlanCard } from "../components/PlanCard";
 import { TaskGraphDag } from "../components/TaskGraphDag";
 import { Markdown } from "../components/Markdown";
@@ -176,7 +176,6 @@ export function ChatView(): React.ReactElement {
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
     toggleSessionPin, unreadCounts, markAllRead,
-    refreshAgents,
     loadGroups,
     sessionsLoaded,
     plan, planApplied, planPending, decidePlan, setPlanMode,
@@ -191,9 +190,6 @@ export function ChatView(): React.ReactElement {
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState("");
-  // 确认弹窗走 useModal 演出器：静态 Modal.confirm 渲染在 React 树外、吃不到 ConfigProvider，
-  // 暗色主题下会落回默认白底（与全局自绘样式打架）；演出器版本随主题/语言/令牌同步。
-  const [modal, modalContextHolder] = Modal.useModal();
 
   const loadTarget = useCallback(async () => {
     try {
@@ -577,6 +573,16 @@ export function ChatView(): React.ReactElement {
     return buckets.filter((b) => b.items.length > 0);
   }, [visibleSessions]);
 
+  // 桌面端初始自动选中（chat-ergonomics）：init 落在左栏首个会话时 store 会话可能
+  // 已是通道/任务会话（新 IA 过滤后不在左栏）——对齐为左栏最近会话，右侧不悬空。
+  // 窄屏跳过：列表页是主视觉，自动进会话页反而打断。
+  useEffect(() => {
+    if (narrow) return;
+    if (!sessionId && sessionsLoaded && visibleSessions.length > 0) {
+      void selectSession(visibleSessions[0].id);
+    }
+  }, [narrow, sessionId, sessionsLoaded, visibleSessions, selectSession]);
+
   // ---- 会话历史管控（组 9.5）：撤销 / 编辑重发 / 分叉 ----
   const [editing, setEditing] = useState<{ turn: number; text: string } | null>(null);
   const [historyBusy, setHistoryBusy] = useState(false);
@@ -649,7 +655,6 @@ export function ChatView(): React.ReactElement {
 
   return (
     <div className={`chat-shell screen-${screen}`} data-screen={screen}>
-      {modalContextHolder}
       {/* 左栏 = 移动端「会话列表页」，桌面端是常驻侧栏（见 styles.css 的屏幕切换） */}
       <aside className="chat-rail">
         {/* 列表页标题栏（窄屏显示）：标题 + 会话计数 */}
