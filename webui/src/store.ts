@@ -223,7 +223,7 @@ function connectWs(get: () => ExmState): void {
     wsBackoff = 0; // 连上即归零退避
     get().setWs(true);
     if (!reconnected) return;
-    // 断连补偿：重拉消息与任务图恢复丢失事件；图无在途节点则解除 running 卡死
+    // 断连补偿：重拉消息与编排图恢复丢失事件；图无在途节点则解除 running 卡死
     const compSeq = selectSeq; // 补偿期间的选择切换同样不得被旧快照覆盖
     void (async () => {
       try {

@@ -101,8 +101,9 @@ createRoot(document.getElementById("root")!).render(
   </React.StrictMode>,
 );
 
-// PWA：Service Worker（离线壳缓存；API/WS 永远走网络）
-if ("serviceWorker" in navigator && location.protocol !== "devtools:") {
+// PWA：Service Worker（离线壳缓存；API/WS 永远走网络）。
+// dev 环境不注册：SW 壳缓存会拦坏 Vite 的模块按需转换（模块请求被旧壳命中 → 白屏）。
+if ("serviceWorker" in navigator && !import.meta.env.DEV && location.protocol !== "devtools:") {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => {
       /* SW 不可用（如 http:// 局域网 IP 下部分浏览器限制）时静默降级为普通网页 */

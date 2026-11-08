@@ -219,9 +219,11 @@ input, textarea { caret-color: var(--accent); }
 .app-shell { display: flex; height: 100dvh; overflow: hidden; }
 
 .app-sider {
-  /* 208px：EN 品牌副标（AGENT CLUSTER // CONSOLE，mono+0.1em 字距 ≈168px）
-     为宽度硬底，双语文本均不折行；移动端另有 min(78vw, 300px) 覆盖 */
+  /* 收起态 208px（EN 品牌副标 mono+0.1em 字距 ≈168px 的宽度硬底，双语不折行）；
+     页面侧栏（会话/聊天流/任务会话）展开时加宽到 300px（.ctx-open），
+     收起即回窄，不常驻占位；移动端抽屉仍为 min(78vw, 300px) */
   width: 208px;
+  transition: width var(--dur-fast) var(--ease-out);
   flex: none;
   display: flex;
   flex-direction: column;
@@ -958,7 +960,7 @@ textarea.ant-input:focus,
   .composer-hint { display: none; }
 }
 
-/* ============ 任务图 ============ */
+/* ============ 编排图 ============ */
 .graph-wrap {
   overflow: auto;
   background: var(--bg-panel);
@@ -1941,34 +1943,6 @@ textarea.ant-input:focus,
   font-family: var(--mono); font-size: 10px; font-weight: 600;
   line-height: 16px; text-align: center;
   pointer-events: none;
-}
-/* 流内会话切换（spec：展开钮 + 会话子列表） */
-.flow-expand {
-  border: none; background: transparent; cursor: pointer;
-  color: var(--muted-dim); font-size: 10px; line-height: 1;
-  padding: 2px; border-radius: 4px;
-  pointer-events: auto;
-}
-.flow-expand:hover { color: var(--text); background: var(--bg-hover, rgba(128,128,128,.15)); }
-.flow-session-list {
-  display: flex; flex-direction: column; gap: 1px;
-  padding: 2px 6px 6px 24px;
-}
-.flow-session-empty {
-  font-size: 10px; color: var(--muted-dim); padding: 2px 4px;
-}
-.flow-session-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 6px;
-  padding: 3px 6px; border-radius: 6px; cursor: pointer;
-  font-size: 11px;
-}
-.flow-session-item:hover { background: var(--bg-hover, rgba(128,128,128,.12)); }
-.flow-session-item.active .flow-session-label { color: var(--accent); }
-.flow-session-label {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.flow-session-time {
-  flex: none; font-size: 10px; font-family: var(--mono); color: var(--muted-dim);
 }
 .flow-live {
   width: 6px; height: 6px; border-radius: var(--r-full);
@@ -3795,7 +3769,7 @@ mark.search-hit {
   text-transform: uppercase; color: var(--muted-dim);
 }
 /* 行复用 .flow-* 既有样式；页面级行稍大（列表主视觉） */
-.flows-shell .flow-item {
+.flow-item {
   display: flex; align-items: center; gap: 8px;
   padding: 9px 9px;
   cursor: pointer;
@@ -3803,12 +3777,9 @@ mark.search-hit {
   border-radius: var(--r-sm);
   transition: background var(--dur-fast) var(--ease-out);
 }
-.flows-shell .flow-item:hover { background: var(--hover); }
-.flows-shell .flow-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
-.flows-shell .flow-item.active .flow-name { color: var(--text-hi); }
-.flows-shell .flow-sessions { padding: 0 0 4px 10px; }
-.flow-sessions-btn { font-size: 11px; color: var(--muted); padding: 2px 6px; }
-.flow-session-item { font-size: 11.5px; }
+.flow-item:hover { background: var(--hover); }
+.flow-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
+.flow-item.active .flow-name { color: var(--text-hi); }
 /* 右侧只读消息流 */
 .flows-thread { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .flows-thread-head {
@@ -3842,7 +3813,7 @@ mark.search-hit {
   .flows-rail { width: 100%; border-right: none; }
 }
 
-/* ── 会话任务图内嵌卡（graph-inline）：聊天页消息流置顶，可折叠 ── */
+/* ── 会话编排图内嵌卡（graph-inline）：聊天页消息流置顶，可折叠 ── */
 .dag-inline { margin: 0 14px 8px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--bg-raise); }
 .dag-inline-head {
   display: flex; align-items: center; gap: 8px;
@@ -3855,3 +3826,120 @@ mark.search-hit {
 .dag-inline-meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted-dim); }
 .dag-inline-caret { color: var(--muted); }
 .dag-inline .graph-wrap { border-top: 1px solid var(--line); max-height: 300px; overflow: auto; padding: 8px; }
+
+/* ============================================================
+   侧栏手风琴（2026-11）：顶部「页面 / 上下文」两个互斥折叠入口
+   （交互与视觉复用 .theme-switcher/.theme-toggle/.theme-panel，
+   和底部主题入口完全一致）；底部「主题」合并预设 + 强调色。
+   收起时侧栏只剩品牌 + 三行入口 + 状态栏。
+   ============================================================ */
+
+/* 弹性占位：手风琴收起时把主题与状态栏压到底部（与原菜单 flex:1 同效） */
+.sider-grow { flex: 1; min-height: 8px; }
+
+/* 主题块（预设 + 强调色，合并入口内的两段） */
+.theme-block { padding: 4px 0 8px; }
+.theme-block + .theme-block { border-top: 1px solid var(--line); }
+.theme-block-label {
+  padding: 6px 14px 2px;
+  font-size: 10.5px; font-family: var(--mono); letter-spacing: 0.08em;
+  color: var(--muted-dim); text-transform: uppercase;
+}
+
+/* 页面 / 页面侧栏面板展开时拉满主侧栏剩余高度，内容在内部滚动 */
+.theme-switcher.acc-nav.open,
+.theme-switcher.acc-ctx.open {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.theme-switcher.acc-nav.open > .theme-panel,
+.theme-switcher.acc-ctx.open > .theme-panel {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* 有顶部面板展开时，弹性占位让位给面板 */
+.app-sider.top-open .sider-grow { flex: 0; min-height: 0; }
+/* 菜单在拉满面板内滚动 */
+.theme-switcher.acc-nav.open .nav-menu { flex: 1; min-height: 0; }
+
+/* 页面侧栏展开时主侧栏加宽（收起仍 208px，不常驻占空间） */
+@media (min-width: 861px) {
+  .app-sider.ctx-open { width: 300px; }
+}
+
+/* 页面侧栏插槽：页面把自己的侧栏（会话/聊天流/任务会话）portal 进来，占满面板 */
+.sider-subpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.sider-subpanel .chat-rail,
+.sider-subpanel .flows-rail {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+.sider-subpanel .chat-rail { padding: 8px; }
+.sider-subpanel .flows-rail { flex: 1; }
+
+/* —— 侧栏内页面侧栏的紧凑化（用户反馈：别太占空间）——
+ * 仅作用于侧栏面板内的 portal 版式；窄屏页内渲染保持原密度不动。 */
+/* 会话：面板顶部已有「会话」入口行，列表头（会话 N）与计数重复 → 隐藏 */
+.sider-subpanel .chat-rail .rail-head { display: none; }
+/* 目标区压成两行：标题行（01 交互目标 + 主智能体提示 flex 同排）+ 选择器 */
+.sider-subpanel .chat-rail .rail-section { margin-bottom: 8px; }
+/* 左标签右提示同一行：两端对齐、各自限宽截断，窄面板也不会叠字 */
+.sider-subpanel .chat-rail .rail-target-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  min-width: 0;
+}
+.sider-subpanel .chat-rail .rail-target-row .rail-label {
+  margin-bottom: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.sider-subpanel .chat-rail .rail-target-row .rail-label-en { color: var(--muted-dim); }
+.sider-subpanel .chat-rail .rail-target-row .rail-hint {
+  margin-top: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sider-subpanel .chat-rail .target-select.ant-select-single { height: 26px; }
+.sider-subpanel .chat-rail .target-select.ant-select-single .ant-select-selector { height: 26px; font-size: 12px; }
+.sider-subpanel .chat-rail .target-select.ant-select-single .ant-select-selection-item,
+.sider-subpanel .chat-rail .target-select.ant-select-single .ant-select-selection-placeholder {
+  line-height: 24px;
+  font-size: 12px;
+}
+/* 工具条贴紧目标区，列表拿回纵向空间 */
+.sider-subpanel .chat-rail .rail-toolbar { margin-bottom: 2px; }
+/* 聊天流 / 任务：去掉整块头部留白，列表贴着入口行排 */
+.sider-subpanel .flows-rail .flows-rail-head { display: none; }
+.sider-subpanel .flows-rail .flows-list { padding: 2px 2px 8px; }
+.sider-subpanel .flows-rail .flows-channel { margin-bottom: 8px; }
+
+/* 主题合并面板保持固定上限（不拉满，避免盖住状态栏） */
+.theme-switcher.theme-merged.open .theme-panel { max-height: 520px; overflow-y: auto; }
+
+/* 窄屏：主题面板随抽屉整页滚动；页面侧栏入口不出现（页面侧栏仍在页内，
+ * 走原有的列表页/会话页切换） */
+@media (max-width: 860px) {
+  .theme-switcher.theme-merged.open .theme-panel { max-height: none; overflow-y: visible; }
+  .sider-ctx-toggle { display: none; }
+}
