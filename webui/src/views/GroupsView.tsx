@@ -295,7 +295,7 @@ export function GroupsView(): React.ReactElement {
     }
   };
 
-  // 在途个体（任务图运行中）：成员表状态列
+  // 在途个体（编排图运行中）：成员表状态列
   const busyAgents = new Set(
     (useExm((s) => s.graph)?.nodes ?? [])
       .filter((n) => ["running", "dispatched", "syncing"].includes(n.status))

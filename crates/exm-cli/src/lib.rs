@@ -72,7 +72,7 @@ enum Commands {
         #[arg(long)]
         capability: Option<String>,
     },
-    /// 查看会话最新任务图
+    /// 查看会话最新编排图（任务依赖 DAG）
     Tasks {
         session_id: String,
     },
@@ -562,7 +562,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         println!("{}", render::node_line(n));
                     }
                 }
-                None => println!("{}", render::dim("该会话暂无任务图")),
+                None => println!("{}", render::dim("该会话暂无编排图")),
             }
             Ok(())
         }
