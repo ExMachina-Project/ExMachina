@@ -23,6 +23,8 @@ import { useExm } from "../store";
 import { useT } from "../i18n/core";
 import { StatementList } from "../components/Statements";
 import { useIsNarrow } from "../useIsNarrow";
+import { createPortal } from "react-dom";
+import { useSubbarSlot } from "../components/Subbar";
 
 /** 平台短标（通道 type → 展示名），与 FlowRailSection 同口径 */
 const PLATFORM_LABEL: Record<string, string> = {
@@ -40,6 +42,8 @@ const PLATFORM_LABEL: Record<string, string> = {
 export function FlowsView(): React.ReactElement {
   const t = useT();
   const narrow = useIsNarrow();
+  /** 桌面端：页面侧栏 portal 到二级侧边栏；窄屏仍在页内（单列切换） */
+  const subbarSlot = useSubbarSlot();
   const selectSession = useExm((st) => st.selectSession);
   const activeSessionId = useExm((st) => st.sessionId);
 
@@ -51,9 +55,6 @@ export function FlowsView(): React.ReactElement {
   /** 选中流的消息流（只读） */
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [msgLoading, setMsgLoading] = useState(false);
-  /** 流内会话切换面板（每流独立展开态） */
-  const [sessionsFor, setSessionsFor] = useState<string | null>(null);
-  const [flowSessions, setFlowSessions] = useState<{ id: string; label: string; active: boolean }[]>([]);
   /** 消息流容器：加载/新消息后滚到底（只读页最新消息在底部） */
   const msgBoxRef = useRef<HTMLDivElement | null>(null);
 
@@ -121,43 +122,11 @@ export function FlowsView(): React.ReactElement {
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
   const openFlow = (f: ChannelFlow) => {
     setSelected(f);
-    setSessionsFor(null);
     if (f.unread) {
       setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, unread: 0 } : x)));
       void api.readChannelFlow(f.id).catch(() => undefined);
     }
     if (f.activeSession) void selectSession(f.activeSession);
-  };
-
-  /** 展开流内会话列表（拉取与通道 /sessions 指令同口径） */
-  const toggleSessions = (f: ChannelFlow) => {
-    if (sessionsFor === f.id) {
-      setSessionsFor(null);
-      return;
-    }
-    setSessionsFor(f.id);
-    setFlowSessions([]);
-    void api
-      .listFlowSessions(f.id)
-      .then((list) =>
-        setFlowSessions(
-          list.map((s) => ({ id: s.id, label: s.label, active: s.active })),
-        ),
-      )
-      .catch(() => setFlowSessions([]));
-  };
-
-  /** 流内改绑（与 /use 指令同源；绑定后刷新消息区） */
-  const switchFlowSession = (f: ChannelFlow, sid: string) => {
-    void api
-      .setFlowActiveSession(f.id, sid)
-      .then(() => {
-        setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, activeSession: sid } : x)));
-        setSessionsFor(null);
-        void selectSession(sid);
-        window.dispatchEvent(new Event("exm:flows-refresh"));
-      })
-      .catch(() => undefined);
   };
 
   /** 按通道分组（保持通道顺序） */
@@ -172,9 +141,7 @@ export function FlowsView(): React.ReactElement {
 
   const totalUnread = flows.reduce((n, f) => n + (f.unread ?? 0), 0);
 
-  return (
-    <div className={`flows-shell ${narrow && selected ? "thread" : ""}`}>
-      {/* 流列表（窄屏选中后隐藏——单列切换） */}
+  const rail = (
       <aside className="flows-rail">
         <div className="flows-rail-head">
           <span className="flows-title">{t("nav.flows")}</span>
@@ -226,36 +193,6 @@ export function FlowsView(): React.ReactElement {
                       </span>
                     </div>
                     {/* 流内会话切换 */}
-                    <div className="flow-sessions">
-                      <Button
-                        type="text"
-                        size="small"
-                        className="flow-sessions-btn"
-                        onClick={() => toggleSessions(f)}
-                      >
-                        {t("chat.flowSessions")} {sessionsFor === f.id ? "▾" : "▸"}
-                      </Button>
-                      {sessionsFor === f.id && (
-                        <div className="flow-session-list">
-                          {flowSessions.map((s) => (
-                            <div
-                              key={s.id}
-                              className={`flow-session-item ${s.active ? "active" : ""}`}
-                              onClick={() => switchFlowSession(f, s.id)}
-                              role="button"
-                              tabIndex={0}
-                              onKeyDown={(e) => e.key === "Enter" && switchFlowSession(f, s.id)}
-                            >
-                              {s.active ? "● " : "○ "}
-                              {s.label}
-                            </div>
-                          ))}
-                          {flowSessions.length === 0 && (
-                            <div className="flow-session-empty">{t("flows.noSessions")}</div>
-                          )}
-                        </div>
-                      )}
-                    </div>
                   </div>
                 );
               })}
@@ -263,6 +200,12 @@ export function FlowsView(): React.ReactElement {
           ))}
         </div>
       </aside>
+  );
+
+  return (
+    <div className={`flows-shell ${narrow && selected ? "thread" : ""}`}>
+      {/* 流列表（窄屏选中后隐藏——单列切换） */}
+      {narrow ? rail : subbarSlot ? createPortal(rail, subbarSlot) : null}
 
       {/* 右侧：选中流的绑定会话消息流（只读——聊天页无输入框） */}
       <main className="flows-thread">
@@ -302,17 +245,27 @@ export function FlowsView(): React.ReactElement {
                 <Empty description={t("flows.noMessages")} style={{ marginTop: 80 }} />
               )}
               {!msgLoading &&
-                messages.map((m) => (
-                  <div key={m.id} className={`flows-msg ${m.role}`}>
-                    <div className="flows-msg-head">
-                      <span className="flows-msg-role">
-                        {m.role === "user" ? t("flows.fromUser") : m.agentId || t("flows.fromAgent")}
-                      </span>
-                      <span className="flows-msg-time">{relativeTime(m.createdAt)}</span>
+                messages.map((m) => {
+                  // 发送者署名：user 消息解 agentId 的 im:/imctx: 标记（群聊真名，
+                  // 无标记回落「外部用户」）；智能体侧显示 agentId 或「智能体」
+                  const isUser = m.role === "user";
+                  const mark = isUser ? (m.agentId ?? "") : "";
+                  const sender =
+                    mark.startsWith("im:") || mark.startsWith("imctx:")
+                      ? mark.slice(mark.indexOf(":") + 1) || t("flows.fromUser")
+                      : isUser
+                        ? t("flows.fromUser")
+                        : (m.agentId || t("flows.fromAgent"));
+                  return (
+                    <div key={m.id} className={`flows-msg ${m.role}`}>
+                      <div className="flows-msg-head">
+                        <span className="flows-msg-role">{sender}</span>
+                        <span className="flows-msg-time">{relativeTime(m.createdAt)}</span>
+                      </div>
+                      <StatementList statements={m.statements} />
                     </div>
-                    <StatementList statements={m.statements} />
-                  </div>
-                ))}
+                  );
+                })}
             </div>
             {/* 只读声明条（替代输入框位置）：聊天页的消息由外部用户发起 */}
             <div className="flows-readonly">{t("flows.readonlyHint")}</div>
