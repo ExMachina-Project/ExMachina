@@ -728,11 +728,12 @@ fn ensure_flow_session(
     core.ensure_flow_session_atomic(&ch.id, chat_key, &scope, &title, flow_name, is_group)
 }
 
-/// 聊天流（chat flow）会话管理指令：
-/// - `/new [标题]`：开新会话并绑到流（旧会话保留可切回）
-/// - `/sessions`：列出流内全部会话（含当前绑定标记）
-/// - `/use <序号|标题片段>`：切换流的活跃会话
+/// 聊天流（chat flow）固定单会话：一条流恒定复用同一个会话，不再有流内
+/// 会话区分（`/new` `/sessions` `/use` 已退役——多会话切换单独治理记忆与
+/// 上下文，与「聊天流 = 一个外部会话的镜像」的定位冲突；需要全新上下文
+/// 时由管理者在控制台归档/重建，通道侧不提供切换入口）。
 ///
+/// 旧指令仍拦截并回执说明（群里发了不能没反应），但不做任何状态变更。
 /// 返回 Some(reply) = 指令已处理（Deny 语义回帖）；None = 非流指令，放行后续闸门。
 async fn flow_command(
     core: &exm_core::Core,
@@ -740,116 +741,22 @@ async fn flow_command(
     ctx: &InboundCtx<'_>,
 ) -> Option<String> {
     let text = ctx.text.trim();
-    let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
-    let title_prefix = format!("channel:{}:{}:", ch.id, ctx.chat_key);
-
-    if text == "/new" || text.starts_with("/new ") {
-        let custom = text.strip_prefix("/new").unwrap_or_default().trim();
-        let title = if custom.is_empty() {
-            format!("channel:{}:{}", ch.id, ctx.chat_key)
-        } else {
-            format!("{title_prefix}{custom}")
-        };
-        return match core.create_session(&title) {
-            Ok(s) => match core.bind_flow_session(&ch.id, ctx.chat_key, &s.id) {
-                Ok(()) => Some(format!("已开新会话（{}）。", short_id(&s.id))),
-                Err(e) => Some(format!("会话已建但绑定失败：{e}")),
-            },
-            Err(e) => Some(format!("开新会话失败：{e}")),
-        };
-    }
-
-    if text == "/sessions" {
-        // 流内会话 = 同流前缀标题的全部会话（新旧口径都覆盖）
-        let all = core.list_sessions_in_group(&gid).unwrap_or_default();
-        let mut mine: Vec<_> = all
-            .iter()
-            .filter(|s| s.title.starts_with(&title_prefix) || {
-                s.title == format!("channel:{}:{}", ch.id, ctx.chat_key)
-            })
-            .cloned()
-            .collect();
-        // 活跃倒序；同秒活跃以创建时间破平（同秒内新建者在前——序号寻址确定性）
-        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
-        if mine.is_empty() {
-            return Some("本聊天流还没有会话。发送 /new 开一个。".into());
+    let retired = [
+        ("/new", "本聊天流固定使用一个会话，不再开新会话。"),
+        ("/sessions", "本聊天流固定使用一个会话，无流内会话列表。"),
+        ("/use", "本聊天流固定使用一个会话，无需切换。"),
+    ];
+    for (cmd, reply) in retired {
+        if text == cmd || text.starts_with(&format!("{cmd} ")) {
+            // 附当前绑定会话短码，管理者可在控制台按此定位
+            let cur = core
+                .flow_active_session(&ch.id, ctx.chat_key)
+                .map(|sid| sid.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "（尚未创建）".into());
+            return Some(format!("{reply}当前会话：{cur}"));
         }
-        let active = core.flow_active_session(&ch.id, ctx.chat_key);
-        let lines: Vec<String> = mine
-            .iter()
-            .take(10)
-            .enumerate()
-            .map(|(i, s)| {
-                let mark = if active.as_deref() == Some(s.id.as_str()) {
-                    "●"
-                } else {
-                    "○"
-                };
-                let label = s
-                    .title
-                    .strip_prefix(&title_prefix)
-                    .filter(|t| !t.is_empty())
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| default_flow_session_label(&s.created_at));
-                format!("{mark} {i}. {label}（{}）", short_id(&s.id))
-            })
-            .collect();
-        return Some(format!(
-            "本聊天流的会话：\n{}\n/use <序号> 切换；/new 开新的。",
-            lines.join("\n")
-        ));
     }
-
-    if let Some(rest) = text.strip_prefix("/use ") {
-        let rest = rest.trim();
-        let all = core.list_sessions_in_group(&gid).unwrap_or_default();
-        let mut mine: Vec<_> = all
-            .iter()
-            .filter(|s| s.title.starts_with(&title_prefix) || {
-                s.title == format!("channel:{}:{}", ch.id, ctx.chat_key)
-            })
-            .cloned()
-            .collect();
-        // 活跃倒序；同秒活跃以创建时间破平（与 /sessions 列表同口径，序号寻址确定性）
-        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
-        // 序号优先；否则按标题片段模糊匹配
-        let hit = if let Ok(idx) = rest.parse::<usize>() {
-            mine.get(idx).cloned().map(|s| s.id).map(|id| (id, rest.to_string()))
-        } else {
-            mine.iter()
-                .find(|s| {
-                    s.title
-                        .strip_prefix(&title_prefix)
-                        .map(|t| t.contains(rest))
-                        .unwrap_or(false)
-                })
-                .map(|s| (s.id.clone(), rest.to_string()))
-        };
-        return match hit {
-            Some((sid, label)) => match core.bind_flow_session(&ch.id, ctx.chat_key, &sid) {
-                Ok(()) => Some(format!("已切换到会话 {label}（{}）。", short_id(&sid))),
-                Err(e) => Some(format!("切换失败：{e}")),
-            },
-            None => Some(format!("没找到会话「{rest}」。/sessions 看全部。")),
-        };
-    }
-
     None
-}
-
-/// 流内会话的默认展示名（无自定义标题时用创建时间区分；REST 流会话列表共用）
-pub(crate) fn default_flow_session_label(created_at: &str) -> String {
-    // ISO 时间取到分位（2026-11-01T15:30:00 → 11-01 15:30）
-    let chars: Vec<char> = created_at.chars().collect();
-    if chars.len() >= 16 {
-        chars[5..16].iter().collect()
-    } else {
-        created_at.to_string()
-    }
-}
-
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
 }
 
 /// 运行收束事件 → 纯文本回帖（telegram / napcat / qqbot 三个适配器共用）。

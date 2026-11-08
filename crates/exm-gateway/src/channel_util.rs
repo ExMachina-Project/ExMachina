@@ -3,9 +3,9 @@
 //! 两块内容，都是六个适配器（telegram / qqbot / napcat / discord / slack / matrix）
 //! 需要同一套语义的地方——各写一遍必然漂移（命令文案、去重窗口、归档命名不一致）：
 //!
-//! ① 内置命令：`/new` 开新会话、`/status` 查状态。`/stop` 已在 `platform::admit`
-//!    最前面统一处理，这里补齐其余两条。调用时机固定为「入站闸门 Allow 之后」：
-//!    未绑定 / 被拒用户不可用命令（/new 会建会话，属资源操作，不能绕过身份管控）。
+//! ① 内置命令：`/status` 查通道与会话状态。`/stop` 与聊天流指令（`/new`
+//!    `/sessions` `/use`，均已退役为回执说明）在 `platform::admit` 最前面统一处理。
+//!    调用时机固定为「入站闸门 Allow 之后」：未绑定 / 被拒用户不可用命令。
 //! ② 消息去重：Discord / QQ 机器人断线 Resume 会重放最近事件；Slack 对同一消息
 //!    可能同时投 `message` 与 `app_mention` 双事件。按平台消息 id 做首见放行。
 
@@ -21,7 +21,8 @@ use std::sync::OnceLock;
 /// 内置命令识别结果（纯数据，便于单测）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinCmd {
-    /// /new：开新会话
+    /// /new：已退役（聊天流固定单会话，admit 流指令回执说明）——保留识别仅为
+    /// 单测口径完整；执行层与 `/status` 之外一律 None 放行
     New,
     /// /status：查通道与会话状态
     Status,
@@ -38,8 +39,8 @@ pub(crate) fn parse_command(text: &str) -> Option<BuiltinCmd> {
 }
 
 /// 尝试执行内置命令：命中返回回复文本（由调用方按平台发回），未命中返回 None 走正常消息流。
-/// `/new` `/sessions` `/use` 已升级为聊天流（chat flow）指令，统一在 `platform::admit`
-/// 的 `flow_command` 处理（流绑定语义，旧会话保留可切回）；这里只保留 `/status`。
+/// `/new` `/sessions` `/use` 已随「聊天流固定单会话」退役：`/sessions` `/use` 与带参
+/// `/new` 在 `platform::admit` 的 `flow_command` 回执说明；这里只保留 `/status`。
 pub(crate) async fn builtin_command(
     core: &Arc<Core>,
     ch: &Channel,
