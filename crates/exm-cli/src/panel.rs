@@ -580,7 +580,7 @@ impl Panel {
                         println!("{}", crate::render::node_line(n));
                     }
                 }
-                None => println!("{}", dim("该会话暂无任务图")),
+                None => println!("{}", dim("该会话暂无编排图")),
             },
             "stop" => match core.stop_session(&state.session_id) {
                 Ok(n) => println!("{} 已请求停止（当时已执行 {n} 次工具调用）", ok("完成")),
@@ -1976,7 +1976,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("/sessions", "列出当前交互目标的会话"),
             ("/session <序号|id>", "切换会话"),
             ("/del <序号|id>", "删除会话"),
-            ("/tasks", "当前会话任务图（节点/依赖/回流）"),
+            ("/tasks", "当前会话编排图（节点/依赖/回流）"),
             ("/stop", "终止当前运行中的轮次（等同 Ctrl+C）"),
             ("/undo <轮次>", "撤销到指定轮次（联动回滚该轮之后改动的工作区文件）"),
             ("/fork <轮次>", "派生分支会话（原会话不变）"),

@@ -1,4 +1,4 @@
-/** 任务图视图：DAG 实时渲染（自绘 SVG，按拓扑深度分层）。
+/** 编排视图（原任务图）：DAG 实时渲染（自绘 SVG，按拓扑深度分层）。
  *  渲染主体抽到 components/TaskGraphDag（与聊天页内嵌卡共享同一口径）。 */
 import React from "react";
 import { Select } from "antd";
