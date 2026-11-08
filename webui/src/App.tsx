@@ -1,6 +1,6 @@
 /** 主框架：纯导航侧栏——组切换在对话页内，组管理独立成页 */
-import React, { lazy, Suspense, useEffect, useState } from "react";
-import { Menu, message, Tag } from "antd";
+import React, { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { message, Menu, Tag } from "antd";
 import {
   ApartmentOutlined,
   BellOutlined,
@@ -25,13 +25,14 @@ import {
 } from "@ant-design/icons";
 import { api } from "./api";
 import { isAutoSessionTitle } from "./session";
+import { SubbarSlotContext } from "./components/Subbar";
 import { useExm } from "./store";
 import { useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, THEMES, useTheme, type ThemeKey } from "./theme";
+import { AsciiDivider } from "./components/Ascii";
 import { CharStream } from "./components/CharStream";
 import { CommandPalette } from "./components/CommandPalette";
 import { DataStream } from "./components/DataStream";
-import { AsciiDivider } from "./components/Ascii";
 import { Emblem } from "./components/Emblem";
 import { OrbitRings } from "./components/OrbitRings";
 import { TelemetryBar } from "./components/TelemetryBar";
@@ -188,6 +189,11 @@ export default function App(): React.ReactElement {
       history.replaceState(null, "", target);
     }
   };
+  // 二级侧边栏（上下文）：当前 view 有页面侧栏内容才提供入口
+  const ctxKind = view === "chat" ? "chat" : view === "flows" ? "flows" : view === "tasks" ? "tasks" : null;
+  const ctxTitleKey = ctxKind === "chat" ? "ctx.chat" : ctxKind === "flows" ? "ctx.flows" : "ctx.tasks";
+  /** 当前页在 NAV_ITEMS 中的条目（页面手风琴行尾显示当前页名） */
+  const currentNav = NAV_ITEMS.find((it) => it.key === view) ?? NAV_ITEMS[0];
   const navRequest = useExm((st) => st.navRequest);
   useEffect(() => {
     if (!navRequest) return;
@@ -224,7 +230,7 @@ export default function App(): React.ReactElement {
   }, []);
 
   // 键盘跳页（kbd-nav）：G 武装后接页首字母（gc=对话 gf=聊天 gt=任务 gs=会话
-  // 管理 ga=智能体 gn=智能连结 gd=任务图 gm=模型 gp=审批），或 1-9 直达前九项。
+  // 管理 ga=智能体 gn=智能连结 gd=编排 gm=模型 gp=审批），或 1-9 直达前九项。
   // 输入框/文本域聚焦与修饰键按下时不触发，不干扰正常输入与浏览器快捷键。
   // 映射手选不自动派生：首字母冲突页（graph/automations 等）一律走数字直达。
   useEffect(() => {
@@ -261,9 +267,39 @@ export default function App(): React.ReactElement {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [view]);
-  const [openMenu, setOpenMenu] = useState<"theme" | "accent" | null>(null);
+  /** 顶部手风琴①：页面导航菜单（与②互斥，展开时占满侧栏剩余高度）。
+   *  不变式：①②至少展开一个——默认展开①；①仅在②已展开时才允许收起。 */
+  const [navMenuOpen, setNavMenuOpen] = useState(true);
+  /** 顶部入口②：二级侧边栏——当前页自己的侧栏内容（与①互斥） */
+  const [subbarOpen, setSubbarOpen] = useState(false);
+  /** 二级侧边栏插槽节点（页面侧栏 portal 目标） */
+  const [subbarSlot, setSubbarSlot] = useState<HTMLElement | null>(null);
+  /** Esc 收起时的最新开关快照（监听器内读，避免闭包旧值） */
+  const subbarOpenRef = useRef(subbarOpen);
+  subbarOpenRef.current = subbarOpen;
+  /** 底部主题手风琴（预设 + 强调色合并入口）：独立开关，不影响顶部两项 */
+  const [themeOpen, setThemeOpen] = useState(false);
   /** 移动端侧栏抽屉（≤860px 时侧栏覆盖呈现） */
   const [navOpen, setNavOpen] = useState(false);
+  // Esc 关闭展开中的面板（输入框聚焦时除外——不干扰会话搜索等本地输入）。
+  // 不变式「①②至少展开一个」：②随时可收（①兜底）；①仅在②已展开时才随之收起。
+  useEffect(() => {
+    if (!navMenuOpen && !subbarOpen && !themeOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (e.key === "Escape" && el?.tagName !== "INPUT" && el?.tagName !== "TEXTAREA") {
+        // ②随时可收；收②的同时①顶上（互斥曾把①收掉，必须兜底「至少一个展开」）。
+        // ①本身不被动收起（仅用户显式切换）。
+        setSubbarOpen((prev) => {
+          if (prev) setNavMenuOpen(true);
+          return false;
+        });
+        setThemeOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navMenuOpen, subbarOpen, themeOpen]);
   const t = useT();
   // 登录门：checking = 鉴权中；setup = 首启未设密钥（引导设置）；locked = 未解锁；open = 已进入
   const [gate, setGate] = useState<"checking" | "setup" | "locked" | "open">("checking");
@@ -295,7 +331,7 @@ export default function App(): React.ReactElement {
               if (s?.title.startsWith("channel:")) setViewState("flows");
               else if (s && isAutoSessionTitle(s.title)) setViewState("tasks");
             } else {
-              message.info(t("route.sessionGone"));
+              message.info("深链会话不存在，已切换到最近会话");
             }
           }
         }
@@ -350,15 +386,17 @@ export default function App(): React.ReactElement {
   }
 
   return (
-    <div className="app-shell">
+    <SubbarSlotContext.Provider value={subbarSlot}>
+      <div className="app-shell">
       {/* 移动端抽屉开关（桌面隐藏） */}
       <button className="mobile-nav-btn" onClick={() => setNavOpen(!navOpen)} aria-label="menu">
         {navOpen ? <CloseOutlined /> : <MenuOutlined />}
       </button>
       {navOpen && <div className="nav-mask" onClick={() => setNavOpen(false)} />}
-      <aside className={`app-sider ${navOpen ? "open" : ""}`}>
+      <aside className={`app-sider ${navOpen ? "open" : ""} ${navMenuOpen || subbarOpen ? "top-open" : ""} ${ctxKind && subbarOpen ? "ctx-open" : ""}`}>
         {/* 字符流放在侧栏背景里（见 styles.css 的层级说明） */}
         <CharStream />
+        {/* 品牌区（保持原样） */}
         <div className="brand">
           <div className="brand-row">
             <span className="brand-led" />
@@ -366,86 +404,124 @@ export default function App(): React.ReactElement {
           </div>
           <div className="brand-sub">{t("brand.sub")}</div>
         </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[view]}
-          className="nav-menu"
-          items={NAV_ITEMS.map((it) => ({
-            key: it.key,
-            icon: it.icon,
-            label: (
-              <>
-                <span>{t(it.labelKey)}</span> <span className="label-en">[{it.en}]</span>
-                {it.key === "approvals" && pendingApprovals > 0 && (
-                  <span className="nav-badge" title={`${pendingApprovals}`}>{pendingApprovals > 99 ? "99+" : pendingApprovals}</span>
-                )}
-                {it.key === "flows" && flowUnread > 0 && (
-                  <span className="nav-badge" title={`${flowUnread}`}>{flowUnread > 99 ? "99+" : flowUnread}</span>
-                )}
-              </>
-            ),
-          }))}
-          onClick={({ key }) => {
-            setView(key as ViewKey);
-            history.replaceState(null, "", "#/" + key);
-            setNavOpen(false); // 移动端：选中即收起抽屉
-          }}
-        />
+
+        {/* ── 顶部手风琴①：页面（NAV_ITEMS 全量入口 + 角标；与原菜单同款行）── */}
+        <div className={`theme-switcher acc-nav ${navMenuOpen ? "open" : ""}`}>
+          <button
+            className="theme-toggle"
+            onClick={() => {
+              // 至少一个展开：②未展开时①不允许收起
+              if (navMenuOpen && !subbarOpen) return;
+              const next = !navMenuOpen;
+              setNavMenuOpen(next);
+              if (next) setSubbarOpen(false);
+            }}
+            aria-expanded={navMenuOpen}
+            aria-disabled={navMenuOpen && !subbarOpen}
+          >
+            <span className="theme-label">{t("nav.pagesTitle")}</span>
+            <span className="theme-current">{t(currentNav.labelKey as TKey)}</span>
+            <span className={`theme-caret ${navMenuOpen ? "up" : ""}`}>▸</span>
+          </button>
+          <div className="theme-panel">
+            <Menu
+              mode="inline"
+              selectedKeys={[view]}
+              className="nav-menu"
+              items={NAV_ITEMS.map((it) => ({
+                key: it.key,
+                icon: it.icon,
+                label: (
+                  <>
+                    <span>{t(it.labelKey)}</span> <span className="label-en">[{it.en}]</span>
+                    {it.key === "approvals" && pendingApprovals > 0 && (
+                      <span className="nav-badge" title={`${pendingApprovals}`}>{pendingApprovals > 99 ? "99+" : pendingApprovals}</span>
+                    )}
+                    {it.key === "flows" && flowUnread > 0 && (
+                      <span className="nav-badge" title={`${flowUnread}`}>{flowUnread > 99 ? "99+" : flowUnread}</span>
+                    )}
+                  </>
+                ),
+              }))}
+              onClick={({ key }) => {
+                setView(key as ViewKey);
+                history.replaceState(null, "", "#/" + key);
+                setNavOpen(false);
+              }}
+            />
+          </div>
+        </div>
+
+        {/* ── 顶部入口②：页面侧栏（对话=会话 / 聊天=聊天流 / 任务=任务会话；
+            其余页不显示）。展开后在主侧栏内拉满展示页面自己的侧栏内容，
+            与①互斥：开一个自动收另一个。── */}
+        {ctxKind && (
+          <div className={`theme-switcher acc-ctx sider-ctx-toggle ${subbarOpen ? "open" : ""}`}>
+            <button
+              className="theme-toggle"
+              onClick={() => {
+                const next = !subbarOpen;
+                setSubbarOpen(next);
+                if (next) setNavMenuOpen(false);
+                else setNavMenuOpen(true); // 至少一个展开：收②时①顶上
+              }}
+              aria-expanded={subbarOpen}
+            >
+              <span className="theme-label">{t(ctxTitleKey)}</span>
+              <span className={`theme-caret ${subbarOpen ? "up" : ""}`}>▸</span>
+            </button>
+            <div className="theme-panel">
+              {subbarOpen && <div className="sider-subpanel" ref={setSubbarSlot} />}
+            </div>
+          </div>
+        )}
+
+        {/* 弹性占位：主题与状态栏压到底（与原导航菜单 flex:1 同效） */}
+        <div className="sider-grow" />
+
         <AsciiDivider className="sider-divider" />
-        {/* 主题预设：决定明暗与中性色阶 */}
-        <div className={`theme-switcher ${openMenu === "theme" ? "open" : ""}`}>
-          <button className="theme-toggle" onClick={() => setOpenMenu(openMenu === "theme" ? null : "theme")}>
+
+        {/* ── 底部手风琴：主题（预设 + 强调色合并为单一入口，独立开关）── */}
+        <div className={`theme-switcher theme-merged ${themeOpen ? "open" : ""}`}>
+          <button className="theme-toggle" onClick={() => setThemeOpen(!themeOpen)} aria-expanded={themeOpen}>
             <span className="theme-label">{t("theme.label")}</span>
-            <span className="theme-current">{t(`theme.preset.${preset}` as TKey)}</span>
-            <span className={`theme-caret ${openMenu === "theme" ? "up" : ""}`}>▸</span>
-          </button>
-          <div className="theme-panel">
-            {THEMES.map((th) => (
-              <button
-                key={th.key}
-                className={`theme-option ${preset === th.key ? "active" : ""}`}
-                onClick={() => {
-                  setPreset(th.key as ThemeKey);
-                  setOpenMenu(null);
-                }}
-              >
-                <span
-                  className="theme-swatch"
-                  style={{ background: th.mode === "light" ? "#ffffff" : "#101218" }}
-                />
-                <span>{t(`theme.preset.${th.key}` as TKey)}</span>
-                <span className="label-en">[{th.key.toUpperCase()}]</span>
-              </button>
-            ))}
-          </div>
-        </div>
-        {/* 强调色：交互与状态点缀（同一键在不同主题下取不同明度） */}
-        <div className={`theme-switcher ${openMenu === "accent" ? "open" : ""}`}>
-          <button className="theme-toggle" onClick={() => setOpenMenu(openMenu === "accent" ? null : "accent")}>
-            <span className="theme-label">{t("theme.accentLabel")}</span>
             <span className="theme-current" style={{ color: accentColor(preset, accent) }}>
-              {t(`theme.accent.${accent}` as TKey)}
+              {t(`theme.preset.${preset}` as TKey)} · {t(`theme.accent.${accent}` as TKey)}
             </span>
-            <span className={`theme-caret ${openMenu === "accent" ? "up" : ""}`}>▸</span>
+            <span className={`theme-caret ${themeOpen ? "up" : ""}`}>▸</span>
           </button>
           <div className="theme-panel">
-            {ACCENTS.map((a) => (
-              <button
-                key={a.key}
-                className={`theme-option ${accent === a.key ? "active" : ""}`}
-                onClick={() => {
-                  setAccent(a.key);
-                  setOpenMenu(null);
-                }}
-              >
-                <span className="theme-swatch" style={{ background: accentColor(preset, a.key) }} />
-                <span>{t(`theme.accent.${a.key}` as TKey)}</span>
-                <span className="label-en">[{a.key.toUpperCase()}]</span>
-              </button>
-            ))}
+            <div className="theme-block">
+              <div className="theme-block-label">{t("theme.presetTitle")}</div>
+              {THEMES.map((th) => (
+                <button
+                  key={th.key}
+                  className={`theme-option ${preset === th.key ? "active" : ""}`}
+                  onClick={() => setPreset(th.key as ThemeKey)}
+                >
+                  <span className="theme-swatch" style={{ background: th.mode === "light" ? "#ffffff" : "#101218" }} />
+                  <span>{t(`theme.preset.${th.key}` as TKey)}</span>
+                  <span className="label-en">[{th.key.toUpperCase()}]</span>
+                </button>
+              ))}
+            </div>
+            <div className="theme-block">
+              <div className="theme-block-label">{t("theme.accentTitle")}</div>
+              {ACCENTS.map((a) => (
+                <button
+                  key={a.key}
+                  className={`theme-option ${accent === a.key ? "active" : ""}`}
+                  onClick={() => setAccent(a.key)}
+                >
+                  <span className="theme-swatch" style={{ background: accentColor(preset, a.key) }} />
+                  <span>{t(`theme.accent.${a.key}` as TKey)}</span>
+                  <span className="label-en">[{a.key.toUpperCase()}]</span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
-        {/* 界面偏好（数据流/语言等）在「设置」页维护，侧栏只留主题与强调色 */}
+
         <div className="nav-footer">
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} />
           <span className="status-text">{wsConnected ? t("status.connected") : t("status.reconnecting")}</span>
@@ -484,6 +560,7 @@ export default function App(): React.ReactElement {
       <TelemetryBar />
       {/* 全局会话速查（Ctrl/Cmd+K）：Modal 自带 portal，挂根部即可 */}
       <CommandPalette />
-    </div>
+      </div>
+    </SubbarSlotContext.Provider>
   );
 }
