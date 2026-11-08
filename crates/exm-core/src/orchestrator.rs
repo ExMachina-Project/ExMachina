@@ -120,6 +120,10 @@ pub const IM_DISCIPLINE: &str = "## 表达纪律（强制：IM 通道）
 - 用户明确要求详细展开或生成长文（文档/代码/翻译全文等）时才可长回复，此时直接输出内容主体，不加多余框架。
 - 不主动追问「是否需要我继续」；信息不足就给出当前结论并说明缺什么。
 
+## 群聊署名（发送者识别）
+
+user 消息可能携带发送者标记（元数据，不在正文内）：`im:名字(id)` 为 @ 你的群聊真人发言者，`imctx:名字(id)` 为旁听群友。正文即发言原文，**不加任何「（某人 说）」前缀**；你根据消息自带的发送者标记与上下文自行判断在跟谁说话、回复中是否需要称呼对方。多人先后发言时按时间顺序理解为不同群友的话。
+
 ## 旁听纪律（强制：群聊会话）
 
 历史里标注「（群聊·某人 说）」的消息是**旁听**——唤醒门控拦下的未 @ 群消息，仅作为背景上下文保留：
@@ -2364,13 +2368,9 @@ pub(crate) fn history_with_ambient_labeled(
                     ambient_run.push(format!("{name}：{}", content));
                 } else {
                     flush_ambient(&mut ambient_run, &mut out);
-                    let who = mark.strip_prefix("im:").unwrap_or("");
-                    let body = if who.is_empty() {
-                        content
-                    } else {
-                        format!("（{who} 说）{content}")
-                    };
-                    out.push(ChatMessage::user(body));
+                    // 署名语义由提示词说明（IM 纪律段）：正文保持原样，
+                    // 不程序化强加「（xxx 说）」前缀——模型按发送者标记自行理解
+                    out.push(ChatMessage::user(content));
                 }
             }
             _ => {
@@ -2415,18 +2415,12 @@ fn pending_inputs_from(msgs: &[crate::types::ChatMessage]) -> Option<String> {
         {
             continue;
         }
-        // 群聊发送者（im: 标记）转行内署名：排队窗口内多人发言合并为一轮目标时
-        // 仍可区分「谁说了什么」（与 history 渲染同口径）
-        let who = m
-            .agent_id
-            .as_deref()
-            .and_then(|a| a.strip_prefix("im:"))
-            .unwrap_or("");
-        let prefix = if who.is_empty() { String::new() } else { format!("（{who} 说）") };
+        // 群聊发送者（im: 标记）的署名由提示词说明（IM 纪律段），正文保持原样：
+        // 排队窗口内多人发言合并为一轮目标时不再程序化强加「（xxx 说）」前缀
         let mut stmts: Vec<String> = m
             .statements
             .iter()
-            .map(|s| format!("{prefix}{}", s.text))
+            .map(|s| s.text.clone())
             .collect();
         stmts.reverse();
         pending.extend(stmts);
@@ -3699,7 +3693,7 @@ mod pending_inputs_tests {
             msg(MessageRole::User, Some("im:王五"), "@bot 帮我们推荐"),
         ];
         let goal = pending_inputs_from(&msgs).expect("应收集到真实输入");
-        assert_eq!(goal, "（王五 说）@bot 帮我们推荐");
+        assert_eq!(goal, "@bot 帮我们推荐");
         assert!(!goal.contains("今晚吃什么"), "旁听不得并入 goal：{goal}");
         assert!(!goal.contains("随便"), "旁听不得并入 goal：{goal}");
     }
@@ -3738,7 +3732,7 @@ mod pending_inputs_tests {
             hist[2].content
         );
         // 真实输入独立成条、无背景标注
-        assert_eq!(hist[3].content, "（赵六 说）@bot 在吗");
+        assert_eq!(hist[3].content, "@bot 在吗");
     }
 
     /// 历史装配：普通会话（无旁听）行为不变——真实输入与助手消息原样呈现
@@ -3752,7 +3746,7 @@ mod pending_inputs_tests {
         let hist = history_with_ambient(&rows);
         assert_eq!(hist.len(), 3);
         assert_eq!(hist[0].content, "普通输入");
-        assert_eq!(hist[2].content, "（甲 说）群聊真实输入");
+        assert_eq!(hist[2].content, "群聊真实输入");
         assert!(
             !hist.iter().any(|m| m.content.contains("群聊记录")),
             "无旁听不应出现记录块"
@@ -3779,6 +3773,6 @@ mod pending_inputs_tests {
             msg(MessageRole::User, Some("im:王五"), "@bot 新任务"),
         ];
         let goal = pending_inputs_from(&msgs).expect("应有新任务");
-        assert_eq!(goal, "（王五 说）@bot 新任务");
+        assert_eq!(goal, "@bot 新任务");
     }
 }

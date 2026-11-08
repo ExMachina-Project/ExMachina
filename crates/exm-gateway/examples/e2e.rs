@@ -1460,47 +1460,16 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     c.check("流 read 非法 id 400", bad_read.status().as_u16() == 400);
 
-    // 流内会话切换（experience-iteration）：sessions 列表含当前绑定（active 标记）；
-    // PUT active 改绑同源状态；跨流会话错绑被拒
-    let fs_list: serde_json::Value = client
+    // 流内会话切换已退役（聊天流固定单会话）：sessions/active 端点已移除——
+    // 404 即正确行为；消毒复用同会话断言（下方）覆盖「固定单会话」不变式
+    let fs_gone = client
         .get(format!("{base}/channels/flows/{flow_id}/sessions"))
         .send()
-        .await?
-        .json()
         .await?;
-    let bound_sid = inbound["sessionId"].as_str().unwrap_or("").to_string();
-    let has_active = fs_list
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .any(|s| s["id"] == bound_sid.as_str() && s["active"] == true)
-        })
-        .unwrap_or(false);
-    c.check("流内会话列表含当前绑定且标记 active", has_active);
-    // 幂等改绑：绑回同一会话 ok
-    let rebind: serde_json::Value = client
-        .put(format!("{base}/channels/flows/{flow_id}/active"))
-        .json(&serde_json::json!({ "sessionId": bound_sid }))
-        .send()
-        .await?
-        .json()
-        .await?;
-    c.check("流绑定改绑（同会话幂等）", rebind["ok"] == true);
-    // 跨流错绑被拒：造一个不属于该流的会话 id
-    let foreign: serde_json::Value = client
-        .post(format!("{base}/sessions"))
-        .json(&serde_json::json!({ "title": "foreign-session" }))
-        .send()
-        .await?
-        .json()
-        .await?;
-    let foreign_id = foreign["id"].as_str().unwrap_or("").to_string();
-    let bad_bind = client
-        .put(format!("{base}/channels/flows/{flow_id}/active"))
-        .json(&serde_json::json!({ "sessionId": foreign_id }))
-        .send()
-        .await?;
-    c.check("跨流会话错绑 400", bad_bind.status().as_u16() == 400);
+    c.check(
+        "流会话切换端点已退役（404）",
+        fs_gone.status().as_u16() == 404,
+    );
 
     // 入站消毒（inbound-sanitization）：注入消息受理 + 审计条目落会话事件流（不含原文全文）
     let sanitize_sid = inbound["sessionId"].as_str().unwrap_or("").to_string();

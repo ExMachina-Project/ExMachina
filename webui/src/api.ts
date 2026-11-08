@@ -434,15 +434,6 @@ export interface ChannelFlow {
   createdAt: string;
 }
 
-/** 流内会话条目（流会话切换）：与通道 /sessions 指令同口径 */
-export interface FlowSessionInfo {
-  id: string;
-  label: string;
-  createdAt: string;
-  updatedAt: string;
-  active: boolean;
-}
-
 /** 通道运行状态（内置适配器上报；桥接类型无运行时不产生条目） */
 export interface ChannelStatus {
   state: "ok" | "error";
@@ -886,9 +877,6 @@ export const api = {
   /** 聊天流列表（按最后活跃倒序；?channel= 过滤单通道） */
   listChannelFlows: () => req<ChannelFlow[]>("/channels/flows"),
   readChannelFlow: (id: string) => req<{ ok: boolean }>(`/channels/flows/${encodeURIComponent(id)}/read`, { method: "POST" }),
-  listFlowSessions: (id: string) => req<FlowSessionInfo[]>(`/channels/flows/${encodeURIComponent(id)}/sessions`),
-  setFlowActiveSession: (id: string, sessionId: string) =>
-    req<{ ok: boolean; sessionId: string }>(`/channels/flows/${encodeURIComponent(id)}/active`, { method: "PUT", body: JSON.stringify({ sessionId }) }),
   /** B 站扫码登录：出码（返回二维码内容 URL）→ 前端渲染二维码 → 轮询到 confirmed 拿登录 Cookie */
   biliQrStart: () => req<{ qrcodeKey: string; url: string }>("/channels/bili-qr", { method: "POST" }),
   biliQrPoll: (key: string) =>
