@@ -1,4 +1,4 @@
-/** 任务图 DAG 渲染（GraphView 与聊天页内嵌卡共享）。
+/** 编排 DAG 渲染（原任务图）（GraphView 与聊天页内嵌卡共享）。
  *
  *  自绘 SVG 按拓扑深度分层；节点点击弹详情 Drawer。布局算法与状态色
  *  原样抽自 GraphView（graph-dag 视图），两处呈现同一渲染口径。

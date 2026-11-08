@@ -87,7 +87,7 @@ pub struct Core {
     /// Auto Agent 运行态（实验性 experiments.autoAgent）：空转计数 + 上次 tick 分钟
     auto_state: parking_lot::RwLock<AutoAgentState>,
     meta_state: parking_lot::RwLock<MetaAgentState>,
-    /// 会话级运行串行：同一会话的并发输入排队（followup），不互踩任务图
+    /// 会话级运行串行：同一会话的并发输入排队（followup），不互踩编排图
     run_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 聊天流未读计数（流粒度，内存态）：智能体在流绑定会话产出回复且用户未打开
     /// 该会话时累积；打开即清零。未读是瞬时 UI 状态，重启归零合理（D5 单一事实源）。
@@ -2521,7 +2521,7 @@ impl Core {
         }
         let status = if result.is_ok() { "done" } else { "failed" };
         let summary = match result {
-            Ok(_) => "任务执行完成（详见会话与任务图）".to_string(),
+            Ok(_) => "任务执行完成（详见会话与编排图）".to_string(),
             Err(e) => format!("执行失败：{e}"),
         };
         let run = CronRun {
