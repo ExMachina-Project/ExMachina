@@ -17,11 +17,15 @@ import { useExm } from "../store";
 import { useT } from "../i18n/core";
 import { StatementList } from "../components/Statements";
 import { useIsNarrow } from "../useIsNarrow";
+import { createPortal } from "react-dom";
+import { useSubbarSlot } from "../components/Subbar";
 import { isAutoSessionTitle } from "../session";
 
 export function TasksView(): React.ReactElement {
   const t = useT();
   const narrow = useIsNarrow();
+  /** 桌面端：页面侧栏 portal 到二级侧边栏；窄屏仍在页内（单列切换） */
+  const subbarSlot = useSubbarSlot();
   const selectSession = useExm((st) => st.selectSession);
 
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -98,8 +102,7 @@ export function TasksView(): React.ReactElement {
     [sessions],
   );
 
-  return (
-    <div className={`flows-shell tasks-shell ${narrow && selected ? "thread" : ""}`}>
+  const rail = (
       <aside className="flows-rail">
         <div className="flows-rail-head">
           <span className="flows-title">{t("nav.tasks")}</span>
@@ -143,6 +146,11 @@ export function TasksView(): React.ReactElement {
           })}
         </div>
       </aside>
+  );
+
+  return (
+    <div className={`flows-shell tasks-shell ${narrow && selected ? "thread" : ""}`}>
+      {narrow ? rail : subbarSlot ? createPortal(rail, subbarSlot) : null}
       <main className="flows-thread">
         {narrow && selected && (
           <Button

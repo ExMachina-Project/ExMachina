@@ -2,7 +2,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
 import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { createPortal } from "react-dom";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
+import { useSubbarSlot } from "../components/Subbar";
 
 import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
 import { agentIdEn } from "../models";
@@ -181,8 +183,8 @@ export function ChatView(): React.ReactElement {
     spawns, clearSpawns,
     graph,
   } = useExm();
-  // 会话任务图内嵌（graph-inline）：当前会话有任务图时在消息流上方给可折叠卡——
-  // 看图不必跳「任务图」页（那页保留全局会话切换视角）
+  // 会话编排图内嵌（graph-inline）：当前会话有编排图时在消息流上方给可折叠卡——
+  // 看图不必跳「编排」页（那页保留全局会话切换视角）
   const [dagOpen, setDagOpen] = useState(true);
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
@@ -267,6 +269,8 @@ export function ChatView(): React.ReactElement {
    *  进入应用先落在会话列表，点某条会话才进入该会话页，会话页有返回按钮回到列表。
    *  带深链（#/chat/<id>）时直接进会话页；桌面端两栏并排，screen 恒为 thread。 */
   const narrow = useIsNarrow();
+  /** 桌面端：页面侧栏 portal 到二级侧边栏；窄屏仍在页内（列表页/会话页切换） */
+  const subbarSlot = useSubbarSlot();
   // 首屏偏好：窄屏默认落在列表页（深链 #/chat/<id> 直接进会话页）。
   // 注意不要用 effect 在首帧纠正 screen——matchMedia 在懒加载 chunk 落地时可能
   // 还没稳定，一次 setScreen("thread") 就会把用户永远留在会话页（实测复现）。
@@ -653,9 +657,7 @@ export function ChatView(): React.ReactElement {
     return { m, turn: userTurn };
   });
 
-  return (
-    <div className={`chat-shell screen-${screen}`} data-screen={screen}>
-      {/* 左栏 = 移动端「会话列表页」，桌面端是常驻侧栏（见 styles.css 的屏幕切换） */}
+  const rail = (
       <aside className="chat-rail">
         {/* 列表页标题栏（窄屏显示）：标题 + 会话计数 */}
         <div className="rail-head">
@@ -663,8 +665,18 @@ export function ChatView(): React.ReactElement {
           <span className="rail-head-count">{visibleSessions.length}</span>
         </div>
         <div className="rail-section">
-          <div className="rail-label">
-            <span className="rail-no">01</span> {t("chat.target")} [TARGET]
+          {/* 标题行：左「01 交互目标」右「主智能体」提示，普通流 flex 同排（窄面板不叠字） */}
+          <div className="rail-target-row">
+            <div className="rail-label">
+              <span className="rail-no">01</span> {t("chat.target")} <span className="rail-label-en">[TARGET]</span>
+            </div>
+            {target.mode === "single" ? (
+              <div className="rail-hint">{t("chat.soloMode")} · <span className="mono">{agentIdEn(target.id)}</span></div>
+            ) : (
+              activeMeta && (
+                <div className="rail-hint">{t("chat.primary")}：<span className="mono">{activeMeta.primary ? agentIdEn(activeMeta.primary) : t("chat.unset")}</span></div>
+              )
+            )}
           </div>
           <Select
             value={targetValue}
@@ -673,13 +685,6 @@ export function ChatView(): React.ReactElement {
             onChange={(v) => void changeTarget(v)}
             options={targetOptions}
           />
-          {target.mode === "single" ? (
-            <div className="rail-hint">{t("chat.soloMode")} · <span className="mono">{agentIdEn(target.id)}</span></div>
-          ) : (
-            activeMeta && (
-              <div className="rail-hint">{t("chat.primary")}：<span className="mono">{activeMeta.primary ? agentIdEn(activeMeta.primary) : t("chat.unset")}</span></div>
-            )
-          )}
         </div>
         {/* 聊天流（chat flow）：外部 IM 的对话单元——一个群/私聊一条流，点流跳到绑定会话 */}
         {/* 聊天流已迁「聊天」页（信息架构 2026-11：对话页只留用户直连会话） */}
@@ -862,6 +867,12 @@ export function ChatView(): React.ReactElement {
           </div>
         </div>
       </aside>
+  );
+
+  return (
+    <div className={`chat-shell screen-${screen}`} data-screen={screen}>
+      {/* 左栏 = 移动端「会话列表页」，桌面端是常驻侧栏（见 styles.css 的屏幕切换） */}
+      {narrow ? rail : subbarSlot ? createPortal(rail, subbarSlot) : null}
 
       {/* 右侧：消息流 + 输入 */}
       <div className="chat-wrap">
@@ -970,8 +981,8 @@ export function ChatView(): React.ReactElement {
             onReject={() => void decidePlan("reject")}
           />
         )}
-        {/* 会话任务图内嵌卡（graph-inline）：当前会话有图时置顶——运行中任务的
-            节点状态/依赖一目了然，不必跳「任务图」页；折叠态只留一行摘要 */}
+        {/* 会话编排图内嵌卡（graph-inline）：当前会话有图时置顶——运行中任务的
+            节点状态/依赖一目了然，不必跳「编排」页；折叠态只留一行摘要 */}
         {graph?.nodes?.length ? (
           <div className="dag-inline">
             <button className="dag-inline-head" onClick={() => setDagOpen((v) => !v)}>
