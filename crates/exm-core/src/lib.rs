@@ -1919,6 +1919,83 @@ impl Core {
         self.registry.delete_group(gid)
     }
 
+    /// 组信息更新（group-card-menu）：改名 / 改 id 一步完成。id 变更时迁移全部
+    /// 外部引用（会话归属、记忆条目、定时任务、事件触发器），激活组拒绝改 id。
+    pub fn update_group_meta(
+        &self,
+        gid: &str,
+        name: &str,
+        new_id: Option<&str>,
+    ) -> anyhow::Result<GroupMeta> {
+        // 改 id 前置守卫：激活组不可改（active_group 落盘引用与运行中轮次按 id 寻址）
+        if let Some(nid) = new_id {
+            let nid = nid.trim();
+            if nid != gid && self.registry.active_group() == gid {
+                anyhow::bail!("激活组不可改 id：请先切换到其他组再操作");
+            }
+        }
+        // 1) 名称（registry 落盘 group.json）
+        let meta = self.registry.rename_group(gid, name)?;
+        // 2) id（目录迁移 + 内存键迁移），随后迁移外部引用
+        match new_id.map(str::trim).filter(|s| !s.is_empty() && *s != gid) {
+            Some(nid) => {
+                let meta = self.registry.change_group_id(gid, nid)?;
+                self.rename_group_refs(gid, nid)?;
+                Ok(meta)
+            }
+            None => Ok(meta),
+        }
+    }
+
+    /// 组 id 迁移的外部引用清扫（change_group_id 成功后调用）：
+    /// 会话归属（sessions/group_id）、记忆条目（memory/entries/group_id）、
+    /// 定时任务（cron jobs group）、事件触发器（event_triggers group）。
+    /// 全部为文档存储的纯字段改写：逐条读-改-写，失败即中断（调用方已先落盘组目录，
+    /// 此处失败留下悬空引用——量级小、重跑同 id 迁移可自愈，不做分布式事务）。
+    fn rename_group_refs(&self, old_id: &str, new_id: &str) -> anyhow::Result<()> {
+        // 会话（含归档）
+        for sid in [
+            self.store.list_sessions()?,
+            self.store.list_archived_sessions()?,
+        ]
+        .concat()
+        {
+            if sid.group_id == old_id {
+                let mut s = sid;
+                s.group_id = new_id.to_string();
+                self.store.update_session_group(&s.id, new_id)?;
+            }
+        }
+        // 记忆条目（组维度归属）
+        let entries = self.memory.entries_public()?;
+        for e in entries {
+            if e.group_id.as_deref() == Some(old_id) {
+                self.memory.retag_group(&e.id, new_id)?;
+            }
+        }
+        // 定时任务
+        let mut jobs = self.cron.list()?;
+        let mut dirty = false;
+        for j in jobs.iter_mut() {
+            if j.group.as_deref() == Some(old_id) {
+                j.group = Some(new_id.to_string());
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.cron.save(&jobs)?;
+        }
+        // 事件触发器
+        for t in self.store.list_event_triggers(None)? {
+            if t.group.as_deref() == Some(old_id) {
+                let mut t2 = t.clone();
+                t2.group = Some(new_id.to_string());
+                self.store.put_event_trigger(&t2)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn group_meta(&self, gid: &str) -> Option<GroupMeta> {
         self.registry.group_meta(gid)
     }

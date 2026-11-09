@@ -151,7 +151,7 @@ pub const LLM_MEMORY_DISCIPLINE: &str = "## 记忆纪律（自主记忆模式）
 
 判定原则：只在「下次新会话遇到类似情况时会用上」时才写；宁可少记，不可灌水。";
 
-/// 自定义组的规划契约：主智能体提示词 + 该契约 = 指挥体能力
+/// 组模式的规划契约：主智能体提示词 + 该契约 = 指挥体能力（全部组统一注入）
 pub const PLANNING_CONTRACT: &str = "
 
 ---
@@ -177,6 +177,7 @@ pub const PLANNING_CONTRACT: &str = "
 }
 - L0 = 本机直接回答（此时 nodes 为空、finalAnswer 必填）；L1 单链；L2 并行；L3 含裁决。
 - agentIdentifier 只能取自下方可调度子个体清单。
+- 节点 objective 必须自包含（子个体看不到会话历史）；并行节点的写入路径不得重叠，实施与校验不得合并到同一节点；acceptance 必须可判定。
 - 创建/修改组内个体必须由用户明确要求；用户未要求时禁止规划任何个体管理类节点。
 - 输入无任务语义（闲聊 / 单字重复 / 无法理解的碎片）时必须 L0：要么请求澄清，要么简短回应，**禁止从会话历史捡旧任务执行**——用户没在本轮下达的任务不是任务。";
 
@@ -1791,14 +1792,9 @@ impl Orchestrator {
         }
         .unwrap_or_else(|| LocalRegistry::DEFAULT_PERSONA.to_string());
         system_prompt.push_str(&format!("\n\n## SOUL（人格）\n{soul}"));
-        if !self.registry.single_mode()
-            && !self
-                .registry
-                .active_group_meta()
-                .map(|m| m.builtin)
-                .unwrap_or(true)
-        {
-            // 自定义组：追加系统级规划契约（内置组提示词已内含）
+        if !self.registry.single_mode() {
+            // 组模式：规划契约由系统统一追加，组提示词只负责人格与工作方式
+            // （简洁人格提示词 + 该契约 = 指挥体能力；自定义组同口径）
             system_prompt.push_str(PLANNING_CONTRACT);
         }
         // Super Agent（实验性）：组模式同样受深度委托纪律约束——规划轮决定拆解与
@@ -2111,7 +2107,7 @@ impl Orchestrator {
         let messages = vec![
             ChatMessage::system(system_prompt),
             ChatMessage::user(format!(
-                "【收束请求】\n目标：{}\n验收：{}\n\n各节点回流摘要：\n{digest}\n\n【要求】按固定六段结构输出最终收束结果（任务边界/已启用链路/关键结论/冲突裁决/残余未知/最终交付），语言纪律：客观简洁，句式前缀陈述，零情绪。",
+                "【收束请求】\n目标：{}\n验收：{}\n\n各节点回流摘要：\n{digest}\n\n【要求】按固定六段结构输出最终收束结果（任务边界/已启用链路/关键结论/冲突裁决/残余未知/最终交付），语言纪律：客观简洁，自然陈述，零情绪。",
                 plan.goal,
                 plan.acceptance.join("；")
             )),

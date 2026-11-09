@@ -271,6 +271,18 @@ impl Store {
         self.db.put("sessions", session_id, &session)
     }
 
+    /// 会话归属组迁移（组改 id 的引用清扫，group-id-migration）：只改 group_id，
+    /// 不动标题/时间戳/账目——组维度的列表与过滤随新 id 即时生效。
+    pub fn update_session_group(&self, session_id: &str, group_id: &str) -> Result<()> {
+        let _guard = self.ledger_lock.lock();
+        let mut session = match self.get_session(session_id)? {
+            Some(s) => s,
+            None => anyhow::bail!("会话不存在: {session_id}"),
+        };
+        session.group_id = group_id.to_string();
+        self.db.put("sessions", session_id, &session)
+    }
+
     /// 直接设置会话活跃时间（测试与数据修正用；不动消息与账目）。
     /// 闲置归档判定读 updated_at，此入口让测试能把会话拨回任意时点。
     pub fn set_session_active_at(&self, session_id: &str, iso: &str) -> Result<()> {

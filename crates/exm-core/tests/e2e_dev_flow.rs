@@ -144,8 +144,9 @@ async fn 端到端_开发任务_从对话到文件落盘() {
                     pc.fetch_add(1, Ordering::SeqCst);
                     return (axum::http::StatusCode::OK, Json(plan_body()));
                 }
-                // 收束请求
-                if system.contains("收束") {
+                // 收束请求：user 消息带「收束请求」标记（组提示词已重构为简洁人格，
+                // system 不再含「收束」字样，按消息特征识别而非 system 特征）
+                if msgs_str.contains("收束请求") {
                     cc.fetch_add(1, Ordering::SeqCst);
                     return (axum::http::StatusCode::OK, Json(converge_body()));
                 }
