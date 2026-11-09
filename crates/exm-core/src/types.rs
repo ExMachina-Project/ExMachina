@@ -777,6 +777,22 @@ pub struct ChatMessage {
     /// 有序过程步骤（思考段落 / 工具调用按发生顺序交错；「按调用顺序显示每一次」数据源）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<crate::round_trace::TraceStep>,
+    /// 入站附件（im-inbound-attach）：外部通道发来的图片/文件/语音随 user 消息落库，
+    /// WebUI 会话视图据此渲染缩略图（此前只落占位文本，聊天流里看不到用户发过的图）。
+    /// path 为工作区相对路径（展示层经 /api/asset 预览）；与出站 artifacts（outbox）字段同名异源。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<InboundAttachment>,
+}
+
+/// 入站附件条目（im-inbound-attach）：随 user 消息落库的媒体元数据
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InboundAttachment {
+    /// image | voice | file
+    pub kind: String,
+    /// 工作区相对路径（.exmachina/inbox/...；展示层经 /api/asset 内联预览）
+    pub path: String,
+    /// 原始文件名（展示层 caption / 下载名）
+    pub name: String,
 }
 
 // ---------------------------------------------------------------- 会话检索（session-search）

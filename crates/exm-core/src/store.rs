@@ -345,6 +345,7 @@ impl Store {
             thinking: None,
             tool_calls: Vec::new(),
             steps: Vec::new(),
+            attachments: Vec::new(),
             last_message_preview: None,
             last_active_at: None,
         };
@@ -388,6 +389,31 @@ impl Store {
 
     pub fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<ChatMessage>> {
         self.db.read_lines("messages", session_id, limit)
+    }
+
+    /// 按消息 id 回填入站附件（im-inbound-attach）：落库与暂存取走之间无原子性，
+    /// 回填失败静默降级（占位文本仍在，只是缩略图缺失）——不阻塞消息主链。
+    pub fn attach_inbound(&self, session_id: &str, message_id: &str, items: Vec<crate::types::InboundAttachment>) {
+        if items.is_empty() {
+            return;
+        }
+        let ok = (|| -> Result<bool> {
+            let mut all: Vec<ChatMessage> = self.db.read_lines("messages", session_id, 0)?;
+            let mut hit = false;
+            if let Some(slot) = all.iter_mut().find(|m| m.id == message_id) {
+                slot.attachments.extend(items);
+                hit = true;
+            }
+            if !hit {
+                return Ok(false);
+            }
+            self.db.rewrite_lines("messages", session_id, &all)?;
+            Ok(true)
+        })()
+        .unwrap_or(false);
+        if !ok {
+            eprintln!("[store] 入站附件回填失败（消息 {message_id}）");
+        }
     }
 
     // ---------------- 会话内容检索（session-search） ----------------
@@ -1251,6 +1277,36 @@ mod store_tests {
         assert!(store.get_event_trigger("t2").unwrap().is_some());
         store.delete_event_trigger("t2").unwrap();
         assert!(store.get_event_trigger("t2").unwrap().is_none());
+    }
+
+    /// 入站附件回填（im-inbound-attach）：落库后按 id 回填 → list_messages 读回可见
+    #[test]
+    fn 入站附件回填() {
+        let store = test_store();
+        let s = store.create_session("附件回填", "exmachina").unwrap();
+        let msg = store
+            .add_message(
+                &s.id,
+                MessageRole::User,
+                Some("im:测试用户"),
+                vec![Statement::new(SpeechTag::要求, "（用户发来附件：图片 x1）")],
+            )
+            .unwrap();
+        let items = vec![crate::types::InboundAttachment {
+            kind: "image".into(),
+            path: ".exmachina/inbox/napcat-exm/pic.png".into(),
+            name: "pic.png".into(),
+        }];
+        store.attach_inbound(&s.id, &msg.id, items);
+        let read = store.list_messages(&s.id, 10).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].attachments.len(), 1, "回填后应能读回附件");
+        assert_eq!(read[0].attachments[0].path, ".exmachina/inbox/napcat-exm/pic.png");
+        assert_eq!(read[0].attachments[0].name, "pic.png");
+        // 空回填（无附件通道）不影响消息
+        store.attach_inbound(&s.id, &msg.id, Vec::new());
+        let again = store.list_messages(&s.id, 10).unwrap();
+        assert_eq!(again[0].attachments.len(), 1);
     }
 
     /// 检索：标题 / 正文 / 大小写 / 同会话去重 / 片段截断

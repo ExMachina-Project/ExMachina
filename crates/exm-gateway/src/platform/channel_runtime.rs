@@ -1534,13 +1534,26 @@ pub(crate) async fn download_bytes_auth(url: &str, token: &str) -> Option<Vec<u8
 
 /// 入站媒体注入会话：图片走多模态暂存（data URL），文件/语音注入路径说明。
 /// 追加到消息文本后由模型一并感知。返回注入说明文本。
+/// 同时把附件元数据（工作区相对路径）登记进会话暂存，随本轮 user 消息落库
+/// （im-inbound-attach）——WebUI 聊天流据此渲染缩略图/下载卡片。
 pub(crate) fn stage_inbound_media(
     core: &exm_core::Core,
     session_id: &str,
     saved: &[(String, String, String)], // (kind, 绝对路径, 文件名)
 ) -> String {
     let mut notes = String::new();
+    let mut rels: Vec<exm_core::types::InboundAttachment> = Vec::new();
     for (kind, path, name) in saved {
+        // 绝对路径 → 工作区相对路径（展示层经 /api/asset 预览；strip 失败保留原样兜底）
+        let rel = std::path::Path::new(path)
+            .strip_prefix(&core.config().workspace_root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.clone());
+        rels.push(exm_core::types::InboundAttachment {
+            kind: kind.clone(),
+            path: rel,
+            name: name.clone(),
+        });
         match kind.as_str() {
             "image" => {
                 if let Ok(bytes) = std::fs::read(path) {
@@ -1563,6 +1576,8 @@ pub(crate) fn stage_inbound_media(
             }
         }
     }
-    let _ = core;
+    if !rels.is_empty() {
+        exm_core::inbox_stash::stage(session_id, rels);
+    }
     notes
 }

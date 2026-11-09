@@ -29,6 +29,8 @@ export interface ChatMessage {
   /** 本轮产物附件（send-file 能力）：控制台会话在 run.finished 事件携带；
    *  IM 通道由适配器直发，不进这里 */
   artifacts?: ArtifactItem[];
+  /** 入站附件（im-inbound-attach）：外部通道用户随消息发来的媒体（图片缩略图/文件卡片） */
+  attachments?: InboundAttachment[];
 }
 
 /** 会话产物附件（outbox 登记 → 轮次收束排空投递） */
@@ -45,6 +47,14 @@ export interface MessageStep {
   kind: "thinking" | "tool";
   text?: string;
   callId?: string;
+}
+
+/** 入站附件（im-inbound-attach）：外部通道用户随消息发来的媒体元数据，
+ *  随 user 消息落库（path 为工作区相对路径，/api/asset 预览） */
+export interface InboundAttachment {
+  kind: string;
+  path: string;
+  name: string;
 }
 
 /** 工具执行轨迹（tool.call / tool.result 事件组装）：编程软件式过程透明 */

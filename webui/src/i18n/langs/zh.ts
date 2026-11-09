@@ -154,6 +154,8 @@ export const zh = {
   "flows.noMessages": "暂无消息",
   "flows.fromUser": "外部用户",
   "flows.fromAgent": "智能体",
+  "flows.attachVoice": "语音",
+  "flows.attachFile": "文件",
   "flows.readonlyHint": "只读视图：聊天流的消息由外部用户发起，回复在对应通道完成；对话请回「对话」页",
   "tasks.empty": "暂无系统任务会话——定时任务触发后自动建档",
   "tasks.pickOne": "从左侧选择一个任务会话",
