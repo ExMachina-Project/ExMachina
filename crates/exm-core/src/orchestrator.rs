@@ -673,12 +673,20 @@ impl Orchestrator {
             anyhow::bail!("会话不存在: {session_id}");
         }
 
-        self.store.add_message(
+        let user_msg = self.store.add_message(
             session_id,
             MessageRole::User,
             origin,
             vec![Statement::new(SpeechTag::要求, text)],
         )?;
+        // 入站附件随 user 消息落库（im-inbound-attach）：通道已把媒体元数据暂存，
+        // 这里取走按消息 id 回填——WebUI 聊天流据此渲染缩略图/下载卡片。
+        // 无附件即空转；普通 IM 文本链路零额外开销。
+        let inbound = crate::inbox_stash::take(session_id);
+        if !inbound.is_empty() {
+            self.store
+                .attach_inbound(session_id, &user_msg.id, inbound);
+        }
 
         // 探活短路（IM 会话）：纯问候 / 在线确认零 LLM 直答——这类输入无任务语义，
         // 进规划流水线纯属浪费（全量注册表注入 + 规划调用，就为回一句「在」）。
@@ -1154,12 +1162,19 @@ impl Orchestrator {
         }
 
         // 本轮输入落库（与 handle_user_message 同口径，要求标签；agent_id 兼作自动来源标记）
-        self.store.add_message(
+        let user_msg = self.store.add_message(
             session_id,
             MessageRole::User,
             origin,
             vec![Statement::new(SpeechTag::要求, text)],
         )?;
+        // 入站附件随 user 消息落库（im-inbound-attach）：与 handle_user_message_scoped
+        // 同口径——单体直连目前无 IM 通道来源，暂存通常为空，接上以防链路断档。
+        let inbound = crate::inbox_stash::take(session_id);
+        if !inbound.is_empty() {
+            self.store
+                .attach_inbound(session_id, &user_msg.id, inbound);
+        }
 
         // 历史窗口：User→user；Orchestrator→assistant（标注来源）；本个体→assistant；其余个体跳过
         let rows = self.store.list_messages(session_id, 40)?;
@@ -3676,6 +3691,7 @@ mod pending_inputs_tests {
             last_active_at: None,
             tool_calls: Vec::new(),
             steps: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 

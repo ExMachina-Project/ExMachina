@@ -16,6 +16,7 @@ pub mod config;
 pub mod cron;
 pub mod fsdb;
 pub mod image_stash;
+pub mod inbox_stash;
 pub mod mcp;
 pub mod mcp_server;
 pub mod memory;

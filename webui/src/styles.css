@@ -2804,6 +2804,16 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   max-width: 100%;
 }
 .msg-artifact:hover { border-color: var(--accent); color: var(--accent); }
+/* 入站附件（im-inbound-attach）：聊天流 user 消息里的缩略图网格（ChatView 产物条同款卡片） */
+.msg-artifacts.inbound { border-top: none; padding-top: 4px; margin-top: 6px; }
+.msg-artifacts.inbound .msg-artifact.image { padding: 0; border: none; background: none; }
+.msg-artifacts.inbound .msg-artifact.image img {
+  max-width: 180px; max-height: 180px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); object-fit: cover; display: block;
+}
+.msg-artifacts.inbound .msg-artifact-kind {
+  font-size: 10.5px; color: var(--muted-dim); margin-left: auto;
+}
 .msg-artifact .msg-artifact-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;
 }

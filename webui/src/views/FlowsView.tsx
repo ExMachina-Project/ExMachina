@@ -17,8 +17,8 @@ import {
   NumberOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
-import { api, type Channel, type ChannelFlow } from "../api";
-import type { ChatMessage } from "../types";
+import { api, assetUrl, serverBase, type Channel, type ChannelFlow } from "../api";
+import type { ChatMessage, InboundAttachment } from "../types";
 import { relativeTime } from "../time";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
@@ -299,6 +299,9 @@ export function FlowsView(): React.ReactElement {
                         <span className="flows-msg-time">{relativeTime(m.createdAt)}</span>
                       </div>
                       <StatementList statements={m.statements} plain />
+                      {m.attachments && m.attachments.length > 0 && (
+                        <InboundAttachments items={m.attachments} />
+                      )}
                     </div>
                   );
                 })}
@@ -308,6 +311,31 @@ export function FlowsView(): React.ReactElement {
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+/** 入站附件（im-inbound-attach）：外部用户随消息发来的图片/文件/语音——
+ *  后端随 user 消息落库的元数据（工作区相对路径），此前聊天流只显示
+ *  「（用户发来附件…）」占位文本，图看不切实存在。图片渲染缩略图
+ *  （/api/asset 内联预览，点击原图），文件/语音渲染下载卡片。 */
+function InboundAttachments({ items }: { items: InboundAttachment[] }) {
+  const t = useT();
+  return (
+    <div className="msg-artifacts inbound">
+      {items.map((a, i) => {
+        const href = `${serverBase()}/api/asset/download?path=${encodeURIComponent(a.path)}`;
+        return a.kind === "image" ? (
+          <a key={i} className="msg-artifact image" href={href} target="_blank" rel="noreferrer">
+            <img src={assetUrl(a.path)} alt={a.name} loading="lazy" />
+          </a>
+        ) : (
+          <a key={i} className="msg-artifact file" href={href} download={a.name}>
+            <span className="msg-artifact-name">{a.name}</span>
+            <span className="msg-artifact-kind">{t(a.kind === "voice" ? "flows.attachVoice" : "flows.attachFile")}</span>
+          </a>
+        );
+      })}
     </div>
   );
 }

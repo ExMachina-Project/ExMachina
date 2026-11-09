@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
     token_usage TEXT,
     thinking TEXT,
     tool_calls TEXT NOT NULL DEFAULT '[]',
+    attachments TEXT NOT NULL DEFAULT '[]',
     archived INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages ON messages(session_id, archived, seq);
@@ -142,6 +143,8 @@ impl SqliteStore {
         // 旧库列补齐（CREATE TABLE IF NOT EXISTS 不会给已存在的表加新列）
         add_column_if_missing(&conn, "sessions", "pinned", "INTEGER NOT NULL DEFAULT 0");
         add_column_if_missing(&conn, "sessions", "archived_at", "TEXT");
+        // im-inbound-attach：入站附件随 user 消息落库（JSON 数组文本，缺省 '[]'）
+        add_column_if_missing(&conn, "messages", "attachments", "TEXT NOT NULL DEFAULT '[]'");
 
         let store = SqliteStore {
             conn: Mutex::new(conn),
@@ -441,8 +444,8 @@ impl SqliteStore {
         archived: bool,
     ) -> anyhow::Result<()> {
         conn.execute(
-            "INSERT OR REPLACE INTO messages(id,session_id,seq,role,agent_id,statements,created_at,token_usage,thinking,tool_calls,archived)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT OR REPLACE INTO messages(id,session_id,seq,role,agent_id,statements,created_at,token_usage,thinking,tool_calls,attachments,archived)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             rusqlite::params![
                 m.id,
                 session_id,
@@ -454,6 +457,7 @@ impl SqliteStore {
                 m.token_usage.as_ref().and_then(|u| serde_json::to_string(u).ok()),
                 m.thinking,
                 serde_json::to_string(&m.tool_calls)?,
+                serde_json::to_string(&m.attachments)?,
                 archived as i64,
             ],
         )?;
@@ -480,6 +484,10 @@ impl SqliteStore {
             tool_calls: serde_json::from_str(&r.get::<_, String>("tool_calls")?)
                 .unwrap_or_default(),
             steps: Vec::new(),
+            attachments: r
+                .get::<_, Option<String>>("attachments")?
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
             last_message_preview: None,
             last_active_at: None,
         })
@@ -516,6 +524,7 @@ impl SqliteStore {
             thinking: None,
             tool_calls: Vec::new(),
             steps: Vec::new(),
+            attachments: Vec::new(),
             last_message_preview: None,
             last_active_at: None,
         };
@@ -561,6 +570,28 @@ impl SqliteStore {
         )?;
         Self::insert_message_conn(&conn, session_id, seq, &msg, false)?;
         Ok(msg)
+    }
+
+    /// 按消息 id 回填入站附件（im-inbound-attach）：落库与暂存取走之间无原子性，
+    /// 回填失败静默降级（占位文本仍在，只是缩略图缺失）——不阻塞消息主链。
+    pub fn attach_inbound(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        items: Vec<crate::types::InboundAttachment>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        let json = match serde_json::to_string(&items) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let conn = self.conn.lock();
+        let _ = conn.execute(
+            "UPDATE messages SET attachments = json(attachments || ?2) WHERE session_id=?1 AND id=?3 AND json_valid(attachments)",
+            rusqlite::params![session_id, json, message_id],
+        );
     }
 
     pub fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<ChatMessage>> {
