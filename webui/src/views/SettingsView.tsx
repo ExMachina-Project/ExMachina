@@ -358,7 +358,7 @@ export function SettingsView(): React.ReactElement {
         {schemaErr ? (
           /* —— 拉取失败：明说原因并给重试，不再静默塌缩成「只有界面与版本」 —— */
           <div className="cfg-fallback">
-            <Alert type="error" showIcon message={t("settings.schemaFail", { err: schemaErr })} />
+            <Alert type="error" showIcon title={t("settings.schemaFail", { err: schemaErr })} />
             <Button type="primary" icon={<ReloadOutlined />} onClick={() => void reloadSchema()}>
               {t("common.retry")}
             </Button>
@@ -587,7 +587,7 @@ function NotifyPrefsCard(): React.ReactElement {
         <div className="dim">{t("notify.unsupported")}</div>
       ) : (
         <>
-          {denied && <Alert type="warning" showIcon message={t("notify.blocked")} style={{ marginBottom: 8 }} />}
+          {denied && <Alert type="warning" showIcon title={t("notify.blocked")} style={{ marginBottom: 8 }} />}
           <div className="cfg2-row">
             <div className="cfg2-label">
               <div className="cfg2-name">{t("notify.enabled")}</div>

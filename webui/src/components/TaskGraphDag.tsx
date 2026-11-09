@@ -142,7 +142,7 @@ export function TaskGraphDag({ graph }: { graph: TaskGraph }): React.ReactElemen
         </svg>
       </div>
 
-      <Drawer open={!!selected} onClose={() => setSelected(null)} title={selected ? `${selected.id} ${selected.title}` : ""} width={420}>
+      <Drawer open={!!selected} onClose={() => setSelected(null)} title={selected ? `${selected.id} ${selected.title}` : ""} size={420}>
         {selected && (
           <div>
             <p><Tag>{selected.status}</Tag> <b>{selected.agentIdentifier}</b> <Tag>{selected.priority}</Tag></p>

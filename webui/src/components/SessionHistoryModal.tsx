@@ -97,7 +97,7 @@ export function SessionHistoryModal({ session, open, onClose, onChanged }: Props
       onCancel={onClose}
       footer={null}
       width={680}
-      destroyOnClose
+      destroyOnHidden
       title={t("history.title")}
       className="history-modal"
     >

@@ -321,7 +321,7 @@ export function MemoryView(): React.ReactElement {
             locale={{ emptyText: t("memory.noHits") }}
             renderItem={(h) => (
               <List.Item>
-                <Space direction="vertical" style={{ width: "100%" }}>
+                <Space orientation="vertical" style={{ width: "100%" }}>
                   <Space>
                     <Tag color={KIND_COLORS[h.entry.kind]}>{h.entry.kind}</Tag>
                     <b>{h.entry.title}</b>
@@ -416,7 +416,7 @@ export function MemoryView(): React.ReactElement {
               title: t("memory.colTitle"),
               key: "title",
               render: (_, e) => (
-                <Space direction="vertical" size={0}>
+                <Space orientation="vertical" size={0}>
                   <span>
                     {e.pinned && <Tag color="orange">{t("memory.pinned")}</Tag>}
                     <b>{e.title}</b>
