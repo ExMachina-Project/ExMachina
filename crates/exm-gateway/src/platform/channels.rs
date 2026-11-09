@@ -190,6 +190,226 @@ pub async fn channel_status() -> impl IntoResponse {
     Json(serde_json::to_value(snapshot).unwrap_or(Value::Null)).into_response()
 }
 
+// ---------------------------------------------------------------- QQ 官方机器人扫码绑定
+// q.qq.com 的 create_bind_task / poll_bind_result 接口：出绑定二维码 → 手机 QQ 扫码
+// 确认 → 轮询拿 bot_appid + botEncryptSecret（AES-256-GCM 密文，解出 appSecret）。
+// 密文格式：IV(12B) + ciphertext + AuthTag(16B)，key 为创建任务时自拟的 32B 随机数。
+// 参照 bili 扫码模式：出码/轮询为无副作用只读接口，凭证只回给前端填表，不落盘
+// （保存通道时才随 config 入库并掩码）。
+
+const QQBOT_BIND_HOST: &str = "q.qq.com";
+
+/// 生成 base64 编码的 32 字节绑定密钥（create_bind_task 请求体用）。
+/// 随机源用两组 UUIDv4（各 16 字节真随机，uuid 已有依赖不引 rand）。
+fn bind_key() -> String {
+    use base64::Engine;
+    let mut buf = [0u8; 32];
+    let u1 = uuid::Uuid::new_v4();
+    let u2 = uuid::Uuid::new_v4();
+    buf[..16].copy_from_slice(u1.as_bytes());
+    buf[16..].copy_from_slice(u2.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(buf)
+}
+
+/// AES-256-GCM 解密 botEncryptSecret：base64(IV(12) + ciphertext + tag(16))
+fn decrypt_bind_secret(encrypted_b64: &str, key_b64: &str) -> anyhow::Result<String> {
+    use base64::Engine;
+    let key = base64::engine::general_purpose::STANDARD.decode(key_b64)?;
+    let data = base64::engine::general_purpose::STANDARD.decode(encrypted_b64)?;
+    if key.len() != 32 || data.len() < 28 {
+        anyhow::bail!("绑定密文格式非法");
+    }
+    type Aes256Gcm = aes_gcm::Aes256Gcm;
+    use aes_gcm::aead::{Aead, KeyInit};
+    let cipher = Aes256Gcm::new_from_slice(&key)?;
+    let iv = &data[..12];
+    let tag = &data[data.len() - 16..];
+    let ct = &data[12..data.len() - 16];
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(iv);
+    let mut sealed = ct.to_vec();
+    sealed.extend_from_slice(tag);
+    let pt = cipher
+        .decrypt((&nonce).into(), sealed.as_ref())
+        .map_err(|_| anyhow::anyhow!("绑定密文解密失败（密钥不匹配或数据损坏）"))?;
+    Ok(String::from_utf8_lossy(&pt).to_string())
+}
+
+#[derive(serde::Deserialize)]
+pub struct QQBotBindBody {
+    /// 环境：production（默认）| test（test.q.qq.com；二维码 URL 恒用 q.qq.com）
+    #[serde(default)]
+    env: Option<String>,
+}
+
+async fn bind_post_json(url: &str, body: &Value) -> anyhow::Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp = client
+        .post(url)
+        .json(body)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    let status = resp.status();
+    let v: Value = resp.json().await?;
+    if !status.is_success() {
+        anyhow::bail!("HTTP {} from {}", status, url);
+    }
+    Ok(v)
+}
+
+/// 出绑定任务（POST /api/channels/qqbot-bind）：返回 taskId + 连接 URL（前端渲染二维码）。
+/// key 由网关生成并随 taskId 一起返回前端（轮询确认时回传用于解密）——网关无状态，
+/// 不持久化绑定会话；key 只在本轮HTTP响应中存在，落到前端表单内存。
+pub async fn qqbot_bind_start(
+    Json(b): Json<QQBotBindBody>,
+) -> impl IntoResponse {
+    let host = if b.env.as_deref() == Some("test") {
+        "test.q.qq.com"
+    } else {
+        QQBOT_BIND_HOST
+    };
+    let key = bind_key();
+    let v = match bind_post_json(
+        &format!("https://{host}/lite/create_bind_task"),
+        &json!({ "key": key }),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("创建绑定任务失败：{e}") })),
+            )
+                .into_response()
+        }
+    };
+    if v.get("retcode").and_then(Value::as_i64) != Some(0) {
+        let msg = v
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("create_bind_task failed");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("创建绑定任务失败：{msg}") })),
+        )
+            .into_response();
+    }
+    let task_id = v
+        .pointer("/data/task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if task_id.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "创建绑定任务失败：缺少 task_id" })),
+        )
+            .into_response();
+    }
+    let connect_url = format!(
+        "https://{QQBOT_BIND_HOST}/qqbot/openclaw/connect.html?task_id={}&source=&_wv=2",
+        urlencode(&task_id)
+    );
+    Json(json!({ "taskId": task_id, "key": key, "url": connect_url })).into_response()
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 轮询绑定结果（GET /api/channels/qqbot-bind/:task_id?key=<bindKey>）。
+/// status: 0 未扫 / 1 待确认 / 2 完成（返回解密后的 appId+appSecret）/ 3 过期。
+pub async fn qqbot_bind_poll(
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Query 提取器会做 URL 解码：前端 encodeURIComponent 后的 base64 key（+/=）
+    // 必须还原成原文，否则确认阶段 AES-GCM 解密会因 key 字节不符而失败。
+    let key = params.get("key").cloned().unwrap_or_default();
+    if task_id.is_empty() || key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺少 task_id 或 key" })),
+        )
+            .into_response();
+    }
+    let v = match bind_post_json(
+        &format!("https://{QQBOT_BIND_HOST}/lite/poll_bind_result"),
+        &json!({ "task_id": task_id }),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("轮询绑定结果失败：{e}") })),
+            )
+                .into_response()
+        }
+    };
+    if v.get("retcode").and_then(Value::as_i64) != Some(0) {
+        let msg = v
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("poll_bind_result failed");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("轮询绑定结果失败：{msg}") })),
+        )
+            .into_response();
+    }
+    let status = v
+        .pointer("/data/status")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if status == 2 {
+        let enc = v
+            .pointer("/data/bot_encrypt_secret")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // bot_appid 可能是字符串或数字（平台实现差异）：两种都归一成字符串
+        let app_id = v
+            .pointer("/data/bot_appid")
+            .and_then(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .or_else(|| x.as_i64().map(|n| n.to_string()))
+            })
+            .unwrap_or_default();
+        match decrypt_bind_secret(enc, &key) {
+            Ok(secret) => Json(json!({
+                "state": "confirmed",
+                "appId": app_id,
+                "appSecret": secret,
+                "userOpenid": v.pointer("/data/user_openid").and_then(Value::as_str),
+            }))
+            .into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        }
+    } else {
+        // 0 未扫 / 1 等待扫码确认（PENDING）→ 继续轮询；3 过期
+        Json(json!({ "state": if status == 3 { "expired" } else { "waiting" } })).into_response()
+    }
+}
+
 // ---------------------------------------------------------------- B 站扫码登录
 // 出码与轮询都是无副作用的 passport 只读接口；登录态 Cookie 只在 poll 确认瞬间产生，
 // 直接回给前端填表单，不落盘（保存通道时才随 config 入库并掩码）。
@@ -930,4 +1150,39 @@ pub async fn channel_inbound(
         Json(json!({ "accepted": true, "sessionId": session.id, "group": st.core.active_group() })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod qqbot_bind_tests {
+    use super::decrypt_bind_secret;
+    use aes_gcm::aead::{Aead, KeyInit};
+    use base64::Engine;
+
+    #[test]
+    fn 扫码绑定密文按_iv_密文_tag_解密() {
+        // 模拟 q.qq.com 的 botEncryptSecret：base64(IV(12) + ciphertext + tag(16))
+        let key = [7u8; 32];
+        let nonce = [9u8; 12];
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).unwrap();
+        let ct = cipher
+            .encrypt((&nonce).into(), b"app-secret-xyz".as_ref())
+            .unwrap();
+        let mut sealed = nonce.to_vec();
+        sealed.extend_from_slice(&ct);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(&key);
+        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(sealed);
+        assert_eq!(
+            decrypt_bind_secret(&sealed_b64, &key_b64).unwrap(),
+            "app-secret-xyz"
+        );
+    }
+
+    #[test]
+    fn 轮询_query_还原_url_编码的绑定密钥() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        let uri: axum::http::Uri = "/?key=ab%2Bcd%2Fef%3D".parse().unwrap();
+        let Query(params) = Query::<HashMap<String, String>>::try_from_uri(&uri).unwrap();
+        assert_eq!(params.get("key").map(String::as_str), Some("ab+cd/ef="));
+    }
 }
