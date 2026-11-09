@@ -3239,8 +3239,9 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
      18px 页底内边距会把面板从遥测条上顶起来，留一条缝；这里把它归零，
     高度直接取外壳高度（视口 − 遥测条），面板底边正好落在遥测条上沿。 */
   .app-content:has(.chat-shell),
+  .app-content:has(.flows-shell),
   .app-content:has(.code-shell) { padding-bottom: 0; }
-  .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h)); }
+  .chat-shell, .flows-shell, .code-shell { height: calc(100dvh - var(--tel-h)); }
   /* 设置页「短分类占满一屏」改由 flex 链达成（不写视口魔数）：
      滚动容器先把自己变成纵向 flex，让 view-stage → pane-wrap → settings2
      逐层把剩余高度下放；settings2 以 flex:1 收下，短页即占满（顶部对齐页头、
@@ -3743,7 +3744,11 @@ mark.search-hit {
    聊天页 / 任务页（信息架构 2026-11）：流列表 + 只读消息流
    —— 对话页之外的非交互会话视图（外部通道流 + 系统任务流），无输入框。
    ============================================================ */
-.flows-shell { display: flex; height: 100%; min-height: 0; gap: 0; }
+.flows-shell { display: flex; height: calc(100dvh - 26px); min-height: 0; gap: 0; }
+/* 高度契约说明：不能写 height:100%——.view-stage 是 auto 高度，百分比链断裂会让
+ * .flows-messages 被消息流撑高（8000 条历史可达上万 px），容器自身无溢出、
+ * 内部 scrollTo 静默无效，打开流永远停在最旧消息（部署实测「从下到上反直觉」缺陷）。
+ * 与 .chat-shell 同款显式高度（.app-content 底 padding 26px）钉住可视壳。 */
 .flows-rail {
   width: 320px; flex: none;
   display: flex; flex-direction: column;
@@ -3761,7 +3766,28 @@ mark.search-hit {
   display: flex; align-items: center; gap: 6px;
   padding: 6px 9px 4px;
   font-size: 11.5px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: background var(--dur-fast) var(--ease-out);
+  user-select: none;
 }
+.flows-channel-head:hover { background: var(--hover); }
+/* 账号筛选态（flow-account-filter）：选中账号高亮，箭头指示可点 */
+.flows-channel-head.filter-on {
+  background: var(--hover);
+  outline: 1px solid var(--primary, var(--text-hi));
+}
+.flows-filter-caret {
+  margin-left: 4px;
+  font-size: 9px;
+  opacity: 0.45;
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.flows-filter-caret.on { opacity: 1; transform: rotate(90deg); }
+
+/* 主智能体独立区块（orchestrator-first）：组详情页头等公民 */
+.primary-panel { display: grid; gap: 6px; }
+.primary-desc { font-size: 13px; line-height: 1.6; }
 .flows-channel-name { font-weight: 600; color: var(--text); }
 .flows-channel-platform {
   margin-left: auto;
@@ -3808,6 +3834,7 @@ mark.search-hit {
 .flows-back { flex: none; align-self: flex-start; margin: 8px 10px 0; }
 /* 窄屏：单列切换（列表 ↔ 消息流） */
 @media (max-width: 860px) {
+  .flows-shell { height: auto; flex: 1; min-height: 0; }
   .flows-shell.thread .flows-rail { display: none; }
   .flows-shell:not(.thread) .flows-thread { display: none; }
   .flows-rail { width: 100%; border-right: none; }

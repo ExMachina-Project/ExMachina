@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Button, Empty, Skeleton, Tag } from "antd";
 import {
   ArrowLeftOutlined,
+  CaretRightFilled,
   MailOutlined,
   NumberOutlined,
   ReloadOutlined,
@@ -57,6 +58,17 @@ export function FlowsView(): React.ReactElement {
   const [msgLoading, setMsgLoading] = useState(false);
   /** 消息流容器：加载/新消息后滚到底（只读页最新消息在底部） */
   const msgBoxRef = useRef<HTMLDivElement | null>(null);
+  // 贴底跟随（与对话页同口径）：用户本来就贴底才跟随新消息，中途上翻回看不打断
+  const stickRef = useRef(true);
+  useEffect(() => {
+    const el = msgBoxRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [selected?.id]);
 
   const load = useCallback(async () => {
     try {
@@ -114,10 +126,22 @@ export function FlowsView(): React.ReactElement {
     window.addEventListener("exm:bound-refresh", reloadBound as EventListener);
     return () => window.removeEventListener("exm:bound-refresh", reloadBound as EventListener);
   }, [reloadBound]);
-  /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新） */
+  /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新；上翻回看时不抢滚动条） */
+  // 定位语义：切流后首次拿到「非空消息列表」时瞬时定位到最新（骨架期与空列表不定位——
+  // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）
+  const anchoredRef = useRef<string | null>(null);
   useEffect(() => {
+    const sid = activeSid ?? null;
+    if (sid && anchoredRef.current !== sid) {
+      if (msgLoading || messages.length === 0) return;
+      anchoredRef.current = sid;
+      if (!stickRef.current) return;
+      msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
+      return;
+    }
+    if (!stickRef.current) return;
     msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, msgLoading, selected?.id]);
+  }, [messages, msgLoading, activeSid]);
 
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
   const openFlow = (f: ChannelFlow) => {
@@ -139,7 +163,11 @@ export function FlowsView(): React.ReactElement {
     return [...m.entries()];
   }, [flows, channels]);
 
-  const totalUnread = flows.reduce((n, f) => n + (f.unread ?? 0), 0);
+  // 账号（通道）筛选（flow-account-filter）：多账号接入时分别查看——
+  // 点通道头只看该账号，再点一次恢复全部；选中态通道高亮
+  const [accountFilter, setAccountFilter] = useState<string | null>(null);
+  const shownChannels = accountFilter ? byChannel.filter(([chId]) => chId === accountFilter) : byChannel;
+  const totalUnread = shownChannels.reduce((n, [, { flows: group }]) => group.reduce((m, f) => m + (f.unread ?? 0), n), 0);
 
   const rail = (
       <aside className="flows-rail">
@@ -159,12 +187,20 @@ export function FlowsView(): React.ReactElement {
           {!loading && flows.length === 0 && (
             <Empty description={t("flows.empty")} style={{ marginTop: 80 }} />
           )}
-          {byChannel.map(([chId, { channel, flows: group }]) => (
+          {shownChannels.map(([chId, { channel, flows: group }]) => (
             <div key={chId} className="flows-channel">
-              <div className="flows-channel-head">
+              <div
+                className={`flows-channel-head ${accountFilter === chId ? "filter-on" : ""}`}
+                onClick={() => setAccountFilter(accountFilter === chId ? null : chId)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === "Enter" && setAccountFilter(accountFilter === chId ? null : chId)}
+                title={t("flows.accountFilterTip")}
+              >
                 <span className="flows-channel-name">{channel?.account || channel?.id}</span>
                 <span className="flows-channel-platform">
                   {PLATFORM_LABEL[channel?.type ?? ""] ?? channel?.type ?? ""}
+                  <CaretRightFilled className={`flows-filter-caret ${accountFilter === chId ? "on" : ""}`} />
                 </span>
               </div>
               {group.map((f) => {
@@ -262,7 +298,7 @@ export function FlowsView(): React.ReactElement {
                         <span className="flows-msg-role">{sender}</span>
                         <span className="flows-msg-time">{relativeTime(m.createdAt)}</span>
                       </div>
-                      <StatementList statements={m.statements} />
+                      <StatementList statements={m.statements} plain />
                     </div>
                   );
                 })}
