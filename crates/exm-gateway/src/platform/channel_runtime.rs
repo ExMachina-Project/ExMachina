@@ -760,7 +760,8 @@ async fn flow_command(
 }
 
 /// 运行收束事件 → 纯文本回帖（telegram / napcat / qqbot 三个适配器共用）。
-/// 收束语句平铺（IM 投递形态）：`【tag】text` 逐行拼接，截断到平台上限。
+/// 收束语句平铺（IM 投递形态）：正文原样逐行拼接，**不添加任何句式前缀**——
+/// 是否使用【报告】等标记由模型自己决定，投递层只做拼接与截断。
 ///
 /// 沉默约定（IM silence）：模型按旁听纪律输出 `<沉默/>`（可能独立成行或与
 /// 少量文字混行）= 本轮无话可说——投递层整轮丢弃（返回空串，由调用方
@@ -769,12 +770,11 @@ pub(crate) fn flatten_statements(payload: &serde_json::Value, max_chars: usize) 
     let mut lines: Vec<String> = Vec::new();
     if let Some(list) = payload.get("statements").and_then(|v| v.as_array()) {
         for s in list {
-            let tag = s.get("tag").and_then(|v| v.as_str()).unwrap_or("报告");
             let text = s.get("text").and_then(|v| v.as_str()).unwrap_or("");
             if text.trim().is_empty() {
                 continue;
             }
-            lines.push(format!("【{tag}】{text}"));
+            lines.push(text.to_string());
         }
     }
     let mut text = lines.join("\n");

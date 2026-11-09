@@ -185,6 +185,7 @@ mod memory_tool_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin,
             created_at: String::new(),
         }
