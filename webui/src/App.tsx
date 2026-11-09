@@ -15,12 +15,11 @@ import {
   UserOutlined,
   FundOutlined,
   ClockCircleOutlined,
-  TeamOutlined,
   CloudUploadOutlined,
   UnorderedListOutlined,
   AppstoreAddOutlined,
   DeploymentUnitOutlined,
-  WechatOutlined,
+  CommentOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { api } from "./api";
@@ -49,7 +48,6 @@ const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default:
 const LedgerView = lazy(() => import("./views/LedgerView").then((m) => ({ default: m.LedgerView })));
 const MemoryView = lazy(() => import("./views/MemoryView").then((m) => ({ default: m.MemoryView })));
 const SettingsView = lazy(() => import("./views/SettingsView").then((m) => ({ default: m.SettingsView })));
-const GroupsView = lazy(() => import("./views/GroupsView").then((m) => ({ default: m.GroupsView })));
 const NexusView = lazy(() => import("./views/NexusView").then((m) => ({ default: m.NexusView })));
 const SinglesView = lazy(() => import("./views/SinglesView").then((m) => ({ default: m.SinglesView })));
 const SkillsView = lazy(() => import("./views/SkillsView").then((m) => ({ default: m.SkillsView })));
@@ -82,7 +80,6 @@ type ViewKey =
   | "sessions"
   | "graph"
   | "agent"
-  | "groups"
   | "nexus"
   | "skills"
   | "plugins"
@@ -97,16 +94,20 @@ type ViewKey =
 
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
-  "chat", "flows", "tasks", "sessions", "agent", "groups", "nexus", "graph", "automations",
+  "chat", "flows", "tasks", "sessions", "agent", "nexus", "graph", "automations",
   "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
 ];
+
+/** 旧路由兼容（agent-groups-merge）：独立组页已并入「智能体」页，#/groups 落到 #/agent */
+const LEGACY_VIEW_ALIASES: Record<string, ViewKey> = { groups: "agent" };
 
 /** 从 hash 解析视图：#/chat/<sessionId> → { view: chat, session }; 非法回落 chat */
 function parseHash(): { view: ViewKey; session?: string } {
   const h = location.hash.replace(/^#\/?/, "");
   if (!h) return { view: "chat" };
   const [head, sub] = h.split("/");
-  const view = VIEW_KEYS.find((k) => k === head);
+  // 旧路由别名先行（groups → agent），再匹配白名单；非法回落 chat
+  const view = LEGACY_VIEW_ALIASES[head] ?? VIEW_KEYS.find((k) => k === head);
   if (!view) return { view: "chat" };
   return { view, session: sub };
 }
@@ -121,10 +122,9 @@ export const NAV_ITEMS: {
   experimental?: boolean;
 }[] = [
   { key: "chat", en: "CHAT", labelKey: "nav.chat", icon: <MessageOutlined /> },
-  { key: "flows", en: "FLOWS", labelKey: "nav.flows", icon: <WechatOutlined /> },
+  { key: "flows", en: "FLOWS", labelKey: "nav.flows", icon: <CommentOutlined /> },
   { key: "tasks", en: "TASKS", labelKey: "nav.tasks", icon: <ThunderboltOutlined /> },
   { key: "agent", en: "AGENTS", labelKey: "nav.agent", icon: <UserOutlined /> },
-  { key: "groups", en: "GROUPS", labelKey: "nav.groups", icon: <TeamOutlined /> },
   { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined />, experimental: true },
   { key: "sessions", en: "SESSIONS", labelKey: "nav.sessions", icon: <UnorderedListOutlined /> },
   { key: "graph", en: "DAG", labelKey: "nav.dag", icon: <ApartmentOutlined /> },
@@ -541,7 +541,6 @@ export default function App(): React.ReactElement {
             {view === "sessions" && <SessionsView />}
             {view === "graph" && <GraphView />}
             {view === "agent" && <SinglesView />}
-            {view === "groups" && <GroupsView />}
             {view === "nexus" && <NexusView />}
             {view === "skills" && <SkillsView />}
             {view === "plugins" && <PluginsView />}

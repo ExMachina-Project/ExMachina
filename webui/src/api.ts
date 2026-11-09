@@ -205,6 +205,8 @@ export interface GroupMeta {
   model?: string;
   /** 组级能力模型覆盖；缺省字段跟随「模型设置」页的全局槽位 */
   capabilities?: GroupCapabilities | null;
+  /** 自我优化开关（group-self-optimize）：true = 主智能体可自行增删改子个体 */
+  selfOptimize?: boolean | null;
   builtin: boolean;
   createdAt: string;
 }
@@ -749,6 +751,15 @@ export const api = {
   renderMemory: () => req<{ ok: boolean }>("/memory/render", { method: "POST" }),
 
   groupAgents: (gid: string) => req<AgentDefinition[]>(`/groups/${gid}/agents`),
+  /** 组信息更新（group-card-menu）：改名 + 可选改 id（改 id 迁移会话/记忆/任务/触发器引用） */
+  updateGroup: (gid: string, body: { name: string; id?: string }) =>
+    req<GroupMeta>(`/groups/${gid}`, { method: "PUT", body: JSON.stringify(body) }),
+  /** 自我优化开关（group-self-optimize）：开启后主智能体可自行增删改子个体 */
+  setGroupSelfOptimize: (gid: string, enabled: boolean) =>
+    req<{ ok: boolean; selfOptimize: boolean }>(`/groups/${gid}/self-optimize`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
   getTarget: () => req<{ mode: "group" | "single"; id: string; name?: string; primary?: string }>("/target"),
   setTarget: (mode: "group" | "single", id?: string) =>
     req<{ ok: boolean }>("/target", { method: "PUT", body: JSON.stringify({ mode, id }) }),
@@ -884,6 +895,14 @@ export const api = {
       | { state: "waiting"; code: number }
       | { state: "confirmed"; sessdata: string; biliJct: string; uid: string; uname: string }
     >(`/channels/bili-qr/${encodeURIComponent(key)}`),
+  /** QQ 官方机器人扫码绑定：出绑定任务（二维码 URL + 解密密钥）→ 轮询到 confirmed 拿 AppID/AppSecret */
+  qqbotBindStart: () =>
+    req<{ taskId: string; key: string; url: string }>("/channels/qqbot-bind", { method: "POST", body: "{}" }),
+  qqbotBindPoll: (taskId: string, key: string) =>
+    req<
+      | { state: "waiting" | "scanned" | "expired" }
+      | { state: "confirmed"; appId: string; appSecret: string; userOpenid?: string }
+    >(`/channels/qqbot-bind/${encodeURIComponent(taskId)}?key=${encodeURIComponent(key)}`),
   createChannel: (body: {
     id: string;
     platform?: string;
