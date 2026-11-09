@@ -112,3 +112,64 @@ pub(crate) async fn delete_group(State(st): State<AppState>, Path(id): Path<Stri
             .into_response(),
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateGroupBody {
+    name: String,
+    /// 新组 id（缺省/同值 = 只改名；改 id 会迁移会话/记忆/任务/触发器引用）
+    #[serde(default)]
+    id: Option<String>,
+}
+
+/// 组信息更新（group-card-menu）：PUT /api/groups/:id，改名 + 可选改 id。
+pub(crate) async fn update_group(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<UpdateGroupBody>,
+) -> impl IntoResponse {
+    match st.core.update_group_meta(&id, &b.name, b.id.as_deref()) {
+        Ok(meta) => Json(serde_json::to_value(meta).unwrap_or(Value::Null)).into_response(),
+        Err(e) if e.to_string().contains("组不存在") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GroupSelfOptimizeBody {
+    enabled: bool,
+}
+
+/// 自我优化开关（group-self-optimize）：PUT /api/groups/:id/self-optimize。
+/// 开启后主智能体可在运行中经 agent_manage 自行增删改本组子个体。
+pub(crate) async fn set_group_self_optimize(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<GroupSelfOptimizeBody>,
+) -> impl IntoResponse {
+    match st.core.registry().set_group_self_optimize(&id, b.enabled) {
+        Ok(meta) => Json(json!({
+            "ok": true,
+            "selfOptimize": meta.self_optimize_enabled(),
+        }))
+        .into_response(),
+        Err(e) if e.to_string().contains("组不存在") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
