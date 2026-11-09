@@ -269,6 +269,7 @@ mod tests {
             last_active_at: None,
             tool_calls: Vec::new(),
             steps: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 

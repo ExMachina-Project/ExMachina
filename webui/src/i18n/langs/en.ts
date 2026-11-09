@@ -156,6 +156,8 @@ export const en: Partial<Dict> = {
   "flows.noMessages": "No messages",
   "flows.fromUser": "External user",
   "flows.fromAgent": "Agent",
+  "flows.attachVoice": "Voice",
+  "flows.attachFile": "File",
   "flows.readonlyHint": "Read-only: flow messages originate from external users; replies land in the channel. For conversations, use the Chat page",
   "tasks.empty": "No task sessions yet — they appear when cron jobs run",
   "tasks.pickOne": "Pick a task session from the left",
