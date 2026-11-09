@@ -84,7 +84,6 @@ export function NexusView(): React.ReactElement {
       });
       message.success(t("nexus.saved", { name: r.link.name }));
       setModal(null);
-      form.resetFields();
       await load();
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
@@ -126,7 +125,7 @@ export function NexusView(): React.ReactElement {
         title={t("nav.nexus")}
         desc={t("nexus.desc")}
         actions={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); form.setFieldsValue({ kind: "exmachina" }); setModal({ link: null }); }}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setModal({ link: null }); }}>
             {t("nexus.add")}
           </Button>
         }
@@ -135,7 +134,7 @@ export function NexusView(): React.ReactElement {
         type="warning"
         showIcon
         className="nexus-exp-alert app-banner"
-        message={t("nexus.expTitle")}
+        title={t("nexus.expTitle")}
         description={t("nexus.expDesc")}
         style={{ marginBottom: 12 }}
       />
@@ -179,6 +178,7 @@ export function NexusView(): React.ReactElement {
                         size="small"
                         icon={<SettingOutlined />}
                         onClick={() => {
+                          // forceRender 常驻挂载：编辑回填必须在打开弹窗前写入表单
                           form.setFieldsValue({ ...l, apiKey: undefined });
                           setModal({ link: l });
                         }}
@@ -203,6 +203,7 @@ export function NexusView(): React.ReactElement {
         confirmLoading={saving}
         okText={t("common.save")}
         destroyOnHidden
+        forceRender
       >
         <Form form={form} layout="vertical" initialValues={{ kind: "exmachina" }} onFinish={() => void submit()}>
           <Form.Item name="id" label={t("nexus.f.id")} rules={[{ required: true }, { pattern: /^[A-Za-z0-9_-]{1,48}$/, message: t("groups.idPattern") }]}>
@@ -252,7 +253,7 @@ export function NexusView(): React.ReactElement {
                     type="info"
                     showIcon
                     className="nexus-cli-hint"
-                    message={t("nexus.cliHint", { cmd: defaultCommand })}
+                    title={t("nexus.cliHint", { cmd: defaultCommand })}
                   />
                   <Form.Item
                     name="command"

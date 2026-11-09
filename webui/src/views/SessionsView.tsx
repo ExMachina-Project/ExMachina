@@ -626,7 +626,7 @@ export function SessionsView(): React.ReactElement {
         cancelText={t("common.cancel")}
         onOk={() => void doRename()}
         onCancel={() => setRenaming(null)}
-        destroyOnClose
+        destroyOnHidden
       >
         <Input value={renameText} onChange={(e) => setRenameText(e.target.value)} onPressEnter={() => void doRename()} />
       </Modal>

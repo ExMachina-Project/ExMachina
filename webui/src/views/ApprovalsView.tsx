@@ -102,7 +102,7 @@ export function ApprovalsView(): React.ReactElement {
             {
               title: t("approvals.colCommand"),
               render: (_, r) => (
-                <Space direction="vertical" size={0} className="full-width">
+                <Space orientation="vertical" size={0} className="full-width">
                   {r.command.startsWith("[root] ") && (
                     <Tag color="error" style={{ marginBottom: 4 }}>
                       🚨 {t("approval.rootElevation")}
