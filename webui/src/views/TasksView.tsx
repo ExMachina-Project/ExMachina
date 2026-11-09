@@ -35,6 +35,17 @@ export function TasksView(): React.ReactElement {
   const [msgLoading, setMsgLoading] = useState(false);
   /** 消息流容器：加载/新消息后滚到底（任务会话最新运行产物在底部） */
   const msgBoxRef = useRef<HTMLDivElement | null>(null);
+  // 贴底跟随（与对话页同口径）：用户本来就贴底才跟随，中途上翻回看不抢滚动条
+  const stickRef = useRef(true);
+  useEffect(() => {
+    const el = msgBoxRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [selected?.id]);
 
   const load = useCallback(async () => {
     try {
@@ -83,8 +94,19 @@ export function TasksView(): React.ReactElement {
     window.addEventListener("exm:bound-refresh", reloadTask as EventListener);
     return () => window.removeEventListener("exm:bound-refresh", reloadTask as EventListener);
   }, [reloadTask]);
-  /** 消息加载完成/更新 → 滚到底（盯运行进度默认关注最新） */
+  /** 消息加载完成/更新 → 滚到底（盯运行进度默认关注最新；上翻回看时不抢滚动条） */
+  // 定位语义与 FlowsView 相同：切任务后首次拿到非空列表瞬时定位，增量更新平滑跟随
+  const anchoredRef = useRef<string | null>(null);
   useEffect(() => {
+    const sid = selected?.id ?? null;
+    if (sid && anchoredRef.current !== sid) {
+      if (msgLoading || messages.length === 0) return;
+      anchoredRef.current = sid;
+      if (!stickRef.current) return;
+      msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
+      return;
+    }
+    if (!stickRef.current) return;
     msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, msgLoading, selected?.id]);
 
@@ -185,7 +207,7 @@ export function TasksView(): React.ReactElement {
                       </span>
                       <span className="flows-msg-time">{relativeTime(m.createdAt)}</span>
                     </div>
-                    <StatementList statements={m.statements} />
+                    <StatementList statements={m.statements} plain />
                   </div>
                 ))}
             </div>
