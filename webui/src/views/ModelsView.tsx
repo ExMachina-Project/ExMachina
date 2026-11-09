@@ -458,7 +458,7 @@ export function ModelsView(): React.ReactElement {
         actions={
           <>
             {/* 视图切换与动作分组（视觉走查：切换/操作分层，Divider 区隔主次） */}
-            <Space split={<span className="head-divider" />}>
+            <Space separator={<span className="head-divider" />}>
               <Segmented
                 value={tab}
                 onChange={(v) => setTab(v as Tab)}
@@ -886,7 +886,7 @@ function ModelPicker({ models, selected, onChange }: {
     onChange(selected.includes(m) ? selected.filter((x) => x !== m) : [...selected, m]);
   return (
     <div className="model-picker">
-      <Space style={{ width: "100%", marginBottom: 8 }} direction="vertical" size={6}>
+      <Space style={{ width: "100%", marginBottom: 8 }} orientation="vertical" size={6}>
         <Input.Search
           placeholder={t("models.pickerSearch")}
           value={q}

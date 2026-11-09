@@ -900,7 +900,7 @@ export function ChatView(): React.ReactElement {
           )}
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} style={{ marginLeft: "auto" }} />
         </div>
-        {!wsConnected && <Alert type="warning" message={t("chat.wsDown")} showIcon className="ws-alert app-banner" />}
+        {!wsConnected && <Alert type="warning" title={t("chat.wsDown")} showIcon className="ws-alert app-banner" />}
         {/* 计划模式（spec plan-mode：WebUI 跨端审批呈现）——模式开关 + 计划卡片 */}
         <div className="plan-mode-bar">
           <Segmented
@@ -1040,7 +1040,7 @@ export function ChatView(): React.ReactElement {
           {/* 等待首个输出：加载卡（一旦有流式输出/子个体产出即让位，避免与输出卡并存） */}
           {running && !liveOrch && liveUnitEntries.length === 0 && (
             <Card size="small" className="msg-bubble msg-agent">
-              <Space direction="vertical" className="full-width">
+              <Space orientation="vertical" className="full-width">
                 <div>
                   <Spin size="small" /> <b>{`${orchLabel} …`}</b>
                 </div>
@@ -1350,7 +1350,7 @@ export function ChatView(): React.ReactElement {
             <Alert
               type="warning"
               showIcon
-              message={t("chat.turn.editWarn")}
+              title={t("chat.turn.editWarn")}
               className="edit-warn"
             />
             <Input.TextArea

@@ -100,7 +100,7 @@ export function BiliQrLoginModal({
     >
       <div className="biliqr-body">
         {error ? (
-          <Alert type="error" showIcon message={error} action={<a onClick={() => void start()}>{t("common.retry")}</a>} />
+          <Alert type="error" showIcon title={error} action={<a onClick={() => void start()}>{t("common.retry")}</a>} />
         ) : qrDataUrl ? (
           <>
             <div className={`biliqr-img${phase === "scanned" ? " scanned" : ""}`}>
