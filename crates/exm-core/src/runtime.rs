@@ -29,6 +29,23 @@ fn tool_feedback(name: &str, r: &crate::tools::ToolResult) -> String {
 /// 单智能体循环步数上限解析（三级覆盖）：
 /// 个体 maxSteps > 作用域档位偏好（Chat 档取全局半数作对话轮保护）> 全局默认。
 /// 全局 0 值视为无效回落 24（与 ToolGateway::chat_max_steps 同口径）。
+/// 工具面清单注入（防「能力幻觉」拒绝）：本轮实际生效的工具名逐个列出。
+/// 部署实测教训：工具 schema 虽随请求下发，模型不「看见」清单时会凭空
+/// 声明「本机无文件系统访问权限」并拒绝执行——显式清单让能力自述有据可依。
+fn tool_surface_note(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## 本轮可用工具（实际生效清单）\n\n以下是你在本轮**真实可以调用**的全部工具，需要什么就直接用，不要凭空声明自己没有某项能力：\n{}",
+        names
+            .iter()
+            .map(|n| format!("- {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 pub fn resolve_max_steps(agent_override: Option<usize>, scope: ToolScope, global: usize) -> usize {
     let global = if global == 0 { 24 } else { global };
     let scope_pref = match scope {
@@ -121,13 +138,6 @@ impl AgentRuntime {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(crate::autonomy::SEARCH_DISCIPLINE);
         }
-        let order_json = serde_json::to_string_pretty(order)?;
-        let mut messages = vec![
-            ChatMessage::system(system_prompt),
-            ChatMessage::user(format!(
-                "【要求】以下是本节点的调度指令（DispatchOrder）。严格在边界内执行，最终只输出 SyncReport JSON。\n```json\n{order_json}\n```"
-            )),
-        ];
 
         let max_steps = order.constraints.max_steps.max(1);
         // 派发时限（指挥体按步数分档声明，timeout_ms = 步数 × 30s）：0 = 不限（旧调用方兼容）。
@@ -166,6 +176,19 @@ impl AgentRuntime {
             // 会话级注入工具（视频观看会话等按会话收窄的插件工具）
             specs.extend(self.tools.session_tool_specs(session_id));
         }
+        // 工具面清单注入（防「能力幻觉」拒绝）：与 chat_execute 同口径
+        if scope.allows_tools() && !specs.is_empty() {
+            let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&tool_surface_note(&names));
+        }
+        let order_json = serde_json::to_string_pretty(order)?;
+        let mut messages = vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(format!(
+                "【要求】以下是本节点的调度指令（DispatchOrder）。严格在边界内执行，最终只输出 SyncReport JSON。\n```json\n{order_json}\n```"
+            )),
+        ];
 
         for _step in 0..max_steps {
             // 停止检查点：会话被请求停止时终止本节点执行
@@ -385,8 +408,6 @@ impl AgentRuntime {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&spawn_note);
         }
-        let mut messages = vec![ChatMessage::system(system_prompt)];
-        messages.extend(history);
 
         // 步数上限三级覆盖：个体 maxSteps > 作用域档位偏好 > 全局 security.chatMaxSteps
         // （Chat 档无工具循环，对话轮保护取半；Tools/Computer 档用全局默认）
@@ -430,6 +451,16 @@ impl AgentRuntime {
             // 会话级注入工具（视频观看会话等按会话收窄的插件工具）
             specs.extend(self.tools.session_tool_specs(session_id));
         }
+        // 工具面清单注入（防「能力幻觉」拒绝）：把本轮实际生效的工具名列进系统提示。
+        // 部署实测：工具 schema 已在请求里，但模型不「看见」清单时会臆断
+        // 「本机无文件系统访问权限」并拒绝执行——显式清单让能力自述有据可依。
+        if scope.allows_tools() && !specs.is_empty() {
+            let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&tool_surface_note(&names));
+        }
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+        messages.extend(history);
 
         for _step in 0..max_steps {
             // 停止检查点:会话被请求停止时终止本循环
@@ -846,6 +877,7 @@ mod timeout_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: true,
             created_at: crate::types::now_iso(),
         };
@@ -1101,6 +1133,7 @@ mod tool_loop_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: true,
             created_at: crate::types::now_iso(),
         };
@@ -1378,6 +1411,7 @@ mod soft_landing_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: true,
             created_at: crate::types::now_iso(),
         };
@@ -1515,6 +1549,7 @@ mod search_discipline_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: true,
             created_at: crate::types::now_iso(),
         };

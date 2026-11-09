@@ -3,15 +3,19 @@
 use super::*;
 
 impl ToolGateway {
-    /// 智能体管理（docs/09）：仅激活组的主智能体可用；内置组定义受保护。
+    /// 智能体管理（docs/09）：仅激活组的主智能体可用；内置组默认编成受保护，
+    /// 组开启「自我优化」（group-self-optimize）后主智能体可自行增删改子个体。
     /// 审计由 execute() 统一落库。
     pub(crate) fn tool_agent_manage(&self, args: &serde_json::Value) -> ToolResult {
-        // 权限闸门：调用者必须是激活组的主智能体，且当前组非内置
+        // 权限闸门：调用者必须是激活组的主智能体；调用者==主智能体的强校验
+        // 在 execute() 的 allowlist 注入处保证。
         let Some(meta) = self.registry.active_group_meta() else {
             return ToolResult::err("无激活组");
         };
-        if meta.builtin {
-            return ToolResult::err("内置组的定义受保护：不可增删改个体");
+        if meta.builtin && !meta.self_optimize_enabled() {
+            return ToolResult::err(
+                "内置组的编成受保护：不可增删改个体（用户可在组设置开启「自我优化」后授权自行优化）",
+            );
         }
         // 调用者身份由网关在 args 上层校验（execute 时传入 agent_id），
         // 这里校验 op 与内容；调用者==主智能体的强校验在 execute() 的 allowlist 注入处保证。

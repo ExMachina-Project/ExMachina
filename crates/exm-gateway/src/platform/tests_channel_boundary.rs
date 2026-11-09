@@ -246,10 +246,15 @@ mod channel_boundary_tests {
             .is_none());
         // 全角尖括号变体：识别
         assert!(run.take_reply(&evt("＜沉默/＞"), 500).is_none());
-        // 正常回复：不误杀
+        // 正常回复：原样投递，不加强制句式前缀（前缀由模型自己决定）
         assert_eq!(
             run.take_reply(&evt("已把任务跑完，结果见文件。"), 500).unwrap(),
-            "【报告】已把任务跑完，结果见文件。"
+            "已把任务跑完，结果见文件。"
+        );
+        // 模型自己写了前缀：保留，且投递层不再叠加第二层
+        assert_eq!(
+            run.take_reply(&evt("【报告】本机已完成推演。"), 500).unwrap(),
+            "【报告】本机已完成推演。"
         );
         // 文本里偶然提到「沉默」二字（非标记形态）：不误杀
         assert!(run.take_reply(&evt("我方选择了沉默策略。"), 500).is_some());

@@ -11,7 +11,7 @@
 
 use crate::fsdb::FsDb;
 use crate::types::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -444,6 +444,24 @@ impl MemoryStore {
             self.index_entry(e)?;
         }
         Ok(entries.len())
+    }
+
+    /// 全量条目读取（组改 id 的引用清扫用，group-id-migration）
+    pub fn entries_public(&self) -> Result<Vec<MemoryEntry>> {
+        self.db.list(ENTRIES)
+    }
+
+    /// 记忆条目组归属改写（组改 id 的引用清扫）：只改 group_id 并重建倒排索引，
+    /// 不动内容/时间戳/统计。写路径持锁（与 remember/decay 同口径）。
+    pub fn retag_group(&self, id: &str, new_group: &str) -> Result<()> {
+        let _guard = self.write_lock.lock();
+        let mut e = self
+            .get_entry_public(id)?
+            .with_context(|| format!("记忆条目不存在: {id}"))?;
+        e.group_id = Some(new_group.to_string());
+        self.save_entry(&e)?;
+        self.index_entry(&e)?;
+        Ok(())
     }
 
     /// 时间衰减（固定项豁免），下限 floor。

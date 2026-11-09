@@ -884,6 +884,7 @@ fn temp_registry(tag: &str) -> exm_core::registry::LocalRegistry {
         workspace: None,
         model: None,
         capabilities: None,
+        self_optimize: None,
         builtin: true,
         created_at: now_iso(),
     };
@@ -984,6 +985,96 @@ fn 默认模型_组与个体解析与持久化() {
         .is_none());
     // 不存在的个体必须报错
     assert!(reg.set_agent_model("ghost", "p-a").is_err());
+
+    // ---- 组改名（group-rename）：显示名可改，id/编成不动；内置组同样放行 ----
+    let reg = temp_registry("group-rename");
+    // temp_registry 的内置组显示名是「测试组」——改名成功即内置组放行的直接证明
+    let m = reg.rename_group("exmachina", "新组名").expect("内置组改名失败");
+    assert_eq!(m.name, "新组名");
+    assert_eq!(
+        reg.group_meta("exmachina").unwrap().name,
+        "新组名",
+        "内存态应同步"
+    );
+    // 落盘校验：重新读 group.json
+    let raw = std::fs::read_to_string(
+        reg.group_dir("exmachina").unwrap().join("group.json"),
+    )
+    .unwrap();
+    assert!(raw.contains("新组名"), "group.json 应落盘新组名");
+    // 空名拒绝
+    assert!(reg.rename_group("exmachina", "  ").is_err());
+    // 不存在的组 404 语义（Err）
+    assert!(reg.rename_group("ghost-grp", "x").is_err());
+
+    // ---- 自我优化开关（group-self-optimize）：内置组编成保护随开关放宽 ----
+    let reg = temp_registry("group-self-opt");
+    // 默认关：内置组编成被锁
+    assert!(!reg.group_meta("exmachina").unwrap().self_optimize_enabled());
+    let d1 = sample_def("opt-unit");
+    assert!(
+        reg.upsert_agent("exmachina", d1, None).is_err(),
+        "默认关时内置组应拒绝新增个体"
+    );
+    // 开启：闸门放宽，增删改放行；关回：重新锁定
+    reg.set_group_self_optimize("exmachina", true)
+        .expect("开启自我优化失败");
+    assert!(reg.group_meta("exmachina").unwrap().self_optimize_enabled());
+    let d2 = sample_def("opt-unit");
+    reg.upsert_agent("exmachina", d2, None)
+        .expect("开关开启后应放行新增个体");
+    reg.upsert_agent(
+        "exmachina",
+        sample_def("opt-unit"),
+        Some("更新后的职责".into()),
+    )
+    .expect("开关开启后应放行修改个体");
+    reg.remove_agent("exmachina", "opt-unit")
+        .expect("开关开启后应放行删除个体");
+    // 落盘校验：开启态已写 group.json
+    let raw = std::fs::read_to_string(
+        reg.group_dir("exmachina").unwrap().join("group.json"),
+    )
+    .unwrap();
+    assert!(raw.contains("selfOptimize"), "group.json 应落盘开关");
+    reg.set_group_self_optimize("exmachina", false)
+        .expect("关闭自我优化失败");
+    assert!(!reg.group_meta("exmachina").unwrap().self_optimize_enabled());
+    assert!(
+        reg.upsert_agent("exmachina", sample_def("opt-unit"), None).is_err(),
+        "关闭后应重新锁定编成"
+    );
+
+    // ---- 组改 id（change_group_id）：目录迁移 + 内存键迁移；激活/占用/非法 id 拒绝 ----
+    let reg = temp_registry("group-change-id");
+    reg.create_group(Some("old-grp".into()), "迁移组", "")
+        .expect("建组失败");
+    let member = sample_def("mig-unit");
+    reg.upsert_agent("old-grp", member, None)
+        .expect("建个体失败");
+    reg.change_group_id("old-grp", "new-grp")
+        .expect("改 id 失败");
+    assert!(reg.group_meta("old-grp").is_none(), "旧 id 应消失");
+    let m = reg.group_meta("new-grp").expect("新 id 应存在");
+    assert_eq!(m.id, "new-grp");
+    assert_eq!(m.name, "迁移组", "显示名不变");
+    assert_eq!(
+        reg.agents_in_group("new-grp").len(),
+        1,
+        "编成应随目录迁移"
+    );
+    // 编成目录确实改名（prompts/agents 全部随迁）
+    assert!(reg.group_dir("new-grp").is_some());
+    assert!(reg.group_dir("old-grp").is_none());
+    // 同 id 幂等
+    reg.change_group_id("new-grp", "new-grp").expect("同 id 应幂等");
+    // 目标 id 已占用
+    reg.create_group(Some("busy".into()), "占用组", "").expect("建占用组失败");
+    assert!(reg.change_group_id("new-grp", "busy").is_err());
+    // 非法 id
+    assert!(reg.change_group_id("new-grp", "非法 id!").is_err());
+    // 旧 id 不存在
+    assert!(reg.change_group_id("ghost", "any").is_err());
 }
 
 #[test]

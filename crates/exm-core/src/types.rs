@@ -544,10 +544,21 @@ pub struct GroupMeta {
     /// 组级能力模型覆盖：每组可用不同模型栈；缺省字段跟随全局槽位
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<GroupCapabilities>,
+    /// 自我优化开关（group-self-optimize）：开启后主智能体可在运行中自行增删改
+    /// 子个体（含内置组解除编成保护）；缺省 = 关（保持出厂保护口径）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_optimize: Option<bool>,
     /// 内置组（默认智能集群）：定义受保护，不可增删个体
     #[serde(default)]
     pub builtin: bool,
     pub created_at: String,
+}
+
+impl GroupMeta {
+    /// 自我优化是否生效：显式开启才生效（缺省/None = 关）
+    pub fn self_optimize_enabled(&self) -> bool {
+        self.self_optimize.unwrap_or(false)
+    }
 }
 
 fn empty_io_schema() -> AgentIoSchema {
