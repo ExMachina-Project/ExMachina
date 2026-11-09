@@ -44,6 +44,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/channels/flows/:id/read", post(read_channel_flow))
         .route("/api/channels/bili-qr", post(bili_qr_start))
         .route("/api/channels/bili-qr/:key", get(bili_qr_poll))
+        .route("/api/channels/qqbot-bind", post(qqbot_bind_start))
+        .route("/api/channels/qqbot-bind/:task_id", get(qqbot_bind_poll))
         .route("/api/channels", get(list_channels).post(create_channel))
         .route(
             "/api/channels/:id",

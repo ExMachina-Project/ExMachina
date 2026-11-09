@@ -7,7 +7,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use exm_core::config::{ExmConfig, LlmConfig};
 use exm_core::types::CoreEvent;
@@ -16,15 +16,16 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+pub mod ambient_media;
 pub mod channel_test;
 pub mod channel_util;
-
 pub mod discord;
 pub mod identity;
 pub mod limits;
 pub mod llm_admin;
 pub mod matrix;
 pub mod napcat;
+pub mod napcat_tools;
 pub mod nexus_api;
 pub mod platform;
 pub mod plugin_admin;
@@ -42,7 +43,7 @@ use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_ch
 use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
 use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
 use agents_admin::{list_agents, create_agent, remove_agent_from_group, remove_agent, set_agent_model, update_agent};
-use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, list_templates};
+use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, update_group, set_group_self_optimize, list_templates};
 use version::{version_info, version_check, version_apply, version_apply_status};
 use persona::{get_agent, get_agent_prompt, put_agent_prompt, get_persona, put_persona, reset_persona};
 use playbooks::list_playbooks;
@@ -263,8 +264,9 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/version/apply", post(version_apply))
         .route("/api/version/apply/status", get(version_apply_status))
         .route("/api/groups/active", get(active_group).put(switch_group))
-        .route("/api/groups/:id", axum::routing::delete(delete_group))
+        .route("/api/groups/:id", axum::routing::put(update_group).delete(delete_group))
         .route("/api/groups/:id/activate", post(activate_group))
+        .route("/api/groups/:id/self-optimize", put(set_group_self_optimize))
         .route("/api/playbooks", get(list_playbooks))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/schema", get(get_config_schema))
