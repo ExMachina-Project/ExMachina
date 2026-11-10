@@ -95,7 +95,7 @@ pub async fn probe(_core: &Core, ch: &Channel) -> TestResult {
             Err(crate::plugins::video::ProbeError::Network(msg)) => network(msg),
         },
         // 长连接平台：以适配器上报的运行时状态为准（连接成功即上报 ok）
-        "napcat" | "qqbot" => match platform::status_of(&ch.id) {
+        "napcat" | "snowluma" | "qqbot" => match platform::status_of(&ch.id) {
             Some(st) if st.state == "ok" => ok(st.detail),
             Some(st) => TestResult {
                 ok: false,
