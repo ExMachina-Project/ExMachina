@@ -774,8 +774,6 @@ impl Orchestrator {
     /// 作为正常轮次执行（预算/锁/快照/事件全复用既有链路）。
     /// 在调用方（handle_user_message_scoped 收束钩子）已持轮次锁的异步上下文里
     /// 直接 await——串行语义天然成立；并行任务不经此处（spawn 已在跑）。
-    /// 每次收束只出队【一条】：防连环独占（长队列一轮全吃会让用户输入饿死）；
-    /// 下一条等下一次用户输入的收束钩子继续。
     async fn drain_task_queue(self: &Arc<Self>, session_id: &str, scope: ToolScope) {
         // 防递归标记（DrainingGuard RAII： panic 也摘除）
         struct DrainingGuard<'a>(&'a parking_lot::Mutex<std::collections::HashSet<String>>, String);
@@ -787,49 +785,53 @@ impl Orchestrator {
         self.queue_draining.lock().insert(session_id.to_string());
         let _guard = DrainingGuard(&self.queue_draining, session_id.to_string());
 
-        // 用户停止过本轮 → 队列任务不再自动执行（停止语义覆盖队列）
-        if crate::round_trace::is_cancelled(session_id) {
-            return;
-        }
-        let Some(task) = crate::task_queue::dequeue_next(session_id) else {
-            return;
-        };
-        let items = crate::task_queue::list(session_id);
-        let running = items.iter().filter(|t| t.status == "running").count();
-        let queued = items.iter().filter(|t| t.status == "queued").count();
-        self.emit(
-            session_id,
-            "task_queue.updated",
-            serde_json::json!({ "items": items, "running": running, "queued": queued }),
-        );
-        // 落库 queue:auto user 消息 → 走正常轮次（与用户输入同链路）
-        let _ = self.store.add_message(
-            session_id,
-            MessageRole::User,
-            Some("queue:auto"),
-            vec![Statement::new(SpeechTag::要求, &task.task)],
-        );
-        // 终态回填：成功 done / 失败 failed（带结论 note，WebUI 队列卡可查）
-        match self.run_round(session_id, &task.task, scope).await {
-            Ok(_) => crate::task_queue::set_status(session_id, &task.id, "done", None),
-            Err(err) => {
-                crate::task_queue::set_status(session_id, &task.id, "failed", Some(err.to_string()));
-                let _ = self.store.add_message(
-                    session_id,
-                    MessageRole::System,
-                    Some("queue:auto"),
-                    vec![Statement::warn(format!("排队任务 {} 执行失败：{err}", task.id))],
-                );
+        loop {
+            // 用户停止过本轮 → 队列任务不再自动执行（停止语义覆盖队列）
+            if crate::round_trace::is_cancelled(session_id) {
+                break;
             }
+            let Some(task) = crate::task_queue::dequeue_next(session_id) else {
+                break;
+            };
+            let note = format!("任务队列出队自动执行（{}）", task.id);
+            let items = crate::task_queue::list(session_id);
+            let queued = items.iter().filter(|t| t.status == "queued").count();
+            self.emit(
+                session_id,
+                "task_queue.updated",
+                serde_json::json!({
+                    "items": items,
+                    "running": 1,
+                    "queued": queued,
+                    "dequeued": task.id,
+                }),
+            );
+            // 落库为 user 消息（queue:auto 标记进 agent_id，展示层区分自动出队与真人输入）
+            let msg = self.store.add_message(
+                session_id,
+                MessageRole::User,
+                Some("queue:auto"),
+                vec![Statement::new(SpeechTag::要求, format!("{}\n{}", note, task.task))],
+            );
+            if let Ok(m) = &msg {
+                // 出队任务也可能带附件元数据（罕见：入队轮附件残留）——一致性回填
+                let inbound = crate::inbox_stash::take(session_id);
+                if !inbound.is_empty() {
+                    self.store.attach_inbound(session_id, &m.id, inbound);
+                }
+            }
+            // 直接跑一轮（本轮已在 chat_scoped_origin 的轮次锁内；run_round 不再经
+            // handle_user_message_scoped，故不会重入收束钩子）
+            let round = self.run_round(session_id, &task.task, scope).await;
+            let (status, note) = match &round {
+                Ok(()) => ("done", None),
+                Err(e) => ("failed", Some(e.to_string())),
+            };
+            crate::task_queue::set_status(session_id, &task.id, status, note);
+            // 单会话一次钩子只出队一条：剩余任务等下一次真实输入的收束钩子继续
+            // （避免一次收束连环跑整条队列把会话独占太久——用户随时可插话）
+            break;
         }
-        let items = crate::task_queue::list(session_id);
-        let running = items.iter().filter(|t| t.status == "running").count();
-        let queued = items.iter().filter(|t| t.status == "queued").count();
-        self.emit(
-            session_id,
-            "task_queue.updated",
-            serde_json::json!({ "items": items, "running": running, "queued": queued }),
-        );
     }
 
     /// 停止轮次的统一收束：停止陈述作为最终消息（含过程数据），审计事件落账

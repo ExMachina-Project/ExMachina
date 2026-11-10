@@ -12,6 +12,7 @@
   "tools": [
     "read",
     "terminal",
+    "filesystem",
     "web_search"
   ],
   "whenToCall": "生成式创作工作流：图像/音频/视频生成管线、提示词工程与产物评估筛选。",

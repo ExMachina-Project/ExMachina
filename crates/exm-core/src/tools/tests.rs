@@ -1182,6 +1182,12 @@ mod terminal_gate_tests {
         assert!(!contains_shell_chain("curl -s \"https://x.com/a?b=1&c=2\""));
         // 引号内的管道不参与分段
         assert!(chain_allowed("echo \"a | b\" | cat"));
+        // `2>&1`：stderr 合并只读惯用法放行（部署实测：子个体查错被拒后乱绕行白耗步数）
+        assert!(!contains_shell_chain("git status --porcelain 2>&1 | head -20"));
+        assert!(chain_allowed("python3 -c \"print(1)\" 2>&1 | tail -2"));
+        // 但写重定向仍拒：`2>&1` 摘除后裸 `>` 仍在
+        assert!(contains_shell_chain("echo x > out.txt 2>&1"));
+        assert!(contains_shell_chain("cmd > file"));
     }
 
     #[test]
