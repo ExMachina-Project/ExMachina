@@ -114,6 +114,10 @@ pub struct SecurityConfig {
     /// 圈禁根目录（绝对路径；空 = 自动推导 /home/<execUser> 或 getpwuid 查询）
     #[serde(default)]
     pub exec_home: String,
+    /// 工具调用预算三值（agent-budget-audit）：默认仅单轮 48（覆盖既有硬上限
+    /// 语义,行为等价收紧）；0 = 单项关闭,全零 = 预算整体关闭
+    #[serde(default)]
+    pub tool_call_budget: ToolCallBudget,
 }
 
 /// 消毒规则开关（全默认开；单项可关）
@@ -151,6 +155,44 @@ fn default_chat_max_steps() -> usize {
     24
 }
 
+/// 工具调用预算三值（agent-budget-audit）：0 = 不限（单项关闭）。
+/// 档位表在 ToolGateway（chat < tools < computer），此处为 computer 档全量值,
+/// 低档位按比例收严。config 显式值直接生效（覆盖档位表）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallBudget {
+    /// 单轮最大工具调用数（一轮用户输入内的工具循环上限）
+    #[serde(default)]
+    pub per_turn: usize,
+    /// 单会话累计上限（进程生命周期内；会话删除不重置——防长会话慢性消耗）
+    #[serde(default)]
+    pub per_session: usize,
+    /// 时间窗内最大调用数（滑动窗口秒数 windowSecs）
+    #[serde(default)]
+    pub per_window: usize,
+    /// 时间窗长度（秒）；0 = 时间窗预算关闭
+    #[serde(default)]
+    pub window_secs: u64,
+}
+
+impl Default for ToolCallBudget {
+    fn default() -> Self {
+        ToolCallBudget {
+            per_turn: 48,
+            per_session: 0,
+            per_window: 0,
+            window_secs: 60,
+        }
+    }
+}
+
+impl ToolCallBudget {
+    /// 全零 = 预算完全关闭（兼容旧行为）
+    pub fn disabled(&self) -> bool {
+        self.per_turn == 0 && self.per_session == 0 && self.per_window == 0
+    }
+}
+
 /// 上下文预算安全线默认值
 fn default_context_budget_ratio() -> f64 {
     0.8
@@ -171,6 +213,7 @@ impl Default for SecurityConfig {
             sanitize_rules: SanitizeRuleConfig::default(),
             exec_user: String::new(),
             exec_home: String::new(),
+            tool_call_budget: ToolCallBudget::default(),
         }
     }
 }
@@ -213,6 +256,11 @@ pub struct SearchConfig {
     pub api_key: String,
     /// 返回条数上限
     pub max_results: usize,
+    /// 主动搜索纪律（proactive-search）：true = 系统提示注入「何时该主动搜」
+    /// 行为准则（时效性问题/事实核验/未知概念先搜再答）。仅提示层——
+    /// 工具下发面由 ready() 决定，与本开关无关。
+    #[serde(default = "default_true")]
+    pub proactive: bool,
 }
 
 impl Default for SearchConfig {
@@ -222,6 +270,7 @@ impl Default for SearchConfig {
             endpoint: String::new(),
             api_key: String::new(),
             max_results: 5,
+            proactive: true,
         }
     }
 }
@@ -312,6 +361,15 @@ pub struct BrowserConfig {
     pub timeout_secs: u64,
     /// 单页正文提取上限（字符）
     pub max_chars: usize,
+    /// 浏览器搜索的搜索引擎（browser-search）：bing | duckduckgo | baidu。
+    /// 无需 API Key——直接导航搜索页取渲染结果，与 search.* 后端互补：
+    /// API 后端给结构化结果，浏览器搜索给「真实网页所见即所得」。
+    #[serde(default = "default_browser_engine")]
+    pub search_engine: String,
+}
+
+fn default_browser_engine() -> String {
+    "bing".into()
 }
 
 impl Default for BrowserConfig {
@@ -321,6 +379,7 @@ impl Default for BrowserConfig {
             headless: true,
             timeout_secs: 30,
             max_chars: 8000,
+            search_engine: default_browser_engine(),
         }
     }
 }
@@ -437,6 +496,18 @@ pub struct AutomationConfig {
     pub auto_agent_backoff_max: u32,
     /// Meta Agent 巡检周期（分钟，experiments.metaAgent 开启才生效;0 = 仅会话召唤）
     pub meta_interval_min: u32,
+    /// 通道流会话闲置归档天数（session-management）：闲置超过该天数的流会话
+    /// 自动归档（活跃绑定会话豁免）。0 = 关闭（默认，零行为变更）。
+    #[serde(default)]
+    pub flow_idle_days: u32,
+    /// 自主记忆摘要触发轮数下限（experiments.autoMemoryDigest 开启才生效）：
+    /// 会话消息数 ≥ 该值才进入低峰归纳。默认 20。
+    #[serde(default = "default_memory_digest_min_turns")]
+    pub memory_digest_min_turns: usize,
+}
+
+fn default_memory_digest_min_turns() -> usize {
+    20
 }
 
 impl Default for AutomationConfig {
@@ -453,6 +524,8 @@ impl Default for AutomationConfig {
             auto_agent_max_steps: 24,
             auto_agent_backoff_max: 8,
             meta_interval_min: 60,
+            flow_idle_days: 0,
+            memory_digest_min_turns: default_memory_digest_min_turns(),
         }
     }
 }
@@ -628,6 +701,11 @@ pub struct ExperimentsConfig {
     /// 成员编成）→ [meta] 审批应用;构建新个体;轮内元认知反思。参数见 automation.metaIntervalMin
     #[serde(default)]
     pub meta_agent: bool,
+    /// 自主记忆摘要（实验性）：低峰期（每日 04:30）把长会话历史归纳为记忆条目
+    /// （LLM 单次摘要调用 + 内容哈希去重 + token 上限钳制）。参数见
+    /// automation.memoryDigestMinTurns。默认关——关闭态零任务零 token 消耗。
+    #[serde(default)]
+    pub auto_memory_digest: bool,
 }
 
 // ---------------------------------------------------------------- 插件系统（plugins/ 目录）
@@ -1200,6 +1278,8 @@ struct SecurityFile {
     exec_user: Option<String>,
     #[serde(default)]
     exec_home: Option<String>,
+    #[serde(default)]
+    tool_call_budget: Option<ToolCallBudget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1225,6 +1305,10 @@ struct AutomationFile {
     auto_agent_backoff_max: Option<u32>,
     #[serde(default)]
     meta_interval_min: Option<u32>,
+    #[serde(default)]
+    flow_idle_days: Option<u32>,
+    #[serde(default)]
+    memory_digest_min_turns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1379,6 +1463,9 @@ impl ExmConfig {
             sanitize_rules: file_sec.sanitize_rules.clone().unwrap_or_default(),
             exec_user: file_sec.exec_user.clone().unwrap_or_default(),
             exec_home: file_sec.exec_home.clone().unwrap_or_default(),
+            tool_call_budget: file_sec
+                .tool_call_budget
+                .unwrap_or_else(|| SecurityConfig::default().tool_call_budget),
         };
         let automation = AutomationConfig {
             heartbeat_enabled: file_auto
@@ -1413,6 +1500,12 @@ impl ExmConfig {
             meta_interval_min: file_auto
                 .meta_interval_min
                 .unwrap_or_else(|| AutomationConfig::default().meta_interval_min),
+            flow_idle_days: file_auto
+                .flow_idle_days
+                .unwrap_or_else(|| AutomationConfig::default().flow_idle_days),
+            memory_digest_min_turns: file_auto
+                .memory_digest_min_turns
+                .unwrap_or_else(|| AutomationConfig::default().memory_digest_min_turns),
         };
 
         let mut llm = LlmConfig {
@@ -1618,6 +1711,7 @@ impl ExmConfig {
                 sanitize_rules: Some(self.security.sanitize_rules.clone()),
                 exec_user: Some(self.security.exec_user.clone()),
                 exec_home: Some(self.security.exec_home.clone()),
+                tool_call_budget: Some(self.security.tool_call_budget),
             }),
             computer: Some(self.computer.clone()),
             automation: Some(AutomationFile {
@@ -1631,6 +1725,8 @@ impl ExmConfig {
                 auto_agent_max_steps: Some(self.automation.auto_agent_max_steps),
                 auto_agent_backoff_max: Some(self.automation.auto_agent_backoff_max),
                 meta_interval_min: Some(self.automation.meta_interval_min),
+                flow_idle_days: Some(self.automation.flow_idle_days),
+                memory_digest_min_turns: Some(self.automation.memory_digest_min_turns),
             }),
             search: Some(self.search.clone()),
             hooks: Some(self.hooks.clone()),
@@ -1883,7 +1979,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "连续「无事可做」次数 N 后自评间隔 × min(N, 上限)；有任务即复位（防空转耗 token）" },
                     { "key": "automation.metaIntervalMin", "label": "Meta Agent 巡检周期（分钟）", "kind": "number",
                       "default": "60", "required": false, "min": 5, "max": 1440,
-                      "help": "（实验性 experiments.metaAgent）元智能体每次巡检的间隔；巡检 = 数据聚合 → 自评 → 有改进点才开会话落提议单" }
+                      "help": "（实验性 experiments.metaAgent）元智能体每次巡检的间隔；巡检 = 数据聚合 → 自评 → 有改进点才开会话落提议单" },
+                    { "key": "automation.memoryDigestMinTurns", "label": "长会话记忆归纳触发轮数下限", "kind": "number",
+                      "default": "20", "required": false, "min": 5, "max": 500,
+                      "help": "（实验性 experiments.autoMemoryDigest）会话消息数 ≥ 该值才进入低峰归纳；过短会话不值得摘要" }
                 ]
             },
             {
@@ -1901,7 +2000,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "tavily / brave 需要；searxng 与自建通常留空" },
                     { "key": "search.maxResults", "label": "返回条数上限", "kind": "number",
                       "default": "5", "required": false, "min": 1, "max": 20,
-                      "help": "单次搜索注入上下文的结果条数" }
+                      "help": "单次搜索注入上下文的结果条数" },
+                    { "key": "search.proactive", "label": "主动搜索纪律", "kind": "boolean",
+                      "default": "true", "required": false,
+                      "help": "开启后系统提示注入「何时该主动搜」行为准则（时效/核验/未知概念先搜再答）；关闭 = 模型仅被动响应用户的搜索请求" }
                 ]
             },
             {
@@ -1940,7 +2042,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "导航与脚本执行的等待上限" },
                     { "key": "browser.maxChars", "label": "正文提取上限（字符）", "kind": "number",
                       "default": "8000", "required": false, "min": 500, "max": 100000,
-                      "help": "browser text 单次返回的正文长度" }
+                      "help": "browser text 单次返回的正文长度" },
+                    { "key": "browser.searchEngine", "label": "浏览器搜索引擎", "kind": "string",
+                      "default": "bing", "required": false,
+                      "help": "browser op=search 用的引擎：bing | duckduckgo | baidu。无需 API Key——直接导航搜索页取渲染结果；与联网搜索后端（tavily 等）互补" }
                 ]
             },
             {
@@ -2076,12 +2181,15 @@ pub fn config_schema() -> serde_json::Value {
                     { "key": "experiments.groupSharedContext", "label": "智能体组共享上下文", "kind": "boolean",
                       "default": "false", "required": false,
                       "help": "（实验性）派发子个体时自动携带组主会话的滚动摘要与最近对话窗口，子个体不再只有 objective 孤岛视角；会放大派发 token 开销" },
-                    { "key": "experiments.llmDrivenMemory", "label": "自主记忆摘要", "kind": "boolean",
-                      "default": "false", "required": false,
-                      "help": "（实验性）关闭程序每轮自动写入的会话摘要/决策/证据/教训，由模型经 memory_write 工具自主决定哪些内容值得长期记忆；治理记忆库被无关内容灌满" },
                     { "key": "experiments.slidingContextWindow", "label": "滑动上下文窗口", "kind": "boolean",
                       "default": "false", "required": false,
                       "help": "（实验性）关闭条数阈值触发的定时压缩：模型持续持有最近对话的完整原文，窗口外历史不再新增压缩调用（已压过的沿用旧摘要）。与动态上下文压缩互斥" },
+                    { "key": "experiments.llmDrivenMemory", "label": "模型自主记忆（LLM Driven Memory）", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）关闭程序每轮自动写入的会话摘要/决策/证据/教训，由模型经 memory_write 工具自主决定哪些内容值得长期记忆；治理记忆库被无关内容灌满" },
+                    { "key": "experiments.autoMemoryDigest", "label": "长会话记忆归纳（每日低峰摘要）", "kind": "boolean",
+                      "default": "false", "required": false,
+                      "help": "（实验性）低峰期（每日 04:30）把长会话（消息数 ≥ automation.memoryDigestMinTurns）历史归纳为记忆条目：LLM 单次摘要 + 内容哈希去重 + token 预算钳制；治理「会话信息随窗口滑走而丢失」" },
                     { "key": "experiments.superAgent", "label": "Super Agent 深度委托", "kind": "boolean",
                       "default": "false", "required": false,
                       "help": "（实验性）新会话进入深度委托模式：agent 静默长链路推进（工具循环+并行子代理），只在需要决策/交付结果/无法继续时产出一条消息——尽可能少占注意力，尽可能多交付价值" },

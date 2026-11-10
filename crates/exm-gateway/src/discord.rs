@@ -310,7 +310,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         let sender_mark = crate::channel_util::sender_origin(
                                             is_group, &display, &external_id,
                                         );
-                                        let gate_ctx = InboundCtx { text: &text, external_id: &external_id, display_name: &display, is_group, mentioned, chat_key: channel_id.as_str() };
+                                        let gate_ctx = InboundCtx { text: &text, external_id: &external_id, display_name: &display, is_group, mentioned, chat_key: channel_id.as_str(), flow_name: None };
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
                                             GateDecision::Allow(clean) => {
                                                 text = clean;
@@ -517,7 +517,8 @@ async fn handle_message(
         run.with_origin(mark)
     } else {
         run
-    };
+    }
+    .with_external_id(external_id);
     run.run(&text).await;
     let _ = reply.await;
 }

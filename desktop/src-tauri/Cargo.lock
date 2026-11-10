@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "exmachina-desktop"
-version = "1.0.0"
+version = "0.6.2"
 dependencies = [
  "futures-util",
  "indexmap 1.9.3",

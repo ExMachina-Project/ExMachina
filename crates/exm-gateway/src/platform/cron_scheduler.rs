@@ -2,14 +2,23 @@
 
 
 use super::*;
-/// 调度循环：每 20s 扫描到期任务（cron 命中 / 一次性 at 到点）；心跳由配置驱动
+/// 闲置归档当日去重标记行 id（enabled=false 的哨兵行，只借 last_run_minute 记日期）
+const IDLE_ARCHIVE_MARKER: &str = "__idle_archive__";
+
+/// 调度循环：每 20s 扫描到期任务（cron 命中 / 一次性 at 到点）；心跳由配置驱动。
+/// 调度体外套 catch_unwind：tick 内任何 panic（未来代码缺陷）只损失当轮扫描，
+/// 不杀死调度任务——否则所有定时任务（含心跳巡检）静默全停（审计 P1-3）。
 pub fn spawn_cron_scheduler(core: std::sync::Arc<exm_core::Core>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let _ = tick_jobs(&core).await;
+            let core2 = core.clone();
+            // JoinError = tick 内 panic：记日志吞掉，下轮继续（调度任务不死）
+            if let Err(join_err) = tokio::task::spawn(async move { tick_jobs(&core2).await }).await {
+                eprintln!("[cron-scheduler] tick panic：{join_err}（已吞掉，下轮继续）");
+            }
         }
     });
 }
@@ -81,6 +90,102 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
         let minute = now.timestamp() / 60;
         if core.meta_agent_tick(minute).await.is_some() {
             changed = true;
+        }
+    }
+
+    // 闲置流会话归档（session-management）：每日一次（UTC 4 点低谷窗口）。
+    // flowIdleDays=0（默认）不进扫描——关闭态零行为变更。
+    // 当日去重：复用 cron 表存标记行（enabled=false，不会被 job_due 触发）。
+    if core.config().automation.flow_idle_days > 0 {
+        use chrono::Timelike;
+        if (now.hour(), now.minute()) == (4, 0) {
+            let minute_key = exm_core::cron::minute_key(now);
+            let last = core
+                .cron
+                .get(IDLE_ARCHIVE_MARKER)?
+                .and_then(|j| j.last_run_minute)
+                .unwrap_or_default();
+            if last != minute_key {
+                let idle_days = core.config().automation.flow_idle_days;
+                if let Ok((archived, skipped)) = core.archive_idle_flow_sessions(idle_days, now)
+                {
+                    if archived > 0 {
+                        let _ = core.events.send(CoreEvent {
+                            kind: "cron.updated".into(),
+                            session_id: String::new(),
+                            payload: json!({
+                                "idleArchive": { "archived": archived, "skipped": skipped }
+                            }),
+                        });
+                    }
+                }
+                let marker = exm_core::types::CronJob {
+                    id: IDLE_ARCHIVE_MARKER.into(),
+                    name: "闲置流会话归档标记".into(),
+                    prompt: String::new(),
+                    kind: None,
+                    cron: Some("0 4 * * *".into()),
+                    at: None,
+                    target_session: None,
+                    steps: vec![],
+                    group: None,
+                    session_title: None,
+                    enabled: false,
+                    last_run_at: Some(exm_core::types::now_iso()),
+                    last_status: None,
+                    last_run_minute: Some(minute_key),
+                    notify_channels: vec![],
+                    created_at: exm_core::types::now_iso(),
+                };
+                let _ = core.cron.upsert(marker);
+            }
+        }
+    }
+
+    // 自主记忆摘要（实验性 experiments.autoMemoryDigest，9.1）：每日一次低峰期
+    // （UTC 4:30，避开 4:00 归档窗口）。关闭态不进扫描（零任务零 token）。
+    // 当日去重：同 IDLE_ARCHIVE_MARKER 模式复用 cron 表标记行。
+    if core.config().experiments.auto_memory_digest {
+        use chrono::Timelike;
+        if (now.hour(), now.minute()) == (4, 30) {
+            const DIGEST_MARKER: &str = "__memory_digest_marker__";
+            let minute_key = exm_core::cron::minute_key(now);
+            let last = core
+                .cron
+                .get(DIGEST_MARKER)?
+                .and_then(|j| j.last_run_minute)
+                .unwrap_or_default();
+            if last != minute_key {
+                let sessions = core.list_sessions_admin().unwrap_or_default();
+                let mut digested = 0usize;
+                for s in &sessions {
+                    if core.memory_digest_session(&s.id).await.is_some() {
+                        digested += 1;
+                    }
+                }
+                if digested > 0 {
+                    eprintln!("[memory-digest] 低峰归纳完成：{digested} 个会话产出记忆条目");
+                }
+                let marker = exm_core::types::CronJob {
+                    id: DIGEST_MARKER.into(),
+                    name: "自主记忆摘要标记".into(),
+                    prompt: String::new(),
+                    kind: None,
+                    cron: Some("30 4 * * *".into()),
+                    at: None,
+                    target_session: None,
+                    steps: vec![],
+                    group: None,
+                    session_title: None,
+                    enabled: false,
+                    last_run_at: Some(exm_core::types::now_iso()),
+                    last_status: None,
+                    last_run_minute: Some(minute_key),
+                    notify_channels: vec![],
+                    created_at: exm_core::types::now_iso(),
+                };
+                let _ = core.cron.upsert(marker);
+            }
         }
     }
 
@@ -173,9 +278,33 @@ pub(crate) async fn notify_cron_result(
         if !ch.enabled || !job.notify_channels.contains(&ch.id) {
             continue;
         }
-        let ok = push_channel_text(&ch, &text).await;
+        // 投递契约（update-pipeline 规格「webhook 投递超时与重试」）：
+        // 单次 15s 超时（push_channel_text 内控）+ 退避重试 2 次（共 3 次尝试），
+        // 最终失败 MUST 落审计事件（含目标与原因摘要），MUST NOT 静默吞掉。
+        let mut ok = push_channel_text(&ch, &text).await;
+        let mut attempts = 1u32;
+        while !ok && attempts < 3 {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                500u64 * (1 << (attempts - 1)), // 0.5s → 1s 退避
+            ))
+            .await;
+            ok = push_channel_text(&ch, &text).await;
+            attempts += 1;
+        }
         if !ok {
-            eprintln!("[cron-notify] 通道 {} 推送失败", ch.id);
+            eprintln!("[cron-notify] 通道 {} 推送失败（重试 {} 次后放弃）", ch.id, attempts);
+            core.orchestrator()
+                .emit(
+                    "",
+                    "notify.delivery_failed",
+                    serde_json::json!({
+                        "channel": ch.id,
+                        "job": job.id,
+                        "jobName": job.name,
+                        "attempts": attempts,
+                        "reason": "投递重试耗尽（端点超时或非 2xx 响应）",
+                    }),
+                );
         }
     }
 }

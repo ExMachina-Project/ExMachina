@@ -102,7 +102,7 @@ pub(crate) async fn push_channel_text(ch: &Channel, text: &str) -> bool {
                 .map(|r| r.status().is_success())
                 .unwrap_or(false)
         }
-        // napcat/qqbot：长连接适配器自有会话内出站，推送语义暂不支持（诚实返回 false）
+        // napcat / snowluma / qqbot：长连接适配器自有会话内出站，推送语义暂不支持（诚实返回 false）
         _ => false,
     }
 }
@@ -127,6 +127,21 @@ pub(crate) fn parse_target(raw: &str) -> (Option<String>, Option<String>) {
     } else {
         (None, Some(s.to_string()))
     }
+}
+
+/// 目标对应的期望 scope（竞态 P1-2 校验用）：单智能体 = `single:id`，组 = 组 id，
+/// 空目标/目标不存在 = None（维持现状，无需校验）
+pub(crate) fn expected_scope_of(core: &exm_core::Core, target: &str) -> Option<String> {
+    let (single, group) = parse_target(target);
+    if let Some(id) = single {
+        return if core.registry().single(&id).is_some() {
+            Some(format!("single:{id}"))
+        } else {
+            None
+        };
+    }
+    group
+        .filter(|g| core.group_meta(g).is_some())
 }
 
 /// 切换全局交互上下文到通道绑定目标（单智能体或组），返回是否发生了切换。
@@ -200,7 +215,8 @@ pub(crate) fn caps(kind: &str) -> ChannelCaps {
             voice: false,
             typing: false,
         },
-        "napcat" => ChannelCaps {
+        // napcat / snowluma：OneBot 11 正向 WS（图片/文件/语音出站齐备；无标准 typing 动作）
+        "napcat" | "snowluma" => ChannelCaps {
             image: true,
             file: true,
             voice: true,
@@ -433,6 +449,9 @@ pub(crate) struct InboundCtx<'a> {
     pub mentioned: bool,
     /// 通道会话键（与会话标题 `channel:<id>:<key>` 一致；/stop 定位会话用）
     pub chat_key: &'a str,
+    /// 流展示名（群名 / 对端昵称；适配器尽力提供，None = 未知）——
+    /// 建流/补名用（旁听路径建流也有名可用），见 ensure_flow_named
+    pub flow_name: Option<&'a str>,
 }
 
 pub(crate) enum GateDecision {
@@ -635,7 +654,9 @@ async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_
     if text.is_empty() {
         return;
     }
-    let Some(sid) = ensure_flow_session(core, ch, ctx.chat_key) else {
+    let Some(sid) =
+        ensure_flow_session(core, ch, ctx.chat_key, ctx.flow_name, ctx.is_group)
+    else {
         return;
     };
     let (clean, findings) = crate::sanitize::sanitize_with(
@@ -678,8 +699,18 @@ async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_
 /// 流会话定位/建立（旁听用，与 `ChannelRun::begin` 同口径）：
 /// 有效绑定优先；未绑定则按 title 认领旧会话（升级迁移）或新建并回写绑定。
 /// 不切全局交互上下文——旁听只是记账，不应翻转打开中的工作目标。
-fn ensure_flow_session(core: &exm_core::Core, ch: &Channel, chat_key: &str) -> Option<String> {
+fn ensure_flow_session(
+    core: &exm_core::Core,
+    ch: &Channel,
+    chat_key: &str,
+    flow_name: Option<&str>,
+    is_group: bool,
+) -> Option<String> {
     if let Some(sid) = core.flow_active_session(&ch.id, chat_key) {
+        // 流名回填（空填不覆盖）：流存在但名为空时补（begin_named 同口径）
+        if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
+            core.ensure_flow_named(&ch.id, chat_key, n, is_group);
+        }
         return Some(sid);
     }
     let target = ch
@@ -693,23 +724,17 @@ fn ensure_flow_session(core: &exm_core::Core, ch: &Channel, chat_key: &str) -> O
         _ => core.active_group(),
     };
     let title = format!("channel:{}:{chat_key}", ch.id);
-    let legacy = core
-        .list_sessions_in_group(&scope)
-        .ok()
-        .and_then(|list| list.into_iter().find(|s| s.title == title));
-    let sid = match legacy {
-        Some(s) => s.id,
-        None => core.store.create_session(&title, &scope).ok()?.id,
-    };
-    let _ = core.bind_flow_session(&ch.id, chat_key, &sid);
-    Some(sid)
+    // 原子版（竞态 P1-3）：查绑定→建会话→回写绑定整体临界区——
+    // 并发同流消息不再各建会话（孤儿+绑定互抹）
+    core.ensure_flow_session_atomic(&ch.id, chat_key, &scope, &title, flow_name, is_group)
 }
 
-/// 聊天流（chat flow）会话管理指令：
-/// - `/new [标题]`：开新会话并绑到流（旧会话保留可切回）
-/// - `/sessions`：列出流内全部会话（含当前绑定标记）
-/// - `/use <序号|标题片段>`：切换流的活跃会话
+/// 聊天流（chat flow）固定单会话：一条流恒定复用同一个会话，不再有流内
+/// 会话区分（`/new` `/sessions` `/use` 已退役——多会话切换单独治理记忆与
+/// 上下文，与「聊天流 = 一个外部会话的镜像」的定位冲突；需要全新上下文
+/// 时由管理者在控制台归档/重建，通道侧不提供切换入口）。
 ///
+/// 旧指令仍拦截并回执说明（群里发了不能没反应），但不做任何状态变更。
 /// 返回 Some(reply) = 指令已处理（Deny 语义回帖）；None = 非流指令，放行后续闸门。
 async fn flow_command(
     core: &exm_core::Core,
@@ -717,136 +742,61 @@ async fn flow_command(
     ctx: &InboundCtx<'_>,
 ) -> Option<String> {
     let text = ctx.text.trim();
-    let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
-    let title_prefix = format!("channel:{}:{}:", ch.id, ctx.chat_key);
-
-    if text == "/new" || text.starts_with("/new ") {
-        let custom = text.strip_prefix("/new").unwrap_or_default().trim();
-        let title = if custom.is_empty() {
-            format!("channel:{}:{}", ch.id, ctx.chat_key)
-        } else {
-            format!("{title_prefix}{custom}")
-        };
-        return match core.create_session(&title) {
-            Ok(s) => match core.bind_flow_session(&ch.id, ctx.chat_key, &s.id) {
-                Ok(()) => Some(format!("已开新会话（{}）。", short_id(&s.id))),
-                Err(e) => Some(format!("会话已建但绑定失败：{e}")),
-            },
-            Err(e) => Some(format!("开新会话失败：{e}")),
-        };
-    }
-
-    if text == "/sessions" {
-        // 流内会话 = 同流前缀标题的全部会话（新旧口径都覆盖）
-        let all = core.list_sessions_in_group(&gid).unwrap_or_default();
-        let mut mine: Vec<_> = all
-            .iter()
-            .filter(|s| s.title.starts_with(&title_prefix) || {
-                s.title == format!("channel:{}:{}", ch.id, ctx.chat_key)
-            })
-            .cloned()
-            .collect();
-        // 活跃倒序；同秒活跃以创建时间破平（同秒内新建者在前——序号寻址确定性）
-        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
-        if mine.is_empty() {
-            return Some("本聊天流还没有会话。发送 /new 开一个。".into());
+    let retired = [
+        ("/new", "本聊天流固定使用一个会话，不再开新会话。"),
+        ("/sessions", "本聊天流固定使用一个会话，无流内会话列表。"),
+        ("/use", "本聊天流固定使用一个会话，无需切换。"),
+    ];
+    for (cmd, reply) in retired {
+        if text == cmd || text.starts_with(&format!("{cmd} ")) {
+            // 附当前绑定会话短码，管理者可在控制台按此定位
+            let cur = core
+                .flow_active_session(&ch.id, ctx.chat_key)
+                .map(|sid| sid.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "（尚未创建）".into());
+            return Some(format!("{reply}当前会话：{cur}"));
         }
-        let active = core.flow_active_session(&ch.id, ctx.chat_key);
-        let lines: Vec<String> = mine
-            .iter()
-            .take(10)
-            .enumerate()
-            .map(|(i, s)| {
-                let mark = if active.as_deref() == Some(s.id.as_str()) {
-                    "●"
-                } else {
-                    "○"
-                };
-                let label = s
-                    .title
-                    .strip_prefix(&title_prefix)
-                    .filter(|t| !t.is_empty())
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| default_flow_session_label(&s.created_at));
-                format!("{mark} {i}. {label}（{}）", short_id(&s.id))
-            })
-            .collect();
-        return Some(format!(
-            "本聊天流的会话：\n{}\n/use <序号> 切换；/new 开新的。",
-            lines.join("\n")
-        ));
     }
-
-    if let Some(rest) = text.strip_prefix("/use ") {
-        let rest = rest.trim();
-        let all = core.list_sessions_in_group(&gid).unwrap_or_default();
-        let mut mine: Vec<_> = all
-            .iter()
-            .filter(|s| s.title.starts_with(&title_prefix) || {
-                s.title == format!("channel:{}:{}", ch.id, ctx.chat_key)
-            })
-            .cloned()
-            .collect();
-        // 活跃倒序；同秒活跃以创建时间破平（与 /sessions 列表同口径，序号寻址确定性）
-        mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
-        // 序号优先；否则按标题片段模糊匹配
-        let hit = if let Ok(idx) = rest.parse::<usize>() {
-            mine.get(idx).cloned().map(|s| s.id).map(|id| (id, rest.to_string()))
-        } else {
-            mine.iter()
-                .find(|s| {
-                    s.title
-                        .strip_prefix(&title_prefix)
-                        .map(|t| t.contains(rest))
-                        .unwrap_or(false)
-                })
-                .map(|s| (s.id.clone(), rest.to_string()))
-        };
-        return match hit {
-            Some((sid, label)) => match core.bind_flow_session(&ch.id, ctx.chat_key, &sid) {
-                Ok(()) => Some(format!("已切换到会话 {label}（{}）。", short_id(&sid))),
-                Err(e) => Some(format!("切换失败：{e}")),
-            },
-            None => Some(format!("没找到会话「{rest}」。/sessions 看全部。")),
-        };
-    }
-
     None
 }
 
-/// 流内会话的默认展示名（无自定义标题时用创建时间区分；REST 流会话列表共用）
-pub(crate) fn default_flow_session_label(created_at: &str) -> String {
-    // ISO 时间取到分位（2026-11-01T15:30:00 → 11-01 15:30）
-    let chars: Vec<char> = created_at.chars().collect();
-    if chars.len() >= 16 {
-        chars[5..16].iter().collect()
-    } else {
-        created_at.to_string()
-    }
-}
-
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
 /// 运行收束事件 → 纯文本回帖（telegram / napcat / qqbot 三个适配器共用）。
+/// 收束语句平铺（IM 投递形态）：正文原样逐行拼接，**不添加任何句式前缀**——
+/// 是否使用【报告】等标记由模型自己决定，投递层只做拼接与截断。
+///
+/// 沉默约定（IM silence）：模型按旁听纪律输出 `<沉默/>`（可能独立成行或与
+/// 少量文字混行）= 本轮无话可说——投递层整轮丢弃（返回空串，由调用方
+/// 决定不发送 / 不记未读），群聊里不再出现「不参与群聊闲聊」这类废话。
 pub(crate) fn flatten_statements(payload: &serde_json::Value, max_chars: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(list) = payload.get("statements").and_then(|v| v.as_array()) {
         for s in list {
-            let tag = s.get("tag").and_then(|v| v.as_str()).unwrap_or("报告");
             let text = s.get("text").and_then(|v| v.as_str()).unwrap_or("");
             if text.trim().is_empty() {
                 continue;
             }
-            lines.push(format!("【{tag}】{text}"));
+            lines.push(text.to_string());
         }
     }
     let mut text = lines.join("\n");
     if text.trim().is_empty() {
         text = "（本轮无收束输出）".into();
     }
+    if is_silence(&text) {
+        return String::new();
+    }
     text.chars().take(max_chars).collect()
+}
+
+/// 沉默标记判定：语句里出现 `<沉默/>`（允许全角变体与空白）即整轮沉默。
+/// 保守口径——只在标记明确出现时丢轮，避免误杀正常回复。
+pub(crate) fn is_silence(text: &str) -> bool {
+    let t = text.trim();
+    t.contains("<沉默/>")
+        || t.contains("<沉默 />")
+        || t.contains("＜沉默/＞")
+        || t.contains("＜沉默 ／＞")
+        || t.contains("〈沉默/〉")
 }
 
 // ---------------------------------------------------------------- 通道消息统一执行
@@ -875,6 +825,9 @@ pub(crate) struct ChannelRun {
     /// "im:<名字|id>" = 群聊发送者——落库进消息 agent_id，展示层据此在消息头显示发送者，
     /// 模型侧上下文渲染为「[用户·名字]」区分群聊多人发言）
     pub origin: Option<String>,
+    /// 发送者平台外部 ID（approval-ergonomics 通道裁决权限判定：
+    /// origin 用户本人或跨通道 admins 才能裁 ok:/no:；非 flow 入口为 None）
+    pub external_id: Option<String>,
     /// 聊天流定位（begin 时快照；run 落库后回写流预览用）
     pub(crate) flow: Option<(String, String)>,
 }
@@ -887,6 +840,19 @@ impl ChannelRun {
         ch: &Channel,
         chat_key: &str,
     ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
+        Self::begin_named(core, ch, chat_key, None, None).await
+    }
+
+    /// begin 带流名变体（会话管理可用性修复）：适配器把入站事件自带的
+    /// 展示名（群名 / 对端昵称）传进来，建流/补名用——流列表不再显示裸
+    /// chat_key（QQ 号）。名称只空填不覆盖（ensure_flow_named 语义）。
+    pub(crate) async fn begin_named(
+        core: &std::sync::Arc<exm_core::Core>,
+        ch: &Channel,
+        chat_key: &str,
+        flow_name: Option<&str>,
+        is_group: Option<bool>,
+    ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
         let prev_group = core.active_group();
         let prev_single = core.registry().active_single();
         // 绑定目标缺省回落单智能体默认体（machina），未配置单智能体时维持当前上下文
@@ -894,45 +860,111 @@ impl ChannelRun {
             .group
             .clone()
             .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(core)));
-        let switched = switch_context_to(core, &target);
-        let scope = core.registry().active_scope();
+        // 切换后校验 + 有限重试（竞态 P1-2 短期缓解）：激活组/单体是进程级全局态，
+        // 并发 begin（多通道同时来消息）会互相切走上下文——switch 后立即快照 scope，
+        // 与目标不符说明被他人切走：重试抢占（最多 3 次，仍不符则用当前 scope 继续，
+        // 消息不丢，只可能落错组——比挂死好）。中期方案：scope 做成 ChannelRun
+        // 显式参数，消灭全局切换。
+        let mut switched = false;
+        let mut scope = core.registry().active_scope();
+        for _ in 0..3 {
+            switched = switch_context_to(core, &target);
+            scope = core.registry().active_scope();
+            let expected = expected_scope_of(core, &target);
+            if expected.as_deref() == Some(scope.as_str()) {
+                break;
+            }
+            // 被并发切换抢走：重试（下轮 switch 回自己的目标）
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         // 聊天流（chat flow）会话定位：流绑定优先——不主动切换时固定复用
         // 同一会话（跨轮上下文与记忆自然延续）。旧数据（按 title 寻址的存量
         // 通道会话）自动认领迁移到流上，行为无缝升级。
+        // 原子版（竞态 P1-3）：查绑定→建会话→回写绑定整体临界区——并发同流
+        // 消息不再各建会话（孤儿+绑定互抹）。组过滤在外层做（换组后旧绑定
+        // 会话不跨组复用，原子版内组不符时按 None 处理重建）。
         let title = format!("channel:{}:{chat_key}", ch.id);
-        let session = match core.flow_active_session(&ch.id, chat_key) {
-            // 绑定有效且仍在当前交互范围内（通道换组后旧绑定会话不跨组复用）
-            Some(sid) => core
-                .store
+        let session = {
+            let sid = core.ensure_flow_session_atomic(
+                &ch.id,
+                chat_key,
+                &scope,
+                &title,
+                flow_name,
+                is_group.unwrap_or(false),
+            )?;
+            core.store
                 .get_session(&sid)
                 .ok()
                 .flatten()
-                .filter(|s| s.group_id == scope),
-            None => None,
-        };
-        let session = match session {
-            Some(s) => Some(s),
-            None => {
-                // 流无有效绑定：认领旧 title 会话（升级迁移），否则开新会话
-                let legacy = core
-                    .list_sessions_in_group(&scope)
-                    .ok()
-                    .and_then(|list| list.into_iter().find(|s| s.title == title));
-                let s = legacy.or_else(|| core.create_session(&title).ok())?;
-                let _ = core.bind_flow_session(&ch.id, chat_key, &s.id);
-                Some(s)
-            }
+                .filter(|s| s.group_id == scope)
         };
         let Some(session) = session else {
-            // 会话建立失败也别把交互上下文留在别人身上
-            if switched {
-                restore_context(core, &prev_group, &prev_single);
+            // 绑定会话跨组不符：原子版内已复用绑定，但 scope 过滤后无效——
+            // 新开本组会话并改绑（保守路径：罕见，通道换组才触发）。
+            // create_session 落当前激活组（上面 switch 后即 scope）。
+            let s = core.create_session(&title).ok()?;
+            let _ = core.bind_flow_session_named(&ch.id, chat_key, &s.id, flow_name, is_group);
+            // 建失败也别把交互上下文留在别人身上
+            if core.store.get_session(&s.id).ok().flatten().is_none() {
+                if switched {
+                    restore_context(core, &prev_group, &prev_single);
+                }
+                return None;
             }
-            return None;
+            return Self::finish_begin(
+                core,
+                ch,
+                chat_key,
+                s,
+                flow_name,
+                is_group.unwrap_or(false),
+                prev_group,
+                prev_single,
+                switched,
+            )
+            .await;
         };
+        Self::finish_begin(
+            core,
+            ch,
+            chat_key,
+            session,
+            flow_name,
+            is_group.unwrap_or(false),
+            prev_group,
+            prev_single,
+            switched,
+        )
+        .await
+    }
+
+    /// begin 尾段（会话已定位）：公共装配（流名回填/IM 登记/预算档位/记忆分区/订阅）
+    #[allow(clippy::too_many_arguments)] // 装配参数天然多；收拢成结构体反增噪音
+    async fn finish_begin(
+        core: &std::sync::Arc<exm_core::Core>,
+        ch: &Channel,
+        chat_key: &str,
+        session: exm_core::types::Session,
+        flow_name: Option<&str>,
+        is_group: bool,
+        prev_group: String,
+        prev_single: Option<String>,
+        switched: bool,
+    ) -> Option<(Self, tokio::sync::broadcast::Receiver<CoreEvent>)> {
+        let scope = core.registry().active_scope();
+        // 流名回填（空填不覆盖）：流已存在但名为空（更早版本建的）时补上
+        if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
+            core.ensure_flow_named(&ch.id, chat_key, n, is_group);
+        }
         // IM 通道会话登记：轮次组装系统提示时注入简洁表达纪律
         // （治理「一次性回复大量内容」：提示层约束 + 通道层截断双保险）
         exm_core::orchestrator::mark_im_session(&session.id);
+        // 会话作用域快照（agent-budget-audit）：工具预算档位按通道 capability
+        // 联动（chat < tools < computer）;begin 时写入,轮次内不变。
+        core.orchestrator()
+            .tools
+            .set_session_scope(&session.id, ch.tool_scope());
         // 记忆隔离即时生效：通道每次执行前把分区键同步到会话；
         // 关闭隔离时清空分区，立即回到同组共享记忆。
         let partition = ch.memory_partition(&scope);
@@ -950,6 +982,7 @@ impl ChannelRun {
                 kind: ch.kind.clone(),
                 scope: ch.tool_scope(),
                 origin: None,
+                external_id: None,
                 flow: Some((ch.id.clone(), chat_key.to_string())),
             },
             rx,
@@ -963,10 +996,26 @@ impl ChannelRun {
         self
     }
 
+    /// 标记发送者平台外部 ID（approval-ergonomics：通道裁决 ok:/no: 权限判定）。
+    /// 六适配器在 stamp_session_origin 同位调用（同一个人的两个标记）。
+    pub(crate) fn with_external_id(mut self, external_id: impl Into<String>) -> Self {
+        self.external_id = Some(external_id.into());
+        self
+    }
+
     /// 收束事件 → 回帖文本（非收束事件返回 None；已按平台上限截断）
     pub(crate) fn take_reply(&self, evt: &CoreEvent, max_chars: usize) -> Option<String> {
         match evt.kind.as_str() {
-            "run.finished" => Some(flatten_statements(&evt.payload, max_chars)),
+            "run.finished" => {
+                let text = flatten_statements(&evt.payload, max_chars);
+                // 沉默约定（IM silence）：模型宣告无话可说 → None（不投递），
+                // 所有直调方（spawn_reply / rss / video 插件）统一免发送。
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
             "run.error" => {
                 let msg = evt
                     .payload
@@ -985,10 +1034,25 @@ impl ChannelRun {
                 };
                 Some(text.chars().take(max_chars).collect())
             }
+            // 工具预算熔断内联提示（agent-budget-audit 3.2）：预算耗尽的首次拦截
+            // 内联一条警告（用户感知「为什么停了」）；后续同轮再拦截不重复推——
+            // 模型收束前可能连续多次尝试，逐条推送会刷屏。
+            "tool.budget" => {
+                let reason = evt
+                    .payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("工具调用预算已耗尽");
+                let key = format!("budget-notified:{}", evt.session_id);
+                if self.core.consume_once_flag(&key) {
+                    Some(format!("【警告】{reason}").chars().take(max_chars).collect())
+                } else {
+                    None
+                }
+            }
             // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
             // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
-            "plan.pending" => {
-                let count = evt
+            "plan.pending" => {                let count = evt
                     .payload
                     .get("count")
                     .and_then(|v| v.as_u64())
@@ -1003,6 +1067,38 @@ impl ChannelRun {
                     lines.push(format!("… 共 {} 条", items.len()));
                 }
                 lines.push("回复「plan:yes」批准执行，「plan:no」拒绝保留".into());
+                Some(lines.join("\n").chars().take(max_chars).collect())
+            }
+            // 审批单待裁决（approval-ergonomics 跨端呈现）：与 plan.pending 同位。
+            // 推单号 + 命令摘要 + 裁决用法;单号支持前缀匹配（完整 8 位或其唯一前缀）。
+            // 通道裁决只走 once 档（设计决策:档位在文本界面无法可靠表达,升档去控制台）。
+            "approval.required" => {
+                let id = evt
+                    .payload
+                    .get("approvalId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let cmd = evt
+                    .payload
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let wait = self
+                    .core
+                    .config()
+                    .security
+                    .approval_wait_secs;
+                let cmd_short: String = cmd.chars().take(120).collect();
+                let mut lines = vec![
+                    format!("⛔ 审批请求（单号 {id}）："),
+                    cmd_short,
+                    format!(
+                        "{wait} 秒内回复 ok:{id} 批准 / no:{id} 拒绝，或到控制台裁决"
+                    ),
+                ];
+                if cmd.len() > 120 {
+                    lines.insert(2, "…（命令已截断）".into());
+                }
                 Some(lines.join("\n").chars().take(max_chars).collect())
             }
             "plan.applied" => {
@@ -1078,6 +1174,92 @@ impl ChannelRun {
             }
             return;
         }
+        // 审批快捷裁决（approval-ergonomics 跨端审批）：ok:<单号> / no:<单号>
+        // 直达裁决,不进模型轮次。单号支持前缀匹配（完整 8 位或唯一前缀）。
+        // 权限口径与身份管控 ③ 段一致：审批单 origin 用户本人,或任一通道 admins
+        // 命中（判权跟人走,跨通道）。通道裁决只走 once 档（设计决策:档位在文本
+        // 界面无法可靠表达,升档去控制台）。
+        if let Some(decision) = parse_approval_directive(trimmed) {
+            let (approve, id_input) = decision;
+            // 前缀匹配：pending 单中 id 以输入开头的集合;唯一命中裁决,多命中报歧义
+            let pendings = self
+                .core
+                .approval_list(Some("pending"), 500)
+                .unwrap_or_default();
+            let hits: Vec<exm_core::types::ApprovalRequest> = pendings
+                .into_iter()
+                .filter(|a| a.id.starts_with(&id_input))
+                .collect();
+            let ap = match hits.as_slice() {
+                [one] => one.clone(),
+                [] => {
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!("【报告】审批单 {id_input} 不存在或已处理。"),
+                    );
+                    return;
+                }
+                _ => {
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!(
+                            "【报告】单号前缀 {} 命中 {} 张待审单（{}），请补全单号。",
+                            id_input,
+                            hits.len(),
+                            hits.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(" / ")
+                        ),
+                    );
+                    return;
+                }
+            };
+            let id = ap.id.clone();
+            // 权限：发送者 = 审批单 origin 用户本人,或跨通道 admins 命中
+            let caller = self.external_id.as_deref().unwrap_or("");
+            let is_origin_user = ap
+                .origin_user
+                .as_deref()
+                .is_some_and(|u| !u.is_empty() && caller == u);
+            let is_admin = !caller.is_empty()
+                && super::channels::load_channels(&self.core)
+                    .iter()
+                    .any(|c| c.admins.iter().any(|a| a.trim() == caller));
+            if !is_origin_user && !is_admin {
+                self.core.emit_run_error(
+                    &self.session_id,
+                    &format!("【报告】审批裁决被拒绝：发送者无权裁决审批单 {id}（仅发起用户或管理员）。"),
+                );
+                return;
+            }
+            match self
+                .core
+                .approval_decide_scoped(
+                    &id,
+                    if approve {
+                        exm_core::types::ApprovalScope::Once { approve: true }
+                    } else {
+                        exm_core::types::ApprovalScope::Once { approve: false }
+                    },
+                )
+                .await
+            {
+                Ok(r) => {
+                    let head = if approve { "已批准并执行" } else { "已拒绝" };
+                    let detail = r.result.as_deref().unwrap_or("");
+                    let note: String = detail.chars().take(300).collect();
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!("【报告】审批单 {id} {head}。{note}"),
+                    );
+                }
+                Err(e) => {
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!("【警告】审批单 {id} 裁决失败：{e}"),
+                    );
+                }
+            }
+            return;
+        }
         // 周期 token 配额（外部来源会话）：耗尽即拒绝新轮次并经 run.error 回帖提示；
         // 组内派发会话无来源登记，天然不受限（设计 D10）
         let limits = self.core.config().limits.clone();
@@ -1122,6 +1304,25 @@ impl Drop for GroupRestore {
             restore_context(&self.core, &self.prev_group, &self.prev_single);
         }
     }
+}
+
+/// 审批快捷指令解析（approval-ergonomics）：`ok:<单号>` / `no:<单号>`。
+/// 单号 = 8 位审批单 id（approval.required 推送文本所带）。返回 (是否批准, 单号)。
+/// 大小写不敏感；单号非空即受理（不存在/已处理在裁决点报告,不在解析点挡）。
+pub(crate) fn parse_approval_directive(text: &str) -> Option<(bool, String)> {
+    let lower = text.trim().to_lowercase();
+    let (approve, rest) = if let Some(r) = lower.strip_prefix("ok:") {
+        (true, r)
+    } else if let Some(r) = lower.strip_prefix("no:") {
+        (false, r)
+    } else {
+        return None;
+    };
+    let id = rest.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some((approve, id.to_string()))
 }
 
 /// 还原到之前的交互上下文（组 + 单智能体快照）
@@ -1180,7 +1381,15 @@ where
     let run = run.clone();
     tokio::spawn(async move {
         let mut rx = rx;
-        while let Ok(evt) = rx.recv().await {
+        // 收流容错（竞态 P1-4）：Lagged = 广播环溢出丢了一批旧事件，新事件仍在
+        // 环里——必须继续收，退出会让本轮回复静默丢失（用户视角：发了消息
+        // 永远没回）。Closed = 发送端全关（进程收束），正常退出。
+        loop {
+            let evt = match rx.recv().await {
+                Ok(evt) => evt,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             if evt.session_id != run.session_id {
                 continue;
             }
@@ -1326,13 +1535,26 @@ pub(crate) async fn download_bytes_auth(url: &str, token: &str) -> Option<Vec<u8
 
 /// 入站媒体注入会话：图片走多模态暂存（data URL），文件/语音注入路径说明。
 /// 追加到消息文本后由模型一并感知。返回注入说明文本。
+/// 同时把附件元数据（工作区相对路径）登记进会话暂存，随本轮 user 消息落库
+/// （im-inbound-attach）——WebUI 聊天流据此渲染缩略图/下载卡片。
 pub(crate) fn stage_inbound_media(
     core: &exm_core::Core,
     session_id: &str,
     saved: &[(String, String, String)], // (kind, 绝对路径, 文件名)
 ) -> String {
     let mut notes = String::new();
+    let mut rels: Vec<exm_core::types::InboundAttachment> = Vec::new();
     for (kind, path, name) in saved {
+        // 绝对路径 → 工作区相对路径（展示层经 /api/asset 预览；strip 失败保留原样兜底）
+        let rel = std::path::Path::new(path)
+            .strip_prefix(&core.config().workspace_root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.clone());
+        rels.push(exm_core::types::InboundAttachment {
+            kind: kind.clone(),
+            path: rel,
+            name: name.clone(),
+        });
         match kind.as_str() {
             "image" => {
                 if let Ok(bytes) = std::fs::read(path) {
@@ -1355,6 +1577,8 @@ pub(crate) fn stage_inbound_media(
             }
         }
     }
-    let _ = core;
+    if !rels.is_empty() {
+        exm_core::inbox_stash::stage(session_id, rels);
+    }
     notes
 }

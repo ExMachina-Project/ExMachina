@@ -309,11 +309,8 @@ pub async fn delete_profile(
             .into_response();
     }
     let Some(pos) = cfg.llm_profiles.iter().position(|p| p.id == id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "档案不存在" })),
-        )
-            .into_response();
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：重复删除目标已不在 → 成功
+        return Json(json!({ "ok": true })).into_response();
     };
     cfg.llm_profiles.remove(pos);
     if cfg.active_profile == id {

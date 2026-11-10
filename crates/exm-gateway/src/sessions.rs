@@ -187,6 +187,12 @@ pub(crate) async fn rename_session(
     }
     match st.core.store.update_session_title(&id, &title) {
         Ok(_) => Json(json!({ "ok": true, "title": title })).into_response(),
+        // 「会话不存在」→ 404（REST 状态码矩阵：路径资源不存在不落 500；审计 REST P1-1）
+        Err(e) if e.to_string().contains("会话不存在") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -208,6 +214,12 @@ pub(crate) async fn pin_session(
 ) -> impl IntoResponse {
     match st.core.toggle_session_pin(&id, b.pinned) {
         Ok(_) => Json(json!({ "ok": true, "pinned": b.pinned })).into_response(),
+        // 「会话不存在」→ 404（REST 状态码矩阵；审计 REST P1-1）
+        Err(e) if e.to_string().contains("会话不存在") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -267,6 +279,54 @@ pub(crate) async fn session_batch(
     .into_response()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FlowArchiveBody {
+    /// 归档范围：flow（单流，channelId+chatKey）/ channel（整通道）
+    scope: String,
+    channel_id: String,
+    #[serde(default)]
+    chat_key: Option<String>,
+}
+
+/// 按流/按通道归档旧会话（POST /api/sessions/flow-archive，session-management）。
+/// 圈定范围 = title 前缀解析；各流活跃绑定会话豁免（下条消息继续复用）。
+/// 返回归档/豁免计数，前端回执展示。
+pub(crate) async fn session_flow_archive(
+    State(st): State<AppState>,
+    Json(b): Json<FlowArchiveBody>,
+) -> impl IntoResponse {
+    let scope = match (b.scope.as_str(), b.chat_key.as_deref()) {
+        ("flow", Some(k)) if !k.is_empty() => exm_core::session_origin::ArchiveScope::Flow {
+            channel_id: b.channel_id.clone(),
+            chat_key: k.to_string(),
+        },
+        ("channel", _) => exm_core::session_origin::ArchiveScope::Channel {
+            channel_id: b.channel_id.clone(),
+        },
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "scope 应为 flow（需 chatKey）或 channel" })),
+            )
+                .into_response();
+        }
+    };
+    match st.core.archive_flow_sessions(scope) {
+        Ok((archived, skipped)) => Json(json!({
+            "ok": true,
+            "archived": archived,
+            "skipped": skipped,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 // ---------------------------------------------------------------- 工具审计聚合（ops-visibility）
 
 /// 工具审计查询（GET /api/audit）：跨个体聚合既有审计分片，服务端过滤
@@ -279,9 +339,24 @@ pub(crate) struct AuditQuery {
     tool: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// 审计类别：缺省 = 工具审计；dispatch = 子代理派发审计（agent-budget-audit）
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 pub(crate) async fn list_audit(State(st): State<AppState>, Query(q): Query<AuditQuery>) -> impl IntoResponse {
+    // kind=dispatch（agent-budget-audit 3.4）：子代理派发审计（跨会话聚合，
+    // 异常条目由前端按 ok/status 高亮）；缺省 = 既有工具审计
+    if q.kind.as_deref() == Some("dispatch") {
+        return match st.core.store.list_dispatch_audit_all(q.limit.unwrap_or(200).min(1000)) {
+            Ok(items) => Json(json!({ "items": items })).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        };
+    }
     match st.core.store.list_tool_audit_filtered(
         q.agent.as_deref(),
         q.tool.as_deref(),
@@ -348,13 +423,16 @@ pub(crate) async fn session_undo(
     {
         Ok(info) => Json(info).into_response(),
         Err(e) => {
-            let busy = e.to_string().contains("处理中");
-            let code = if busy {
+            // 错误分类（REST 状态码矩阵，审计 P1-1）：处理中→409；会话不存在→404；其余→400
+            let msg = e.to_string();
+            let code = if msg.contains("处理中") {
                 StatusCode::CONFLICT
+            } else if msg.contains("会话不存在") || msg.contains("快照不存在") {
+                StatusCode::NOT_FOUND
             } else {
                 StatusCode::BAD_REQUEST
             };
-            (code, Json(json!({ "error": e.to_string() }))).into_response()
+            (code, Json(json!({ "error": msg }))).into_response()
         }
     }
 }
@@ -384,13 +462,16 @@ pub(crate) async fn session_edit(
     match st.core.edit_resend(&id, b.turn, &b.text).await {
         Ok(info) => (StatusCode::ACCEPTED, Json(info)).into_response(),
         Err(e) => {
-            let busy = e.to_string().contains("处理中");
-            let code = if busy {
+            // 错误分类（REST 状态码矩阵，审计 P1-1）：处理中→409；会话/快照不存在→404；其余→400
+            let msg = e.to_string();
+            let code = if msg.contains("处理中") {
                 StatusCode::CONFLICT
+            } else if msg.contains("会话不存在") || msg.contains("快照不存在") {
+                StatusCode::NOT_FOUND
             } else {
                 StatusCode::BAD_REQUEST
             };
-            (code, Json(json!({ "error": e.to_string() }))).into_response()
+            (code, Json(json!({ "error": msg }))).into_response()
         }
     }
 }
@@ -414,11 +495,16 @@ pub(crate) async fn session_fork(
             Json(serde_json::to_value(s).unwrap_or(Value::Null)),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        // 错误分类（REST 状态码矩阵，审计 P1-1）：会话/快照不存在→404；其余（轮次越界等）→400
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.contains("会话不存在") || msg.contains("快照不存在") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({ "error": msg }))).into_response()
+        }
     }
 }
 

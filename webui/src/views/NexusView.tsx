@@ -1,10 +1,11 @@
 /** 智能连结网络（实验性）：外部连结体管理——远程 EXMACHINA 网关 / 本机 CLI 智能体的接入与维护 */
 import React, { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Spin, Switch, Tag, message } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch, Tag, message } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
 import { ApiOutlined, PlusOutlined, SettingOutlined, UsergroupDeleteOutlined } from "@ant-design/icons";
 import { api, type NexusLink } from "../api";
 import { PageHeader } from "../components/PageHeader";
+import { NexusTopology, type TopoEdge, type TopoNode } from "../components/NexusTopology";
 import { useT } from "../i18n/core";
 
 // 连结体类别 → 资产灰阶语汇：仅 opencode（自研外部连结）保留品牌紫点缀，其余中性
@@ -29,12 +30,22 @@ export function NexusView(): React.ReactElement {
   const [modal, setModal] = useState<{ link: NexusLink | null } | null>(null);
   const [probing, setProbing] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // 拓扑/列表视图切换（nexus-topology-admin）：同一事实源（graph 聚合端点）
+  const [view, setView] = useState<"topo" | "list">("topo");
+  const [topo, setTopo] = useState<{ nodes: TopoNode[]; edges: TopoEdge[] }>({ nodes: [], edges: [] });
+  const [edgeBusy, setEdgeBusy] = useState(false);
   const [form] = Form.useForm();
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       setLinks((await api.nexusLinks()).links);
+      // 拓扑聚合失败（旧网关无端点）静默空图：列表视图不受影响，不弹错误
+      try {
+        setTopo(await api.nexusGraph());
+      } catch {
+        setTopo({ nodes: [], edges: [] });
+      }
     } finally {
       setLoading(false);
     }
@@ -43,6 +54,20 @@ export function NexusView(): React.ReactElement {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** 拓扑详情面板解绑（PUT /nexus/edges unbind）——图与列表同源刷新 */
+  const unbind = async (agentId: string, linkId: string) => {
+    setEdgeBusy(true);
+    try {
+      await api.editNexusEdge("unbind", agentId, linkId);
+      message.success(t("nexus.topoUnbound"));
+      await load();
+    } catch (e) {
+      message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
+    } finally {
+      setEdgeBusy(false);
+    }
+  };
 
   const submit = async () => {
     const v = await form.validateFields();
@@ -59,7 +84,6 @@ export function NexusView(): React.ReactElement {
       });
       message.success(t("nexus.saved", { name: r.link.name }));
       setModal(null);
-      form.resetFields();
       await load();
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
@@ -101,7 +125,7 @@ export function NexusView(): React.ReactElement {
         title={t("nav.nexus")}
         desc={t("nexus.desc")}
         actions={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); form.setFieldsValue({ kind: "exmachina" }); setModal({ link: null }); }}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setModal({ link: null }); }}>
             {t("nexus.add")}
           </Button>
         }
@@ -110,13 +134,25 @@ export function NexusView(): React.ReactElement {
         type="warning"
         showIcon
         className="nexus-exp-alert app-banner"
-        message={t("nexus.expTitle")}
+        title={t("nexus.expTitle")}
         description={t("nexus.expDesc")}
         style={{ marginBottom: 12 }}
       />
       <div className="pane-body">
         <Spin spinning={loading}>
-          {links.length === 0 ? (
+          {/* 拓扑/列表切换（nexus-topology-admin）：默认拓扑（结构可读），列表保留管理操作 */}
+          <Segmented
+            value={view}
+            onChange={(v) => setView(v as "topo" | "list")}
+            options={[
+              { value: "topo", label: t("nexus.viewTopo") },
+              { value: "list", label: t("nexus.viewList") },
+            ]}
+            style={{ marginBottom: 12 }}
+          />
+          {view === "topo" ? (
+            <NexusTopology nodes={topo.nodes} edges={topo.edges} onUnbind={(a, l) => void unbind(a, l)} busy={edgeBusy} />
+          ) : links.length === 0 ? (
             <BrandEmpty description={t("nexus.empty")} className="pane-empty" />
           ) : (
             <div className="nexus-links">
@@ -142,6 +178,7 @@ export function NexusView(): React.ReactElement {
                         size="small"
                         icon={<SettingOutlined />}
                         onClick={() => {
+                          // forceRender 常驻挂载：编辑回填必须在打开弹窗前写入表单
                           form.setFieldsValue({ ...l, apiKey: undefined });
                           setModal({ link: l });
                         }}
@@ -166,6 +203,7 @@ export function NexusView(): React.ReactElement {
         confirmLoading={saving}
         okText={t("common.save")}
         destroyOnHidden
+        forceRender
       >
         <Form form={form} layout="vertical" initialValues={{ kind: "exmachina" }} onFinish={() => void submit()}>
           <Form.Item name="id" label={t("nexus.f.id")} rules={[{ required: true }, { pattern: /^[A-Za-z0-9_-]{1,48}$/, message: t("groups.idPattern") }]}>
@@ -215,7 +253,7 @@ export function NexusView(): React.ReactElement {
                     type="info"
                     showIcon
                     className="nexus-cli-hint"
-                    message={t("nexus.cliHint", { cmd: defaultCommand })}
+                    title={t("nexus.cliHint", { cmd: defaultCommand })}
                   />
                   <Form.Item
                     name="command"

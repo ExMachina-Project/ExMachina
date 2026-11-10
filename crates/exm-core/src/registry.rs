@@ -142,6 +142,7 @@ impl LocalRegistry {
                 workspace: None,
                 model: None,
                 capabilities: None,
+                self_optimize: None,
                 builtin: true,
                 created_at: crate::types::now_iso(),
             };
@@ -211,6 +212,11 @@ impl LocalRegistry {
             for p in def_files {
                 let def: AgentDefinition = serde_json::from_str(&std::fs::read_to_string(&p)?)
                     .with_context(|| format!("智能体定义校验失败: {}", p.display()))?;
+                // 工具面默认全量（agent-tool-surface）：未声明 = 全量，显式声明才裁剪
+                let mut def = def;
+                if def.tools.is_empty() {
+                    def.tools = ToolName::full_set();
+                }
                 singles.insert(def.identifier.clone(), def);
             }
         }
@@ -275,6 +281,11 @@ impl LocalRegistry {
                 let mut def: AgentDefinition = serde_json::from_str(&raw)
                     .with_context(|| format!("定义 schema 校验失败: {}", path.display()))?;
                 def.domain = normalize_domain(&def.domain);
+                // 工具面默认全量（agent-tool-surface）：未声明 tools = 全量
+                // （serde 缺省空表）——显式声明才裁剪
+                if def.tools.is_empty() {
+                    def.tools = ToolName::full_set();
+                }
                 defs.insert(def.identifier.clone(), def);
             }
         }
@@ -342,6 +353,68 @@ impl LocalRegistry {
         *self.active.write() = gid.to_string();
         std::fs::write(self.dir.join("active_group"), gid)?;
         Ok(())
+    }
+
+    /// 组改名（group-rename）：仅改显示名；组 id 与编成目录不动，落盘 group.json。
+    /// 内置组同样放行——「定义受保护」指编成（增删个体），组元数据（名称/模型/工作区）向来可编辑。
+    pub fn rename_group(&self, gid: &str, name: &str) -> anyhow::Result<GroupMeta> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("组名不能为空");
+        }
+        let mut groups = self.groups.write();
+        let g = groups.get_mut(gid).context("组不存在")?;
+        g.meta.name = name.to_string();
+        let meta_path = g.dir.join("group.json");
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
+        Ok(g.meta.clone())
+    }
+
+    /// 自我优化开关（group-self-optimize）：开启后主智能体可经 agent_manage
+    /// 自行增删改本组子个体（编成保护按此口径放宽）；落盘 group.json。
+    pub fn set_group_self_optimize(&self, gid: &str, enabled: bool) -> anyhow::Result<GroupMeta> {
+        let mut groups = self.groups.write();
+        let g = groups.get_mut(gid).context("组不存在")?;
+        g.meta.self_optimize = if enabled { Some(true) } else { None };
+        let meta_path = g.dir.join("group.json");
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
+        Ok(g.meta.clone())
+    }
+
+    /// 组改 id（group-rename 的 id 侧）：编成目录整体改名 + 内存键迁移。
+    /// 硬约束：新 id 合法且未被占用；激活组不可改（active_group 落盘引用随目录失效）。
+    /// 会话/记忆等外部引用由 Core 层（rename_group_refs）在本方法成功后迁移。
+    /// 返回迁移前的旧 id 调用方不需要——本方法内部已自洽；Err 时零落盘副作用。
+    pub fn change_group_id(&self, old_id: &str, new_id: &str) -> anyhow::Result<GroupMeta> {
+        let new_id = new_id.trim();
+        if new_id == old_id {
+            // 幂等：同 id 直接返回现元数据
+            return self.group_meta(old_id).context("组不存在");
+        }
+        if !valid_id(new_id) {
+            anyhow::bail!("非法组 id: {new_id}（仅允许字母/数字/-/_，≤48 字符）");
+        }
+        let mut groups = self.groups.write();
+        if !groups.contains_key(old_id) {
+            anyhow::bail!("组不存在: {old_id}");
+        }
+        if groups.contains_key(new_id) {
+            anyhow::bail!("组已存在: {new_id}");
+        }
+        let mut g = groups.remove(old_id).context("组不存在")?;
+        // 目录整体改名（组内 SOUL/MEMORY/agents/prompts 全部随迁）
+        let new_dir = self.dir.join("groups").join(new_id);
+        if new_dir.exists() {
+            anyhow::bail!("目标编成目录已存在: {}", new_dir.display());
+        }
+        std::fs::rename(&g.dir, &new_dir)
+            .with_context(|| format!("编成目录改名失败: {} → {}", g.dir.display(), new_dir.display()))?;
+        g.dir = new_dir;
+        g.meta.id = new_id.to_string();
+        let meta_path = g.dir.join("group.json");
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
+        groups.insert(new_id.to_string(), g);
+        Ok(groups.get(new_id).context("组不存在")?.meta.clone())
     }
 
     // ---------------- 工作目录（干活的项目） ----------------
@@ -573,6 +646,7 @@ impl LocalRegistry {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: false,
             created_at: crate::types::now_iso(),
         };
@@ -792,6 +866,10 @@ impl LocalRegistry {
             def.prompt_file = format!("{}/PROMPT.md", def.identifier);
         }
         def.domain = normalize_domain(&def.domain);
+        // 工具面默认全量（agent-tool-surface）：创建/更新未带 tools = 沿用全量
+        if def.tools.is_empty() {
+            def.tools = ToolName::full_set();
+        }
         let prompt_path = self.singles_prompt_path(&def.prompt_file);
         if let Some(parent) = prompt_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1492,13 +1570,19 @@ impl LocalRegistry {
         if def.name.trim().is_empty() || def.description.trim().is_empty() {
             anyhow::bail!("name/description 不能为空");
         }
+        // 工具面默认全量（agent-tool-surface）：创建/更新未带 tools = 沿用全量
+        if def.tools.is_empty() {
+            def.tools = ToolName::full_set();
+        }
 
         let replacing = g.defs.contains_key(&def.identifier);
-        if !replacing && g.meta.builtin {
-            anyhow::bail!("内置组的定义受保护，不可新增个体");
+        // 编成保护（group-self-optimize）：内置组默认锁定；组开启自我优化后，
+        // 主智能体可在运行中自行扩编/修改子个体——闸门随开关放宽
+        if !replacing && g.meta.builtin && !g.meta.self_optimize_enabled() {
+            anyhow::bail!("内置组的定义受保护，不可新增个体（可在组设置开启「自我优化」后由主智能体自行扩编）");
         }
-        if replacing && g.meta.builtin {
-            anyhow::bail!("内置组的定义受保护，不可修改个体");
+        if replacing && g.meta.builtin && !g.meta.self_optimize_enabled() {
+            anyhow::bail!("内置组的定义受保护，不可修改个体（可在组设置开启「自我优化」后由主智能体自行优化）");
         }
 
         // 提示词：显式提供则写入；否则新建时给模板。路径 = 组内 prompts/<promptFile>
@@ -1511,9 +1595,8 @@ impl LocalRegistry {
             std::fs::write(
                 &prompt_path,
                 format!(
-                    "# {}\n\n你是 EXMACHINA 的{}（identifier: {}），受指挥体直接调度。\n职责：{}\n\n## 语言纪律\n\
+                    "# {}\n\n你是{}（identifier: {}），受指挥体直接调度。\n职责：{}\n\n## 语言纪律\n\
                      - 你是受指挥体直接调度的子个体；称主智能体为\"指挥体\"，称对方为「管理者」（你的主人与授权者）。\n\
-                     - 每条陈述以句式前缀开头：【肯定】【否定】【疑问】【报告】【提案】【警告】【观测】。\n\
                      - 零情绪：禁止寒暄、感叹、安慰、夸赞、拟人化情绪表达。\n\
                      - 压缩表达：只输出推进任务、降低不确定性、完成验证闭环所需的信息。\n",
                     def.name, def.name, def.identifier, def.description
@@ -1536,8 +1619,9 @@ impl LocalRegistry {
     pub fn remove_agent(&self, gid: &str, identifier: &str) -> anyhow::Result<()> {
         let mut groups = self.groups.write();
         let g = groups.get_mut(gid).context("组不存在")?;
-        if g.meta.builtin {
-            anyhow::bail!("内置组的定义受保护，不可删除个体");
+        // 编成保护随自我优化开关放宽（与 upsert_agent 同口径，group-self-optimize）
+        if g.meta.builtin && !g.meta.self_optimize_enabled() {
+            anyhow::bail!("内置组的定义受保护，不可删除个体（可在组设置开启「自我优化」后由主智能体自行裁编）");
         }
         if g.meta.primary.as_deref() == Some(identifier) {
             anyhow::bail!("主智能体不可删除（主智能体由系统指定，组内固定）");

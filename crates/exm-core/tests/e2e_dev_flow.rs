@@ -11,7 +11,8 @@ use exm_core::config::ExmConfig;
 use exm_core::Core;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::{Arc};
 
 /// 脚本化 OpenAI 兼容端点：
 /// - 规划请求（system 含 OrchestratorPlan）→ 返回单节点计划（派给 coding-agent）
@@ -143,8 +144,9 @@ async fn 端到端_开发任务_从对话到文件落盘() {
                     pc.fetch_add(1, Ordering::SeqCst);
                     return (axum::http::StatusCode::OK, Json(plan_body()));
                 }
-                // 收束请求
-                if system.contains("收束") {
+                // 收束请求：user 消息带「收束请求」标记（组提示词已重构为简洁人格，
+                // system 不再含「收束」字样，按消息特征识别而非 system 特征）
+                if msgs_str.contains("收束请求") {
                     cc.fetch_add(1, Ordering::SeqCst);
                     return (axum::http::StatusCode::OK, Json(converge_body()));
                 }
@@ -163,7 +165,7 @@ async fn 端到端_开发任务_从对话到文件落盘() {
                             .iter()
                             .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                             .collect();
-                        *tas.lock().unwrap() = names;
+                        *tas.lock() = names;
                     }
                     uc.fetch_add(1, Ordering::SeqCst);
                     return (axum::http::StatusCode::OK, Json(tool_call_body()));
@@ -207,7 +209,7 @@ async fn 端到端_开发任务_从对话到文件落盘() {
     assert!(converge_calls.load(Ordering::SeqCst) >= 1, "应有收束请求");
 
     // 7) 断言：下发的工具面包含 edit（修复的编成白名单在真实链路生效）
-    let tools = tool_args_seen.lock().unwrap().clone();
+    let tools = tool_args_seen.lock().clone();
     assert!(
         tools.iter().any(|t| t == "edit"),
         "子个体工具面应含 edit（编成修复应在真实链路生效），实际: {tools:?}"

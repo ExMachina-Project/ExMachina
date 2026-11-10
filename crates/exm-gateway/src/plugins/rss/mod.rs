@@ -14,7 +14,8 @@ use exm_core::config::{
 use exm_core::Core;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 // ---------------------------------------------------------------- 监督循环（video 同模式）
@@ -58,7 +59,7 @@ fn reconcile(core: &Arc<Core>) {
         .filter(|c| c.enabled && is_rss_channel(&c.kind))
         .map(|c| (c.id.clone(), c))
         .collect();
-    let mut runners = runners().lock().unwrap();
+    let mut runners = runners().lock();
     // 回收：停用/删除/kind 变化的
     runners.retain(|id, r| {
         let keep = wanted

@@ -29,6 +29,23 @@ fn tool_feedback(name: &str, r: &crate::tools::ToolResult) -> String {
 /// 单智能体循环步数上限解析（三级覆盖）：
 /// 个体 maxSteps > 作用域档位偏好（Chat 档取全局半数作对话轮保护）> 全局默认。
 /// 全局 0 值视为无效回落 24（与 ToolGateway::chat_max_steps 同口径）。
+/// 工具面清单注入（防「能力幻觉」拒绝）：本轮实际生效的工具名逐个列出。
+/// 部署实测教训：工具 schema 虽随请求下发，模型不「看见」清单时会凭空
+/// 声明「本机无文件系统访问权限」并拒绝执行——显式清单让能力自述有据可依。
+fn tool_surface_note(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## 本轮可用工具（实际生效清单）\n\n以下是你在本轮**真实可以调用**的全部工具，需要什么就直接用，不要凭空声明自己没有某项能力：\n{}",
+        names
+            .iter()
+            .map(|n| format!("- {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 pub fn resolve_max_steps(agent_override: Option<usize>, scope: ToolScope, global: usize) -> usize {
     let global = if global == 0 { 24 } else { global };
     let scope_pref = match scope {
@@ -115,13 +132,12 @@ impl AgentRuntime {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(boundary);
         }
-        let order_json = serde_json::to_string_pretty(order)?;
-        let mut messages = vec![
-            ChatMessage::system(system_prompt),
-            ChatMessage::user(format!(
-                "【要求】以下是本节点的调度指令（DispatchOrder）。严格在边界内执行，最终只输出 SyncReport JSON。\n```json\n{order_json}\n```"
-            )),
-        ];
+        // 主动搜索纪律（proactive-search）：搜索就绪时教会模型「何时该主动搜」——
+        // 工具在表里但模型想不到用，是行为层缺口而非能力层
+        if scope.allows_tools() && self.tools.search_discipline_ready() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::autonomy::SEARCH_DISCIPLINE);
+        }
 
         let max_steps = order.constraints.max_steps.max(1);
         // 派发时限（指挥体按步数分档声明，timeout_ms = 步数 × 30s）：0 = 不限（旧调用方兼容）。
@@ -160,6 +176,19 @@ impl AgentRuntime {
             // 会话级注入工具（视频观看会话等按会话收窄的插件工具）
             specs.extend(self.tools.session_tool_specs(session_id));
         }
+        // 工具面清单注入（防「能力幻觉」拒绝）：与 chat_execute 同口径
+        if scope.allows_tools() && !specs.is_empty() {
+            let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&tool_surface_note(&names));
+        }
+        let order_json = serde_json::to_string_pretty(order)?;
+        let mut messages = vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(format!(
+                "【要求】以下是本节点的调度指令（DispatchOrder）。严格在边界内执行，最终只输出 SyncReport JSON。\n```json\n{order_json}\n```"
+            )),
+        ];
 
         for _step in 0..max_steps {
             // 停止检查点：会话被请求停止时终止本节点执行
@@ -355,10 +384,18 @@ impl AgentRuntime {
     {
         let agent_hint = Some(def.identifier.clone());
         let mut system_prompt = system_prompt;
+        // 单轮工具预算清零（agent-budget-audit）：每轮用户输入一个新预算周期
+        self.tools.reset_turn_tool_budget(session_id);
         let boundary = scope.system_note();
         if !boundary.is_empty() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(boundary);
+        }
+        // 主动搜索纪律（proactive-search）：搜索就绪时教会模型「何时该主动搜」——
+        // 工具在表里但模型想不到用，是行为层缺口而非能力层
+        if scope.allows_tools() && self.tools.search_discipline_ready() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::autonomy::SEARCH_DISCIPLINE);
         }
         // 任务清单注入（spec: agent-todo）：清单非空时每轮带上进度全景（✅/🔄/⬜）
         if let Some(todo_block) = crate::todo::render(session_id) {
@@ -371,8 +408,6 @@ impl AgentRuntime {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&spawn_note);
         }
-        let mut messages = vec![ChatMessage::system(system_prompt)];
-        messages.extend(history);
 
         // 步数上限三级覆盖：个体 maxSteps > 作用域档位偏好 > 全局 security.chatMaxSteps
         // （Chat 档无工具循环，对话轮保护取半；Tools/Computer 档用全局默认）
@@ -416,6 +451,16 @@ impl AgentRuntime {
             // 会话级注入工具（视频观看会话等按会话收窄的插件工具）
             specs.extend(self.tools.session_tool_specs(session_id));
         }
+        // 工具面清单注入（防「能力幻觉」拒绝）：把本轮实际生效的工具名列进系统提示。
+        // 部署实测：工具 schema 已在请求里，但模型不「看见」清单时会臆断
+        // 「本机无文件系统访问权限」并拒绝执行——显式清单让能力自述有据可依。
+        if scope.allows_tools() && !specs.is_empty() {
+            let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&tool_surface_note(&names));
+        }
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+        messages.extend(history);
 
         for _step in 0..max_steps {
             // 停止检查点:会话被请求停止时终止本循环
@@ -832,6 +877,7 @@ mod timeout_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: true,
             created_at: crate::types::now_iso(),
         };
@@ -970,6 +1016,7 @@ mod timeout_tests {
 #[cfg(test)]
 mod tool_loop_tests {
     use super::*;
+    use parking_lot::Mutex;
     use crate::config::SecurityConfig;
     use crate::provider::{ChatResponse, FailoverState, ToolCall};
     use crate::types::{DispatchBoundary, DispatchConstraints, DispatchInput, SyncStatus};
@@ -979,14 +1026,14 @@ mod tool_loop_tests {
     struct ScriptedProvider {
         step: AtomicUsize,
         /// 每步收到的消息列表快照（role 序列），供回灌断言
-        seen_roles: std::sync::Mutex<Vec<Vec<String>>>,
+        seen_roles: Mutex<Vec<Vec<String>>>,
     }
 
     impl ScriptedProvider {
         fn new() -> Self {
             ScriptedProvider {
                 step: AtomicUsize::new(0),
-                seen_roles: std::sync::Mutex::new(Vec::new()),
+                seen_roles: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1016,7 +1063,6 @@ mod tool_loop_tests {
         ) -> anyhow::Result<ChatResponse> {
             self.seen_roles
                 .lock()
-                .unwrap()
                 .push(req.messages.iter().map(|m| m.role.clone()).collect());
             let step = self.step.fetch_add(1, Ordering::SeqCst);
             let s = match step {
@@ -1087,6 +1133,7 @@ mod tool_loop_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: true,
             created_at: crate::types::now_iso(),
         };
@@ -1184,7 +1231,7 @@ mod tool_loop_tests {
         );
 
         // 工具结果以 role=tool 回灌，assistant 的 tool_calls 有被记录
-        let seen = provider.seen_roles.lock().unwrap();
+        let seen = provider.seen_roles.lock();
         assert!(seen.len() >= 4, "应有多轮交互，实际 {} 轮", seen.len());
         let last = seen.last().unwrap();
         assert!(
@@ -1364,6 +1411,7 @@ mod soft_landing_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin: true,
             created_at: crate::types::now_iso(),
         };
@@ -1437,6 +1485,162 @@ mod soft_landing_tests {
             provider.calls.load(Ordering::SeqCst) >= 2,
             "工具调用至少走了预算步数"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// 主动搜索纪律注入（proactive-search）：chat_execute 系统提示携带行为准则
+#[cfg(test)]
+mod search_discipline_tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use crate::config::SearchConfig;
+    use crate::provider::{ChatRequest, ChatResponse, StreamDelta};
+    use crate::types::AgentDefinition;
+    use std::sync::Arc;
+
+    /// 回声替身：记录看到的系统提示，直接产出终文本
+    struct PromptProbeProvider {
+        seen: Mutex<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for PromptProbeProvider {
+        fn name(&self) -> &'static str {
+            "prompt-probe"
+        }
+        async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            if let Some(m) = req.messages.first() {
+                *self.seen.lock() = m.content.clone();
+            }
+            Ok(ChatResponse {
+                content: "收到".into(),
+                reasoning: String::new(),
+                prompt_tokens: 10,
+                completion_tokens: 10,
+                tool_calls: Vec::new(),
+            })
+        }
+        async fn embed(&self, _model: &str, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0f32; 8]).collect())
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            Ok(ChatResponse::default())
+        }
+    }
+
+    fn probe_rig(
+        provider: Arc<PromptProbeProvider>,
+        search: SearchConfig,
+    ) -> (AgentRuntime, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("exm-rt-sd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let reg_dir = base.join("entities");
+        std::fs::create_dir_all(reg_dir.join("prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            capabilities: None,
+            self_optimize: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(
+            reg_dir.join("group.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        let prompts_dir = reg_dir.join("groups").join("exmachina").join("prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(prompts_dir.join("watch-agent.md"), "# 观众代理\n你是观众代理。").unwrap();
+        let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
+        let store = Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let tools = Arc::new(
+            crate::tools::ToolGateway::new(&base, store, registry.clone(), events, Default::default())
+                .with_search(search),
+        );
+        let rt = AgentRuntime::new(registry, provider, tools, "test-model");
+        (rt, base)
+    }
+
+    fn def() -> AgentDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "观众代理", "identifier": "watch-agent", "domain": "公共",
+            "tier": "unit", "description": "观看演练", "capabilities": ["测试"],
+            "promptFile": "watch-agent.md"
+        }))
+        .unwrap()
+    }
+
+    fn tavily(proactive: bool) -> SearchConfig {
+        SearchConfig {
+            provider: "tavily".into(),
+            endpoint: String::new(),
+            api_key: "k".into(),
+            max_results: 5,
+            proactive,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 搜索就绪_系统提示含纪律() {
+        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
+        let (rt, base) = probe_rig(probe.clone(), tavily(true));
+        let chain = crate::provider::ModelChain {
+            candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
+            failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
+        };
+        let _ = rt
+            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd1", "t", chain, false, ToolScope::Tools, |_d| {})
+            .await
+            .unwrap();
+        let seen = probe.seen.lock().clone();
+        assert!(seen.contains("主动搜索纪律"), "就绪+开启应注入: {seen}");
+        assert!(seen.contains("时效性"), "纪律内容含行为触发条件");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 开关关闭_零注入() {
+        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
+        let (rt, base) = probe_rig(probe.clone(), tavily(false));
+        let chain = crate::provider::ModelChain {
+            candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
+            failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
+        };
+        let _ = rt
+            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd2", "t", chain, false, ToolScope::Tools, |_d| {})
+            .await
+            .unwrap();
+        let seen = probe.seen.lock().clone();
+        assert!(!seen.contains("主动搜索纪律"), "关闭后不应注入: {seen}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 仅聊天档_零注入() {
+        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
+        let (rt, base) = probe_rig(probe.clone(), tavily(true));
+        let chain = crate::provider::ModelChain {
+            candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
+            failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
+        };
+        // Chat 档无工具面：纪律无意义（web_search 不可达），不注入
+        let _ = rt
+            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd3", "t", chain, false, ToolScope::Chat, |_d| {})
+            .await
+            .unwrap();
+        let seen = probe.seen.lock().clone();
+        assert!(!seen.contains("主动搜索纪律"), "Chat 档不应注入: {seen}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Button, Segmented, Space, Spin, Table, Tag, message } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
 import { ArrowRightOutlined, CheckOutlined, CloseOutlined, ReloadOutlined } from "@ant-design/icons";
-import { api, type ApprovalRequest } from "../api";
+import { api, type ApprovalRequest, isDestructiveCommand } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
@@ -28,11 +28,16 @@ export function ApprovalsView(): React.ReactElement {
 
   useEffect(() => {
     void load();
+    // 审批事件驱动刷新：approval.required / 裁决动作都会广播 exm:approvals-refresh
+    // （store 侧发），列表页借同链路自刷新（WS 在线时免手动刷新）
+    const h = () => void load();
+    window.addEventListener("exm:approvals-refresh", h);
+    return () => window.removeEventListener("exm:approvals-refresh", h);
   }, [load]);
 
-  const decide = async (id: string, approve: boolean) => {
+  const decide = async (id: string, approve: boolean, scope: "once" | "session" | "allowlist" = "once") => {
     try {
-      const r = await api.decideApproval(id, approve);
+      const r = await api.decideApproval(id, approve, scope);
       if (r.status === "executed") {
         message.success(t("approvals.approvedExecuted", { id }));
       } else if (r.status === "failed") {
@@ -97,7 +102,7 @@ export function ApprovalsView(): React.ReactElement {
             {
               title: t("approvals.colCommand"),
               render: (_, r) => (
-                <Space direction="vertical" size={0} className="full-width">
+                <Space orientation="vertical" size={0} className="full-width">
                   {r.command.startsWith("[root] ") && (
                     <Tag color="error" style={{ marginBottom: 4 }}>
                       🚨 {t("approval.rootElevation")}
@@ -159,7 +164,7 @@ export function ApprovalsView(): React.ReactElement {
             },
             {
               title: t("approvals.colOps"),
-              width: 160,
+              width: 240,
               // 窄屏固定右侧：批准/拒绝是审批页核心操作，恒可达（不依赖横滚）
               fixed: narrow ? "right" : undefined,
               render: (_, r) =>
@@ -168,6 +173,18 @@ export function ApprovalsView(): React.ReactElement {
                     <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => void decide(r.id, true)}>
                       {t("approvals.approve")}
                     </Button>
+                    {/* 三档放行（approval-ergonomics）：升档按钮仅普通命令单可见——
+                        [root] 提权单与破坏性命令后端红线降级 once,UI 直接隐藏避免误导 */}
+                    {!r.command.startsWith("[") && !isDestructiveCommand(r.command) && (
+                      <>
+                        <Button size="small" onClick={() => void decide(r.id, true, "session")}>
+                          {t("approvals.session")}
+                        </Button>
+                        <Button size="small" onClick={() => void decide(r.id, true, "allowlist")}>
+                          {t("approvals.allowlist")}
+                        </Button>
+                      </>
+                    )}
                     <Button size="small" danger icon={<CloseOutlined />} onClick={() => void decide(r.id, false)}>
                       {t("approvals.reject")}
                     </Button>

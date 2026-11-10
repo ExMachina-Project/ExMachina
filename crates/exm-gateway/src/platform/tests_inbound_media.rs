@@ -16,7 +16,8 @@ mod inbound_media_tests {
     async fn 入站媒体_注入与暂存() {
         let core = test_core();
         let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
-        let dir = std::env::temp_dir().join(format!("exm-inb-f-{}", uuid::Uuid::new_v4()));
+        // 媒体落工作区内（save_inbound_media 实际行为）：附件元数据相对化才有意义
+        let dir = core.config().workspace_root.join("media");
         std::fs::create_dir_all(&dir).unwrap();
         let img = dir.join("shot.png");
         std::fs::write(&img, &png).unwrap();
@@ -38,6 +39,14 @@ mod inbound_media_tests {
         let staged = exm_core::image_stash::take("ses-inb");
         assert_eq!(staged.len(), 1, "应有一条暂存图片");
         assert!(staged[0].starts_with("data:image/png;base64,"));
+        // 附件元数据已登记进入站暂存（im-inbound-attach：随 user 消息落库，
+        // WebUI 聊天流据此渲染缩略图）；路径应为工作区相对路径
+        let rels = exm_core::inbox_stash::take("ses-inb");
+        assert_eq!(rels.len(), 2, "图片+文件都应登记");
+        assert_eq!(rels[0].kind, "image");
+        assert!(!rels[0].path.starts_with('/'), "应为工作区相对路径：{}", rels[0].path);
+        assert!(rels[0].path.contains("shot.png"), "{}", rels[0].path);
+        assert_eq!(rels[1].name, "report.txt");
     }
 
     /// 失败回退：文件缺失 → 注入失败说明而非 panic/丢弃

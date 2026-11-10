@@ -4,7 +4,7 @@
 use super::*;
 /// 平台能力路由（挂到 /api 下）
 pub fn routes() -> Router<AppState> {
-    use axum::routing::{get, post, put};
+    use axum::routing::{get, post};
     Router::new()
         .route("/api/skills", get(list_skills).post(create_skill))
         .route("/api/skills/:id", axum::routing::delete(delete_skill))
@@ -42,10 +42,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/channels/status", get(channel_status))
         .route("/api/channels/flows", get(list_channel_flows))
         .route("/api/channels/flows/:id/read", post(read_channel_flow))
-        .route("/api/channels/flows/:id/sessions", get(list_flow_sessions))
-        .route("/api/channels/flows/:id/active", put(set_flow_active_session))
         .route("/api/channels/bili-qr", post(bili_qr_start))
         .route("/api/channels/bili-qr/:key", get(bili_qr_poll))
+        .route("/api/channels/qqbot-bind", post(qqbot_bind_start))
+        .route("/api/channels/qqbot-bind/:task_id", get(qqbot_bind_poll))
         .route("/api/channels", get(list_channels).post(create_channel))
         .route(
             "/api/channels/:id",
