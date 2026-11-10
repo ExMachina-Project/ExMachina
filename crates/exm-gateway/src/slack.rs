@@ -345,6 +345,26 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         });
                         continue;
                     }
+                    // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖任务之前
+                    // 处理，避免原轮次审批等待中新建回帖任务造成重复投递与答复丢失。
+                    if crate::platform::is_quick_directive(&text) {
+                        let sid = core.flow_active_session(&ch.id, &channel);
+                        let reply = crate::platform::quick_directive_reply(
+                            &core,
+                            sid.as_deref(),
+                            Some(&external_id),
+                            &text,
+                        )
+                        .await
+                        .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
+                        let client2 = client.clone();
+                        let token2 = bot_token.clone();
+                        let chan = channel.clone();
+                        tokio::spawn(async move {
+                            send_message(&client2, &token2, &chan, &reply).await
+                        });
+                        continue;
+                    }
                     let core = core.clone();
                     let ch2 = ch.clone();
                     let client2 = client.clone();

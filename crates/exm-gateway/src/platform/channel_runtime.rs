@@ -767,6 +767,10 @@ async fn flow_command(
 /// 沉默约定（IM silence）：模型按旁听纪律输出 `<沉默/>`（可能独立成行或与
 /// 少量文字混行）= 本轮无话可说——投递层整轮丢弃（返回空串，由调用方
 /// 决定不发送 / 不记未读），群聊里不再出现「不参与群聊闲聊」这类废话。
+///
+/// 不在此处截断（防截断丢内容）：分段职责归 `split_reply`（按段落/代码块
+/// 边界切），段数封顶归回帖循环。这里仅设单轮总预算天花板（一段上限 ×
+/// 24 段）防异常超长（如工具输出裸拼）打爆通道侧。
 pub(crate) fn flatten_statements(payload: &serde_json::Value, max_chars: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(list) = payload.get("statements").and_then(|v| v.as_array()) {
@@ -785,8 +789,14 @@ pub(crate) fn flatten_statements(payload: &serde_json::Value, max_chars: usize) 
     if is_silence(&text) {
         return String::new();
     }
-    text.chars().take(max_chars).collect()
+    let budget = max_chars.saturating_mul(MAX_REPLY_SEGMENTS.max(24));
+    text.chars().take(budget).collect()
 }
+
+/// 单轮回帖段数默认封顶（IM 防轰炸）：超出部分截断并注明去处。
+/// 不再像旧版一刀切 3 段——分段前先经完整预算（见 flatten_statements），
+/// 常规长文（数段）可完整送达，只有异常超长才触顶。
+pub(crate) const MAX_REPLY_SEGMENTS: usize = 24;
 
 /// 沉默标记判定：语句里出现 `<沉默/>`（允许全角变体与空白）即整轮沉默。
 /// 保守口径——只在标记明确出现时丢轮，避免误杀正常回复。
@@ -1135,129 +1145,19 @@ impl ChannelRun {
             prev_single: self.prev_single.clone(),
             switched: self.switched,
         };
-        // 计划快捷审批（spec plan-mode 跨端审批）：plan:yes / plan:no 直达裁决，
-        // 不进模型轮次；无待审清单时提示当前状态
-        let trimmed = text.trim();
-        if trimmed == "plan:yes" || trimmed == "plan:no" {
-            let approve = trimmed == "plan:yes";
-            let items = self.core.plan_list(&self.session_id);
-            if items.is_empty() {
-                self.core.emit_run_error(
-                    &self.session_id,
-                    "【报告】当前无待审批计划（清单为空或已处理）。",
-                );
-                return;
-            }
-            if approve {
-                match self.core.plan_approve(&self.session_id).await {
-                    Ok(rs) => {
-                        let ok_n = rs.iter().filter(|(_, r)| r.ok).count();
-                        let fail_n = rs.len() - ok_n;
-                        self.core.emit_run_error(
-                            &self.session_id,
-                            &format!("【报告】计划已批准并回放：{ok_n} 条成功，{fail_n} 条失败。"),
-                        );
-                    }
-                    Err(e) => {
-                        self.core.emit_run_error(
-                            &self.session_id,
-                            &format!("【警告】计划回放失败：{e}"),
-                        );
-                    }
-                }
-            } else {
-                self.core.plan_reject(&self.session_id);
-                self.core.emit_run_error(
-                    &self.session_id,
-                    "【报告】计划已拒绝（清单保留，可继续修改后再次生成）。",
-                );
-            }
-            return;
-        }
-        // 审批快捷裁决（approval-ergonomics 跨端审批）：ok:<单号> / no:<单号>
-        // 直达裁决,不进模型轮次。单号支持前缀匹配（完整 8 位或唯一前缀）。
-        // 权限口径与身份管控 ③ 段一致：审批单 origin 用户本人,或任一通道 admins
-        // 命中（判权跟人走,跨通道）。通道裁决只走 once 档（设计决策:档位在文本
-        // 界面无法可靠表达,升档去控制台）。
-        if let Some(decision) = parse_approval_directive(trimmed) {
-            let (approve, id_input) = decision;
-            // 前缀匹配：pending 单中 id 以输入开头的集合;唯一命中裁决,多命中报歧义
-            let pendings = self
-                .core
-                .approval_list(Some("pending"), 500)
-                .unwrap_or_default();
-            let hits: Vec<exm_core::types::ApprovalRequest> = pendings
-                .into_iter()
-                .filter(|a| a.id.starts_with(&id_input))
-                .collect();
-            let ap = match hits.as_slice() {
-                [one] => one.clone(),
-                [] => {
-                    self.core.emit_run_error(
-                        &self.session_id,
-                        &format!("【报告】审批单 {id_input} 不存在或已处理。"),
-                    );
-                    return;
-                }
-                _ => {
-                    self.core.emit_run_error(
-                        &self.session_id,
-                        &format!(
-                            "【报告】单号前缀 {} 命中 {} 张待审单（{}），请补全单号。",
-                            id_input,
-                            hits.len(),
-                            hits.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(" / ")
-                        ),
-                    );
-                    return;
-                }
-            };
-            let id = ap.id.clone();
-            // 权限：发送者 = 审批单 origin 用户本人,或跨通道 admins 命中
-            let caller = self.external_id.as_deref().unwrap_or("");
-            let is_origin_user = ap
-                .origin_user
-                .as_deref()
-                .is_some_and(|u| !u.is_empty() && caller == u);
-            let is_admin = !caller.is_empty()
-                && super::channels::load_channels(&self.core)
-                    .iter()
-                    .any(|c| c.admins.iter().any(|a| a.trim() == caller));
-            if !is_origin_user && !is_admin {
-                self.core.emit_run_error(
-                    &self.session_id,
-                    &format!("【报告】审批裁决被拒绝：发送者无权裁决审批单 {id}（仅发起用户或管理员）。"),
-                );
-                return;
-            }
-            match self
-                .core
-                .approval_decide_scoped(
-                    &id,
-                    if approve {
-                        exm_core::types::ApprovalScope::Once { approve: true }
-                    } else {
-                        exm_core::types::ApprovalScope::Once { approve: false }
-                    },
-                )
-                .await
-            {
-                Ok(r) => {
-                    let head = if approve { "已批准并执行" } else { "已拒绝" };
-                    let detail = r.result.as_deref().unwrap_or("");
-                    let note: String = detail.chars().take(300).collect();
-                    self.core.emit_run_error(
-                        &self.session_id,
-                        &format!("【报告】审批单 {id} {head}。{note}"),
-                    );
-                }
-                Err(e) => {
-                    self.core.emit_run_error(
-                        &self.session_id,
-                        &format!("【警告】审批单 {id} 裁决失败：{e}"),
-                    );
-                }
-            }
+        // 计划/审批快捷指令（plan-mode / approval-ergonomics）：plan:yes / plan:no /
+        // ok:<单号> / no:<单号> 直达裁决，不进模型轮次。
+        // 适配器已在 begin 前调用 quick_directive_reply 直发回帖；这里保留同一入口
+        // 兜底（非适配器调用方 / 旧路径），行为与直发一致。
+        if let Some(reply) = quick_directive_reply(
+            &self.core,
+            Some(&self.session_id),
+            self.external_id.as_deref(),
+            text,
+        )
+        .await
+        {
+            self.core.emit_run_error(&self.session_id, &reply);
             return;
         }
         // 周期 token 配额（外部来源会话）：耗尽即拒绝新轮次并经 run.error 回帖提示；
@@ -1325,6 +1225,109 @@ pub(crate) fn parse_approval_directive(text: &str) -> Option<(bool, String)> {
     Some((approve, id.to_string()))
 }
 
+/// 是否快捷裁决指令（plan:yes / plan:no / ok:<单号> / no:<单号>）。
+/// 适配器用它在建会话/回帖任务前分流，避免为裁决消息启动模型轮次。
+pub(crate) fn is_quick_directive(text: &str) -> bool {
+    let t = text.trim();
+    t == "plan:yes" || t == "plan:no" || parse_approval_directive(t).is_some()
+}
+
+/// 快捷指令直裁（plan-mode / approval-ergonomics 跨端审批）：
+/// `plan:yes` / `plan:no` / `ok:<单号>` / `no:<单号>` 直达裁决，不进模型轮次。
+/// 返回 Some(回帖文本) = 已处理；None = 非指令。
+///
+/// 适配器应在 `ChannelRun::begin` / `spawn_reply` 之前调用：同一会话可能仍有
+/// 原轮次在跑（审批等待中），再建一个回帖任务会与原任务争抢同一事件流——
+/// 裁决回帖被重复投递，且原任务提前退出会吞掉原轮最终答复。
+pub(crate) async fn quick_directive_reply(
+    core: &std::sync::Arc<exm_core::Core>,
+    session_id: Option<&str>,
+    external_id: Option<&str>,
+    text: &str,
+) -> Option<String> {
+    let trimmed = text.trim();
+    // 计划快捷审批（spec plan-mode 跨端审批）：无待审清单时提示当前状态
+    if trimmed == "plan:yes" || trimmed == "plan:no" {
+        let approve = trimmed == "plan:yes";
+        let Some(session_id) = session_id else {
+            return Some("【报告】当前无待审批计划（清单为空或已处理）。".into());
+        };
+        if core.plan_list(session_id).is_empty() {
+            return Some("【报告】当前无待审批计划（清单为空或已处理）。".into());
+        }
+        if approve {
+            return Some(match core.plan_approve(session_id).await {
+                Ok(rs) => {
+                    let ok_n = rs.iter().filter(|(_, r)| r.ok).count();
+                    let fail_n = rs.len() - ok_n;
+                    format!("【报告】计划已批准并回放：{ok_n} 条成功，{fail_n} 条失败。")
+                }
+                Err(e) => format!("【警告】计划回放失败：{e}"),
+            });
+        }
+        core.plan_reject(session_id);
+        return Some("【报告】计划已拒绝（清单保留，可继续修改后再次生成）。".into());
+    }
+    // 审批快捷裁决（approval-ergonomics 跨端审批）：单号支持前缀匹配
+    //（完整 8 位或唯一前缀）。权限口径：审批单 origin 用户本人，或任一通道
+    // admins 命中（判权跟人走，跨通道）。通道裁决只走 once 档（档位在文本
+    // 界面无法可靠表达，升档去控制台）。
+    let (approve, id_input) = parse_approval_directive(trimmed)?;
+    let pendings = core.approval_list(Some("pending"), 500).unwrap_or_default();
+    let hits: Vec<exm_core::types::ApprovalRequest> = pendings
+        .into_iter()
+        .filter(|a| a.id.starts_with(&id_input))
+        .collect();
+    let ap = match hits.as_slice() {
+        [one] => one.clone(),
+        [] => return Some(format!("【报告】审批单 {id_input} 不存在或已处理。")),
+        _ => {
+            return Some(format!(
+                "【报告】单号前缀 {} 命中 {} 张待审单（{}），请补全单号。",
+                id_input,
+                hits.len(),
+                hits.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(" / ")
+            ))
+        }
+    };
+    let id = ap.id.clone();
+    let caller = external_id.unwrap_or("");
+    let is_origin_user = ap
+        .origin_user
+        .as_deref()
+        .is_some_and(|u| !u.is_empty() && caller == u);
+    let is_admin = !caller.is_empty()
+        && super::channels::load_channels(core)
+            .iter()
+            .any(|c| c.admins.iter().any(|a| a.trim() == caller));
+    if !is_origin_user && !is_admin {
+        return Some(format!(
+            "【报告】审批裁决被拒绝：发送者无权裁决审批单 {id}（仅发起用户或管理员）。"
+        ));
+    }
+    Some(
+        match core
+            .approval_decide_scoped(
+                &id,
+                if approve {
+                    exm_core::types::ApprovalScope::Once { approve: true }
+                } else {
+                    exm_core::types::ApprovalScope::Once { approve: false }
+                },
+            )
+            .await
+        {
+            Ok(r) => {
+                let head = if approve { "已批准并执行" } else { "已拒绝" };
+                let detail = r.result.as_deref().unwrap_or("");
+                let note: String = detail.chars().take(300).collect();
+                format!("【报告】审批单 {id} {head}。{note}")
+            }
+            Err(e) => format!("【警告】审批单 {id} 裁决失败：{e}"),
+        },
+    )
+}
+
 /// 还原到之前的交互上下文（组 + 单智能体快照）
 pub(crate) fn restore_context(
     core: &exm_core::Core,
@@ -1365,12 +1368,45 @@ pub(crate) struct MediaItem {
     pub caption: String,
 }
 
+/// 审批推送的富消息钩子载荷（approval-ergonomics 平台交互）：文本摘要 + 审批单号。
+/// 平台适配器可据此附加原生交互控件（如 QQ 官方机器人按钮）；钩子返回 false
+/// 表示富消息发送失败，调用方回落普通文本（审批单不丢）。
+pub(crate) struct ApprovalPrompt {
+    pub approval_id: String,
+    pub text: String,
+}
+
+/// 审批富消息发送钩子：返回是否已成功送达（false = 回落普通文本）。
+pub(crate) type ApprovalHook = Box<
+    dyn Fn(ApprovalPrompt) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        + Send,
+>;
+
 pub(crate) fn spawn_reply<F, Fut, M, MFut>(
     run: &ChannelRun,
     rx: tokio::sync::broadcast::Receiver<CoreEvent>,
     max_chars: usize,
     send: F,
     send_media: M,
+) -> tokio::task::JoinHandle<()>
+where
+    F: Fn(String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+    M: Fn(MediaItem) -> MFut + Send + 'static,
+    MFut: std::future::Future<Output = bool> + Send,
+{
+    spawn_reply_with_approval(run, rx, max_chars, send, send_media, None)
+}
+
+/// `spawn_reply` 的审批富消息变体：审批事件优先交给 `approval_send` 钩子
+/// （平台原生控件），失败再走普通文本分段。其余事件行为完全一致。
+pub(crate) fn spawn_reply_with_approval<F, Fut, M, MFut>(
+    run: &ChannelRun,
+    rx: tokio::sync::broadcast::Receiver<CoreEvent>,
+    max_chars: usize,
+    send: F,
+    send_media: M,
+    approval_send: Option<ApprovalHook>,
 ) -> tokio::task::JoinHandle<()>
 where
     F: Fn(String) -> Fut + Send + 'static,
@@ -1442,13 +1478,31 @@ where
                 if let Some((ch_id, chat_key)) = run.flow.as_ref() {
                     run.core.bump_flow_unread(ch_id, chat_key);
                 }
+                // 审批事件优先走平台富消息（approval-ergonomics 平台交互）：
+                // 如 QQ 官方机器人按钮，点击即产生 ok:/no: 裁决指令；失败回落文本。
+                if evt.kind == "approval.required" {
+                    if let (Some(hook), Some(id)) = (
+                        approval_send.as_ref(),
+                        evt.payload.get("approvalId").and_then(|v| v.as_str()),
+                    ) {
+                        let prompt = ApprovalPrompt {
+                            approval_id: id.to_string(),
+                            text: text.clone(),
+                        };
+                        if hook(prompt).await {
+                            continue;
+                        }
+                    }
+                }
                 // 长回复分段推送（组 6.6）：按平台上限逐段送达，顺序保持。
-                // 段数封顶（IM 防轰炸）：单轮最多 3 段，超出截断并注明——
-                // 需要完整长文的场景（文档/代码交付）应走文件产物而非刷屏
+                // 段数封顶（IM 防轰炸）：异常超长触顶时截断并注明去处——
+                // 需要完整长文的场景（文档/代码交付）应走文件产物而非刷屏。
+                // 官方机器人被动回复每条入站消息限 ~5 次（群 5 次/5 分钟），
+                // 审批/计划推送还共享同一额度——qqbot 单独收紧防后段静默失败。
                 let segments = split_reply(&text, max_chars);
                 let total = segments.len();
-                const MAX_SEGMENTS: usize = 3;
-                if total <= MAX_SEGMENTS {
+                let max_segments = if run.kind == "qqbot" { 4 } else { MAX_REPLY_SEGMENTS };
+                if total <= max_segments {
                     for (i, seg) in segments.into_iter().enumerate() {
                         // 产物注记并入最后一段（文本主体保持整洁）
                         if i + 1 == total && !media_notes.is_empty() {
@@ -1458,8 +1512,8 @@ where
                         }
                     }
                 } else {
-                    let capped = total - MAX_SEGMENTS;
-                    for seg in segments.into_iter().take(MAX_SEGMENTS - 1) {
+                    let capped = total - max_segments;
+                    for seg in segments.into_iter().take(max_segments - 1) {
                         send(seg).await;
                     }
                     let mut note = media_notes.join("\n");
@@ -1469,7 +1523,11 @@ where
                     ))
                     .await;
                 }
-                break;
+                // 只有收束事件才结束回帖循环：审批/计划/预算属于本轮中间提示，
+                // 推送后继续等待 run.finished（否则审批后的最终答复永远送不出去）。
+                if matches!(evt.kind.as_str(), "run.finished" | "run.error") {
+                    break;
+                }
             }
         }
     })
