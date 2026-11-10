@@ -19,7 +19,7 @@ import { StatementList } from "../components/Statements";
 import { useIsNarrow } from "../useIsNarrow";
 import { createPortal } from "react-dom";
 import { useSubbarSlot } from "../components/Subbar";
-import { isAutoSessionTitle } from "../session";
+import { isAutoSessionTitle, isDispatchChildTitle } from "../session";
 
 export function TasksView(): React.ReactElement {
   const t = useT();
@@ -50,11 +50,16 @@ export function TasksView(): React.ReactElement {
   const load = useCallback(async () => {
     try {
       const all = await api.listAllSessions();
-      setSessions(all.filter((s) => !s.archivedAt && isAutoSessionTitle(s.title)));
+      // 任务页 = 系统自动会话（cron / 心跳巡检）+ 派发子会话（sub:，编排节点运行台账）
+      setSessions(
+        all.filter((s) => !s.archivedAt && (isAutoSessionTitle(s.title) || isDispatchChildTitle(s.title))),
+      );
       // 跨页跳转落地：全局会话是任务会话且尚未选中 → 直接选中（右侧立即呈现）
       const cur = useExm.getState().sessionId;
       if (!cur) return;
-      const hit = all.find((s) => s.id === cur && !s.archivedAt && isAutoSessionTitle(s.title));
+      const hit = all.find(
+        (s) => s.id === cur && !s.archivedAt && (isAutoSessionTitle(s.title) || isDispatchChildTitle(s.title)),
+      );
       setSelected((prev) => prev ?? hit ?? null);
     } catch {
       // 网关不可用：空态

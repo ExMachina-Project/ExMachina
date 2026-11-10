@@ -30,6 +30,7 @@ import { useSubbarSlot } from "../components/Subbar";
 /** 平台短标（通道 type → 展示名），与 FlowRailSection 同口径 */
 const PLATFORM_LABEL: Record<string, string> = {
   napcat: "QQ",
+  snowluma: "QQ",
   qqbot: "QQ 机器人",
   telegram: "Telegram",
   discord: "Discord",
