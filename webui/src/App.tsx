@@ -23,12 +23,11 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { api } from "./api";
-import { isAutoSessionTitle } from "./session";
+import { isTaskSideTitle } from "./session";
 import { SubbarSlotContext } from "./components/Subbar";
 import { useExm } from "./store";
 import { useT, type TKey } from "./i18n/core";
 import { ACCENTS, accentColor, THEMES, useTheme, type ThemeKey } from "./theme";
-import { AsciiDivider } from "./components/Ascii";
 import { CharStream } from "./components/CharStream";
 import { CommandPalette } from "./components/CommandPalette";
 import { DataStream } from "./components/DataStream";
@@ -190,8 +189,8 @@ export default function App(): React.ReactElement {
     }
   };
   // 二级侧边栏（上下文）：当前 view 有页面侧栏内容才提供入口
-  const ctxKind = view === "chat" ? "chat" : view === "flows" ? "flows" : view === "tasks" ? "tasks" : null;
-  const ctxTitleKey = ctxKind === "chat" ? "ctx.chat" : ctxKind === "flows" ? "ctx.flows" : "ctx.tasks";
+  const ctxKind = view === "chat" ? "chat" : view === "flows" ? "flows" : view === "tasks" ? "tasks" : view === "settings" ? "settings" : null;
+  const ctxTitleKey = ctxKind === "chat" ? "ctx.chat" : ctxKind === "flows" ? "ctx.flows" : ctxKind === "settings" ? "nav.settings" : "ctx.tasks";
   /** 当前页在 NAV_ITEMS 中的条目（页面手风琴行尾显示当前页名） */
   const currentNav = NAV_ITEMS.find((it) => it.key === view) ?? NAV_ITEMS[0];
   const navRequest = useExm((st) => st.navRequest);
@@ -207,7 +206,7 @@ export default function App(): React.ReactElement {
         .then((s) => {
           const dest = s.title.startsWith("channel:")
             ? "flows"
-            : isAutoSessionTitle(s.title)
+            : isTaskSideTitle(s.title)
               ? "tasks"
               : "chat";
           setView(dest as ViewKey);
@@ -267,39 +266,28 @@ export default function App(): React.ReactElement {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [view]);
-  /** 顶部手风琴①：页面导航菜单（与②互斥，展开时占满侧栏剩余高度）。
-   *  不变式：①②至少展开一个——默认展开①；①仅在②已展开时才允许收起。 */
-  const [navMenuOpen, setNavMenuOpen] = useState(true);
-  /** 顶部入口②：二级侧边栏——当前页自己的侧栏内容（与①互斥） */
-  const [subbarOpen, setSubbarOpen] = useState(false);
+  /** 页面导航：全量平铺（2026-11 三次调整：手风琴展开收起被指多余，直接平铺）。
+   *  二级侧边栏已彻底迁至右栏常驻，与左栏无关。 */
+  const navMenuOpen = true;
   /** 二级侧边栏插槽节点（页面侧栏 portal 目标） */
   const [subbarSlot, setSubbarSlot] = useState<HTMLElement | null>(null);
-  /** Esc 收起时的最新开关快照（监听器内读，避免闭包旧值） */
-  const subbarOpenRef = useRef(subbarOpen);
-  subbarOpenRef.current = subbarOpen;
-  /** 底部主题手风琴（预设 + 强调色合并入口）：独立开关，不影响顶部两项 */
+  /** 底部主题手风琴（预设 + 强调色合并入口）：独立开关 */
   const [themeOpen, setThemeOpen] = useState(false);
   /** 移动端侧栏抽屉（≤860px 时侧栏覆盖呈现） */
   const [navOpen, setNavOpen] = useState(false);
   // Esc 关闭展开中的面板（输入框聚焦时除外——不干扰会话搜索等本地输入）。
-  // 不变式「①②至少展开一个」：②随时可收（①兜底）；①仅在②已展开时才随之收起。
+  // 主题面板收起；页面导航已平铺无常开态，右栏独立，不受 Esc 影响。
   useEffect(() => {
-    if (!navMenuOpen && !subbarOpen && !themeOpen) return;
+    if (!themeOpen) return;
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       if (e.key === "Escape" && el?.tagName !== "INPUT" && el?.tagName !== "TEXTAREA") {
-        // ②随时可收；收②的同时①顶上（互斥曾把①收掉，必须兜底「至少一个展开」）。
-        // ①本身不被动收起（仅用户显式切换）。
-        setSubbarOpen((prev) => {
-          if (prev) setNavMenuOpen(true);
-          return false;
-        });
         setThemeOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navMenuOpen, subbarOpen, themeOpen]);
+  }, [themeOpen]);
   const t = useT();
   // 登录门：checking = 鉴权中；setup = 首启未设密钥（引导设置）；locked = 未解锁；open = 已进入
   const [gate, setGate] = useState<"checking" | "setup" | "locked" | "open">("checking");
@@ -329,7 +317,7 @@ export default function App(): React.ReactElement {
               const s = await api.getSession(session).catch(() => null);
               await useExm.getState().selectSession(session);
               if (s?.title.startsWith("channel:")) setViewState("flows");
-              else if (s && isAutoSessionTitle(s.title)) setViewState("tasks");
+              else if (s && isTaskSideTitle(s.title)) setViewState("tasks");
             } else {
               message.info("深链会话不存在，已切换到最近会话");
             }
@@ -393,10 +381,11 @@ export default function App(): React.ReactElement {
         {navOpen ? <CloseOutlined /> : <MenuOutlined />}
       </button>
       {navOpen && <div className="nav-mask" onClick={() => setNavOpen(false)} />}
-      <aside className={`app-sider ${navOpen ? "open" : ""} ${navMenuOpen || subbarOpen ? "top-open" : ""} ${ctxKind && subbarOpen ? "ctx-open" : ""}`}>
+      <aside className={`app-sider ${navOpen ? "open" : ""} top-open`}>
         {/* 字符流放在侧栏背景里（见 styles.css 的层级说明） */}
         <CharStream />
-        {/* 品牌区（保持原样） */}
+        {/* 品牌区：LED + 名称一行，副标语保留独立第二行（2026-11 回退：
+            副标语并行尾挤成一行被斥「谁叫你压成这样的」——只减 padding 不并排） */}
         <div className="brand">
           <div className="brand-row">
             <span className="brand-led" />
@@ -405,24 +394,9 @@ export default function App(): React.ReactElement {
           <div className="brand-sub">{t("brand.sub")}</div>
         </div>
 
-        {/* ── 顶部手风琴①：页面（NAV_ITEMS 全量入口 + 角标；与原菜单同款行）── */}
-        <div className={`theme-switcher acc-nav ${navMenuOpen ? "open" : ""}`}>
-          <button
-            className="theme-toggle"
-            onClick={() => {
-              // 至少一个展开：②未展开时①不允许收起
-              if (navMenuOpen && !subbarOpen) return;
-              const next = !navMenuOpen;
-              setNavMenuOpen(next);
-              if (next) setSubbarOpen(false);
-            }}
-            aria-expanded={navMenuOpen}
-            aria-disabled={navMenuOpen && !subbarOpen}
-          >
-            <span className="theme-label">{t("nav.pagesTitle")}</span>
-            <span className="theme-current">{t(currentNav.labelKey as TKey)}</span>
-            <span className={`theme-caret ${navMenuOpen ? "up" : ""}`}>▸</span>
-          </button>
+        {/* ── 页面导航：全量平铺（NAV_ITEMS 全量入口 + 角标；与原菜单同款行）──
+            标题头已删（2026-11：平铺形态下「页面」标题无信息量，被指留着干嘛） */}
+        <div className="theme-switcher acc-nav open">
           <div className="theme-panel">
             <Menu
               mode="inline"
@@ -452,36 +426,14 @@ export default function App(): React.ReactElement {
           </div>
         </div>
 
-        {/* ── 顶部入口②：页面侧栏（对话=会话 / 聊天=聊天流 / 任务=任务会话；
-            其余页不显示）。展开后在主侧栏内拉满展示页面自己的侧栏内容，
-            与①互斥：开一个自动收另一个。── */}
-        {ctxKind && (
-          <div className={`theme-switcher acc-ctx sider-ctx-toggle ${subbarOpen ? "open" : ""}`}>
-            <button
-              className="theme-toggle"
-              onClick={() => {
-                const next = !subbarOpen;
-                setSubbarOpen(next);
-                if (next) setNavMenuOpen(false);
-                else setNavMenuOpen(true); // 至少一个展开：收②时①顶上
-              }}
-              aria-expanded={subbarOpen}
-            >
-              <span className="theme-label">{t(ctxTitleKey)}</span>
-              <span className={`theme-caret ${subbarOpen ? "up" : ""}`}>▸</span>
-            </button>
-            <div className="theme-panel">
-              {subbarOpen && <div className="sider-subpanel" ref={setSubbarSlot} />}
-            </div>
-          </div>
-        )}
+        {/* ── 二级侧边栏已彻底迁至主内容右栏（subbar-rail，常驻）：
+            左主侧栏不再保留入口与面板（2026-11 二次调整）── */}
 
-        {/* 弹性占位：主题与状态栏压到底（与原导航菜单 flex:1 同效） */}
+        {/* 弹性占位：主题压到底 */}
         <div className="sider-grow" />
 
-        <AsciiDivider className="sider-divider" />
-
-        {/* ── 底部手风琴：主题（预设 + 强调色合并为单一入口，独立开关）── */}
+        {/* ── 底部手风琴：主题（预设 + 强调色合并为单一入口，独立开关）──
+            分隔线已删（2026-11：菜单平铺后与主题区无缝衔接，分割线纯占位） */}
         <div className={`theme-switcher theme-merged ${themeOpen ? "open" : ""}`}>
           <button className="theme-toggle" onClick={() => setThemeOpen(!themeOpen)} aria-expanded={themeOpen}>
             <span className="theme-label">{t("theme.label")}</span>
@@ -555,6 +507,13 @@ export default function App(): React.ReactElement {
           </div>
         </ViewSuspense>
       </main>
+      {/* ── 二级侧边栏（右栏，常驻）：页面自己的侧栏内容（会话/聊天流/任务会话/
+          设置分类导航）portal 到这里。独立于左主侧栏，无开关——进页即现。── */}
+      {ctxKind && (
+        <aside className={`subbar-rail subbar-rail-${ctxKind}`}>
+          <div className="sider-subpanel" ref={setSubbarSlot} />
+        </aside>
+      )}
       {/* 底边遥测条：position:fixed 通栏贴窗口底，不参与 .app-shell 的 flex 布局 */}
       <TelemetryBar />
       {/* 全局会话速查（Ctrl/Cmd+K）：Modal 自带 portal，挂根部即可 */}
