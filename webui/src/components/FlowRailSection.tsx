@@ -13,6 +13,7 @@ import { useExm } from "../store";
 /** 平台短标（通道 type → 展示名），与通道页 platformTag 同口径 */
 const PLATFORM_LABEL: Record<string, string> = {
   napcat: "QQ",
+  snowluma: "QQ",
   qqbot: "QQ 机器人",
   telegram: "Telegram",
   discord: "Discord",
