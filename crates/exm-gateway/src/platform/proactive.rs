@@ -290,6 +290,7 @@ mod tests {
             is_group: true,
             mentioned: false,
             chat_key: "12345",
+            flow_name: None,
         };
         // ① 回复率 0：概率闸门在最前，不该触达任何后续判定
         assert!(!should_proactively_reply(&core, &ch, &ctx).await);

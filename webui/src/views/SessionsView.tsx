@@ -16,6 +16,7 @@ import {
 import { api } from "../api";
 import { toastOk, toastErr } from "../feedback";
 import type { Session, SessionSearchHit } from "../types";
+import type { Channel } from "../api";
 import { Highlight, useSessionSearch } from "../components/sessionSearch";
 import { SessionHistoryModal } from "../components/SessionHistoryModal";
 import { useExm } from "../store";
@@ -24,6 +25,21 @@ import { relativeTime } from "../time";
 
 type SortKey = "active" | "created" | "messages";
 type KindFilter = "all" | "normal" | "channel";
+type LayoutMode = "flat" | "grouped";
+
+/** 平台短标（通道 type → 展示名）：与 FlowRailSection 的 PLATFORM_LABEL 同口径 */
+const PLATFORM_LABEL: Record<string, string> = {
+  napcat: "QQ",
+  snowluma: "QQ",
+  qqbot: "QQ 机器人",
+  telegram: "Telegram",
+  discord: "Discord",
+  slack: "Slack",
+  matrix: "Matrix",
+  bilibili: "B站",
+  youtube: "YouTube",
+  webhook: "Webhook",
+};
 
 /** 行选择集合（id 集合；全选 = 当前过滤视图全部） */
 export function SessionsView(): React.ReactElement {
@@ -32,8 +48,16 @@ export function SessionsView(): React.ReactElement {
   const requestNav = useExm((st) => st.requestNav);
 
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setListView] = useState<"main" | "archived">("main");
+  // 组织形态（session-management）：分组视图按来源聚簇（控制台 / 通道流）；
+  // 旧网关不返回 origin 字段 → 分组入口隐藏，锁定平铺（降级口径）。
+  const [layout, setLayout] = useState<LayoutMode>("flat");
+  const hasOrigin = useMemo(
+    () => sessions.length > 0 && sessions.every((s) => typeof s.origin === "string"),
+    [sessions],
+  );
   // 内容检索（session-search）：主列表走服务端（标题 + 最近 200 条消息），
   // 归档视图保持本地过滤（不调用内容检索接口）。
   const search = useSessionSearch({ enabled: view === "main" });
@@ -52,6 +76,12 @@ export function SessionsView(): React.ReactElement {
         ? await api.listArchivedSessions()
         : await api.listAllSessions();
       setSessions(list);
+      // 通道列表（分组视图平台标 join；失败不阻塞主列表）
+      try {
+        setChannels(await api.listChannels());
+      } catch {
+        setChannels([]);
+      }
     } catch (e) {
       toastErr(e, tr("sessions.loadFailed", { err: "" }));
     } finally {
@@ -94,6 +124,42 @@ export function SessionsView(): React.ReactElement {
   /** 服务端检索生效条件：主列表 + 有关键词 + 接口未失败（失败回退本地过滤） */
   const searching = view === "main" && search.query.trim().length > 0;
   const showSearchPanel = searching && !search.error;
+
+  /** 来源分组（session-management）：控制台一组 + 每通道一组（组内按流聚簇）。
+   *  分组基于 origin 派生字段（channel:{channelId}:{chatKey} / console）；
+   *  通道名从通道列表 join（平台标），流名用 origin_label 前段。 */
+  const groups = useMemo(() => {
+    type FlowGroup = { flowKey: string; label: string; sessions: Session[] };
+    type ChanGroup = { channelId: string; title: string; flows: FlowGroup[]; total: number };
+    const console_: Session[] = [];
+    const byChannel = new Map<string, ChanGroup>();
+    for (const s of visible) {
+      const origin = s.origin ?? "console";
+      if (origin === "console") {
+        console_.push(s);
+        continue;
+      }
+      const rest = origin.slice("channel:".length);
+      const [channelId] = rest.split(":");
+      let cg = byChannel.get(channelId);
+      if (!cg) {
+        const ch = channels.find((c) => c.id === channelId);
+        const plat = ch ? PLATFORM_LABEL[ch.type] ?? ch.type : channelId;
+        cg = { channelId, title: `${plat}（${channelId}）`, flows: [], total: 0 };
+        byChannel.set(channelId, cg);
+      }
+      cg.total += 1;
+      let fg = cg.flows.find((f) => f.flowKey === origin);
+      if (!fg) {
+        fg = { flowKey: origin, label: s.originLabel ?? rest, sessions: [] };
+        cg.flows.push(fg);
+      }
+      fg.sessions.push(s);
+    }
+    // 流/组内排序沿用 visible 的整体序（活跃倒序为主口径），这里只做聚簇
+    return { console: console_, channels: [...byChannel.values()] };
+  }, [visible, channels]);
+
   const hitList = useMemo(() => {
     const list = search.hits ?? [];
     return kind === "all"
@@ -153,9 +219,39 @@ export function SessionsView(): React.ReactElement {
     }
   };
 
-  /** 单条归档 / 恢复 / 删除 / 置顶 / 重命名 */
-  const archiveOne = async (s: Session, archived: boolean) => {
+  /** 按流/按通道归档旧会话（session-management）：流内非绑定会话批量归档，
+   *  活跃绑定会话由服务端豁免并在回执说明。 */
+  const archiveByScope = async (scope: "flow" | "channel", channelId: string, chatKey?: string) => {
+    setBusy(true);
     try {
+      const r = await api.archiveSessionsByScope(scope, channelId, chatKey);
+      toastOk(
+        t("sessions.flowArchiveOk", { archived: r.archived, skipped: r.skipped } as never),
+      );
+      setSelected(new Set());
+      await load();
+      window.dispatchEvent(new Event("exm:flows-refresh"));
+    } catch (e) {
+      toastErr(e, t("sessions.flowArchiveFailed", { err: "" }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const archiveFlow = (channelId: string, flowOrigin: string) => {
+    // flowOrigin = channel:{channelId}:{chatKey} → 拆出 chatKey
+    const chatKey = flowOrigin.slice(`channel:${channelId}:`.length);
+    void archiveByScope("flow", channelId, chatKey);
+  };
+  const archiveChannel = (channelId: string) => {
+    Modal.confirm({
+      title: t("sessions.channelArchiveConfirm"),
+      content: t("sessions.channelArchiveConfirmBody"),
+      onOk: () => archiveByScope("channel", channelId),
+    });
+  };
+
+  /** 单条归档 / 恢复 / 删除 / 置顶 / 重命名 */
+  const archiveOne = async (s: Session, archived: boolean) => {    try {
       await api.batchSessions(archived ? "archive" : "unarchive", [s.id]);
       toastOk(t(archived ? "sessions.archivedOne" : "sessions.unarchivedOne", { name: s.title } as never));
       await load();
@@ -268,6 +364,55 @@ export function SessionsView(): React.ReactElement {
     },
   });
 
+  /** 单行渲染（平铺表 / 分组流内共用）：分组形态下通道会话主显 originLabel
+   *  （流名·标签），原始 title 退到 tooltip（寻址/调试仍可查）。 */
+  const rowEl = (s: Session) => {
+    const isChannel = s.origin ? s.origin !== "console" : s.title.startsWith("channel:");
+    const grouped = layout === "grouped" && hasOrigin;
+    const displayTitle = grouped && s.originLabel ? s.originLabel : s.title;
+    const sel = selected.has(s.id);
+    return (
+      <div
+        key={s.id}
+        className={`sessions-tr sessions-row ${sel ? "selected" : ""}`}
+        role="row"
+        onClick={() => toggleOne(s.id)}
+      >
+        <span className="sessions-td sessions-td-check">
+          <Checkbox checked={sel} onChange={() => toggleOne(s.id)} onClick={(e) => e.stopPropagation()} />
+        </span>
+        <span className="sessions-td sessions-td-title">
+          {s.pinned && <PushpinOutlined className="sessions-pin" />}
+          <span className="sessions-title-text" title={s.title}>{displayTitle}</span>
+          {(s.lastMessagePreview ?? "") && (
+            <span className="sessions-preview">{s.lastMessagePreview}</span>
+          )}
+        </span>
+        <span className="sessions-td sessions-td-kind">
+          <span className={`sessions-kind-tag ${isChannel ? "channel" : "normal"}`}>
+            {isChannel ? t("sessions.kindChannelShort") : t("sessions.kindNormalShort")}
+          </span>
+        </span>
+        <span className="sessions-td sessions-td-scope mono">{s.groupId}</span>
+        <span className="sessions-td sessions-td-active">{relativeTime(s.lastActiveAt ?? s.updatedAt)}</span>
+        <span className="sessions-td sessions-td-count mono">{s.messageCount ?? "–"}</span>
+        <span className="sessions-td sessions-td-ops" onClick={(e) => e.stopPropagation()}>
+          <Tooltip title={view === "archived" ? t("sessions.unarchiveOne") : t("sessions.open")}>
+            <Button
+              size="small"
+              type="text"
+              icon={view === "archived" ? <CheckOutlined /> : <EditOutlined />}
+              onClick={() => (view === "archived" ? void archiveOne(s, false) : openChat(s))}
+            />
+          </Tooltip>
+          <Dropdown trigger={["click"]} menu={rowMenu(s)}>
+            <Button size="small" type="text" icon={<MoreIcon />} />
+          </Dropdown>
+        </span>
+      </div>
+    );
+  };
+
   return (
     <div className="sessions-view view-pad">
       <header className="page-head">
@@ -324,6 +469,16 @@ export function SessionsView(): React.ReactElement {
             { value: "messages", label: t("sessions.sortMessages") },
           ]}
         />
+        {view === "main" && hasOrigin && (
+          <Segmented
+            value={layout}
+            onChange={(v) => setLayout(v as LayoutMode)}
+            options={[
+              { value: "flat", label: t("sessions.layoutFlat") },
+              { value: "grouped", label: t("sessions.layoutGrouped") },
+            ]}
+          />
+        )}
         <span className="sessions-count mono">{showSearchPanel ? hitList.length : visible.length}</span>
       </div>
 
@@ -390,6 +545,57 @@ export function SessionsView(): React.ReactElement {
         <div className="sessions-loading"><Spin /></div>
       ) : visible.length === 0 ? (
         <div className="sessions-empty">{view === "archived" ? t("sessions.emptyArchived") : t("sessions.emptyMain")}</div>
+      ) : layout === "grouped" && hasOrigin ? (
+        <div className="sessions-groups">
+          {groups.console.length > 0 && (
+            <section className="sessions-group">
+              <header className="sessions-group-head">
+                <span className="sessions-group-title">{t("sessions.groupConsole")}</span>
+                <span className="mono sessions-group-count">{groups.console.length}</span>
+              </header>
+              {groups.console.map((s) => rowEl(s))}
+            </section>
+          )}
+          {groups.channels.map((cg) => (
+            <section className="sessions-group" key={cg.channelId}>
+              <header className="sessions-group-head">
+                <span className="sessions-group-title">{cg.title}</span>
+                <span className="mono sessions-group-count">{cg.total}</span>
+                {view === "main" && (
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<InboxOutlined />}
+                    title={t("sessions.channelArchiveTip")}
+                    onClick={() => archiveChannel(cg.channelId)}
+                  >
+                    {t("sessions.archiveChannel")}
+                  </Button>
+                )}
+              </header>
+              {cg.flows.map((fg) => (
+                <div className="sessions-flow" key={fg.flowKey}>
+                  <div className="sessions-flow-head">
+                    <span className="sessions-flow-name" title={fg.flowKey}>{fg.label}</span>
+                    <span className="mono sessions-flow-count">{fg.sessions.length}</span>
+                    {view === "main" && (
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<InboxOutlined />}
+                        title={t("sessions.archiveFlowTip")}
+                        onClick={() => void archiveFlow(cg.channelId, fg.flowKey)}
+                      >
+                        {t("sessions.archiveFlow")}
+                      </Button>
+                    )}
+                  </div>
+                  {fg.sessions.map((s) => rowEl(s))}
+                </div>
+              ))}
+            </section>
+          ))}
+        </div>
       ) : (
         <div className="sessions-table" role="table">
           <div className="sessions-tr sessions-th" role="row">
@@ -403,50 +609,7 @@ export function SessionsView(): React.ReactElement {
             <span className="sessions-td sessions-td-count">{t("sessions.colMessages")}</span>
             <span className="sessions-td sessions-td-ops" />
           </div>
-          {visible.map((s) => {
-            const isChannel = s.title.startsWith("channel:");
-            const sel = selected.has(s.id);
-            return (
-              <div
-                key={s.id}
-                className={`sessions-tr sessions-row ${sel ? "selected" : ""}`}
-                role="row"
-                onClick={() => toggleOne(s.id)}
-              >
-                <span className="sessions-td sessions-td-check">
-                  <Checkbox checked={sel} onChange={() => toggleOne(s.id)} onClick={(e) => e.stopPropagation()} />
-                </span>
-                <span className="sessions-td sessions-td-title">
-                  {s.pinned && <PushpinOutlined className="sessions-pin" />}
-                  <span className="sessions-title-text" title={s.title}>{s.title}</span>
-                  {(s.lastMessagePreview ?? "") && (
-                    <span className="sessions-preview">{s.lastMessagePreview}</span>
-                  )}
-                </span>
-                <span className="sessions-td sessions-td-kind">
-                  <span className={`sessions-kind-tag ${isChannel ? "channel" : "normal"}`}>
-                    {isChannel ? t("sessions.kindChannelShort") : t("sessions.kindNormalShort")}
-                  </span>
-                </span>
-                <span className="sessions-td sessions-td-scope mono">{s.groupId}</span>
-                <span className="sessions-td sessions-td-active">{relativeTime(s.lastActiveAt ?? s.updatedAt)}</span>
-                <span className="sessions-td sessions-td-count mono">{s.messageCount ?? "–"}</span>
-                <span className="sessions-td sessions-td-ops" onClick={(e) => e.stopPropagation()}>
-                  <Tooltip title={view === "archived" ? t("sessions.unarchiveOne") : t("sessions.open")}>
-                    <Button
-                      size="small"
-                      type="text"
-                      icon={view === "archived" ? <CheckOutlined /> : <EditOutlined />}
-                      onClick={() => (view === "archived" ? void archiveOne(s, false) : openChat(s))}
-                    />
-                  </Tooltip>
-                  <Dropdown trigger={["click"]} menu={rowMenu(s)}>
-                    <Button size="small" type="text" icon={<MoreIcon />} />
-                  </Dropdown>
-                </span>
-              </div>
-            );
-          })}
+          {visible.map((s) => rowEl(s))}
         </div>
       )}
 
@@ -464,7 +627,7 @@ export function SessionsView(): React.ReactElement {
         cancelText={t("common.cancel")}
         onOk={() => void doRename()}
         onCancel={() => setRenaming(null)}
-        destroyOnClose
+        destroyOnHidden
       >
         <Input value={renameText} onChange={(e) => setRenameText(e.target.value)} onPressEnter={() => void doRename()} />
       </Modal>

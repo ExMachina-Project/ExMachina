@@ -35,6 +35,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "toolOutputSpillChars": cfg.security.tool_output_spill_chars,
             "approvalWaitSecs": cfg.security.approval_wait_secs,
             "keySetupDismissed": cfg.security.key_setup_dismissed,
+            "toolCallBudget": cfg.security.tool_call_budget,
         },
         "automation": {
             "heartbeatEnabled": cfg.automation.heartbeat_enabled,
@@ -47,12 +48,15 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "autoAgentMaxSteps": cfg.automation.auto_agent_max_steps,
             "autoAgentBackoffMax": cfg.automation.auto_agent_backoff_max,
             "metaIntervalMin": cfg.automation.meta_interval_min,
+            "flowIdleDays": cfg.automation.flow_idle_days,
+            "memoryDigestMinTurns": cfg.automation.memory_digest_min_turns,
         },
         "search": {
             "provider": cfg.search.provider,
             "endpoint": cfg.search.endpoint,
             "apiKey": if cfg.search.api_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "maxResults": cfg.search.max_results,
+            "proactive": cfg.search.proactive,
         },
         "hooks": {
             "preTool": cfg.hooks.pre_tool,
@@ -71,6 +75,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "headless": cfg.browser.headless,
             "timeoutSecs": cfg.browser.timeout_secs,
             "maxChars": cfg.browser.max_chars,
+            "searchEngine": cfg.browser.search_engine,
         },
         "tools": {
             "custom": cfg.tools.custom,
@@ -87,6 +92,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "superAgent": cfg.experiments.super_agent,
             "autoAgent": cfg.experiments.auto_agent,
             "metaAgent": cfg.experiments.meta_agent,
+            "autoMemoryDigest": cfg.experiments.auto_memory_digest,
         },
         "mock": st.core.is_mock(),
     }))
@@ -159,6 +165,8 @@ pub(crate) struct PartialExperiments {
     auto_agent: Option<bool>,
     #[serde(default)]
     meta_agent: Option<bool>,
+    #[serde(default)]
+    auto_memory_digest: Option<bool>,
 }
 
 /// 回收站保留契约（部分更新：缺省沿用旧值；0 视为未提供回默认）
@@ -254,6 +262,9 @@ pub(crate) struct PartialSecurity {
     exec_user: Option<String>,
     #[serde(default)]
     exec_home: Option<String>,
+    /// 工具调用预算三值（agent-budget-audit）：缺省沿用现值
+    #[serde(default)]
+    tool_call_budget: Option<exm_core::config::ToolCallBudget>,
 }
 
 /// Computer Use（设置页）：部分更新语义——缺省字段沿用旧值
@@ -293,6 +304,10 @@ pub(crate) struct PartialAutomation {
     auto_agent_backoff_max: Option<u32>,
     #[serde(default)]
     meta_interval_min: Option<u32>,
+    #[serde(default)]
+    flow_idle_days: Option<u32>,
+    #[serde(default)]
+    memory_digest_min_turns: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -356,6 +371,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         sanitize_hidden_unicode: None,
         exec_user: None,
         exec_home: None,
+        tool_call_budget: None,
     });
     let computer = body.computer.clone().unwrap_or(PartialComputer {
         enabled: None,
@@ -374,6 +390,8 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         auto_agent_max_steps: None,
         auto_agent_backoff_max: None,
         meta_interval_min: None,
+        flow_idle_days: None,
+        memory_digest_min_turns: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
@@ -389,6 +407,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 other => other.to_string(),
             },
             max_results: s.max_results.clamp(1, 20),
+            proactive: s.proactive,
         },
     };
     let hooks = match sec_hooks {
@@ -504,6 +523,10 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 .exec_home
                 .clone()
                 .unwrap_or_else(|| current.security.exec_home.clone()),
+            // 工具调用预算三值（agent-budget-audit）：缺省沿用现值
+            tool_call_budget: sec
+                .tool_call_budget
+                .unwrap_or(current.security.tool_call_budget),
         },
         computer: exm_core::config::ComputerUseConfig {
             enabled: computer.enabled.unwrap_or(current.computer.enabled),
@@ -551,6 +574,13 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             meta_interval_min: auto
                 .meta_interval_min
                 .unwrap_or(current.automation.meta_interval_min),
+            // 闲置流会话归档（session-management）：0 = 关；缺省沿用现值
+            flow_idle_days: auto
+                .flow_idle_days
+                .unwrap_or(current.automation.flow_idle_days),
+            memory_digest_min_turns: auto
+                .memory_digest_min_turns
+                .unwrap_or(current.automation.memory_digest_min_turns),
         },
         search,
         hooks,
@@ -589,6 +619,9 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 super_agent: e.super_agent.unwrap_or(current.experiments.super_agent),
                 auto_agent: e.auto_agent.unwrap_or(current.experiments.auto_agent),
                 meta_agent: e.meta_agent.unwrap_or(current.experiments.meta_agent),
+                auto_memory_digest: e
+                    .auto_memory_digest
+                    .unwrap_or(current.experiments.auto_memory_digest),
             }
         },
         ..(*current).clone()

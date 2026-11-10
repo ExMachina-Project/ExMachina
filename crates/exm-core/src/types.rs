@@ -234,6 +234,38 @@ impl ToolName {
             _ => None,
         }
     }
+
+    /// 全量工具面（agent-tool-surface 口径：编成未声明 tools = 沿用全量）。
+    /// 运行时可见性仍按既有开关收窄：搜索/浏览器/Computer 按探测与配置、
+    /// meta 组按实验开关（gateway tool_specs 内判定）——全集只是「声明白名单
+    /// 为空时的默认值」，与显式声明全量等价。
+    pub fn full_set() -> Vec<Self> {
+        vec![
+            ToolName::Read,
+            ToolName::Filesystem,
+            ToolName::Terminal,
+            ToolName::Edit,
+            ToolName::Patch,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::WebSearch,
+            ToolName::WebFetch,
+            ToolName::AgentManage,
+            ToolName::Schedule,
+            ToolName::Browser,
+            ToolName::Computer,
+            ToolName::MemoryRead,
+            ToolName::MemoryWrite,
+            ToolName::MemoryLink,
+            ToolName::Git,
+            ToolName::Spawn,
+            ToolName::ContextCompact,
+            ToolName::Todo,
+            ToolName::MetaObserve,
+            ToolName::MetaPropose,
+            ToolName::MetaBuild,
+        ]
+    }
 }
 
 /// 外部通道路径的能力边界（通道级）：只聊天 / 可调工具 / 可电脑操控。
@@ -512,10 +544,21 @@ pub struct GroupMeta {
     /// 组级能力模型覆盖：每组可用不同模型栈；缺省字段跟随全局槽位
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<GroupCapabilities>,
+    /// 自我优化开关（group-self-optimize）：开启后主智能体可在运行中自行增删改
+    /// 子个体（含内置组解除编成保护）；缺省 = 关（保持出厂保护口径）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_optimize: Option<bool>,
     /// 内置组（默认智能集群）：定义受保护，不可增删个体
     #[serde(default)]
     pub builtin: bool,
     pub created_at: String,
+}
+
+impl GroupMeta {
+    /// 自我优化是否生效：显式开启才生效（缺省/None = 关）
+    pub fn self_optimize_enabled(&self) -> bool {
+        self.self_optimize.unwrap_or(false)
+    }
 }
 
 fn empty_io_schema() -> AgentIoSchema {
@@ -685,6 +728,14 @@ pub struct Session {
     /// 归档区可见可恢复——归档是可逆状态而非删除，旧数据缺省 None 零迁移）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
+    /// 会话来源（session-management，读时派生不入存储）：`console` 或
+    /// `channel:{channelId}:{chatKey}`。由 title 约定解析，新旧会话同口径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// 来源展示名（读时派生）：通道会话 = `流显示名·标签`（流名来自 flow 表，
+    /// 缺省 chat_key）；控制台会话缺省（展示名即 title）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_label: Option<String>,
     /// 消息条数（管理页附加，不入存储）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_count: Option<usize>,
@@ -726,6 +777,22 @@ pub struct ChatMessage {
     /// 有序过程步骤（思考段落 / 工具调用按发生顺序交错；「按调用顺序显示每一次」数据源）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<crate::round_trace::TraceStep>,
+    /// 入站附件（im-inbound-attach）：外部通道发来的图片/文件/语音随 user 消息落库，
+    /// WebUI 会话视图据此渲染缩略图（此前只落占位文本，聊天流里看不到用户发过的图）。
+    /// path 为工作区相对路径（展示层经 /api/asset 预览）；与出站 artifacts（outbox）字段同名异源。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<InboundAttachment>,
+}
+
+/// 入站附件条目（im-inbound-attach）：随 user 消息落库的媒体元数据
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InboundAttachment {
+    /// image | voice | file
+    pub kind: String,
+    /// 工作区相对路径（.exmachina/inbox/...；展示层经 /api/asset 内联预览）
+    pub path: String,
+    /// 原始文件名（展示层 caption / 下载名）
+    pub name: String,
 }
 
 // ---------------------------------------------------------------- 会话检索（session-search）
@@ -1237,6 +1304,28 @@ pub type VideoActExecutor = std::sync::Arc<
         + Send
         + Sync,
 >;
+
+/// 审批决定放行粒度（approval-ergonomics）：
+/// - Once：本次执行（旧行为，缺省档）
+/// - Session：本次执行 + 同命令前缀本会话后续自动放行
+/// - Allowlist：本次执行 + 前缀持久写入 security.execAllowlist
+///
+/// 拒绝语义由 Once{approve:false} 承载（拒绝无档位可言）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalScope {
+    Once { approve: bool },
+    Session,
+    Allowlist,
+}
+
+impl ApprovalScope {
+    pub fn is_approve(&self) -> bool {
+        matches!(
+            self,
+            ApprovalScope::Once { approve: true } | ApprovalScope::Session | ApprovalScope::Allowlist
+        )
+    }
+}
 
 /// 终端命令审批单：命令被闸门拦截后挂起，等待用户批准后由系统代执行
 #[derive(Debug, Clone, Serialize, Deserialize)]

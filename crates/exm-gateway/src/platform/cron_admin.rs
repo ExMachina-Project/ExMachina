@@ -194,12 +194,8 @@ pub async fn update_cron(
 
 pub async fn delete_cron(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.cron.remove(&id) {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "任务不存在" })),
-        )
-            .into_response(),
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：重复删除目标已不在 → 成功
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),

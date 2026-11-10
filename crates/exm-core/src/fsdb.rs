@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 pub const TERM_BUCKETS: usize = 64;
 
@@ -224,7 +224,7 @@ impl FsDb {
         V: DeserializeOwned + Serialize + Clone,
         F: FnMut(&str, &mut std::collections::HashMap<String, V>),
     {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock();
         let dir = self.coll_dir(collection)?;
         let path = dir.join(format!("bucket-{:02}.json", Self::bucket_id(key)));
         let mut map: std::collections::HashMap<String, V> = match std::fs::read(&path) {
@@ -287,14 +287,24 @@ impl FsDb {
     }
 }
 
-/// 原子写：同目录临时文件 + rename（Windows 上 rename 到已存在目标需先删除）
+/// 原子写：同目录唯一临时文件 + rename。
+/// tmp 带唯一后缀（`{name}.{new_id()}.tmp`）：并发写同目标不共用同一 tmp 文件，
+/// 避免交错后 rename 出半截内容（审计竞态 P1-5 场景B）。
+/// rename 语义按平台分流：Linux/POSIX rename 原子覆盖目标——不存在 remove→rename
+/// 之间的"文件不存在"窗口（场景A：读者瞬时得 NotFound，flow 绑定被顺手删）；
+/// Windows rename 到已存在目标需先删（std 保持 errno 行为），保留回退。
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_extension(format!("{}.tmp", crate::types::new_id()));
     std::fs::write(&tmp, data)?;
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
+    #[cfg(unix)]
     std::fs::rename(&tmp, path)?;
+    #[cfg(not(unix))]
+    {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        std::fs::rename(&tmp, path)?;
+    }
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 # video-ondemand Specification
 
 ## Purpose
-TBD - created by archiving change video-ondemand-admin. Update Purpose after archive.
+视频点播工具面：videoId 归一解析、点播评论角色判权与配对码预设角色，支撑按需取用的视频信息获取。
 
 ## Requirements
 

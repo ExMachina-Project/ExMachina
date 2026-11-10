@@ -668,6 +668,108 @@ function renderNavFoot() {
   }
 }
 
+// ─────────────────────── 桌面集成：版本比对（6.2）与网关健康（6.3） ───────────────────────
+// 壳经 __EXM_GATEWAY__ 注入 { version, remote }（无注入 = 浏览器调试，跳过）。
+// 版本比对：启动 + 每 6h 周期拉 /api/version，与壳版本差异时提示——本机模式
+// 提示更新（壳与网关同装包交付，版本应一致）；远程模式仅提示不同（远端自治）。
+let versionToastShown = false; // 差异提示每会话一次（周期检查只更新角标语义）
+
+function desktopVersionWatch() {
+  const injected = window.__EXM_GATEWAY__ ?? {};
+  if (!injected.version) return; // 无壳注入（浏览器调试）不比对
+  const shellVer = String(injected.version);
+  const remote = Boolean(injected.remote);
+  const check = async () => {
+    try {
+      const v = await req("/version");
+      const gwVer = String(v?.version ?? "");
+      if (!gwVer || gwVer === shellVer) return;
+      const hint = remote
+        ? `远程网关版本 ${gwVer}（本机壳 ${shellVer}），仅提示——远端独立更新`
+        : `本机网关版本 ${gwVer} 与桌面壳 ${shellVer} 不一致，建议更新安装包`;
+      chromeVer = `${shellVer} / GW ${gwVer}`; // 遥测条与版次读数呈现两侧版本
+      renderChrome();
+      renderNavFoot();
+      if (!versionToastShown) {
+        versionToastShown = true;
+        toast(hint, false);
+      }
+    } catch { /* 网关不可达：断连态由 WS 重连与 gateway://down 层呈现 */ }
+  };
+  void check();
+  setInterval(check, 6 * 60 * 60 * 1000); // 6h 周期比对
+}
+
+// 网关健康（6.3）：壳监控子进程退出 → gateway://down 事件 → 全屏状态层。
+// 一键重启（gateway_restart 命令）复用原端口 → gateway://up → WS 自动重连
+// （既有指数退避循环）+ 重拉会话与消息恢复现场。
+function desktopGatewayWatch() {
+  if (!window.__TAURI__?.event?.listen) return;
+  window.__TAURI__.event.listen("gateway://down", () => {
+    showGatewayDown();
+  });
+  window.__TAURI__.event.listen("gateway://up", async () => {
+    hideGatewayDown();
+    setConn(false); // 先置断连：wsConnect 成功后 setConn(true) 才点亮
+    // 就绪后重连：小延迟等网关监听完全就位（就绪判定是 TCP 可连，HTTP 可能差半拍）
+    setTimeout(() => {
+      wsConnect();
+      // 恢复现场：重拉会话列表与当前会话消息（网关重启 = 进程内状态清零，磁盘数据在）
+      void (async () => {
+        try {
+          S.sessions = await api.sessions();
+          renderSidebar();
+          const cur = S.sessionId && S.sessions.some((s) => s.id === S.sessionId)
+            ? S.sessionId
+            : S.sessions[0]?.id;
+          if (cur) await selectSession(cur);
+        } catch { /* 下轮重连再补偿 */ }
+      })();
+    }, 500);
+  });
+}
+
+function showGatewayDown() {
+  let layer = $("gw-down");
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.id = "gw-down";
+    layer.innerHTML =
+      `<div class="gw-down-card">` +
+      `<h3>本地网关已停止</h3>` +
+      `<p>捆绑的网关进程已退出。会话数据保留在磁盘，重启后自动恢复连接与当前会话。</p>` +
+      `<p id="gw-down-err" class="gw-down-err"></p>` +
+      `<button id="gw-restart" class="set-btn">重启网关</button>` +
+      `</div>`;
+    document.body.appendChild(layer);
+    layer.querySelector("#gw-restart").addEventListener("click", async () => {
+      const btn = layer.querySelector("#gw-restart");
+      btn.disabled = true;
+      btn.textContent = "重启中…";
+      layer.querySelector("#gw-down-err").textContent = "";
+      try {
+        await window.__TAURI__.core.invoke("gateway_restart");
+        // 成功：gateway://up 事件收尾（隐藏层 + 重连）；按钮状态交由事件复位
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = "重启网关";
+        layer.querySelector("#gw-down-err").textContent = String(e).slice(0, 300);
+      }
+    });
+  }
+  layer.classList.add("show");
+  setConn(false);
+}
+
+function hideGatewayDown() {
+  const layer = $("gw-down");
+  if (layer) {
+    layer.classList.remove("show");
+    const btn = layer.querySelector("#gw-restart");
+    if (btn) { btn.disabled = false; btn.textContent = "重启网关"; }
+  }
+}
+
 function setRunning(on) {
   S.running = on;
   $("run-state").classList.toggle("hidden", !on);
@@ -3693,6 +3795,11 @@ async function init() {
     $("tb-min").addEventListener("click", () => window.__TAURI__.core.invoke("min_window"));
     $("tb-max").addEventListener("click", () => window.__TAURI__.core.invoke("max_window"));
     $("tb-close").addEventListener("click", () => window.__TAURI__.core.invoke("close_window"));
+    // 桌面集成（6.2 版本比对 + 6.3 网关健康）：壳注入版本与模式，启动 + 周期
+    // 比对 /api/version，差异提示（本机 = 提示更新 / 远程 = 仅提示不同）；网关
+    // 退出事件 → 全屏状态层（原因 + 一键重启），重启成功 → 自动恢复连接与会话
+    desktopVersionWatch();
+    desktopGatewayWatch();
   }
   $("btn-new").addEventListener("click", () => newSession().catch(alertErr));
   $("btn-send").addEventListener("click", send);

@@ -8,14 +8,15 @@ use exm_core::config::ExmConfig;
 use exm_core::memory::{MemoryDraft, MemoryKind};
 use exm_core::types::*;
 use exm_core::Core;
+use parking_lot::{Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 
 /// 测试串行锁：Core 型测试共享仓库工作区（entities/active_group 等运行时文件），并行互踩
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SERIAL: Mutex<()> = Mutex::new(());
 
-fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+fn serial_guard() -> MutexGuard<'static, ()> {
+    SERIAL.lock()
 }
 
 fn test_config() -> ExmConfig {
@@ -240,14 +241,15 @@ async fn 执行审批_高危命令拦截与批准放行() {
         sec_always,
     );
 
-    // 命令拦截 → 审批单挂起 + 事件通知
+    // 命令拦截 → 审批单挂起 + 事件通知（样例用高危命令：2026-11 审批经济学
+    // 语义升级后无害命令直通，always 档降级为「高危必拦」）
     let blocked = gw
         .execute(
             "coding-agent",
             "ses",
             &[ToolName::Terminal],
             ToolName::Terminal,
-            &serde_json::json!({ "command": "echo blocked-test" }),
+            &serde_json::json!({ "command": "git reset --hard blocked-test" }),
         )
         .await;
     assert!(!blocked.ok, "未放行命令应被拦截");
@@ -268,7 +270,8 @@ async fn 执行审批_高危命令拦截与批准放行() {
 
     let pending = core.approval_list(Some("pending"), 10).unwrap();
     assert_eq!(pending.len(), 1, "应产生一张待审批单");
-    assert_eq!(pending[0].command, "echo blocked-test");
+    // git reset 在 DENY 档（破坏性清单）→ 落 [红线] 前缀审批单（分档矩阵语义）
+    assert_eq!(pending[0].command, "[红线] git reset --hard blocked-test");
 
     // 批准 → 系统代执行并记录结果
     let decided = core.approval_decide(&pending[0].id, true).await.unwrap();
@@ -354,6 +357,58 @@ async fn 执行审批_高危命令拦截与批准放行() {
 
     // 已处理审批单不可重复决定
     assert!(core.approval_decide(&pending[0].id, false).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 审批决定并发互斥_命令只执行一次() {
+    use std::sync::Arc;
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.security.exec_approval = "always".into();
+    cfg.security.approval_wait_secs = 0;
+    let core = Arc::new(Core::with_config(cfg).expect("创建 Core 失败"));
+    // 慢命令（执行 ~1.2s）：制造「决定返回前命令仍在跑」的窗口
+    let sid = core.create_session("并发审批").unwrap().id;
+    let cmd = "sleep 1.2 && echo approval-dup-probe".to_string();
+    let ap = exm_core::types::ApprovalRequest {
+        id: exm_core::types::new_id()[..8].to_string(),
+        session_id: sid.clone(),
+        node_id: None,
+        agent_id: "e2e".into(),
+        command: cmd,
+        status: "pending".into(),
+        result: None,
+        created_at: exm_core::types::now_iso(),
+        decided_at: None,
+        origin_user: None,
+        origin_role: None,
+        meta_json: None,
+    };
+    core.store.add_approval(&ap).unwrap();
+    // 两个并发批准（双击场景）：都应成功返回，但只有先到者真的执行了命令
+    let c1 = core.clone();
+    let c2 = core.clone();
+    let id_a = ap.id.clone();
+    let id_b = ap.id.clone();
+    let (r1, r2) = tokio::join!(
+        async move { c1.approval_decide(&id_a, true).await },
+        async move { c2.approval_decide(&id_b, true).await },
+    );
+    let out1 = r1.expect("第一个决定应成功");
+    // 第二个：等先到者收束后返回最终单据（先到者代执行语义），不是报错
+    let out2 = r2.expect("第二个决定也应返回");
+    assert_eq!(out1.status, "executed");
+    assert_eq!(out2.status, "executed", "并发第二击拿到先到者结果: {out2:?}");
+    // 互斥生效：第二击拿到的是同一份执行结果（结果文本与决定时间戳一致），
+    // 而非两次独立执行
+    assert_eq!(
+        out1.result, out2.result,
+        "并发第二击与先到者返回同一份执行结果"
+    );
+    assert_eq!(
+        out1.decided_at, out2.decided_at,
+        "决定时间戳一致（同一次执行）"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -829,6 +884,7 @@ fn temp_registry(tag: &str) -> exm_core::registry::LocalRegistry {
         workspace: None,
         model: None,
         capabilities: None,
+        self_optimize: None,
         builtin: true,
         created_at: now_iso(),
     };
@@ -929,6 +985,96 @@ fn 默认模型_组与个体解析与持久化() {
         .is_none());
     // 不存在的个体必须报错
     assert!(reg.set_agent_model("ghost", "p-a").is_err());
+
+    // ---- 组改名（group-rename）：显示名可改，id/编成不动；内置组同样放行 ----
+    let reg = temp_registry("group-rename");
+    // temp_registry 的内置组显示名是「测试组」——改名成功即内置组放行的直接证明
+    let m = reg.rename_group("exmachina", "新组名").expect("内置组改名失败");
+    assert_eq!(m.name, "新组名");
+    assert_eq!(
+        reg.group_meta("exmachina").unwrap().name,
+        "新组名",
+        "内存态应同步"
+    );
+    // 落盘校验：重新读 group.json
+    let raw = std::fs::read_to_string(
+        reg.group_dir("exmachina").unwrap().join("group.json"),
+    )
+    .unwrap();
+    assert!(raw.contains("新组名"), "group.json 应落盘新组名");
+    // 空名拒绝
+    assert!(reg.rename_group("exmachina", "  ").is_err());
+    // 不存在的组 404 语义（Err）
+    assert!(reg.rename_group("ghost-grp", "x").is_err());
+
+    // ---- 自我优化开关（group-self-optimize）：内置组编成保护随开关放宽 ----
+    let reg = temp_registry("group-self-opt");
+    // 默认关：内置组编成被锁
+    assert!(!reg.group_meta("exmachina").unwrap().self_optimize_enabled());
+    let d1 = sample_def("opt-unit");
+    assert!(
+        reg.upsert_agent("exmachina", d1, None).is_err(),
+        "默认关时内置组应拒绝新增个体"
+    );
+    // 开启：闸门放宽，增删改放行；关回：重新锁定
+    reg.set_group_self_optimize("exmachina", true)
+        .expect("开启自我优化失败");
+    assert!(reg.group_meta("exmachina").unwrap().self_optimize_enabled());
+    let d2 = sample_def("opt-unit");
+    reg.upsert_agent("exmachina", d2, None)
+        .expect("开关开启后应放行新增个体");
+    reg.upsert_agent(
+        "exmachina",
+        sample_def("opt-unit"),
+        Some("更新后的职责".into()),
+    )
+    .expect("开关开启后应放行修改个体");
+    reg.remove_agent("exmachina", "opt-unit")
+        .expect("开关开启后应放行删除个体");
+    // 落盘校验：开启态已写 group.json
+    let raw = std::fs::read_to_string(
+        reg.group_dir("exmachina").unwrap().join("group.json"),
+    )
+    .unwrap();
+    assert!(raw.contains("selfOptimize"), "group.json 应落盘开关");
+    reg.set_group_self_optimize("exmachina", false)
+        .expect("关闭自我优化失败");
+    assert!(!reg.group_meta("exmachina").unwrap().self_optimize_enabled());
+    assert!(
+        reg.upsert_agent("exmachina", sample_def("opt-unit"), None).is_err(),
+        "关闭后应重新锁定编成"
+    );
+
+    // ---- 组改 id（change_group_id）：目录迁移 + 内存键迁移；激活/占用/非法 id 拒绝 ----
+    let reg = temp_registry("group-change-id");
+    reg.create_group(Some("old-grp".into()), "迁移组", "")
+        .expect("建组失败");
+    let member = sample_def("mig-unit");
+    reg.upsert_agent("old-grp", member, None)
+        .expect("建个体失败");
+    reg.change_group_id("old-grp", "new-grp")
+        .expect("改 id 失败");
+    assert!(reg.group_meta("old-grp").is_none(), "旧 id 应消失");
+    let m = reg.group_meta("new-grp").expect("新 id 应存在");
+    assert_eq!(m.id, "new-grp");
+    assert_eq!(m.name, "迁移组", "显示名不变");
+    assert_eq!(
+        reg.agents_in_group("new-grp").len(),
+        1,
+        "编成应随目录迁移"
+    );
+    // 编成目录确实改名（prompts/agents 全部随迁）
+    assert!(reg.group_dir("new-grp").is_some());
+    assert!(reg.group_dir("old-grp").is_none());
+    // 同 id 幂等
+    reg.change_group_id("new-grp", "new-grp").expect("同 id 应幂等");
+    // 目标 id 已占用
+    reg.create_group(Some("busy".into()), "占用组", "").expect("建占用组失败");
+    assert!(reg.change_group_id("new-grp", "busy").is_err());
+    // 非法 id
+    assert!(reg.change_group_id("new-grp", "非法 id!").is_err());
+    // 旧 id 不存在
+    assert!(reg.change_group_id("ghost", "any").is_err());
 }
 
 #[test]
@@ -1091,6 +1237,7 @@ async fn mcp_客户端_http全链() {
         url: Some(format!("http://{addr}/mcp")),
         allowed_agents: vec![],
         enabled: true,
+        call_timeout_secs: 60,
     };
     let reg = McpRegistry::shared();
     reg.configure(&[cfg.clone()]);
@@ -1131,6 +1278,156 @@ async fn mcp_客户端_http全链() {
     assert!(matches!(denied, Some(r) if !r.ok), "白名单外的个体应被拒绝");
     assert!(reg.tool_snapshot_for("other-agent").is_empty());
     assert_eq!(reg.tool_snapshot_for("scout-agent").len(), 1);
+}
+
+/// MCP 调用超时（审计 错误处理 P1-2）：端点收下请求后不回包（模拟僵死）——
+/// 调用在 callTimeoutSecs 内返回失败；另一台正常服务器不被拖死（per-server 锁）。
+#[tokio::test]
+async fn mcp_调用超时_僵死端点不拖死其他服务器() {
+    use exm_core::mcp::{McpRegistry, McpServerConfig};
+    use std::collections::HashMap;
+
+    // 僵死服务器：initialize / tools/list 正常应答（让握手与清单通过），tools/call 挂起不回
+    let stall_app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(async |body: String| {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            if method == "tools/call" {
+                // 僵死：吞掉请求永不响应（挂到测试结束）
+                futures_util::future::pending::<()>().await;
+            }
+            let id = v.get("id").cloned().unwrap_or(serde_json::json!(0));
+            let result = match method {
+                "initialize" => serde_json::json!({ "protocolVersion": "2025-03-26", "capabilities": { "tools": {} } }),
+                "tools/list" => serde_json::json!({ "tools": [{
+                    "name": "echo", "description": "回声",
+                    "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } }
+                }]}),
+                _ => serde_json::Value::Null,
+            };
+            axum::Json(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        }),
+    );
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a1 = l1.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l1, stall_app).await.unwrap() });
+
+    // 正常服务器：echo
+    let ok_app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(async |body: String| {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let id = v.get("id").cloned().unwrap_or(serde_json::json!(0));
+            let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let result = match method {
+                "initialize" => serde_json::json!({ "protocolVersion": "2025-03-26", "capabilities": { "tools": {} } }),
+                "tools/list" => serde_json::json!({ "tools": [{
+                    "name": "echo", "description": "回声",
+                    "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } }
+                }]}),
+                "tools/call" => serde_json::json!({ "content": [{ "type": "text", "text": "回声:ok" }], "isError": false }),
+                _ => serde_json::Value::Null,
+            };
+            axum::Json(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        }),
+    );
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a2 = l2.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l2, ok_app).await.unwrap() });
+
+    let mk = |id: &str, addr: std::net::SocketAddr, timeout: u64| McpServerConfig {
+        id: id.into(),
+        transport: "http".into(),
+        url: Some(format!("http://{addr}/mcp")),
+        allowed_agents: vec![],
+        enabled: true,
+        call_timeout_secs: timeout,
+        command: None,
+        args: vec![],
+        env: HashMap::new(),
+    };
+    let reg = McpRegistry::shared();
+    // 僵死端点：1s 超时（测试加速）；正常端点：默认
+    reg.configure(&[mk("stall", a1, 1), mk("ok", a2, 60)]);
+
+    // 僵死端点的调用在 ~1s 内失败（而非永久挂死）
+    let t0 = std::time::Instant::now();
+    let r = reg
+        .call("mcp:stall:echo", "a", &serde_json::json!({ "text": "x" }))
+        .await
+        .expect("应返回结果（失败也返回）");
+    assert!(!r.ok, "僵死端点应失败：{}", r.text);
+    assert!(r.text.contains("超时"), "失败原因应为超时：{}", r.text);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5), "超时应及时返回");
+
+    // 正常服务器不被拖死：立即可用
+    let r2 = reg
+        .call("mcp:ok:echo", "a", &serde_json::json!({ "text": "x" }))
+        .await
+        .expect("正常服务器调用失败");
+    assert!(r2.ok, "正常服务器应成功：{}", r2.text);
+    assert_eq!(r2.text, "回声:ok");
+}
+
+/// 流绑定并发（竞态 P1-3）：同 chat_key 并发 20 条消息走 ensure_flow_session_atomic，
+/// 断言只建 1 个会话且绑定不再互抹（修复前 check-then-act 各建会话→孤儿+后写覆盖）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn 流绑定_并发同流消息只建一个会话() {
+    let dir = std::env::temp_dir().join(format!("exm-flow-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    let core = exm_core::Core::create(&dir).unwrap();
+
+    // 20 线程并发 ensure（模拟 20 条并发消息各查绑定→建会话→回写）
+    let core = std::sync::Arc::new(core);
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let c = core.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            c.ensure_flow_session_atomic(
+                "ch-race",
+                "chat-race",
+                "exmachina",
+                "channel:ch-race:chat-race",
+                Some("并发测试群"),
+                true,
+            )
+            .map(|sid| (i, sid))
+        }));
+    }
+    let mut sids = Vec::new();
+    for h in handles {
+        let (i, sid) = h.await.unwrap().expect("ensure 应成功");
+        sids.push((i, sid));
+    }
+    // 全部拿到同一会话 id（而非各建各的）
+    let first = &sids[0].1;
+    assert!(
+        sids.iter().all(|(_, s)| s == first),
+        "并发 ensure 应收敛到同一会话：{sids:?}"
+    );
+    // 组内 channel:* 会话只有一个（无孤儿）
+    let list = core.list_sessions_in_group("exmachina").unwrap();
+    let ch_sessions: Vec<_> = list
+        .iter()
+        .filter(|s| s.title == "channel:ch-race:chat-race")
+        .collect();
+    assert_eq!(ch_sessions.len(), 1, "应只有 1 个会话，实际 {}", ch_sessions.len());
+    // 绑定稳定（touch 并发不抹 active_session）
+    let handles2: Vec<_> = (0..10)
+        .map(|i| {
+            let c = core.clone();
+            tokio::task::spawn_blocking(move || {
+                c.touch_flow_message("ch-race", "chat-race", &format!("消息{i}")).unwrap();
+            })
+        })
+        .collect();
+    for h in handles2 {
+        h.await.unwrap();
+    }
+    let bound = core.flow_active_session("ch-race", "chat-race").unwrap();
+    assert_eq!(&bound, first, "touch 并发后绑定不变");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// 混合记忆检索：词项无命中时语义兜底；词项命中时语义加成
@@ -2313,4 +2610,235 @@ async fn 自定义工具_http与命令模板() {
         "未知工具应报错: {:?}",
         r.error
     );
+}
+
+/// 工具面声明（agent-tool-surface）：声明白名单裁剪（声明外调用明确拒绝）
+/// 与未声明全量（空 tools = 全量默认，零回归）两向口径。
+#[tokio::test]
+async fn 工具面声明_白名单裁剪与未声明全量() {
+    use exm_core::types::ToolName;
+
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    let tmp = std::env::temp_dir().join(format!("exm-surface-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    cfg.workspace_root = tmp.clone();
+    cfg.data_dir = tmp.join("data");
+    cfg.config_path = tmp.join("config.json");
+    cfg.memory_md_path = tmp.join("memory.md");
+    cfg.webui_dist = tmp.join("webui-dist");
+    let core = Core::with_config(cfg).expect("创建 Core 失败");
+    let tools = exm_core::tools::ToolGateway::new(
+        &core.config().workspace_root,
+        core.store.clone(),
+        core.registry.clone(),
+        core.events.clone(),
+        core.config().security.clone(),
+    );
+
+    // --- 声明外不可达：allowlist 只给 read，terminal 调用必须明确拒绝 ---
+    let denied = tools
+        .execute(
+            "machina",
+            "ses",
+            &[ToolName::Read],
+            ToolName::Terminal,
+            &serde_json::json!({ "command": "echo hi" }),
+        )
+        .await;
+    assert!(!denied.ok, "白名单外调用应失败");
+    let denied_err = denied.error.unwrap_or_default();
+    assert!(
+        denied_err.contains("白名单"),
+        "拒绝信息应明确指出白名单口径: {denied_err:?}"
+    );
+
+    // schema 下发同样只含声明工具
+    let specs = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::Read],
+        false, false, false,
+    );
+    assert!(specs.iter().all(|s| s.name == "read"), "schema 只应含 read");
+    assert_eq!(specs.len(), 1);
+
+    // --- 未声明 = 全量：registry 加载时空 tools 补全集 ---
+    let singles = core.registry().list_singles();
+    // test_config 的注册表来自真实 entities 目录（machina 显式声明了 11 个）——
+    // 全量默认在 upsert 路径验证：新建个体不带 tools，落库后应为全集
+    let _ = singles; // （真实 entities 都带显式清单，此处不断言）
+    let new_def = exm_core::types::AgentDefinition {
+        name: "面测个体".into(),
+        identifier: "surface-probe".into(),
+        domain: "测试".into(),
+        tier: exm_core::types::Tier::Unit,
+        description: "工具面默认全量验证".into(),
+        tools: vec![], // 未声明
+        when_to_call: String::new(),
+        prompt_file: "surface-probe.md".into(),
+        capabilities: vec![],
+        dependencies: vec![],
+        composable_with: vec![],
+        input_schema: Default::default(),
+        output_schema: Default::default(),
+        link: None,
+        max_steps: None,
+        model_hint: None,
+    };
+    core.registry()
+        .upsert_single(new_def, None)
+        .expect("新建个体失败");
+    let stored = core
+        .registry()
+        .single("surface-probe")
+        .expect("应能查到新建个体");
+    assert_eq!(
+        stored.tools.len(),
+        ToolName::full_set().len(),
+        "未声明 tools 的个体应落库为全量默认"
+    );
+    assert!(stored.tools.contains(&ToolName::Terminal));
+    assert!(stored.tools.contains(&ToolName::Git));
+}
+
+#[tokio::test]
+async fn 自主行动_eval通过开会被拒时保守回落() {
+    // 9.2 Eval→act 链路：mock 替身对 Eval 提示词固定产出 act:false（user 文本
+    // 「执行一次自评。」不含「值得做」标记）——断言拒绝路径：不开会、空转递增、
+    // 事件落库；再断言周期判定（退避期内 tick 直接跳过，窗口外再评）。
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.experiments.auto_agent = true;
+    cfg.automation.auto_agent_interval_minutes = 10;
+    cfg.automation.auto_agent_backoff_max = 3;
+    let core = std::sync::Arc::new(exm_core::Core::with_config(cfg).expect("创建 Core 失败"));
+
+    // tick 1（last=0 首评直评）：Eval act:false → 不触发行动
+    let r1 = core.auto_agent_tick(10_000).await;
+    assert!(r1.is_none(), "Eval 拒绝时不应触发行动");
+
+    // tick 2（退避期内：10 分钟基础间隔 × 空转 1 → 10 分钟窗口内）：跳过
+    let r2 = core.auto_agent_tick(10_001).await;
+    assert!(r2.is_none(), "退避期内应跳过");
+
+    // tick 3（窗口外）：再次自评（仍是 act:false，但周期判定应放行完成一次评估）
+    let r3 = core.auto_agent_tick(10_060).await;
+    assert!(r3.is_none(), "Eval 仍拒绝");
+
+    // 事件落库核查：auto.eval 至少两条（tick1/tick3）。
+    // Envelope.payload 内嵌 CoreEvent（kind/sessionId/payload）——按内嵌 kind 过滤
+    let evts = core.store.list_events("").unwrap_or_default();
+    let evals: Vec<_> = evts
+        .iter()
+        .filter(|e| e["payload"]["type"] == "auto.eval")
+        .collect();
+    assert!(
+        evals.len() >= 2,
+        "应有至少两条 auto.eval 事件（实际 {}）",
+        evals.len()
+    );
+    assert!(
+        evals
+            .iter()
+            .all(|e| e["payload"]["payload"]["ok"] == true && e["payload"]["payload"]["act"] == false)
+    );
+}
+
+#[tokio::test]
+async fn 自主行动_eval通过_开会执行并落act事件() {
+    // 9.2 Eval→act 通过路径：拨动 mock 一次性开关 → Eval 产出 act:true →
+    // 开自主会话执行（落普通会话可审计）→ auto.eval(act:true) 与 auto.act(done) 落库
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.experiments.auto_agent = true;
+    cfg.automation.auto_agent_interval_minutes = 10;
+    let core = std::sync::Arc::new(exm_core::Core::with_config(cfg).expect("创建 Core 失败"));
+
+    exm_core::provider::MOCK_EVAL_ACT_ONCE.store(true, std::sync::atomic::Ordering::SeqCst);
+    let acted = core.auto_agent_tick(20_000).await;
+    let (task, _why) = acted.expect("Eval 通过应触发行动");
+    assert!(!task.is_empty(), "任务目标非空");
+
+    // 自主会话已创建（标题 auto-agent: 前缀）
+    let sessions = core.list_sessions_admin().unwrap_or_default();
+    assert!(
+        sessions.iter().any(|s| s.title.starts_with("auto-agent:")),
+        "应存在 auto-agent 会话（实际标题：{:?}）",
+        sessions.iter().map(|s| s.title.as_str()).take(3).collect::<Vec<_>>()
+    );
+
+    // auto.eval(act:true) 落全局（session 空）；auto.act 落行动会话自己的事件流
+    let global_evts = core.store.list_events("").unwrap_or_default();
+    assert!(
+        global_evts
+            .iter()
+            .any(|e| e["payload"]["type"] == "auto.eval" && e["payload"]["payload"]["act"] == true),
+        "应落 auto.eval(act:true) 事件"
+    );
+    let auto_sid = sessions
+        .iter()
+        .find(|s| s.title.starts_with("auto-agent:"))
+        .map(|s| s.id.clone())
+        .expect("auto-agent 会话应存在");
+    let sess_evts = core.store.list_events(&auto_sid).unwrap_or_default();
+    assert!(
+        sess_evts
+            .iter()
+            .any(|e| e["payload"]["type"] == "auto.act" && e["payload"]["payload"]["status"] == "done"),
+        "行动会话应落 auto.act(done) 事件"
+    );
+}
+
+#[tokio::test]
+async fn 自主记忆摘要_达标归纳与去重() {
+    // 9.1 autoMemoryDigest：达标会话归纳落记忆（kind=digest、来源指向会话）；
+    // 未达标配额跳过；同会话二次归纳命中内容哈希去重（不新建条目）。
+    let _serial = serial_guard();
+    let mut cfg = test_config();
+    cfg.automation.memory_digest_min_turns = 5;
+    let core = std::sync::Arc::new(exm_core::Core::with_config(cfg).expect("创建 Core 失败"));
+
+    use exm_core::types::{MessageRole, SpeechTag, Statement};
+    // 会话 A：6 条消息（≥5 达标）
+    let a = core.create_session("摘要达标").expect("建会话失败");
+    for k in 0..3 {
+        core.store
+            .add_message(
+                &a.id,
+                MessageRole::User,
+                None,
+                vec![Statement::new(SpeechTag::要求, format!("问题{k}：部署配置怎么改"))],
+            )
+            .unwrap();
+        core.store
+            .add_message(
+                &a.id,
+                MessageRole::System,
+                None,
+                vec![Statement::report(format!("答复{k}：见部署文档"))],
+            )
+            .unwrap();
+    }
+    // 会话 B：2 条（未达标）
+    let b = core.create_session("太短不摘要").expect("建会话失败");
+    core.store
+        .add_message(&b.id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, "短")])
+        .unwrap();
+
+    let none = core.memory_digest_session(&b.id).await;
+    assert!(none.is_none(), "未达标会话应跳过");
+
+    let first = core.memory_digest_session(&a.id).await;
+    assert!(first.is_some(), "达标会话应产出摘要");
+    // 二次归纳：mock 输出确定性相同 → 内容哈希命中 → 去重（不新建）
+    let second = core.memory_digest_session(&a.id).await;
+    assert!(second.is_some());
+
+    // 记忆库断言：存在 kind=digest 且 sessionId 指向会话 A 的条目；且同内容只一条
+    let entries = core.memory.list(Some(exm_core::memory::MemoryKind::Digest), 50).unwrap_or_default();
+    let a_digests: Vec<_> = entries
+        .iter()
+        .filter(|e| e.session_id.as_deref() == Some(a.id.as_str()))
+        .collect();
+    assert_eq!(a_digests.len(), 1, "同内容二次归纳应去重为一条（实际 {}）", a_digests.len());
+    assert!(a_digests[0].body.contains("E2E 会话主题归纳"));
 }

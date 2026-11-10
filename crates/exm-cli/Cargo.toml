@@ -28,6 +28,7 @@ owo-colors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ratatui = "0.29"
+parking_lot = "0.12"
 crossterm = "0.28"
 
 # libc 仅 Unix fd 操作（pipe/dup/dup2）使用；Windows 走 CRT（extern 声明，无 crate）

@@ -16,8 +16,8 @@ use super::*;
 ///   读取字幕/简介与评论 → 生成评论/回复 → 可选真发；默认 dry-run）；
 /// - `rss`：RSS/Atom 订阅阅读（plugins/rss，按配置轮询新条目 → 阅读简报 → 可选推送）。
 pub const CHANNEL_PLATFORMS: &[&str] = &[
-    "webhook", "telegram", "qqbot", "napcat", "discord", "slack", "matrix", "qq", "wechat",
-    "bilibili", "youtube", "rss",
+    "webhook", "telegram", "qqbot", "napcat", "snowluma", "discord", "slack", "matrix", "qq",
+    "wechat", "bilibili", "youtube", "rss",
 ];
 
 /// 通道定义：外部消息源接入点。平台 = `type`（webhook / telegram / qqbot / napcat …）。
@@ -190,6 +190,226 @@ pub async fn channel_status() -> impl IntoResponse {
     Json(serde_json::to_value(snapshot).unwrap_or(Value::Null)).into_response()
 }
 
+// ---------------------------------------------------------------- QQ 官方机器人扫码绑定
+// q.qq.com 的 create_bind_task / poll_bind_result 接口：出绑定二维码 → 手机 QQ 扫码
+// 确认 → 轮询拿 bot_appid + botEncryptSecret（AES-256-GCM 密文，解出 appSecret）。
+// 密文格式：IV(12B) + ciphertext + AuthTag(16B)，key 为创建任务时自拟的 32B 随机数。
+// 参照 bili 扫码模式：出码/轮询为无副作用只读接口，凭证只回给前端填表，不落盘
+// （保存通道时才随 config 入库并掩码）。
+
+const QQBOT_BIND_HOST: &str = "q.qq.com";
+
+/// 生成 base64 编码的 32 字节绑定密钥（create_bind_task 请求体用）。
+/// 随机源用两组 UUIDv4（各 16 字节真随机，uuid 已有依赖不引 rand）。
+fn bind_key() -> String {
+    use base64::Engine;
+    let mut buf = [0u8; 32];
+    let u1 = uuid::Uuid::new_v4();
+    let u2 = uuid::Uuid::new_v4();
+    buf[..16].copy_from_slice(u1.as_bytes());
+    buf[16..].copy_from_slice(u2.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(buf)
+}
+
+/// AES-256-GCM 解密 botEncryptSecret：base64(IV(12) + ciphertext + tag(16))
+fn decrypt_bind_secret(encrypted_b64: &str, key_b64: &str) -> anyhow::Result<String> {
+    use base64::Engine;
+    let key = base64::engine::general_purpose::STANDARD.decode(key_b64)?;
+    let data = base64::engine::general_purpose::STANDARD.decode(encrypted_b64)?;
+    if key.len() != 32 || data.len() < 28 {
+        anyhow::bail!("绑定密文格式非法");
+    }
+    type Aes256Gcm = aes_gcm::Aes256Gcm;
+    use aes_gcm::aead::{Aead, KeyInit};
+    let cipher = Aes256Gcm::new_from_slice(&key)?;
+    let iv = &data[..12];
+    let tag = &data[data.len() - 16..];
+    let ct = &data[12..data.len() - 16];
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(iv);
+    let mut sealed = ct.to_vec();
+    sealed.extend_from_slice(tag);
+    let pt = cipher
+        .decrypt((&nonce).into(), sealed.as_ref())
+        .map_err(|_| anyhow::anyhow!("绑定密文解密失败（密钥不匹配或数据损坏）"))?;
+    Ok(String::from_utf8_lossy(&pt).to_string())
+}
+
+#[derive(serde::Deserialize)]
+pub struct QQBotBindBody {
+    /// 环境：production（默认）| test（test.q.qq.com；二维码 URL 恒用 q.qq.com）
+    #[serde(default)]
+    env: Option<String>,
+}
+
+async fn bind_post_json(url: &str, body: &Value) -> anyhow::Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp = client
+        .post(url)
+        .json(body)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    let status = resp.status();
+    let v: Value = resp.json().await?;
+    if !status.is_success() {
+        anyhow::bail!("HTTP {} from {}", status, url);
+    }
+    Ok(v)
+}
+
+/// 出绑定任务（POST /api/channels/qqbot-bind）：返回 taskId + 连接 URL（前端渲染二维码）。
+/// key 由网关生成并随 taskId 一起返回前端（轮询确认时回传用于解密）——网关无状态，
+/// 不持久化绑定会话；key 只在本轮HTTP响应中存在，落到前端表单内存。
+pub async fn qqbot_bind_start(
+    Json(b): Json<QQBotBindBody>,
+) -> impl IntoResponse {
+    let host = if b.env.as_deref() == Some("test") {
+        "test.q.qq.com"
+    } else {
+        QQBOT_BIND_HOST
+    };
+    let key = bind_key();
+    let v = match bind_post_json(
+        &format!("https://{host}/lite/create_bind_task"),
+        &json!({ "key": key }),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("创建绑定任务失败：{e}") })),
+            )
+                .into_response()
+        }
+    };
+    if v.get("retcode").and_then(Value::as_i64) != Some(0) {
+        let msg = v
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("create_bind_task failed");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("创建绑定任务失败：{msg}") })),
+        )
+            .into_response();
+    }
+    let task_id = v
+        .pointer("/data/task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if task_id.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "创建绑定任务失败：缺少 task_id" })),
+        )
+            .into_response();
+    }
+    let connect_url = format!(
+        "https://{QQBOT_BIND_HOST}/qqbot/openclaw/connect.html?task_id={}&source=&_wv=2",
+        urlencode(&task_id)
+    );
+    Json(json!({ "taskId": task_id, "key": key, "url": connect_url })).into_response()
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 轮询绑定结果（GET /api/channels/qqbot-bind/:task_id?key=<bindKey>）。
+/// status: 0 未扫 / 1 待确认 / 2 完成（返回解密后的 appId+appSecret）/ 3 过期。
+pub async fn qqbot_bind_poll(
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Query 提取器会做 URL 解码：前端 encodeURIComponent 后的 base64 key（+/=）
+    // 必须还原成原文，否则确认阶段 AES-GCM 解密会因 key 字节不符而失败。
+    let key = params.get("key").cloned().unwrap_or_default();
+    if task_id.is_empty() || key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺少 task_id 或 key" })),
+        )
+            .into_response();
+    }
+    let v = match bind_post_json(
+        &format!("https://{QQBOT_BIND_HOST}/lite/poll_bind_result"),
+        &json!({ "task_id": task_id }),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("轮询绑定结果失败：{e}") })),
+            )
+                .into_response()
+        }
+    };
+    if v.get("retcode").and_then(Value::as_i64) != Some(0) {
+        let msg = v
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("poll_bind_result failed");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("轮询绑定结果失败：{msg}") })),
+        )
+            .into_response();
+    }
+    let status = v
+        .pointer("/data/status")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if status == 2 {
+        let enc = v
+            .pointer("/data/bot_encrypt_secret")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // bot_appid 可能是字符串或数字（平台实现差异）：两种都归一成字符串
+        let app_id = v
+            .pointer("/data/bot_appid")
+            .and_then(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .or_else(|| x.as_i64().map(|n| n.to_string()))
+            })
+            .unwrap_or_default();
+        match decrypt_bind_secret(enc, &key) {
+            Ok(secret) => Json(json!({
+                "state": "confirmed",
+                "appId": app_id,
+                "appSecret": secret,
+                "userOpenid": v.pointer("/data/user_openid").and_then(Value::as_str),
+            }))
+            .into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        }
+    } else {
+        // 0 未扫 / 1 等待扫码确认（PENDING）→ 继续轮询；3 过期
+        Json(json!({ "state": if status == 3 { "expired" } else { "waiting" } })).into_response()
+    }
+}
+
 // ---------------------------------------------------------------- B 站扫码登录
 // 出码与轮询都是无副作用的 passport 只读接口；登录态 Cookie 只在 poll 确认瞬间产生，
 // 直接回给前端填表单，不落盘（保存通道时才随 config 入库并掩码）。
@@ -239,7 +459,8 @@ pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
 pub(crate) fn secret_config_keys(kind: &str) -> Vec<&'static str> {
     let static_keys: &[&'static str] = match kind {
         "qqbot" => &["appSecret"],
-        "napcat" => &["token"],
+        // napcat / snowluma 同为 OneBot 11 正向 WS：访问令牌敏感键一致
+        "napcat" | "snowluma" => &["token"],
         // Slack Socket Mode 应用级令牌（xapp-）；机器人令牌走顶层 token
         "slack" => &["appToken"],
         // B 站：登录态 Cookie（SESSDATA 鉴权 / biliJct 为 CSRF）；YouTube：API Key / OAuth
@@ -361,115 +582,8 @@ pub async fn read_channel_flow(
     Json(json!({ "ok": true })).into_response()
 }
 
-/// 流内会话列表（spec experience-iteration 流内会话切换：与通道 /sessions 指令同口径——
-/// 同流标题前缀的全部会话，活跃时间倒序，活跃绑定带标记）
-pub async fn list_flow_sessions(
-    State(st): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    let Some((channel_id, chat_key)) = id.rsplit_once(':') else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "非法流 id（应为 channelId:chatKey）" })),
-        )
-            .into_response();
-    };
-    let Some(flow) = st.core.channel_flow(channel_id, chat_key) else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "流不存在" }))).into_response();
-    };
-    // 归属 scope 与通道执行同口径：通道绑定目标（group 或 single:<id>；
-    // 缺省回落默认单智能体——与 ChannelRun::begin 的 target 解析一致）
-    let scope = load_channels(&st.core)
-        .into_iter()
-        .find(|c| c.id == channel_id)
-        .and_then(|c| c.group.clone())
-        .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(&st.core)));
-    let title_prefix = format!("channel:{channel_id}:{chat_key}:");
-    let bare_title = format!("channel:{channel_id}:{chat_key}");
-    let mut mine: Vec<_> = st
-        .core
-        .list_sessions_in_group(&scope)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|s| s.title.starts_with(&title_prefix) || s.title == bare_title)
-        .collect();
-    // 活跃倒序；同秒以创建时间破平（与 /sessions /use 序号寻址同口径）
-    mine.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id)));
-    let active = flow.active_session.clone();
-    let items: Vec<Value> = mine
-        .iter()
-        .take(20)
-        .map(|s| {
-            let label = s
-                .title
-                .strip_prefix(&title_prefix)
-                .filter(|t| !t.is_empty())
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| default_flow_session_label(&s.created_at));
-            json!({
-                "id": s.id,
-                "label": label,
-                "createdAt": s.created_at,
-                "updatedAt": s.updated_at,
-                "active": active.as_deref() == Some(s.id.as_str()),
-            })
-        })
-        .collect();
-    Json(items).into_response()
-}
-
-/// 流绑定会话改绑（spec：与 /new /use 指令共享同一绑定状态——一处切换他处反映）
-pub async fn set_flow_active_session(
-    State(st): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    Json(b): Json<FlowActiveBody>,
-) -> impl IntoResponse {
-    let Some((channel_id, chat_key)) = id.rsplit_once(':') else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "非法流 id（应为 channelId:chatKey）" })),
-        )
-            .into_response();
-    };
-    if st.core.channel_flow(channel_id, chat_key).is_none() {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "流不存在" }))).into_response();
-    }
-    // 会话必须属于本流（防跨流错绑：只收同前缀标题的会话 id）
-    let title_prefix = format!("channel:{channel_id}:{chat_key}:");
-    let bare_title = format!("channel:{channel_id}:{chat_key}");
-    let scope = load_channels(&st.core)
-        .into_iter()
-        .find(|c| c.id == channel_id)
-        .and_then(|c| c.group.clone())
-        .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(&st.core)));
-    let belongs = st
-        .core
-        .list_sessions_in_group(&scope)
-        .unwrap_or_default()
-        .into_iter()
-        .any(|s| s.id == b.session_id && (s.title.starts_with(&title_prefix) || s.title == bare_title));
-    if !belongs {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "会话不属于本流" })),
-        )
-            .into_response();
-    }
-    match st.core.bind_flow_session(channel_id, chat_key, &b.session_id) {
-        Ok(()) => Json(json!({ "ok": true, "sessionId": b.session_id })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FlowActiveBody {
-    pub session_id: String,
-}
+/// 流内会话切换已退役（聊天流固定单会话）：列表/改绑端点一并移除，
+/// 会话复用只走流绑定（flow_active_session → ensure_flow_session_atomic）。
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -568,10 +682,12 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "napcat" && config.get("url").is_none_or(|v| v.trim().is_empty()) {
+    if matches!(platform.as_str(), "napcat" | "snowluma")
+        && config.get("url").is_none_or(|v| v.trim().is_empty())
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "napcat 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" })),
+            Json(json!({ "error": "napcat/snowluma 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" })),
         )
             .into_response();
     }
@@ -838,11 +954,8 @@ pub async fn delete_channel(
     let before = channels.len();
     channels.retain(|c| c.id != id);
     if channels.len() == before {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "通道不存在" })),
-        )
-            .into_response();
+        // 幂等 200（D4 决议推广，审计 REST P1-2）：重复删除目标已不在 → 成功
+        return Json(json!({ "ok": true })).into_response();
     }
     match save_channels(&st.core, &channels) {
         Ok(_) => {
@@ -1040,4 +1153,39 @@ pub async fn channel_inbound(
         Json(json!({ "accepted": true, "sessionId": session.id, "group": st.core.active_group() })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod qqbot_bind_tests {
+    use super::decrypt_bind_secret;
+    use aes_gcm::aead::{Aead, KeyInit};
+    use base64::Engine;
+
+    #[test]
+    fn 扫码绑定密文按_iv_密文_tag_解密() {
+        // 模拟 q.qq.com 的 botEncryptSecret：base64(IV(12) + ciphertext + tag(16))
+        let key = [7u8; 32];
+        let nonce = [9u8; 12];
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).unwrap();
+        let ct = cipher
+            .encrypt((&nonce).into(), b"app-secret-xyz".as_ref())
+            .unwrap();
+        let mut sealed = nonce.to_vec();
+        sealed.extend_from_slice(&ct);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(&key);
+        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(sealed);
+        assert_eq!(
+            decrypt_bind_secret(&sealed_b64, &key_b64).unwrap(),
+            "app-secret-xyz"
+        );
+    }
+
+    #[test]
+    fn 轮询_query_还原_url_编码的绑定密钥() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        let uri: axum::http::Uri = "/?key=ab%2Bcd%2Fef%3D".parse().unwrap();
+        let Query(params) = Query::<HashMap<String, String>>::try_from_uri(&uri).unwrap();
+        assert_eq!(params.get("key").map(String::as_str), Some("ab+cd/ef="));
+    }
 }

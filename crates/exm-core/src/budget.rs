@@ -206,6 +206,7 @@ mod tests {
             last_active_at: None,
             tool_calls: Vec::new(),
             steps: Vec::new(),
+            attachments: Vec::new(),
         };
         let mut msgs = vec![mk(&"旧".repeat(500)), mk(&"新".repeat(300))];
         let n = trim_oldest_messages(&mut msgs, 250);

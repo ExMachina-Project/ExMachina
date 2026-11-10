@@ -31,8 +31,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (resp.status === 401) {
-    // 密钥失效：清除并回到登录门（登录门自身的 verify 不触发重载，交由调用方处理）
-    if (path !== "/auth/verify") {
+    // 密钥失效才清键回登录门；无 key 的 401 = 未登录（dev 源首访 / 角标预热早于
+    // 登录门），不 reload——否则挂载期轮询（approvals/flows 角标）会触发
+    // 401→清键→reload 死循环，页面永远卡在 CONNECTING（dev 预览实测踩中）
+    if (localStorage.getItem("exm.key") && path !== "/auth/verify") {
       localStorage.removeItem("exm.key");
       window.location.reload();
     }
@@ -163,6 +165,10 @@ export interface RecallHit {
   entry: MemoryEntry;
   score: number;
   reasons: string[];
+  /** 调试视图：命中的查询词项 → 权重贡献（词项召回路径才有） */
+  matchedTerms?: Record<string, number>;
+  /** 调试视图：语义相似分数值（0~1 余弦；语义/混合路径才有） */
+  semanticScore?: number;
 }
 
 export interface AgentStat {
@@ -201,6 +207,8 @@ export interface GroupMeta {
   model?: string;
   /** 组级能力模型覆盖；缺省字段跟随「模型设置」页的全局槽位 */
   capabilities?: GroupCapabilities | null;
+  /** 自我优化开关（group-self-optimize）：true = 主智能体可自行增删改子个体 */
+  selfOptimize?: boolean | null;
   builtin: boolean;
   createdAt: string;
 }
@@ -327,6 +335,22 @@ export interface ApprovalRequest {
   decidedAt?: string;
 }
 
+/**
+ * 破坏性命令前端判定（approval-ergonomics）：与后端
+ * exm-core `DESTRUCTIVE_PATTERNS`（tools/allowlist.rs）口径保持同步——
+ * 命中时审批卡隐藏「本会话允许/加入白名单」档（后端同样降级,此处仅 UI 预避）。
+ */
+export function isDestructiveCommand(command: string): boolean {
+  const pats = [
+    "rm ", "rm -", "del ", "rmdir", "rd /s", "format ", "shutdown", "taskkill",
+    "reg delete", "reg add", "dd if=", "mkfs", "git push --force", "git push -f",
+    "git reset --hard", "git clean", "git rebase", "drop table", "drop database",
+    "truncate table", "remove-item", "invoke-expression", "curl | sh", "curl | bash",
+  ];
+  const lowered = command.toLowerCase();
+  return pats.some((p) => lowered.includes(p));
+}
+
 // 计划模式（spec plan-mode：WebUI 计划卡片数据契约）
 export interface PlanItem {
   id: string;
@@ -342,6 +366,18 @@ export interface TodoItem {
   id: string;
   content: string;
   status: "pending" | "in_progress" | "done";
+}
+
+// 任务队列（task-queue）：task_queue.updated 事件负载中的单条任务
+export interface QueuedTaskItem {
+  id: string;
+  task: string;
+  runMode: "parallel" | "queued";
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  spawnId?: string;
+  createdAt: string;
+  finishedAt?: string;
+  note?: string;
 }
 
 // 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件数据
@@ -412,15 +448,6 @@ export interface ChannelFlow {
   lastMessage: string;
   lastActiveAt: string;
   createdAt: string;
-}
-
-/** 流内会话条目（流会话切换）：与通道 /sessions 指令同口径 */
-export interface FlowSessionInfo {
-  id: string;
-  label: string;
-  createdAt: string;
-  updatedAt: string;
-  active: boolean;
 }
 
 /** 通道运行状态（内置适配器上报；桥接类型无运行时不产生条目） */
@@ -530,6 +557,15 @@ export const api = {
   /** 「不再提醒」：持久化关闭首启设置引导 */
   dismissKeySetup: () => req<{ ok: boolean }>("/auth/dismiss", { method: "POST" }),
   health: () => req<{ ok: boolean; mock: boolean; agents: number }>("/health"),
+  /** 开箱自检（onboarding-selfcheck）：四类体检分级结果（引导卡数据源） */
+  selfcheck: () =>
+    req<{
+      ok: boolean;
+      overall: "ok" | "warn" | "error";
+      errors: number;
+      warns: number;
+      items: { level: "ok" | "warn" | "error"; name: string; detail: string; hint?: string }[];
+    }>("/selfcheck"),
   listSessions: () => req<Session[]>("/sessions"),
   /** 管理视角全量会话（含所有组；归档态默认排除） */
   listAllSessions: () => req<Session[]>("/sessions?all=true"),
@@ -540,6 +576,13 @@ export const api = {
     req<{ ok: boolean; affected: number; failed: { id: string; error: string }[] }>("/sessions/batch", {
       method: "POST",
       body: JSON.stringify({ action, ids }),
+    }),
+  /** 按流/按通道归档旧会话（session-management）：scope=flow 时 channelId+chatKey
+   *  圈定单流；scope=channel 时归档该通道全部流的旧会话。流绑定会话豁免。 */
+  archiveSessionsByScope: (scope: "flow" | "channel", channelId: string, chatKey?: string) =>
+    req<{ ok: boolean; archived: number; skipped: number }>("/sessions/flow-archive", {
+      method: "POST",
+      body: JSON.stringify({ scope, channelId, chatKey }),
     }),
   createSession: (title: string) =>
     req<Session>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
@@ -595,6 +638,18 @@ export const api = {
       ),
     ),
   nexusLinks: () => req<{ links: NexusLink[] }>("/nexus/links"),
+  /** 拓扑聚合视图（nexus-topology-admin）：节点（连结体）+ 边（个体绑定） */
+  nexusGraph: () =>
+    req<{
+      nodes: { id: string; name: string; kind: string; enabled: boolean }[];
+      edges: { agentId: string; agentName: string; linkId: string }[];
+    }>("/nexus/graph"),
+  /** 连边编辑：bind / unbind（重复边与状态冲突 409，连结体不存在 404） */
+  editNexusEdge: (action: "bind" | "unbind", agentId: string, linkId: string) =>
+    req<{ ok: boolean; agentId: string; linkId: string | null }>("/nexus/edges", {
+      method: "PUT",
+      body: JSON.stringify({ action, agentId, linkId }),
+    }),
   saveNexusLink: (body: NexusLink) =>
     req<{ ok: boolean; link: NexusLink }>("/nexus/links", { method: "POST", body: JSON.stringify(body) }),
   deleteNexusLink: (id: string) => req<{ ok: boolean }>(`/nexus/links/${id}`, { method: "DELETE" }),
@@ -603,7 +658,7 @@ export const api = {
     req<NexusProbeResult>(`/nexus/links/${id}/probe`, { method: "POST" }),
   stopSession: (id: string) =>
     req<{ ok: boolean; toolsExecuted: number }>(`/sessions/${id}/stop`, { method: "POST", body: JSON.stringify({}) }),
-  audit: (params: { agent?: string; tool?: string; limit?: number }) =>
+  audit: (params: { agent?: string; tool?: string; kind?: string; limit?: number }) =>
     req<{ items: Array<Record<string, unknown>> }>("/audit?" + new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)])).toString()),
   channelTest: (id: string) =>
     req<{ ok: boolean; category?: string; identity?: string; message?: string; error?: string }>(`/channels/${id}/test`, { method: "POST", body: JSON.stringify({}) }),
@@ -710,6 +765,15 @@ export const api = {
   renderMemory: () => req<{ ok: boolean }>("/memory/render", { method: "POST" }),
 
   groupAgents: (gid: string) => req<AgentDefinition[]>(`/groups/${gid}/agents`),
+  /** 组信息更新（group-card-menu）：改名 + 可选改 id（改 id 迁移会话/记忆/任务/触发器引用） */
+  updateGroup: (gid: string, body: { name: string; id?: string }) =>
+    req<GroupMeta>(`/groups/${gid}`, { method: "PUT", body: JSON.stringify(body) }),
+  /** 自我优化开关（group-self-optimize）：开启后主智能体可自行增删改子个体 */
+  setGroupSelfOptimize: (gid: string, enabled: boolean) =>
+    req<{ ok: boolean; selfOptimize: boolean }>(`/groups/${gid}/self-optimize`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
   getTarget: () => req<{ mode: "group" | "single"; id: string; name?: string; primary?: string }>("/target"),
   setTarget: (mode: "group" | "single", id?: string) =>
     req<{ ok: boolean }>("/target", { method: "PUT", body: JSON.stringify({ mode, id }) }),
@@ -819,10 +883,10 @@ export const api = {
     p.set("limit", String(limit));
     return req<ApprovalRequest[]>(`/approvals?${p.toString()}`);
   },
-  decideApproval: (id: string, approve: boolean) =>
+  decideApproval: (id: string, approve: boolean, scope: "once" | "session" | "allowlist" = "once") =>
     req<ApprovalRequest>(`/approvals/${id}/${approve ? "approve" : "deny"}`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: approve ? JSON.stringify({ scope }) : JSON.stringify({}),
     }),
 
   // 计划模式（spec plan-mode：跨端审批呈现——WebUI 计划卡片）
@@ -838,9 +902,6 @@ export const api = {
   /** 聊天流列表（按最后活跃倒序；?channel= 过滤单通道） */
   listChannelFlows: () => req<ChannelFlow[]>("/channels/flows"),
   readChannelFlow: (id: string) => req<{ ok: boolean }>(`/channels/flows/${encodeURIComponent(id)}/read`, { method: "POST" }),
-  listFlowSessions: (id: string) => req<FlowSessionInfo[]>(`/channels/flows/${encodeURIComponent(id)}/sessions`),
-  setFlowActiveSession: (id: string, sessionId: string) =>
-    req<{ ok: boolean; sessionId: string }>(`/channels/flows/${encodeURIComponent(id)}/active`, { method: "PUT", body: JSON.stringify({ sessionId }) }),
   /** B 站扫码登录：出码（返回二维码内容 URL）→ 前端渲染二维码 → 轮询到 confirmed 拿登录 Cookie */
   biliQrStart: () => req<{ qrcodeKey: string; url: string }>("/channels/bili-qr", { method: "POST" }),
   biliQrPoll: (key: string) =>
@@ -848,6 +909,14 @@ export const api = {
       | { state: "waiting"; code: number }
       | { state: "confirmed"; sessdata: string; biliJct: string; uid: string; uname: string }
     >(`/channels/bili-qr/${encodeURIComponent(key)}`),
+  /** QQ 官方机器人扫码绑定：出绑定任务（二维码 URL + 解密密钥）→ 轮询到 confirmed 拿 AppID/AppSecret */
+  qqbotBindStart: () =>
+    req<{ taskId: string; key: string; url: string }>("/channels/qqbot-bind", { method: "POST", body: "{}" }),
+  qqbotBindPoll: (taskId: string, key: string) =>
+    req<
+      | { state: "waiting" | "scanned" | "expired" }
+      | { state: "confirmed"; appId: string; appSecret: string; userOpenid?: string }
+    >(`/channels/qqbot-bind/${encodeURIComponent(taskId)}?key=${encodeURIComponent(key)}`),
   createChannel: (body: {
     id: string;
     platform?: string;

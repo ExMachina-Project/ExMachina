@@ -80,23 +80,48 @@ impl ToolGateway {
         // 拦截后运行时原地等待人工决定（security.approvalWaitSecs）：
         // 批准 → 系统代执行，输出直接回灌本工具结果，模型继续干活；拒绝/超时 → 受阻回流。
         let mode = self.security.exec_approval.as_str();
+        // 命令分档闸门（agent-budget-audit 3.3）：tier_gate 联动判定
+        // （capability × 审批档 × 命令分档）。Denied 档（rm/format/dd…）无论
+        // 白名单命中与否、审批档位为何，一律走审批——off 档对白名单受控命令宽松，
+        // 对破坏性命令永远不放行。能力边界（仅聊天档）：本工具在 Chat 档不可达
+        // （runtime 执行层全拒），tier_gate 的边界文案兜底防御纵深。
+        let scope = self.session_scope_of(session_id);
+        let tier = super::allowlist::tier_of_command(&cmd);
+        let (tier_pass, tier_deny_msg) = super::allowlist::tier_gate(&cmd, scope, mode);
+        if let Some(deny_msg) = tier_deny_msg.filter(|_| !tier_pass) {
+            return ToolResult::err(deny_msg);
+        }
+        if !tier_pass {
+            return self
+                .gate_command(agent_id, session_id, &format!("[红线] {cmd}"))
+                .await;
+        }
         if !whitelisted {
-            // 白名单外命令：off 档直接拒绝（历史行为）；开启审批闸门时不再硬拒——
-            // 转入人工审批（用户批准即由系统代执行）。此前一律硬拒导致 mkdir/go/pytest
-            // 等大量日常开发命令无路可走，agent 无法完成编码任务。
+            // 白名单外命令（审批经济学）：**无害即直通**——非 Denied 档且无
+            // 高危特征（is_destructive_command）时不进审批。此前 risky/always
+            // 档下白名单外一律进审批，「跑个 mkdir/go/pytest 都要人工介入」。
+            // off 档保持白名单即全部边界的历史语义（无害也不例外——off 的
+            // 语义就是零信任白名单模式）。
+            let harmless = tier != super::allowlist::CommandTier::Denied
+                && !is_destructive_command(&lowered);
             if mode == "off" {
                 return ToolResult::err(format!(
                     "命令不在白名单: {cmd}（白名单按「命令 + 子命令」逐段匹配——链式命令每段都须在白名单；\
                      可将 security.execApproval 设为 risky/always 走人工审批放行）"
                 ));
             }
-            return self.gate_command(agent_id, session_id, &cmd).await;
+            if !harmless {
+                return self.gate_command(agent_id, session_id, &cmd).await;
+            }
         }
         if mode == "risky" || mode == "always" {
             let allowlisted = self.security.exec_allowlist.iter().any(|p| {
                 !p.trim().is_empty() && lowered.starts_with(p.trim().to_lowercase().as_str())
             });
-            let gated = mode == "always" || is_destructive_command(&lowered);
+            // 高危判定不再叠加审批档：risky 拦高危（既有语义），always 档
+            // 高危也拦但**白名单外无害命令已放行**（上一分支）——「全拦」的
+            // 旧语义降级为「高危必拦」，审批只花在真危险的东西上。
+            let gated = is_destructive_command(&lowered);
             if gated && !allowlisted {
                 return self.gate_command(agent_id, session_id, &cmd).await;
             }
@@ -252,6 +277,9 @@ impl ToolGateway {
             chars[start..].iter().collect()
         };
         drop(guard);
+        // 终态回收（P2-4）：轮询即清理——退出超过 30 分钟的终态任务
+        // （输出已被取走，保留只剩泄漏面；运行中任务不受影响）
+        self.reap_finished_bg();
         let status_line = match state {
             None => format!("运行中（已 {elapsed}s）"),
             Some(0) => format!("已完成（exit=0，耗时 {elapsed}s）"),
@@ -261,6 +289,18 @@ impl ToolGateway {
             "{status_line}\n—— 输出（累计 {} 字符）——\n{tail}",
             buf.chars().count()
         ))
+    }
+
+    /// 终态任务回收：进程已退出且退出超过 30 分钟的条目移除（防注册表只进不出；
+    /// 与 spawn 注册表 50 条上限同族治理——终态任务无 abort 需求，超龄即回收）
+    fn reap_finished_bg(&self) {
+        const BG_TOMBSTONE_SECS: u64 = 1800;
+        self.background
+            .lock()
+            .retain(|_, t| match *t.state.lock() {
+                Some(_) => t.started.elapsed().as_secs() < BG_TOMBSTONE_SECS,
+                None => true, // 运行中不回收
+            });
     }
 
     /// 终止后台任务（中止读取任务 → kill_on_drop 连带结束子进程）

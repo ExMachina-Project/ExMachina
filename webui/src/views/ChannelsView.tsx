@@ -10,6 +10,7 @@ import { PageHeader } from "../components/PageHeader";
 import { IdentityPanel } from "../components/IdentityPanel";
 import { MaskedPasswordInput } from "../components/MaskedInput";
 import { BiliQrLoginModal } from "../components/BiliQrLoginModal";
+import { QQBotBindModal } from "../components/QQBotBindModal";
 import { useExm } from "../store";
 import { useT, type TKey } from "../i18n/core";
 import { useIsNarrow } from "../useIsNarrow";
@@ -35,6 +36,8 @@ interface ChanField {
   multiline?: boolean;
   /** B 站扫码登录挂点：该字段渲染前插「扫码登录」按钮（回填本平台 Cookie 字段） */
   qrLogin?: boolean;
+  /** QQ 官方机器人扫码绑定挂点：该字段渲染前插「扫码创建机器人」按钮（回填 AppID/AppSecret） */
+  qqBind?: boolean;
 }
 interface ChanPlat {
   key: string;
@@ -60,7 +63,7 @@ const PLATFORMS: ChanPlat[] = [
     helpKey: "channels.platHelp.qqbot",
     replyBuiltin: true,
     fields: [
-      { key: "appId", labelKey: "channels.f.appId", required: true, ph: "AppID", helpKey: "channels.f.appIdHelp" },
+      { key: "appId", labelKey: "channels.f.appId", required: true, ph: "AppID", helpKey: "channels.f.appIdHelp", qqBind: true },
       { key: "appSecret", labelKey: "channels.f.appSecret", secret: true, required: true, ph: "AppSecret", helpKey: "channels.f.appSecretHelp" },
       { key: "sandbox", labelKey: "channels.f.sandbox", toggle: true, helpKey: "channels.f.sandboxHelp" },
     ],
@@ -71,6 +74,18 @@ const PLATFORMS: ChanPlat[] = [
     tag: "NapCat",
     labelKey: "channels.plat.napcat",
     helpKey: "channels.platHelp.napcat",
+    replyBuiltin: true,
+    fields: [
+      { key: "url", labelKey: "channels.f.napUrl", required: true, ph: "ws://127.0.0.1:3001", helpKey: "channels.f.napUrlHelp" },
+      { key: "token", labelKey: "channels.f.napToken", secret: true, helpKey: "channels.f.napTokenHelp" },
+    ],
+  },
+  {
+    key: "snowluma",
+    color: undefined,
+    tag: "SnowLuma",
+    labelKey: "channels.plat.snowluma",
+    helpKey: "channels.platHelp.snowluma",
     replyBuiltin: true,
     fields: [
       { key: "url", labelKey: "channels.f.napUrl", required: true, ph: "ws://127.0.0.1:3001", helpKey: "channels.f.napUrlHelp" },
@@ -338,6 +353,7 @@ export function ChannelsView(): React.ReactElement {
   const [modal, setModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
+  const [qqBindOpen, setQqBindOpen] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [form] = Form.useForm();
 
@@ -553,7 +569,7 @@ export function ChannelsView(): React.ReactElement {
     const st = status[c.id];
     if (!st) return <Tag>{t("channels.stWait")}</Tag>;
     return (
-      <Space direction="vertical" size={0} style={{ display: "flex" }}>
+      <Space orientation="vertical" size={0} style={{ display: "flex" }}>
         <Tooltip title={`${st.detail} · ${st.at}`}>
           <Tag color={st.state === "ok" ? "success" : "error"} style={{ cursor: "default", marginRight: 0, alignSelf: "flex-start" }}>
             {st.state === "ok" ? t("channels.stOk") : t("channels.stErr")}
@@ -613,7 +629,7 @@ export function ChannelsView(): React.ReactElement {
             {
               title: t("channels.colAccount"),
               render: (_, c) => (
-                <Space direction="vertical" size={0}>
+                <Space orientation="vertical" size={0}>
                   <b>
                     {c.account ?? c.id} {c.account ? <span className="mono dim">{c.id}</span> : null}
                   </b>
@@ -632,7 +648,7 @@ export function ChannelsView(): React.ReactElement {
                 const cap = c.capability ?? "computer";
                 const isSingle = c.group?.startsWith("single:");
                 return (
-                  <Space direction="vertical" size={2}>
+                  <Space orientation="vertical" size={2}>
                     {c.group ? (
                       isSingle ? (
                         <Tag>
@@ -674,7 +690,7 @@ export function ChannelsView(): React.ReactElement {
                     : t("channels.testCat." + st.category, { msg: (st.message ?? "").slice(0, 60) })
                   : "";
                 return (
-                  <Space size={4} direction="vertical">
+                  <Space size={4} orientation="vertical">
                     <Button
                       size="small"
                       loading={testing === c.id}
@@ -819,6 +835,13 @@ export function ChannelsView(): React.ReactElement {
                           <Form.Item label={t("channels.biliqr.btn")} extra={t("channels.biliqr.btnHelp")}>
                             <Button block icon={<QrcodeOutlined />} onClick={() => setQrOpen(true)}>
                               {t("channels.biliqr.btn")}
+                            </Button>
+                          </Form.Item>
+                        )}
+                        {f.qqBind && (
+                          <Form.Item label={t("channels.qqbind.btn")} extra={t("channels.qqbind.btnHelp")}>
+                            <Button block icon={<QrcodeOutlined />} onClick={() => setQqBindOpen(true)}>
+                              {t("channels.qqbind.btn")}
                             </Button>
                           </Form.Item>
                         )}
@@ -985,6 +1008,14 @@ export function ChannelsView(): React.ReactElement {
         onConfirmed={({ sessdata, biliJct, uid }) => {
           // 回填 Cookie 字段：uid 非空才写（老账号可能不下发）
           form.setFieldsValue({ config: { ...form.getFieldValue("config"), sessdata, biliJct, ...(uid ? { uid } : {}) } });
+        }}
+      />
+      <QQBotBindModal
+        open={qqBindOpen}
+        onClose={() => setQqBindOpen(false)}
+        onConfirmed={({ appId, appSecret }) => {
+          // 回填官方机器人凭据：扫码绑定后由平台下发
+          form.setFieldsValue({ config: { ...form.getFieldValue("config"), appId, appSecret } });
         }}
       />
     </div>

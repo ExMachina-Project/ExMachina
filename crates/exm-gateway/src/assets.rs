@@ -67,6 +67,85 @@ pub(crate) struct AssetQuery {
     key: Option<String>,
 }
 
+/// 工作区文件下载（GET /api/asset/download?path=）：会话产物投递（send-file
+/// 能力）的 WebUI 侧下载端点。与 /api/asset（内联预览）的差别：
+/// · 扩展名不限（任意类型可发——xlsx/pdf/zip…；MIME 缺省 application/octet-stream）
+/// · 上限 200MB（与 filesystem send_file 登记护栏同口径）
+/// · Content-Disposition: attachment（浏览器落盘而非内联打开）
+/// · 仅鉴权头（不是 <img> 场景，无需查询参数密钥通道）
+pub(crate) async fn download_asset(
+    State(st): State<AppState>,
+    Query(q): Query<AssetQuery>,
+) -> impl IntoResponse {
+    use axum::response::AppendHeaders;
+    let raw = q.path.trim();
+    if raw.is_empty() {
+        return (StatusCode::BAD_REQUEST, "path 不能为空").into_response();
+    }
+    let root = st.core.config().workspace_root.clone();
+    let candidate = root.join(raw);
+    // 路径校验与 /api/asset 同口径（相对路径 + 无 .. + 目标必须已存在于工作区内）
+    // 语义区分（REST 通用约定）：不存在的文件 → 404；路径越界（绝对路径/..）→ 403
+    let rel_ok =
+        std::path::Path::new(raw).is_relative() && !raw.split(['/', '\\']).any(|seg| seg == "..");
+    if !rel_ok {
+        return (StatusCode::FORBIDDEN, "路径越界（仅允许工作区内的文件）").into_response();
+    }
+    if !candidate.exists() {
+        return (StatusCode::NOT_FOUND, "文件不存在").into_response();
+    }
+    let meta = match tokio::fs::metadata(&candidate).await {
+        Ok(m) if m.is_file() => m,
+        _ => return (StatusCode::NOT_FOUND, "文件不存在").into_response(),
+    };
+    if meta.len() > 200 * 1024 * 1024 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "文件超过 200MB").into_response();
+    }
+    let ext = candidate
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "txt" | "log" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        "md" => "text/markdown; charset=utf-8",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "csv" => "text/csv; charset=utf-8",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    };
+    let name = candidate
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".into());
+    match tokio::fs::read(&candidate).await {
+        Ok(bytes) => (
+            AppendHeaders([
+                (axum::http::header::CONTENT_TYPE, mime),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    Box::leak(format!("attachment; filename=\"{name}\"").into_boxed_str()),
+                ),
+            ]),
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "文件不存在").into_response(),
+    }
+}
+
 pub(crate) async fn health(State(st): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "ok": true,

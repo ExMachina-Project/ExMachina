@@ -7,7 +7,7 @@
 
 ### Requirement: 统一能力注册契约
 
-宿主定义四类能力 trait（工具组执行面 / 通道工厂 / watcher 生命周期 / 资源装载），插件以实现 trait 的方式注册能力。内置功能（含迁移后的 video）与进程插件桥都实现同一契约，注册后对系统其余部分不可区分。
+宿主 SHALL 定义四类能力 trait（工具组执行面 / 通道工厂 / watcher 生命周期 / 资源装载），插件以实现 trait 的方式注册能力。内置功能（含迁移后的 video）与进程插件桥都实现同一契约，注册后对系统其余部分不可区分。
 
 #### Scenario: 内置与第三方走同一注册面
 - **WHEN** 一个内置 Rust 插件与一个进程插件注册了同名能力的不同实例
@@ -15,7 +15,7 @@
 
 ### Requirement: 工具组接入工具网关
 
-插件工具经注册面进入工具网关：工具名以插件 id 作命名空间前缀（`<plugin>__<tool>`）避免冲突；schema 随 function calling 正常下发；执行结果与错误沿用既有 ToolResult 契约。插件工具的可见性可按个体收窄（对齐 CustomTool 的 agents 口径）。
+插件工具 SHALL 经注册面进入工具网关：工具名以插件 id 作命名空间前缀（`<plugin>__<tool>`）避免冲突；schema 随 function calling 正常下发；执行结果与错误沿用既有 ToolResult 契约。插件工具的可见性可按个体收窄（对齐 CustomTool 的 agents 口径）。
 
 #### Scenario: 插件工具随 schema 下发
 - **WHEN** 启用插件声明了 tools 能力且会话个体的工具面包含该插件
@@ -27,7 +27,7 @@
 
 ### Requirement: 通道工厂接入
 
-通道适配能力以工厂形式注册：声明平台 kind、能力矩阵（收发/媒体/凭据字段）、凭据字段清单。通道 supervisor 启动序列枚举注册面创建适配器，而非硬编码模块列表。WebUI 通道配置页按插件声明的凭据字段清单渲染表单。
+通道适配能力 SHALL 以工厂形式注册：声明平台 kind、能力矩阵（收发/媒体/凭据字段）、凭据字段清单。通道 supervisor 启动序列枚举注册面创建适配器，而非硬编码模块列表。WebUI 通道配置页按插件声明的凭据字段清单渲染表单。
 
 #### Scenario: 通道页按清单渲染
 - **WHEN** 插件声明 channel 能力且包含凭据字段（如 sessdata/biliJct）
@@ -39,7 +39,7 @@
 
 ### Requirement: watcher 生命周期
 
-watch 能力注册为带生命周期的循环体：宿主统一调度启动、配置变更时重建、禁用/关闭时优雅退出（在飞轮询完成后停止，不硬杀）。
+watch 能力 SHALL 注册为带生命周期的循环体：宿主统一调度启动、配置变更时重建、禁用/关闭时优雅退出（在飞轮询完成后停止，不硬杀）。
 
 #### Scenario: 禁用后 watcher 优雅退出
 - **WHEN** 插件在 watcher 轮询进行中被禁用
@@ -47,7 +47,7 @@ watch 能力注册为带生命周期的循环体：宿主统一调度启动、�
 
 ### Requirement: 资源注入
 
-resources 能力把插件目录内的技能/提示词文件注入既有装载面（与 entities/skills 同格式），热装载语义一致（文件变更即生效）；注入的资源以插件 id 标注来源，可在管理面区分内置与插件来源。
+resources 能力 SHALL 把插件目录内的技能/提示词文件注入既有装载面（与 entities/skills 同格式），热装载语义一致（文件变更即生效）；注入的资源以插件 id 标注来源，可在管理面区分内置与插件来源。
 
 #### Scenario: 插件技能进目录
 - **WHEN** 启用插件的 resources 含技能 JSON
@@ -55,7 +55,7 @@ resources 能力把插件目录内的技能/提示词文件注入既有装载面
 
 ### Requirement: 既有机制收编
 
-CustomTool（config 声明式）与 entities/skills 装载逻辑收编到注册面之后执行，外部行为完全不变：既有配置无需迁移，工具名、技能 id、审计口径保持原样。
+CustomTool（config 声明式）与 entities/skills 装载逻辑 SHALL 收编到注册面之后执行，外部行为完全不变：既有配置无需迁移，工具名、技能 id、审计口径保持原样。
 
 #### Scenario: 既有配置零迁移
 - **WHEN** 未安装任何插件但配置了 CustomTool 与 entities/skills

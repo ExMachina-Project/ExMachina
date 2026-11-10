@@ -4,6 +4,7 @@ import { message } from "antd";
 import type {
   AgentDefinition,
   ApprovalItem,
+  ArtifactItem,
   ChatMessage,
   Session,
   SessionLedger,
@@ -11,11 +12,11 @@ import type {
   TaskGraph,
   ToolCallItem,
 } from "./types";
-import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit, type SpawnBgItem, type TodoItem } from "./api";
+import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type QueuedTaskItem, type RecallHit, type SpawnBgItem, type TodoItem } from "./api";
 import { tr } from "./i18n/core";
 
 export interface TimelineItem {
-  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron";
+  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron" | "budget";
   agentId?: string;
   nodeId?: string;
   /** 派发对应的子会话（可点击跳转查看子个体过程流） */
@@ -65,11 +66,12 @@ interface ExmState {
   planDirtyAt: number;
   refreshPlan: (sessionId: string) => Promise<void>;
   decidePlan: (action: "approve" | "reject" | "setMode", plan?: boolean) => Promise<void>;
-  setPlanMode: (on: boolean) => Promise<void>;
   /** 任务清单（spec agent-todo）：todo.updated 事件快照 */
   todo: { count: number; doneCount: number; allDone: boolean; items: TodoItem[] } | null;
   /** 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件维护 */
   spawns: SpawnBgItem[];
+  /** 任务队列（task-queue）：task_queue.updated 事件快照（切会话/刷新后回放恢复） */
+  taskQueue: { running: number; queued: number; items: QueuedTaskItem[] } | null;
   /** 清除全部后台子任务卡（终态收讫后手动清理） */
   clearSpawns: () => void;
   timeline: TimelineItem[];
@@ -106,7 +108,7 @@ interface ExmState {
   /** 全部已读（清 unreadCounts 全表） */
   markAllRead: () => void;
   saveConfig: (body: Record<string, unknown>) => Promise<void>;
-  decideApproval: (id: string, approve: boolean) => Promise<void>;
+  decideApproval: (id: string, approve: boolean, scope?: "once" | "session" | "allowlist") => Promise<void>;
   handleEvent: (evt: WsEvent) => void;
   setWs: (ok: boolean) => void;
   bumpMemory: () => void;
@@ -222,7 +224,7 @@ function connectWs(get: () => ExmState): void {
     wsBackoff = 0; // 连上即归零退避
     get().setWs(true);
     if (!reconnected) return;
-    // 断连补偿：重拉消息与任务图恢复丢失事件；图无在途节点则解除 running 卡死
+    // 断连补偿：重拉消息与编排图恢复丢失事件；图无在途节点则解除 running 卡死
     const compSeq = selectSeq; // 补偿期间的选择切换同样不得被旧快照覆盖
     void (async () => {
       try {
@@ -344,6 +346,7 @@ export const useExm = create<ExmState>((set, get) => ({
   planDirtyAt: 0,
   todo: null,
   spawns: [],
+  taskQueue: null,
   timeline: [],
   timelineSession: null,
   lastRecall: [],
@@ -463,6 +466,7 @@ export const useExm = create<ExmState>((set, get) => ({
       planPending: false,
       todo: null,
       spawns: [],
+      taskQueue: null,
       timeline: [],
       timelineSession: null,
       running: false,
@@ -483,6 +487,21 @@ export const useExm = create<ExmState>((set, get) => ({
               doneCount: Number(d.doneCount ?? 0),
               allDone: Boolean(d.allDone),
               items: (d.items ?? []) as unknown as TodoItem[],
+            },
+          });
+          break;
+        }
+      }
+      // 任务队列回放：快照只由事件维护（与 todo 同口径），刷新后从事件尾恢复
+      for (let i = evts.length - 1; i >= 0; i--) {
+        const p = evts[i].payload as { type?: string; payload?: Record<string, unknown> } | undefined;
+        if (p?.type === "task_queue.updated") {
+          const d = (p.payload ?? {}) as Record<string, unknown>;
+          set({
+            taskQueue: {
+              running: Number(d.running ?? 0),
+              queued: Number(d.queued ?? 0),
+              items: (d.items ?? []) as unknown as QueuedTaskItem[],
             },
           });
           break;
@@ -537,6 +556,18 @@ export const useExm = create<ExmState>((set, get) => ({
     });
     try {
       await api.chat(id, text, images, sendMode ?? undefined);
+    } catch (e) {
+      // 发送失败（网络断/网关拒/会话忙）：running 复位 + 时间线错误条 + toast。
+      // HTTP 层失败不会广播 run.error 事件，无此兜底则「执行中」转圈永挂、
+      // 用户不知该重发——本地暂留用户消息作为重发参照。
+      set({
+        running: false,
+        timeline: [
+          ...get().timeline,
+          { kind: "error", text: tr("store.tl.error", { msg: String(e) }) },
+        ],
+      });
+      message.error(String(e));
     } finally {
       // 草稿已发出：清除（chat-ergonomics）。
       // 修 bug：历史版本逐会话存 exm.draft.<id>，现行复合存 exm.drafts JSON——
@@ -563,12 +594,14 @@ export const useExm = create<ExmState>((set, get) => ({
   setWs: (ok) => set({ wsConnected: ok }),
   bumpMemory: () => set({ memoryVersion: get().memoryVersion + 1 }),
 
-  decideApproval: async (id, approve) => {
+  decideApproval: async (id, approve, scope = "once") => {
     try {
-      await api.decideApproval(id, approve);
+      await api.decideApproval(id, approve, scope);
       // 乐观移除（approval.resolved 事件到达时幂等）
       set({ approvals: get().approvals.filter((a) => a.approvalId !== id) });
       void get().refreshPendingApprovals();
+      // 审批页列表自刷新（若正看着该页，行状态即刻流转）
+      window.dispatchEvent(new Event("exm:approvals-refresh"));
     } catch (e) {
       message.error(String(e));
     }
@@ -608,10 +641,6 @@ export const useExm = create<ExmState>((set, get) => ({
     } catch (e) {
       message.error(String(e));
     }
-  },
-
-  setPlanMode: async (on) => {
-    await get().decidePlan("setMode", on);
   },
 
   clearSpawns: () => set({ spawns: [] }),
@@ -685,6 +714,8 @@ export const useExm = create<ExmState>((set, get) => ({
     if (evt.type === "approval.required") {
       // 全局计数即时刷新（侧栏角标；不依赖轮询周期）
       void get().refreshPendingApprovals();
+      // 审批页列表自刷新（同链路事件；WS 在线时免手动刷新）
+      window.dispatchEvent(new Event("exm:approvals-refresh"));
       const prefs = loadNotifyPrefs();
       if (prefs.enabled && prefs.approval && document.visibilityState === "hidden" && typeof Notification !== "undefined" && Notification.permission === "granted") {
         fireNotification(
@@ -708,6 +739,8 @@ export const useExm = create<ExmState>((set, get) => ({
     }
     if (evt.type === "approval.resolved") {
       set({ approvals: get().approvals.filter((a) => a.approvalId !== String(p.approvalId)) });
+      void get().refreshPendingApprovals();
+      window.dispatchEvent(new Event("exm:approvals-refresh"));
       return;
     }
     // 任务清单（spec agent-todo）：todo.updated 快照（仅当前会话）
@@ -719,6 +752,19 @@ export const useExm = create<ExmState>((set, get) => ({
             doneCount: Number(p.doneCount ?? 0),
             allDone: Boolean(p.allDone),
             items: ((p.items ?? []) as unknown as TodoItem[]),
+          },
+        });
+      }
+      return;
+    }
+    // 任务队列（task-queue）：入队/出队/状态回填实时快照
+    if (evt.type === "task_queue.updated") {
+      if (evt.sessionId === get().sessionId) {
+        set({
+          taskQueue: {
+            running: Number(p.running ?? 0),
+            queued: Number(p.queued ?? 0),
+            items: (p.items ?? []) as unknown as QueuedTaskItem[],
           },
         });
       }
@@ -765,6 +811,11 @@ export const useExm = create<ExmState>((set, get) => ({
           break;
         case "plan.pending":
           set({ planPending: true });
+          void get().refreshPlan(sid);
+          break;
+        case "plan.mode":
+          // agent 经 plan__mode 工具切换模式（plan-mode-tools）：plan 接口返回 mode 位，
+          // 防抖拉取刷新徽标（reason 由工具结果呈现给用户，前端不重复展示）
           void get().refreshPlan(sid);
           break;
         case "plan.approved":
@@ -955,6 +1006,8 @@ export const useExm = create<ExmState>((set, get) => ({
       case "run.finished": {
         // 流面板未读刷新（spec experience-iteration）：任何会话收束都可能给流加未读
         window.dispatchEvent(new Event("exm:flows-refresh"));
+        // 只读页实时刷新（聊天/任务页旁观视角）：携带收束会话 id，仅呈现中的会话重拉消息
+        window.dispatchEvent(new CustomEvent<string | undefined>("exm:bound-refresh", { detail: evt.sessionId }));
         // 浏览器通知（web-notifications）：非当前会话或页面隐藏时提醒
         {
           const prefs = loadNotifyPrefs();
@@ -964,6 +1017,9 @@ export const useExm = create<ExmState>((set, get) => ({
           }
         }
         const statements = (p.statements ?? []) as Statement[];
+        // 产物附件（send-file 能力）：控制台会话的文件投递——IM 通道由适配器
+        // 直发（不进消息流），这里只渲染控制台侧
+        const artifacts = (p.artifacts ?? []) as ArtifactItem[];
         const id = get().sessionId!;
         // 权威回填代际：回拉期间若用户切走（selectSession 落了新会话），不得覆盖。
         // 比较选择代际：回拉发起时的序号仍是最新 → 没有更新的选择发生 → 安全落盘。
@@ -986,6 +1042,7 @@ export const useExm = create<ExmState>((set, get) => ({
               statements,
               toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
               thinking: thinking.trim() ? thinking : undefined,
+              artifacts: artifacts.length > 0 ? artifacts : undefined,
               createdAt: new Date().toISOString(),
             },
           ],
@@ -1010,8 +1067,11 @@ export const useExm = create<ExmState>((set, get) => ({
         if (prefs.enabled && prefs.cronDone && typeof Notification !== "undefined" && Notification.permission === "granted") {
           const name = String(p.jobName ?? "");
           const status = String(p.status ?? "");
-          fireNotificationLocal(`定时任务${status === "done" ? "完成" : "失败"}：${name}`, String(p.summary ?? status), undefined);
+          // 点击跳会话：cron.finished 携带收束会话 id（会话创建失败路径为空串则不跳）
+          fireNotificationLocal(`定时任务${status === "done" ? "完成" : "失败"}：${name}`, String(p.summary ?? status), evt.sessionId || undefined);
         }
+        // 任务会话列表刷新（任务页监听）：cron 收束可能新建/更新任务会话
+        window.dispatchEvent(new Event("exm:flows-refresh"));
         set({
           timelineSession: evt.sessionId,
           timeline: [...get().timeline, { kind: "cron", text: tr("store.tl.cron", { name: String(p.jobName ?? ""), status: String(p.status ?? "") }) }],
@@ -1025,6 +1085,19 @@ export const useExm = create<ExmState>((set, get) => ({
           timeline: [...get().timeline, { kind: "error", text: tr("store.tl.error", { msg: String(p.message) }) }],
         });
         break;
+      // 工具预算熔断（agent-budget-audit）：消息流内联提示——说明本轮为何停止。
+      // reason 文案后端已定稿；模型收束前可能连续多次拦截，相邻重复只提示一次。
+      case "tool.budget": {
+        const reason = String(p.reason ?? "");
+        const last = get().timeline[get().timeline.length - 1];
+        if (!last || last.kind !== "budget" || last.text !== reason) {
+          set({
+            timelineSession: evt.sessionId,
+            timeline: [...get().timeline, { kind: "budget", text: reason }],
+          });
+        }
+        break;
+      }
     }
   },
 }));

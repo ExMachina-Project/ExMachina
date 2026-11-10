@@ -7,7 +7,7 @@
 
 ### Requirement: 视频元信息工具
 
-`video__summary(videoId)`：返回标题、UP主、时长、播放/弹幕/评论数、简介、分区、发布时间。两平台同构。
+`video__summary(videoId)`：SHALL 返回标题、UP主、时长、播放/弹幕/评论数、简介、分区、发布时间。两平台同构。
 
 #### Scenario: 元信息一次拿全
 - **WHEN** 智能体传入候选清单中的视频标识
@@ -15,7 +15,7 @@
 
 ### Requirement: 字幕工具
 
-`video__subtitle(videoId, page?)`：返回字幕全文（按行带时间戳），超长分页；无字幕时明确返回「该视频无字幕」而非空串。
+`video__subtitle(videoId, page?)`：SHALL 返回字幕全文（按行带时间戳），超长分页；无字幕时 SHALL 明确返回「该视频无字幕」而非空串。
 
 #### Scenario: 字幕分页
 - **WHEN** 字幕超过单页上限
@@ -27,7 +27,7 @@
 
 ### Requirement: 弹幕工具（仅B站）
 
-`video__danmaku(videoId, segment?)`：返回弹幕抽样（按时间段分片，含热度权重），总量与分片上限固定；智能体可看不同时间段的弹幕感知节奏与氛围。
+`video__danmaku(videoId, segment?)`：SHALL 返回弹幕抽样（按时间段分片，含热度权重），总量与分片上限固定；智能体可看不同时间段的弹幕感知节奏与氛围。
 
 #### Scenario: 弹幕分段抽样
 - **WHEN** 智能体请求某视频弹幕
@@ -35,7 +35,7 @@
 
 ### Requirement: 评论工具
 
-`video__comments(videoId, page?, sort?)`：返回评论区页（热度/时间排序可选），每页固定条数，含作者/赞数/文本/回复数；B站支持展开单条评论的回复页。
+`video__comments(videoId, page?, sort?)`：SHALL 返回评论区页（热度/时间排序可选），每页固定条数，含作者/赞数/文本/回复数；B站支持展开单条评论的回复页。
 
 #### Scenario: 评论区翻页
 - **WHEN** 智能体翻取评论区后续页
@@ -43,7 +43,7 @@
 
 ### Requirement: UP主与相关视频工具
 
-`video__uploader(uploaderId)`：UP主/频道公开信息与近期投稿（限量）；`video__related(videoId)`：相关/推荐视频（限量，结构同候选清单）。
+`video__uploader(uploaderId)`：SHALL 返回 UP主/频道公开信息与近期投稿（限量）；`video__related(videoId)`：SHALL 返回相关/推荐视频（限量，结构同候选清单）。
 
 #### Scenario: UP主近作可见
 - **WHEN** 智能体查询 UP主
@@ -51,7 +51,7 @@
 
 ### Requirement: 站内搜索工具
 
-`video__search(query)`：平台内搜索，返回结构同候选清单（标识/标题/UP主/数据），供智能体按倾向自行发现视频。
+`video__search(query)`：SHALL 执行平台内搜索，返回结构同候选清单（标识/标题/UP主/数据），供智能体按倾向自行发现视频。
 
 #### Scenario: 自主搜索发现
 - **WHEN** 智能体对候选不感兴趣，用倾向词搜索
@@ -59,7 +59,7 @@
 
 ### Requirement: 平台差异与错误契约
 
-工具面隐藏平台差异（同一工具名双平台同构，凭通道配置路由）；YouTube 无弹幕，该工具在 youtube 通道返回「该平台无弹幕数据」。平台接口失败（风控/限流/网络）返回结构化错误（含可读原因），不中断会话轮次——智能体可换工具或放弃该视频。
+工具面 SHALL 隐藏平台差异（同一工具名双平台同构，凭通道配置路由）；YouTube 无弹幕，该工具在 youtube 通道 SHALL 返回「该平台无弹幕数据」。平台接口失败（风控/限流/网络）SHALL 返回结构化错误（含可读原因），MUST NOT 中断会话轮次——智能体可换工具或放弃该视频。
 
 #### Scenario: 平台接口失败不中断
 - **WHEN** 某工具调用遇到接口错误
