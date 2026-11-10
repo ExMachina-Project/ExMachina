@@ -16,6 +16,19 @@ export function isAutoSessionTitle(title: string): boolean {
   return title.startsWith("job-") || title.startsWith("心跳巡检");
 }
 
+/** 派发子会话判定（task-dispatch-child）：编排派发节点的运行台账会话，
+ *  标题 `sub:<identifier>·<goal>·<node>`（orchestrator create_child_session）。
+ *  归「任务」页只读呈现——此前漏进对话页（部署实测：creative-agent 派发
+ *  在对话页出现 sub: 会话）。 */
+export function isDispatchChildTitle(title: string): boolean {
+  return title.startsWith("sub:");
+}
+
+/** 会话是否属于「任务」页（系统自动 + 派发子会话） */
+export function isTaskSideTitle(title: string): boolean {
+  return isAutoSessionTitle(title) || isDispatchChildTitle(title);
+}
+
 /** 通道流会话判定（与后端 parse_session_origin 的前缀事实源一致） */
 export function isChannelSessionTitle(title: string): boolean {
   return title.startsWith("channel:");
