@@ -637,6 +637,31 @@ async fn on_text(
             let _ = tx.send(action);
             return;
         }
+        // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖任务之前处理，
+        // 避免原轮次审批等待中新建回帖任务造成重复投递与最终答复丢失。
+        if crate::platform::is_quick_directive(&text) {
+            let sid = core.flow_active_session(&ch.id, &peer);
+            let reply = crate::platform::quick_directive_reply(
+                &core,
+                sid.as_deref(),
+                Some(&external_id),
+                &text,
+            )
+            .await
+            .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
+            let action = match group_id {
+                Some(g) => serde_json::json!({
+                    "action": "send_group_msg",
+                    "params": { "group_id": g, "message": [{ "type": "text", "data": { "text": reply } }] },
+                }),
+                None => serde_json::json!({
+                    "action": "send_private_msg",
+                    "params": { "user_id": user_id.unwrap_or(0), "message": [{ "type": "text", "data": { "text": reply } }] },
+                }),
+            };
+            let _ = tx.send(action);
+            return;
+        }
         handle_message(
             &core,
             &ch,

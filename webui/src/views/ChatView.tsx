@@ -24,7 +24,7 @@ import { FileMentionPopup, mentionCandidates, type MentionState } from "../compo
 import { workbenchTree, type WorkbenchNode } from "../api";
 import { copyText } from "../components/Markdown";
 import { UsageBar } from "../components/UsageBar";
-import { ProcessSteps } from "../components/ProcessSteps";
+import { ProcessSteps, MessageProcess } from "../components/ProcessSteps";
 import { TimelineTag } from "../components/TimelineTag";
 import { SkeletonList } from "../components/SkeletonList";
 import { OrbitRings } from "../components/OrbitRings";
@@ -51,10 +51,6 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
     : m.role === "orchestrator"
       ? (orchLabel ?? tb("chat.role.orchestrator"))
       : (m.agentId ?? tb("chat.role.system"));
-  const hasThinking = Boolean(m.thinking && m.thinking.trim());
-  const hasTools = Boolean(m.toolCalls && m.toolCalls.length > 0);
-  const steps = m.steps ?? [];
-  const hasProcess = hasThinking || hasTools || steps.length > 0;
   const time = relativeTime(m.createdAt);
   return (
     <Card
@@ -82,31 +78,15 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
         </button>
         {ops && <span className="msg-ops">{ops}</span>}
       </div>
-      {hasProcess &&
-        (steps.length > 0 ? (
-          // 有序步骤：思考/工具按发生顺序交错逐次显示（服务端留存，刷新后仍在）
-          <ProcessSteps
-            parts={steps.map((s) => ({ kind: s.kind, text: s.text, callId: s.callId }))}
-            toolCalls={m.toolCalls ?? []}
-            labelThinking={(n) => tUsage(tb, n)}
-            labelTools={(n) => tb("chat.usedTools", { n: String(n) })}
-            sessionId={m.sessionId}
-            turn={m.turn ?? turn}
-          />
-        ) : (
-          <div className="msg-process">
-            {hasThinking && (
-              <UsageBar label={tUsage(tb, m.thinking!.length)}>
-                <pre className="usage-think">{m.thinking}</pre>
-              </UsageBar>
-            )}
-            {hasTools && (
-              <UsageBar label={tb("chat.usedTools", { n: m.toolCalls!.length })}>
-                <ToolCallList calls={m.toolCalls!} sessionId={m.sessionId} turn={m.turn ?? turn} />
-              </UsageBar>
-            )}
-          </div>
-        ))}
+      <MessageProcess
+        thinking={m.thinking}
+        steps={m.steps}
+        toolCalls={m.toolCalls}
+        labelThinking={(n) => tUsage(tb, n)}
+        labelTools={(n) => tb("chat.usedTools", { n: String(n) })}
+        sessionId={m.sessionId}
+        turn={m.turn ?? turn}
+      />
       <Markdown text={m.statements.map((s) => s.text).join("\n\n")} />
       {/* 产物附件（send-file 能力）：文件/图片卡片，点击下载（工作区相对路径经
           /api/asset/download；IM 通道直发不进这里，仅控制台会话） */}
