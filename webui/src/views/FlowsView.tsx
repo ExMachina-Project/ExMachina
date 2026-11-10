@@ -8,7 +8,7 @@
  *  右侧选中流的绑定会话消息流（StatementList 只读渲染）。窄屏单列切换。
  *  数据与通道侧/WebUI 同源（/channels/flows 系端点 + /sessions/:id/messages）。
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Skeleton, Tag } from "antd";
 import {
   ArrowLeftOutlined,
@@ -130,9 +130,11 @@ export function FlowsView(): React.ReactElement {
   }, [reloadBound]);
   /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新；上翻回看时不抢滚动条） */
   // 定位语义：切流后首次拿到「非空消息列表」时瞬时定位到最新（骨架期与空列表不定位——
-  // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）
+  // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）。
+  // 用 useLayoutEffect：绘制前同步定位——useEffect 会先绘制顶部再跳底，
+  // 切流时可见「从头滚到尾」闪动（部署实测）。
   const anchoredRef = useRef<string | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const sid = activeSid ?? null;
     if (sid && anchoredRef.current !== sid) {
       if (msgLoading || messages.length === 0) return;
@@ -142,7 +144,7 @@ export function FlowsView(): React.ReactElement {
       return;
     }
     if (!stickRef.current) return;
-    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight, behavior: "smooth" });
+    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
   }, [messages, msgLoading, activeSid]);
 
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
