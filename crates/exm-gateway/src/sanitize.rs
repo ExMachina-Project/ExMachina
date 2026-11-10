@@ -7,9 +7,9 @@
 //! - 只剥「指令伪装结构」，不改语义内容——正常技术讨论（如讨论注入本身）不误杀
 //! - 检出产生 Finding（审计事件数据源），不阻断消息（阻断留给身份闸门）
 //! - 审计只记模式摘要，不落原文全文
+use parking_lot::Mutex;
 
 /// 单次消毒检出项
-#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Finding {
     /// 命中的规则 id（audit 事件里的 pattern 字段）
     pub rule: &'static str,
@@ -18,15 +18,15 @@ pub(crate) struct Finding {
 }
 
 /// 消毒命中统计（设置页安全区可见性）：模式 → 累计计数（进程级，重启归零）
-fn finding_stats() -> &'static std::sync::Mutex<std::collections::HashMap<&'static str, u64>> {
-    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<&'static str, u64>>> =
+fn finding_stats() -> &'static Mutex<std::collections::HashMap<&'static str, u64>> {
+    static S: std::sync::OnceLock<Mutex<std::collections::HashMap<&'static str, u64>>> =
         std::sync::OnceLock::new();
-    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    S.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 /// 记录一次命中（sanitize 调用方在 findings 非空时调用）
 pub(crate) fn note_findings(findings: &[Finding]) {
-    let mut s = finding_stats().lock().unwrap();
+    let mut s = finding_stats().lock();
     for f in findings {
         *s.entry(f.rule).or_insert(0) += 1;
     }
@@ -34,7 +34,7 @@ pub(crate) fn note_findings(findings: &[Finding]) {
 
 /// 命中统计快照（REST 端点下发：模式 → 计数）
 pub(crate) fn finding_snapshot() -> Vec<(String, u64)> {
-    let s = finding_stats().lock().unwrap();
+    let s = finding_stats().lock();
     let mut out: Vec<(String, u64)> = s
         .iter()
         .map(|(k, v)| (k.to_string(), *v))

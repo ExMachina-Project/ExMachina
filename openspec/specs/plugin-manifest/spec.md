@@ -7,7 +7,7 @@
 
 ### Requirement: 插件目录与清单布局
 
-仓库根 `plugins/` 目录（独立于 `entities/`），每个插件一个子目录，内含必需的 `plugin.json` 清单。插件子目录内可含插件自有资源（提示词、技能 JSON、可执行文件）。
+插件 SHALL 布局于仓库根 `plugins/` 目录（独立于 `entities/`），每个插件一个子目录，内含必需的 `plugin.json` 清单。插件子目录内可含插件自有资源（提示词、技能 JSON、可执行文件）。
 
 #### Scenario: 合法清单被加载
 - **WHEN** Core 启动或热装载扫描 `plugins/`，某子目录含可解析的 `plugin.json` 且 `id` 唯一
@@ -58,7 +58,7 @@ plugin.json 清单 MUST 声明插件元信息与四类能力：`tools`（工具�
 
 ### Requirement: 启停与禁用语义
 
-插件可被启用/禁用（管理端点或配置），状态持久化。禁用插件的能力面从系统中完全摘除：工具不再随 schema 下发、通道 supervisor 停止、watcher 循环退出、资源不再注入。运行中会话不受已派发调用影响，但新调用被拒。
+插件 SHALL 支持启用/禁用（管理端点或配置），状态 SHALL 持久化。禁用插件的能力面从系统中完全摘除：工具不再随 schema 下发、通道 supervisor 停止、watcher 循环退出、资源不再注入。运行中会话不受已派发调用影响，但新调用被拒。
 
 #### Scenario: 禁用即时生效
 - **WHEN** 已加载插件被禁用
@@ -70,7 +70,7 @@ plugin.json 清单 MUST 声明插件元信息与四类能力：`tools`（工具�
 
 ### Requirement: 版本与兼容性检查
 
-清单声明 `exmMin`（最低宿主版本，SemVer）。加载时宿主当前版本低于该值则拒绝加载并诊断提示；未声明视为兼容。
+清单 SHALL 声明 `exmMin`（最低宿主版本，SemVer）。加载时宿主 MUST 校验：当前版本低于该值则拒绝加载并诊断提示；未声明视为兼容。
 
 #### Scenario: 版本不满足拒绝加载
 - **WHEN** 清单 `exmMin` 高于宿主当前版本

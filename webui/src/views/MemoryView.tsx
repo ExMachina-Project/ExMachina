@@ -6,6 +6,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
   Card,
+  Checkbox,
   Col,
   Descriptions,
   Input,
@@ -130,6 +131,8 @@ export function MemoryView(): React.ReactElement {
   const [stats, setStats] = useState<MemoryStats | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<RecallHit[] | null>(null);
+  // 检索调试视图（8.4）：显示命中词项明细与语义分数
+  const [debugRecall, setDebugRecall] = useState(false);
   const [kindFilter, setKindFilter] = useState<string | undefined>(undefined);
   const [agentFilter, setAgentFilter] = useState<string | undefined>(undefined);
   // 语义检索目标（档案ID，或 档案ID/模型名）；空 = 仅词项召回
@@ -299,6 +302,15 @@ export function MemoryView(): React.ReactElement {
         </Space.Compact>
         <div className="memory-scope-hint">
           {t("memory.scope")}{agentFilter ? t("memory.scopeAgent", { id: agentFilter }) : t("memory.scopeGroup")}
+          <Tooltip title={t("memory.debugOn")}>
+            <Checkbox
+              style={{ marginLeft: 12 }}
+              checked={debugRecall}
+              onChange={(e) => setDebugRecall(e.target.checked)}
+            >
+              {t("memory.debug")}
+            </Checkbox>
+          </Tooltip>
         </div>
 
         {hits !== null && (
@@ -309,7 +321,7 @@ export function MemoryView(): React.ReactElement {
             locale={{ emptyText: t("memory.noHits") }}
             renderItem={(h) => (
               <List.Item>
-                <Space direction="vertical" style={{ width: "100%" }}>
+                <Space orientation="vertical" style={{ width: "100%" }}>
                   <Space>
                     <Tag color={KIND_COLORS[h.entry.kind]}>{h.entry.kind}</Tag>
                     <b>{h.entry.title}</b>
@@ -317,6 +329,24 @@ export function MemoryView(): React.ReactElement {
                     <span className="memory-reason">{h.reasons.join("；")}</span>
                   </Space>
                   <span>{h.entry.body.slice(0, 200)}</span>
+                  {debugRecall && (h.matchedTerms || h.semanticScore !== undefined) && (
+                    <div className="memory-debug">
+                      {h.matchedTerms && Object.keys(h.matchedTerms).length > 0 && (
+                        <span>
+                          {t("memory.matchedTerms")}：
+                          {Object.entries(h.matchedTerms)
+                            .sort((a, b) => b[1] - a[1])
+                            .map(([term, w]) => `${term}(${w.toFixed(2)})`)
+                            .join("、")}
+                        </span>
+                      )}
+                      {h.semanticScore !== undefined && (
+                        <Tag style={{ marginLeft: 8 }}>
+                          {t("memory.semanticScore", { s: h.semanticScore.toFixed(3) })}
+                        </Tag>
+                      )}
+                    </div>
+                  )}
                 </Space>
               </List.Item>
             )}
@@ -386,7 +416,7 @@ export function MemoryView(): React.ReactElement {
               title: t("memory.colTitle"),
               key: "title",
               render: (_, e) => (
-                <Space direction="vertical" size={0}>
+                <Space orientation="vertical" size={0}>
                   <span>
                     {e.pinned && <Tag color="orange">{t("memory.pinned")}</Tag>}
                     <b>{e.title}</b>

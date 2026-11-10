@@ -74,7 +74,7 @@ export function CommandPalette(): React.ReactElement {
       onCancel={close}
       footer={null}
       width={560}
-      destroyOnClose
+      destroyOnHidden
       className="cmd-palette"
       styles={{ body: { padding: 0 } }}
     >

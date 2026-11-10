@@ -1,7 +1,7 @@
 # filesystem-ops Specification
 
 ## Purpose
-TBD - created by archiving change fs-ops-spawn-ui. Update Purpose after archive.
+补充文件系统工具面的 delete 与 rename 操作契约：删除走回收站、重命名保持登记口径一致，与既有读写操作同一安全框架。
 
 ## Requirements
 

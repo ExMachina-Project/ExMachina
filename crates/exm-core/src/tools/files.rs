@@ -841,6 +841,47 @@ impl ToolGateway {
                 Ok(_) => ToolResult::ok(format!("mkdir: {}", target.display())),
                 Err(e) => ToolResult::err(e.to_string()),
             },
+            // 发送文件给用户（send-file 能力）：把工作区内任意文件登记为本轮
+            // 产物——轮次收束时经通道媒体链直发（IM）或控制台附件卡（WebUI）。
+            // 与 write→outbox 约定互补：write 只覆盖文本新建；本 op 可投递
+            // 任意已有文件（含工具产物/下载物/二进制），路径不必在 outbox 目录。
+            "send_file" => {
+                if !target.is_file() {
+                    return ToolResult::err(format!("不是文件: {path}"));
+                }
+                let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+                // 超大文件护栏：>200MB 拒绝（IM 平台上限普遍 50~100MB，登记了也发不出）
+                if size > 200 * 1024 * 1024 {
+                    return ToolResult::err(format!(
+                        "文件过大（{} MB）：IM 平台普遍上限 50~100MB，请压缩或改用网盘链接",
+                        size / 1024 / 1024
+                    ));
+                }
+                let name = target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let caption: String = args
+                    .get("caption")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect();
+                // 登记口径与 write→outbox 一致：工作区相对路径（spawn_reply 的
+                // workspace_root.join(rel) 与 WebUI /api/asset/download 都按此解析）
+                let rel = target
+                    .strip_prefix(&self.workspace_root)
+                    .map(|p| p.display().to_string().replace('\\', "/"))
+                    .unwrap_or_else(|_| target.display().to_string());
+                let _ = self
+                    .store
+                    .outbox_push(session_id, "file", &rel, &caption);
+                ToolResult::ok(format!(
+                    "已登记投递：{name}（{} KB）——本轮收束时发送给用户",
+                    size / 1024
+                ))
+            }
             "list" => {
                 if target.is_dir() {
                     self.list_dir(&target)

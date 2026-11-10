@@ -11,7 +11,7 @@
 
 use crate::fsdb::FsDb;
 use crate::types::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -177,6 +177,12 @@ pub struct RecallHit {
     pub entry: MemoryEntry,
     pub score: f64,
     pub reasons: Vec<String>,
+    /// 调试视图（8.4）：本条命中的查询词项明细（词 → 该词权重贡献）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_terms: Option<std::collections::BTreeMap<String, f64>>,
+    /// 调试视图（8.4）：语义相似分数值（0~1 余弦，无嵌入/无查询向量时 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,6 +446,24 @@ impl MemoryStore {
         Ok(entries.len())
     }
 
+    /// 全量条目读取（组改 id 的引用清扫用，group-id-migration）
+    pub fn entries_public(&self) -> Result<Vec<MemoryEntry>> {
+        self.db.list(ENTRIES)
+    }
+
+    /// 记忆条目组归属改写（组改 id 的引用清扫）：只改 group_id 并重建倒排索引，
+    /// 不动内容/时间戳/统计。写路径持锁（与 remember/decay 同口径）。
+    pub fn retag_group(&self, id: &str, new_group: &str) -> Result<()> {
+        let _guard = self.write_lock.lock();
+        let mut e = self
+            .get_entry_public(id)?
+            .with_context(|| format!("记忆条目不存在: {id}"))?;
+        e.group_id = Some(new_group.to_string());
+        self.save_entry(&e)?;
+        self.index_entry(&e)?;
+        Ok(())
+    }
+
     /// 时间衰减（固定项豁免），下限 floor。
     /// 衰减数学收敛在 [`decay_factor`]/[`decayed_importance`] 两个纯函数里，边界行为有单测锁定。
     pub fn decay(&self, half_life_days: f64, floor: f64) -> Result<usize> {
@@ -549,15 +573,21 @@ impl MemoryStore {
             return self.recent_layered(limit, group, layer, scope);
         }
 
-        // 候选：命中任一查询词项的条目 + 命中权重
-        let mut overlap: std::collections::HashMap<String, (f64, usize)> = Default::default();
+        // 候选：命中任一查询词项的条目 + 命中权重（附词项明细，调试视图 8.4 用）
+        let mut overlap: std::collections::HashMap<
+            String,
+            (f64, usize, std::collections::BTreeMap<String, f64>),
+        > = Default::default();
         for t in &q_tokens {
             let bucket: TermBucket = self.db.read_bucket_map(TERMS, t)?;
             if let Some(list) = bucket.get(t) {
                 for (id, w) in list {
-                    let slot = overlap.entry(id.clone()).or_insert((0.0, 0));
+                    let slot = overlap
+                        .entry(id.clone())
+                        .or_insert((0.0, 0, Default::default()));
                     slot.0 += *w;
                     slot.1 += 1;
+                    *slot.2.entry(t.clone()).or_insert(0.0) += *w;
                 }
             }
         }
@@ -596,6 +626,8 @@ impl MemoryStore {
                         entry: e,
                         score: sim * 3.0,
                         reasons: vec![format!("语义相似 {:.0}%", (sim * 100.0) as u32)],
+                        matched_terms: None,
+                        semantic_score: Some((sim * 1000.0).round() / 1000.0),
                     });
                 }
                 sem.sort_by(|a, b| {
@@ -613,7 +645,7 @@ impl MemoryStore {
         let max_overlap = overlap.values().map(|v| v.0).fold(1.0f64, f64::max);
 
         let mut results: Vec<RecallHit> = Vec::new();
-        for (id, (ov, matched)) in overlap {
+        for (id, (ov, matched, term_detail)) in overlap {
             let Some(entry) = self.get_entry(&id)? else {
                 continue;
             };
@@ -683,6 +715,9 @@ impl MemoryStore {
                 entry,
                 score,
                 reasons,
+                // 调试视图（8.4）：词项命中明细 + 语义分数数值
+                matched_terms: Some(term_detail),
+                semantic_score: sem.map(|s| (s * 1000.0).round() / 1000.0),
             });
         }
 
@@ -760,6 +795,8 @@ impl MemoryStore {
                     entry: e,
                     score,
                     reasons: vec!["按重要性/时间排序".into()],
+                    matched_terms: None,
+                    semantic_score: None,
                 }
             })
             .collect())

@@ -1,0 +1,225 @@
+/** 任务页（TasksView，信息架构 2026-11）：系统自动会话的只读视图。
+ *
+ *  覆盖：定时任务会话（cron，标题 `job-<id>` 或任务自定义 session_title）、
+ *  心跳巡检会话（`心跳巡检` / `心跳巡检-<个体>`）。这些会话由系统发起、
+ *  无人工输入——页面只读呈现运行产物（无输入框），输入与配置在「自动化」页。
+ *
+ *  判定口径与 webui/src/session.ts 的 isAutoSessionTitle 一致（保守识别，
+ *  cron 自定义标题与用户会话不可区分时归对话页——不影响使用）。
+ */
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button, Empty, Skeleton, Tag } from "antd";
+import { ArrowLeftOutlined, ReloadOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import { api } from "../api";
+import type { ChatMessage, Session } from "../types";
+import { relativeTime } from "../time";
+import { useExm } from "../store";
+import { useT } from "../i18n/core";
+import { StatementList } from "../components/Statements";
+import { useIsNarrow } from "../useIsNarrow";
+import { createPortal } from "react-dom";
+import { useSubbarSlot } from "../components/Subbar";
+import { isAutoSessionTitle, isDispatchChildTitle } from "../session";
+
+export function TasksView(): React.ReactElement {
+  const t = useT();
+  const narrow = useIsNarrow();
+  /** 桌面端：页面侧栏 portal 到二级侧边栏；窄屏仍在页内（单列切换） */
+  const subbarSlot = useSubbarSlot();
+  const selectSession = useExm((st) => st.selectSession);
+
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Session | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [msgLoading, setMsgLoading] = useState(false);
+  /** 消息流容器：加载/新消息后滚到底（任务会话最新运行产物在底部） */
+  const msgBoxRef = useRef<HTMLDivElement | null>(null);
+  // 贴底跟随（与对话页同口径）：用户本来就贴底才跟随，中途上翻回看不抢滚动条
+  const stickRef = useRef(true);
+  useEffect(() => {
+    const el = msgBoxRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [selected?.id]);
+
+  const load = useCallback(async () => {
+    try {
+      const all = await api.listAllSessions();
+      // 任务页 = 系统自动会话（cron / 心跳巡检）+ 派发子会话（sub:，编排节点运行台账）
+      setSessions(
+        all.filter((s) => !s.archivedAt && (isAutoSessionTitle(s.title) || isDispatchChildTitle(s.title))),
+      );
+      // 跨页跳转落地：全局会话是任务会话且尚未选中 → 直接选中（右侧立即呈现）
+      const cur = useExm.getState().sessionId;
+      if (!cur) return;
+      const hit = all.find(
+        (s) => s.id === cur && !s.archivedAt && (isAutoSessionTitle(s.title) || isDispatchChildTitle(s.title)),
+      );
+      setSelected((prev) => prev ?? hit ?? null);
+    } catch {
+      // 网关不可用：空态
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    const h = () => void load();
+    window.addEventListener("exm:flows-refresh", h);
+    return () => window.removeEventListener("exm:flows-refresh", h);
+  }, [load]);
+
+  /** 选中任务会话 → 拉消息流（只读） */
+  const selId = selected?.id;
+  useEffect(() => {
+    if (!selId) {
+      setMessages([]);
+      return;
+    }
+    setMsgLoading(true);
+    void api
+      .messages(selId)
+      .then(setMessages)
+      .catch(() => setMessages([]))
+      .finally(() => setMsgLoading(false));
+  }, [selId]);
+  /** 任务会话新轮次收束 → 静默重拉（任务页盯运行进度不需要手动刷新） */
+  const reloadTask = useCallback((e?: Event) => {
+    if (!selId) return;
+    if (e && "detail" in e && (e as CustomEvent<string | undefined>).detail && (e as CustomEvent<string | undefined>).detail !== selId) return;
+    void api.messages(selId).then(setMessages).catch(() => undefined);
+  }, [selId]);
+  useEffect(() => {
+    window.addEventListener("exm:bound-refresh", reloadTask as EventListener);
+    return () => window.removeEventListener("exm:bound-refresh", reloadTask as EventListener);
+  }, [reloadTask]);
+  /** 消息加载完成/更新 → 滚到底（盯运行进度默认关注最新；上翻回看时不抢滚动条） */
+  // 定位语义与 FlowsView 相同：切任务后首次拿到非空列表瞬时定位，增量更新平滑跟随
+  const anchoredRef = useRef<string | null>(null);
+  useEffect(() => {
+    const sid = selected?.id ?? null;
+    if (sid && anchoredRef.current !== sid) {
+      if (msgLoading || messages.length === 0) return;
+      anchoredRef.current = sid;
+      if (!stickRef.current) return;
+      msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
+      return;
+    }
+    if (!stickRef.current) return;
+    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, msgLoading, selected?.id]);
+
+  const openTask = (s: Session) => {
+    setSelected(s);
+    void selectSession(s.id);
+  };
+
+  /** 活跃倒序（最近运行的任务在前） */
+  const sorted = useMemo(
+    () =>
+      [...sessions].sort((a, b) =>
+        (b.lastActiveAt ?? b.updatedAt ?? "").localeCompare(a.lastActiveAt ?? a.updatedAt ?? ""),
+      ),
+    [sessions],
+  );
+
+  const rail = (
+      <aside className="flows-rail">
+        <div className="flows-rail-head">
+          <span className="flows-title">{t("nav.tasks")}</span>
+          <Tag>{sorted.length}</Tag>
+          <Button
+            type="text"
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={() => void load()}
+            aria-label={t("common.refresh")}
+          />
+        </div>
+        <div className="flows-list">
+          {loading && <Skeleton active paragraph={{ rows: 6 }} />}
+          {!loading && sorted.length === 0 && (
+            <Empty description={t("tasks.empty")} style={{ marginTop: 80 }} />
+          )}
+          {sorted.map((s) => {
+            const active = selected?.id === s.id;
+            return (
+              <div
+                key={s.id}
+                className={`flow-item ${active ? "active" : ""}`}
+                onClick={() => openTask(s)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === "Enter" && openTask(s)}
+              >
+                <span className="flow-kind-icon group">
+                  <ThunderboltOutlined />
+                </span>
+                <span className="flow-main">
+                  <span className="flow-name">{s.title}</span>
+                  <span className="flow-preview">{s.lastMessagePreview || s.title}</span>
+                </span>
+                <span className="flow-side">
+                  <span className="flow-time">{relativeTime(s.lastActiveAt ?? s.updatedAt)}</span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </aside>
+  );
+
+  return (
+    <div className={`flows-shell tasks-shell ${narrow && selected ? "thread" : ""}`}>
+      {narrow ? rail : subbarSlot ? createPortal(rail, subbarSlot) : null}
+      <main className="flows-thread">
+        {narrow && selected && (
+          <Button
+            className="flows-back"
+            type="text"
+            icon={<ArrowLeftOutlined />}
+            onClick={() => setSelected(null)}
+          >
+            {t("nav.tasks")}
+          </Button>
+        )}
+        {!selected && !narrow && (
+          <Empty description={t("tasks.pickOne")} style={{ marginTop: 120 }} />
+        )}
+        {selected && (
+          <>
+            <div className="flows-thread-head">
+              <span className="flows-thread-name">{selected.title}</span>
+              <span className="flows-thread-meta">{t("tasks.autoOnly")}</span>
+            </div>
+            <div className="flows-messages" ref={msgBoxRef}>
+              {msgLoading && <Skeleton active paragraph={{ rows: 4 }} />}
+              {!msgLoading && messages.length === 0 && (
+                <Empty description={t("flows.noMessages")} style={{ marginTop: 80 }} />
+              )}
+              {!msgLoading &&
+                messages.map((m) => (
+                  <div key={m.id} className={`flows-msg ${m.role}`}>
+                    <div className="flows-msg-head">
+                      <span className="flows-msg-role">
+                        {m.role === "user" ? t("tasks.trigger") : m.agentId || t("flows.fromAgent")}
+                      </span>
+                      <span className="flows-msg-time">{relativeTime(m.createdAt)}</span>
+                    </div>
+                    <StatementList statements={m.statements} plain />
+                  </div>
+                ))}
+            </div>
+            <div className="flows-readonly">{t("tasks.readonlyHint")}</div>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}

@@ -7,7 +7,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use exm_core::config::{ExmConfig, LlmConfig};
 use exm_core::types::CoreEvent;
@@ -16,18 +16,21 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+pub mod ambient_media;
 pub mod channel_test;
 pub mod channel_util;
-
 pub mod discord;
 pub mod identity;
 pub mod limits;
 pub mod llm_admin;
 pub mod matrix;
 pub mod napcat;
+pub mod napcat_tools;
 pub mod nexus_api;
+pub mod plan_mode_tools;
 pub mod platform;
 pub mod plugin_admin;
+pub mod task_queue_tools;
 pub mod plugins;
 pub mod qqbot;
 pub mod singles;
@@ -37,12 +40,12 @@ pub mod telegram;
 pub mod triggers;
 pub mod worker_hub;
 // 资源域 handlers（自本文件拆出；build_router 经此引入）
-use assets::{get_asset, health};
+use assets::{download_asset, get_asset, health};
 use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
 use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
-use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, search_sessions};
+use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
 use agents_admin::{list_agents, create_agent, remove_agent_from_group, remove_agent, set_agent_model, update_agent};
-use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, list_templates};
+use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, update_group, set_group_self_optimize, list_templates};
 use version::{version_info, version_check, version_apply, version_apply_status};
 use persona::{get_agent, get_agent_prompt, put_agent_prompt, get_persona, put_persona, reset_persona};
 use playbooks::list_playbooks;
@@ -63,6 +66,7 @@ pub mod persona;
 pub mod playbooks;
 pub mod sessions;
 pub mod agents_admin;
+pub mod selfcheck;
 pub mod version;
 pub mod voice;
 pub mod ws;
@@ -220,6 +224,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
     let state = AppState { core: core.clone() };
     let mut router = Router::new()
         .route("/api/health", get(health))
+        .route("/api/selfcheck", get(selfcheck::selfcheck))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/search", get(search_sessions))
         .route("/api/sessions/:id", get(get_session).delete(delete_session))
@@ -234,6 +239,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         )
         .route("/api/sessions/:id/pin", axum::routing::put(pin_session))
         .route("/api/sessions/batch", axum::routing::post(session_batch))
+        .route("/api/sessions/flow-archive", axum::routing::post(session_flow_archive))
         // 会话历史管控（组 9）：撤销 / 编辑重发 / 分支派生 / 归档与快照视图
         .route("/api/sessions/:id/undo", post(session_undo))
         .route("/api/sessions/:id/edit", post(session_edit))
@@ -260,8 +266,9 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/version/apply", post(version_apply))
         .route("/api/version/apply/status", get(version_apply_status))
         .route("/api/groups/active", get(active_group).put(switch_group))
-        .route("/api/groups/:id", axum::routing::delete(delete_group))
+        .route("/api/groups/:id", axum::routing::put(update_group).delete(delete_group))
         .route("/api/groups/:id/activate", post(activate_group))
+        .route("/api/groups/:id/self-optimize", put(set_group_self_optimize))
         .route("/api/playbooks", get(list_playbooks))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/schema", get(get_config_schema))
@@ -330,6 +337,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .merge(mcp_mount(core.clone()))
         // 工作区资产（截图 / 工具输出落盘）：沙箱内只读，聊天工具卡内联预览
         .route("/api/asset", get(get_asset))
+        .route("/api/asset/download", get(download_asset))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -437,6 +445,23 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
     matrix::spawn_supervisor(core.clone());
     // 插件装载面：builtin 插件注册 + watcher 拉起（video 走新路径，行为等价）
     plugins::spawn_all(core.clone());
+    // 会话任务队列工具（task__queue）：全局动态工具——智能体执行中收到新任务时
+    // 自主决定并行（spawn 派生）或排队（收束钩子串行执行），机制见 task_queue_tools。
+    core.orchestrator()
+        .tools
+        .register_dynamic_tool(
+            crate::task_queue_tools::tool_spec(),
+            crate::task_queue_tools::build_exec(core.clone()),
+        );
+    // 计划模式工具（plan__mode）：智能体自主决定「先计划再执行」节奏——
+    // 用户对话中要求先计划、或 agent 判断任务复杂/高风险时自行进入计划模式；
+    // WebUI 不再提供硬开关（plan-mode-tools：模式决定权归 agent）
+    core.orchestrator()
+        .tools
+        .register_dynamic_tool(
+            crate::plan_mode_tools::tool_spec(),
+            crate::plan_mode_tools::build_exec(core.clone()),
+        );
     // 视频互动审批代发执行器（video__act approval=always 批准后的 [video] 回调）
     {
         let core_for_act = core.clone();
@@ -529,6 +554,33 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             "未构建（运行 npm run build:webui 后可由本网关托管）".to_string()
         }
     );
+    // 通道能力摘要（协议与契约·通道能力矩阵）：启动时一行说清各启用通道的
+    // 出站能力面——配置了媒体不可直发的平台，用户在投递降级时能对上号
+    {
+        let chans = platform::load_channels(&core);
+        let enabled: Vec<_> = chans.iter().filter(|c| c.enabled).collect();
+        if enabled.is_empty() {
+            println!("[gateway]   通道  无启用通道（控制台会话可直接使用）");
+        } else {
+            let lines: Vec<String> = enabled
+                .iter()
+                .map(|c| {
+                    let cp = platform::channel_runtime::caps(&c.kind);
+                    let media = |b: bool| if b { "✓" } else { "—" };
+                    format!(
+                        "{}[{}] {}（图{} 文{} 语{}）",
+                        c.kind,
+                        if c.enabled { "启用" } else { "停用" },
+                        c.account.as_deref().unwrap_or(&c.id),
+                        media(cp.image),
+                        media(cp.file),
+                        media(cp.voice)
+                    )
+                })
+                .collect();
+            println!("[gateway]   通道  {}", lines.join("｜"));
+        }
+    }
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),

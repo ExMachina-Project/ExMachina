@@ -1,17 +1,22 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
-import { ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, FolderOpenOutlined, MessageOutlined, MoreOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
+import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { createPortal } from "react-dom";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
-import { api, type LlmProfile } from "../api";
+import { useSubbarSlot } from "../components/Subbar";
+
+import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
 import { agentIdEn } from "../models";
+import { isAutoSessionTitle, isTaskSideTitle } from "../session";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
 import { relativeTime } from "../time";
 
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
-import { StatementList } from "../components/Statements";
+
 import { PlanCard } from "../components/PlanCard";
+import { TaskGraphDag } from "../components/TaskGraphDag";
 import { Markdown } from "../components/Markdown";
 import { AsciiMeter } from "../components/Ascii";
 import { ToolCallList } from "../components/ToolCall";
@@ -25,7 +30,7 @@ import { SkeletonList } from "../components/SkeletonList";
 import { OrbitRings } from "../components/OrbitRings";
 import { TurnOps } from "../components/HistoryOps";
 import { Emblem } from "../components/Emblem";
-import { FlowRailSection } from "../components/FlowRailSection";
+
 import type { ChatMessage } from "../types";
 
 function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
@@ -63,20 +68,18 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
         {ambientSender !== null && <span className="auto-tag ambient-tag">{tb("chat.role.ambient")}</span>}
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
         {time && <span className="msg-time mono">{time}</span>}
-        {!isUser && (
-          <button
-            className="msg-copy"
-            title="复制"
-            onClick={async () => {
-              const text = m.statements.map((st) => st.text).join("\n\n");
-              if (await copyText(text)) {
-                message.success("已复制");
-              }
-            }}
-          >
-            ⧉
-          </button>
-        )}
+        <button
+          className="msg-copy"
+          title={tb("chat.copy")}
+          onClick={async () => {
+            const text = m.statements.map((st) => st.text).join("\n\n");
+            if (await copyText(text)) {
+              message.success(tb("chat.copied"));
+            }
+          }}
+        >
+          ⧉
+        </button>
         {ops && <span className="msg-ops">{ops}</span>}
       </div>
       {hasProcess &&
@@ -105,6 +108,30 @@ function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: num
           </div>
         ))}
       <Markdown text={m.statements.map((s) => s.text).join("\n\n")} />
+      {/* 产物附件（send-file 能力）：文件/图片卡片，点击下载（工作区相对路径经
+          /api/asset/download；IM 通道直发不进这里，仅控制台会话） */}
+      {m.artifacts && m.artifacts.length > 0 && (
+        <div className="msg-artifacts">
+          {m.artifacts.map((a, i) => {
+            const name = a.path.split("/").pop() || a.path;
+            // 后端登记统一为工作区相对路径；绝对路径兜底截取（旧数据容错）
+            const rel = a.path;
+            const href = `${serverBase()}/api/asset/download?path=${encodeURIComponent(rel)}`;
+            return a.kind === "image" ? (
+              <a key={i} className="msg-artifact image" href={href} target="_blank" rel="noreferrer">
+                <img src={assetUrl(rel)} alt={a.caption || name} />
+                {a.caption && <span className="msg-artifact-caption">{a.caption}</span>}
+              </a>
+            ) : (
+              <a key={i} className="msg-artifact file" href={href} download={name}>
+                <PaperClipOutlined />
+                <span className="msg-artifact-name">{name}</span>
+                {a.caption && <span className="msg-artifact-caption">{a.caption}</span>}
+              </a>
+            );
+          })}
+        </div>
+      )}
     </Card>
   );
 }
@@ -149,20 +176,21 @@ export function ChatView(): React.ReactElement {
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget,
     toggleSessionPin, unreadCounts, markAllRead,
-    refreshAgents,
     loadGroups,
     sessionsLoaded,
-    plan, planApplied, planPending, decidePlan, setPlanMode,
+    plan, planApplied, planPending, decidePlan,
     todo,
+    taskQueue,
     spawns, clearSpawns,
+    graph,
   } = useExm();
+  // 会话编排图内嵌（graph-inline）：当前会话有编排图时在消息流上方给可折叠卡——
+  // 看图不必跳「编排」页（那页保留全局会话切换视角）
+  const [dagOpen, setDagOpen] = useState(true);
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState("");
-  // 确认弹窗走 useModal 演出器：静态 Modal.confirm 渲染在 React 树外、吃不到 ConfigProvider，
-  // 暗色主题下会落回默认白底（与全局自绘样式打架）；演出器版本随主题/语言/令牌同步。
-  const [modal, modalContextHolder] = Modal.useModal();
 
   const loadTarget = useCallback(async () => {
     try {
@@ -242,6 +270,8 @@ export function ChatView(): React.ReactElement {
    *  进入应用先落在会话列表，点某条会话才进入该会话页，会话页有返回按钮回到列表。
    *  带深链（#/chat/<id>）时直接进会话页；桌面端两栏并排，screen 恒为 thread。 */
   const narrow = useIsNarrow();
+  /** 桌面端：页面侧栏 portal 到二级侧边栏；窄屏仍在页内（列表页/会话页切换） */
+  const subbarSlot = useSubbarSlot();
   // 首屏偏好：窄屏默认落在列表页（深链 #/chat/<id> 直接进会话页）。
   // 注意不要用 effect 在首帧纠正 screen——matchMedia 在懒加载 chunk 落地时可能
   // 还没稳定，一次 setScreen("thread") 就会把用户永远留在会话页（实测复现）。
@@ -251,8 +281,6 @@ export function ChatView(): React.ReactElement {
   });
   const screen: "list" | "thread" = narrow ? screenPref : "thread";
   const setScreen = setScreenPref;
-  /** 会话类型过滤（2.2）：all / normal / channel */
-  const [sessionKind, setSessionKind] = useState("all");
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const [usage, setUsage] = useState<{
     estimate: number;
@@ -502,16 +530,19 @@ export function ChatView(): React.ReactElement {
   const visibleSessions = useMemo(
     () =>
       sessions
-        .filter((s) =>
-          sessionKind === "all" ? true : sessionKind === "channel" ? s.title.startsWith("channel:") : !s.title.startsWith("channel:"),
-        )
+        // 对话页 = 用户直接发起的会话（信息架构 2026-11）：通道流会话（channel:）
+        // 与任务侧会话（job-* / 心跳巡检 / 派发子会话 sub:）不在这里——分别在
+        // 「聊天」「任务」页，无输入框；对话页每条会话都可输入。
+        .filter((s) => !s.title.startsWith("channel:") && !isTaskSideTitle(s.title))
         .filter(
           (s) =>
             !sessionFilter ||
             s.title.toLowerCase().includes(sessionFilter.toLowerCase()) ||
-            (s.lastMessagePreview ?? "").toLowerCase().includes(sessionFilter.toLowerCase()),
+            (s.lastMessagePreview ?? "").toLowerCase().includes(sessionFilter.toLowerCase()) ||
+            // 来源名（流显示名·发送者）一并可搜：「萝莉」「张三」都能命中
+            (s.originLabel ?? "").toLowerCase().includes(sessionFilter.toLowerCase()),
         ),
-    [sessions, sessionKind, sessionFilter],
+    [sessions, sessionFilter],
   );
 
   /** 分组：置顶 / 今天 / 昨天 / 更早（置顶常驻列表头，不受时间分组沉底影响） */
@@ -544,6 +575,18 @@ export function ChatView(): React.ReactElement {
     }
     return buckets.filter((b) => b.items.length > 0);
   }, [visibleSessions]);
+
+  // 桌面端选中对齐（chat-ergonomics）：store 全局会话若是通道/任务会话（如刚在
+  // 「聊天」页打开过通道流）——本页列表永远不含它，对齐为左栏最近会话，右栏
+  // 不残留无输入语义的会话。只按类型判定、不按过滤后列表判定：左栏搜索临时
+  // 滤掉当前会话时不得抢走用户上下文。窄屏跳过：列表页是主视觉。
+  useEffect(() => {
+    if (narrow || !sessionId) return;
+    const raw = sessions.find((s) => s.id === sessionId);
+    if (!raw) return; // 全表未及（新会话竞态）——不动
+    if (!raw.title.startsWith("channel:") && !isTaskSideTitle(raw.title)) return;
+    if (visibleSessions.length > 0) void selectSession(visibleSessions[0].id);
+  }, [narrow, sessionId, sessions, visibleSessions, selectSession]);
 
   // ---- 会话历史管控（组 9.5）：撤销 / 编辑重发 / 分叉 ----
   const [editing, setEditing] = useState<{ turn: number; text: string } | null>(null);
@@ -615,10 +658,7 @@ export function ChatView(): React.ReactElement {
     return { m, turn: userTurn };
   });
 
-  return (
-    <div className={`chat-shell screen-${screen}`} data-screen={screen}>
-      {modalContextHolder}
-      {/* 左栏 = 移动端「会话列表页」，桌面端是常驻侧栏（见 styles.css 的屏幕切换） */}
+  const rail = (
       <aside className="chat-rail">
         {/* 列表页标题栏（窄屏显示）：标题 + 会话计数 */}
         <div className="rail-head">
@@ -626,8 +666,18 @@ export function ChatView(): React.ReactElement {
           <span className="rail-head-count">{visibleSessions.length}</span>
         </div>
         <div className="rail-section">
-          <div className="rail-label">
-            <span className="rail-no">01</span> {t("chat.target")} [TARGET]
+          {/* 标题行：左「01 交互目标」右「主智能体」提示，普通流 flex 同排（窄面板不叠字） */}
+          <div className="rail-target-row">
+            <div className="rail-label">
+              <span className="rail-no">01</span> {t("chat.target")} <span className="rail-label-en">[TARGET]</span>
+            </div>
+            {target.mode === "single" ? (
+              <div className="rail-hint">{t("chat.soloMode")} · <span className="mono">{agentIdEn(target.id)}</span></div>
+            ) : (
+              activeMeta && (
+                <div className="rail-hint">{t("chat.primary")}：<span className="mono">{activeMeta.primary ? agentIdEn(activeMeta.primary) : t("chat.unset")}</span></div>
+              )
+            )}
           </div>
           <Select
             value={targetValue}
@@ -636,16 +686,9 @@ export function ChatView(): React.ReactElement {
             onChange={(v) => void changeTarget(v)}
             options={targetOptions}
           />
-          {target.mode === "single" ? (
-            <div className="rail-hint">{t("chat.soloMode")} · <span className="mono">{agentIdEn(target.id)}</span></div>
-          ) : (
-            activeMeta && (
-              <div className="rail-hint">{t("chat.primary")}：<span className="mono">{activeMeta.primary ? agentIdEn(activeMeta.primary) : t("chat.unset")}</span></div>
-            )
-          )}
         </div>
         {/* 聊天流（chat flow）：外部 IM 的对话单元——一个群/私聊一条流，点流跳到绑定会话 */}
-        <FlowRailSection t={t} />
+        {/* 聊天流已迁「聊天」页（信息架构 2026-11：对话页只留用户直连会话） */}
         <div className="rail-section grow">
           {/* 工具条：搜索 + 类型过滤（同行紧凑排布，见样式表） */}
           <div className="rail-toolbar">
@@ -657,19 +700,6 @@ export function ChatView(): React.ReactElement {
               className="session-search"
               value={sessionFilter}
               onChange={(e) => setSessionFilter(e.target.value)}
-            />
-            {/* 会话类型过滤（2.2）：全部 / 普通 / 通道（segment 紧凑形态，宽度自适应） */}
-            <Select
-              size="small"
-              value={sessionKind}
-              onChange={setSessionKind}
-              className="session-kind"
-              popupMatchSelectWidth={false}
-              options={[
-                { value: "all", label: t("chat.kind.all") },
-                { value: "normal", label: t("chat.kind.normal") },
-                { value: "channel", label: t("chat.kind.channel") },
-              ]}
             />
             {/* 会话管理入口（session-management）：管理职能解耦到管理页，左栏留直达 */}
             <Button
@@ -742,6 +772,12 @@ export function ChatView(): React.ReactElement {
                       const isSub = s.title.startsWith("sub:");
                       const subAgent = isSub ? s.title.split(":")[1] : "";
                       const kind = isChannel ? "channel" : isSub ? "sub" : "normal";
+                      // 通道会话主显来源名（流显示名·发送者标签，如「萝莉领主二群·张三」），
+                      // 裸 QQ 号降为次要信息——满屏裸号无法辨认是哪个群/谁（可用性修复）。
+                      // 旧网关无 originLabel 时回落 title 截前缀（原行为）。
+                      const channelLabel =
+                        s.originLabel ||
+                        (isChannel ? s.title.replace(/^channel:[^:]+:/, "") : "");
                       return (
                         <>
                           <span className={`session-avatar kind-${kind}`} aria-hidden="true">
@@ -750,17 +786,21 @@ export function ChatView(): React.ReactElement {
                           <span className="session-main">
                             <span className="session-title">
                               {isChannel
-                                ? s.title.replace(/^channel:[^:]+:/, "↗ ")
+                                ? channelLabel
                                 : isSub
                                   ? s.title.replace(/^sub:[^:]+:/, "")
                                   : s.title}
                             </span>
-                            {/* 副标题 = 末条消息预览（比组名信息量大：组几乎全列表同名）；
-                                预览缺省回落组名（新会话还没有消息） */}
+                            {/* 副标题 = 末条消息预览（信息量大于组名：组几乎全列表同名）；
+                                预览缺省回落——通道会话用发送者标签（originLabel 的 · 后段），
+                                其余回落组名（新会话还没有消息） */}
                             <span className="session-sub">
                               {isSub && !s.lastMessagePreview
                                 ? `@${subAgent} · ${t("chat.subSession")}`
-                                : s.lastMessagePreview || groupNameOf(s.groupId)}
+                                : s.lastMessagePreview ||
+                                  (isChannel
+                                    ? channelLabel.split("·").pop()?.trim() || groupNameOf(s.groupId)
+                                    : groupNameOf(s.groupId))}
                             </span>
                           </span>
                           {/* 置顶标识：标题右侧小图钉（与「⋮」菜单的 pin 开关呼应） */}
@@ -828,6 +868,12 @@ export function ChatView(): React.ReactElement {
           </div>
         </div>
       </aside>
+  );
+
+  return (
+    <div className={`chat-shell screen-${screen}`} data-screen={screen}>
+      {/* 左栏 = 移动端「会话列表页」，桌面端是常驻侧栏（见 styles.css 的屏幕切换） */}
+      {narrow ? rail : subbarSlot ? createPortal(rail, subbarSlot) : null}
 
       {/* 右侧：消息流 + 输入 */}
       <div className="chat-wrap">
@@ -855,19 +901,17 @@ export function ChatView(): React.ReactElement {
           )}
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} style={{ marginLeft: "auto" }} />
         </div>
-        {!wsConnected && <Alert type="warning" message={t("chat.wsDown")} showIcon className="ws-alert app-banner" />}
-        {/* 计划模式（spec plan-mode：WebUI 跨端审批呈现）——模式开关 + 计划卡片 */}
+        {!wsConnected && <Alert type="warning" title={t("chat.wsDown")} showIcon className="ws-alert app-banner" />}
+        {/* 计划模式（plan-mode-tools）：模式决定权归 agent——用户对话中要求先计划、
+            或 agent 判断任务复杂/高风险时自行切换（plan__mode 工具）。
+            UI 只呈现状态徽标（plan.mode 事件实时刷新），不再提供硬开关；
+            计划批准后自动回放执行并回执行模式，全程无需手动切换 */}
         <div className="plan-mode-bar">
-          <Segmented
-            size="small"
-            value={plan?.mode ?? "execute"}
-            onChange={(v) => void setPlanMode(v === "plan")}
-            options={[
-              { value: "execute", label: t("plan.modeExecute") },
-              { value: "plan", label: t("plan.modePlan") },
-            ]}
-          />
-          {plan?.mode === "plan" && <span className="plan-mode-hint">{t("plan.modeHint")}</span>}
+          {plan?.mode === "plan" && (
+            <span className="plan-mode-hint" title={t("plan.modeHint")}>
+              📋 {t("plan.modePlan")}
+            </span>
+          )}
           {/* 任务清单进度（spec agent-todo）：todo.updated 实时刷新 */}
           {todo && todo.count > 0 && (
             <span className={`todo-progress${todo.allDone ? " todo-all-done" : ""}`}>
@@ -888,6 +932,19 @@ export function ChatView(): React.ReactElement {
                 {it.status === "done" ? "✅" : it.status === "in_progress" ? "🔄" : "⬜"} {it.content}
               </span>
             ))}
+          </div>
+        )}
+        {/* 任务队列（task-queue）：智能体入队的新任务（并行/排队）实时状态条 */}
+        {taskQueue && (taskQueue.running > 0 || taskQueue.queued > 0) && (
+          <div className="tq-strip">
+            {taskQueue.items
+              .filter((it) => it.status === "queued" || it.status === "running")
+              .map((it) => (
+                <span key={it.id} className={`tq-chip tq-${it.status}`}>
+                  {it.status === "running" ? "⚙️" : "⏳"}
+                  {it.runMode === "parallel" ? "[并行]" : "[队列]"} {it.task.length > 40 ? `${it.task.slice(0, 40)}…` : it.task}
+                </span>
+              ))}
           </div>
         )}
         {/* 后台子任务卡（spec subagent-spawn WebUI 呈现）：运行中 spinner + 终态展开 + 清除 */}
@@ -936,6 +993,21 @@ export function ChatView(): React.ReactElement {
             onReject={() => void decidePlan("reject")}
           />
         )}
+        {/* 会话编排图内嵌卡（graph-inline）：当前会话有图时置顶——运行中任务的
+            节点状态/依赖一目了然，不必跳「编排」页；折叠态只留一行摘要 */}
+        {graph?.nodes?.length ? (
+          <div className="dag-inline">
+            <button className="dag-inline-head" onClick={() => setDagOpen((v) => !v)}>
+              <ApartmentOutlined />
+              <span>{t("dag.inlineTitle")}</span>
+              <span className="dag-inline-meta">
+                {graph.nodes.length} · {t("dag.inlineRunning", { n: String(graph.nodes.filter((n) => ["running", "dispatched", "syncing"].includes(n.status)).length) })}
+              </span>
+              <span className="dag-inline-caret">{dagOpen ? "▾" : "▸"}</span>
+            </button>
+            {dagOpen && <TaskGraphDag graph={graph} />}
+          </div>
+        ) : null}
         <div className="chat-scroll">
           {/* 空态：当前会话尚无消息且未在运行 —— 目标捕获盘（与桌面端空态同源母题） */}
           {renderMessages.length === 0 && !running && (
@@ -980,7 +1052,7 @@ export function ChatView(): React.ReactElement {
           {/* 等待首个输出：加载卡（一旦有流式输出/子个体产出即让位，避免与输出卡并存） */}
           {running && !liveOrch && liveUnitEntries.length === 0 && (
             <Card size="small" className="msg-bubble msg-agent">
-              <Space direction="vertical" className="full-width">
+              <Space orientation="vertical" className="full-width">
                 <div>
                   <Spin size="small" /> <b>{`${orchLabel} …`}</b>
                 </div>
@@ -1077,6 +1149,24 @@ export function ChatView(): React.ReactElement {
                 >
                   {t("chat.approvalApprove")}
                 </Button>
+                {/* 三档放行（approval-ergonomics）：升档按钮仅普通命令单可见——
+                    [root] 提权单与破坏性命令后端红线降级 once,UI 直接隐藏避免误导 */}
+                {!a.command.startsWith("[") && !isDestructiveCommand(a.command) && (
+                  <>
+                    <Button
+                      size="small"
+                      onClick={() => void decideApproval(a.approvalId, true, "session")}
+                    >
+                      {t("chat.approvalSession")}
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => void decideApproval(a.approvalId, true, "allowlist")}
+                    >
+                      {t("chat.approvalAllowlist")}
+                    </Button>
+                  </>
+                )}
                 <Button size="small" danger onClick={() => void decideApproval(a.approvalId, false)}>
                   {t("chat.approvalDeny")}
                 </Button>
@@ -1272,7 +1362,7 @@ export function ChatView(): React.ReactElement {
             <Alert
               type="warning"
               showIcon
-              message={t("chat.turn.editWarn")}
+              title={t("chat.turn.editWarn")}
               className="edit-warn"
             />
             <Input.TextArea
