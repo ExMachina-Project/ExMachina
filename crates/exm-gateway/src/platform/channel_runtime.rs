@@ -771,8 +771,15 @@ async fn flow_command(
     ctx: &InboundCtx<'_>,
 ) -> Option<String> {
     let text = ctx.text.trim();
+    // /reset：重置聊天上下文——旧会话归档保留（控制台归档区可回看），流绑定
+    // 切到新会话，后续消息从零开始。「聊天流固定单会话」退役了 /new /sessions
+    // /use，但「干净重开」是真实高频诉求（上下文被长对话灌满 / 话题彻底换轨），
+    // 只靠控制台手动归档对通道侧用户不可达。
+    if text == "/reset" {
+        return Some(reset_flow_session(core, ch, ctx).await);
+    }
     let retired = [
-        ("/new", "本聊天流固定使用一个会话，不再开新会话。"),
+        ("/new", "本聊天流固定使用一个会话，不再开新会话。如需干净重开请发 /reset（旧对话归档保留）。"),
         ("/sessions", "本聊天流固定使用一个会话，无流内会话列表。"),
         ("/use", "本聊天流固定使用一个会话，无需切换。"),
     ];
@@ -787,6 +794,62 @@ async fn flow_command(
         }
     }
     None
+}
+
+/// /reset 落地：归档旧会话 → 新建会话 → 流绑定切换。
+/// 会话内消息不动（归档 = archived_at 标记 + 移出默认列表，历史在归档区完整可回看）。
+async fn reset_flow_session(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>) -> String {
+    let old = core.flow_active_session(&ch.id, ctx.chat_key);
+    // 无会话可直接开新的（首次消息前 /reset 也成立）
+    let Some(old_sid) = old else {
+        return match ensure_flow_session(core, ch, ctx.chat_key, ctx.flow_name, ctx.is_group) {
+            Some(_) => "✅ 已重置：新建会话就绪，发消息即从零开始。".into(),
+            None => "❌ 重置失败：会话创建失败，请稍后重试。".into(),
+        };
+    };
+    // 运行中的轮次先停（旧会话可能在长任务里，不停会把回复落进归档会话）
+    let stop_note = match core.stop_session(&old_sid) {
+        Ok(n) => format!("（已停止运行中任务，{n} 次工具调用中止）"),
+        Err(_) => String::new(),
+    };
+    // 归档旧会话（幂等；失败不阻断——旧会话保持原样，新会话照常开）
+    let archived = core.store.set_session_archived(&old_sid, true).is_ok();
+    // 新建同 scope 会话并切换绑定（ensure_flow_session_atomic 会复用绑定，
+    // 这里需显式 create + bind：归档会话不再是活跃目标）
+    let scope = core
+        .store
+        .get_session(&old_sid)
+        .ok()
+        .flatten()
+        .map(|s| s.group_id)
+        .unwrap_or_else(|| {
+            ch.group
+                .clone()
+                .unwrap_or_else(|| format!("{SINGLE_PREFIX}{}", default_single_id(core)))
+        });
+    let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
+    match core.store.create_session(&title, &scope) {
+        Ok(new_s) => {
+            let bind = core.bind_flow_session_named(
+                &ch.id,
+                ctx.chat_key,
+                &new_s.id,
+                ctx.flow_name,
+                Some(ctx.is_group),
+            );
+            let archive_note = if archived { "旧对话已归档（控制台归档区可回看）" } else { "⚠️ 旧会话归档失败（保留原样），但已切换新会话" };
+            match bind {
+                Ok(()) => format!(
+                    "✅ 已重置{stop_note}。{archive_note}，新会话从零开始。"
+                ),
+                Err(e) => format!("❌ 重置失败：新会话已建但绑定切换失败（{e}）。旧会话保持归档态，可到控制台恢复。"),
+            }
+        }
+        Err(e) => format!(
+            "❌ 重置失败：新会话创建失败（{e}）。{}",
+            if archived { "旧会话已归档，可到控制台恢复后重试。" } else { "旧会话未受影响。" }
+        ),
+    }
 }
 
 /// 运行收束事件 → 纯文本回帖（telegram / napcat / qqbot 三个适配器共用）。
