@@ -337,6 +337,30 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 });
                                 continue;
                             }
+                            // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖
+                            // 任务之前处理，避免原轮次审批等待中新建回帖任务造成重复
+                            // 投递与最终答复丢失。
+                            if crate::platform::is_quick_directive(&text) {
+                                let sid = core.flow_active_session(&ch.id, &room);
+                                let reply = crate::platform::quick_directive_reply(
+                                    &core,
+                                    sid.as_deref(),
+                                    Some(&sender),
+                                    &text,
+                                )
+                                .await
+                                .unwrap_or_else(|| {
+                                    "【报告】当前无待审批计划或审批单。".into()
+                                });
+                                let client2 = client.clone();
+                                let hs2 = hs.clone();
+                                let token2 = token.clone();
+                                let room2 = room.clone();
+                                tokio::spawn(async move {
+                                    send_message(&client2, &hs2, &token2, &room2, &reply).await
+                                });
+                                continue;
+                            }
                             let core = core.clone();
                             let ch2 = ch.clone();
                             let hs2 = hs.clone();

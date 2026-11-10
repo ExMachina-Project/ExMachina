@@ -259,4 +259,54 @@ mod channel_boundary_tests {
         // 文本里偶然提到「沉默」二字（非标记形态）：不误杀
         assert!(run.take_reply(&evt("我方选择了沉默策略。"), 500).is_some());
     }
+
+    /// 长回复不再被收束平铺截断吞掉（回归锚点）：flatten_statements 曾把
+    /// 全文截到单段上限（650 字符级）再交给 split_reply——分段机制形同虚设，
+    /// 超出部分直接丢失。现在平铺保留全文（仅防异常超长的总预算天花板），
+    /// 由 split_reply 做边界切分、回帖循环做段数封顶。
+    #[test]
+    fn 回帖_长文不因平铺截断丢内容() {
+        let long = "第一段。\n\n".to_string() + &"正文细节。".repeat(400); // ~2400 字符
+        let evt = exm_core::types::CoreEvent {
+            kind: "run.finished".into(),
+            session_id: "s".into(),
+            payload: serde_json::json!({ "statements": [{ "tag": "报告", "text": long }] }),
+        };
+        let core = exm_core::Core::create(std::env::temp_dir().join(format!(
+            "exm-longreply-{}",
+            uuid::Uuid::new_v4()
+        )))
+        .expect("创建 Core 失败");
+        let run = ChannelRun {
+            core: std::sync::Arc::new(core),
+            session_id: "s".into(),
+            prev_group: String::new(),
+            prev_single: None,
+            switched: false,
+            kind: "webhook".into(),
+            scope: exm_core::types::ToolScope::Tools,
+            origin: None,
+            external_id: None,
+            flow: None,
+        };
+        let text = run.take_reply(&evt, 650).expect("应有文本回复");
+        assert!(
+            text.chars().count() > 2_000,
+            "超长文不应被平铺截到单段上限：{}",
+            text.chars().count()
+        );
+        assert!(text.ends_with("正文细节。"), "结尾内容不得丢失");
+        // 分段切分后内容完整（段数 > 1 才证明分段机制真正参与）；
+        // 硬切片自带「（续 N/M）」标注，允许尾段带标注，但正文不得丢
+        let segments = super::super::channel_runtime::split_reply(&text, 650);
+        assert!(segments.len() > 3, "应切出多段: {}", segments.len());
+        let last = segments.last().unwrap();
+        assert!(
+            last.contains("正文细节。"),
+            "最后一段应含正文结尾内容: {last}"
+        );
+        for seg in &segments {
+            assert!(seg.chars().count() <= 650 + 20, "单段不得远超预算");
+        }
+    }
 }

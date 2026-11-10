@@ -243,4 +243,134 @@ mod channel_approval_tests {
         let ws = core_arc.config().workspace_root.clone();
         let _ = std::fs::remove_dir_all(&ws);
     }
+
+    // ---------------- 回帖循环：中间提示不吞收束答复 ----------------
+
+    /// 审批推送后回帖循环不得退出：审批是本轮中间事件，最终答复（run.finished）
+    /// 仍须送达——否则通道里用户批完只看到审批摘要，永远等不到执行结果。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 审批推送后不结束回帖_最终答复仍送达() {
+        let core = std::sync::Arc::new(core());
+        let c = ch(vec![]);
+        let (run, rx) = ChannelRun::begin(&core, &c, "chat-1").await.unwrap();
+        let sid = run.session_id.clone();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sent2 = sent.clone();
+        let reply = crate::platform::channel_runtime::spawn_reply(
+            &run,
+            rx,
+            500,
+            move |text| {
+                let sent = sent2.clone();
+                async move {
+                    sent.lock().unwrap().push(text);
+                }
+            },
+            |_item: crate::platform::MediaItem| async { false },
+        );
+        core.events
+            .send(CoreEvent {
+                kind: "approval.required".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "approvalId": "abcd1234", "agentId": "a1", "command": "echo hi"
+                }),
+            })
+            .unwrap();
+        core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "statements": [{ "text": "已完成" }]
+                }),
+            })
+            .unwrap();
+        reply.await.unwrap();
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.iter().any(|t| t.contains("abcd1234")),
+            "审批提示应送达: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|t| t.contains("已完成")),
+            "审批后的最终答复应送达: {sent:?}"
+        );
+        drop(sent);
+        let ws = core.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 审批富消息钩子（QQ 官方机器人按钮）：命中后审批文本不再走普通发送，
+    /// 回帖循环继续等待收束答复。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 审批富消息钩子_命中后不走文本且继续收束() {
+        type HookFuture = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+        let core = std::sync::Arc::new(core());
+        let c = ch(vec![]);
+        let (run, rx) = ChannelRun::begin(&core, &c, "chat-1").await.unwrap();
+        let sid = run.session_id.clone();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let hooked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sent2 = sent.clone();
+        let hooked2 = hooked.clone();
+        let hook: crate::platform::channel_runtime::ApprovalHook = Box::new(
+            move |prompt: crate::platform::ApprovalPrompt| -> HookFuture {
+                let hooked = hooked2.clone();
+                Box::pin(async move {
+                    hooked.lock().unwrap().push(prompt.approval_id);
+                    true
+                })
+            },
+        );
+        let reply = crate::platform::channel_runtime::spawn_reply_with_approval(
+            &run,
+            rx,
+            500,
+            move |text| {
+                let sent = sent2.clone();
+                async move {
+                    sent.lock().unwrap().push(text);
+                }
+            },
+            |_item: crate::platform::MediaItem| async { false },
+            Some(hook),
+        );
+        core.events
+            .send(CoreEvent {
+                kind: "approval.required".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "approvalId": "abcd1234", "agentId": "a1", "command": "echo hi"
+                }),
+            })
+            .unwrap();
+        core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "statements": [{ "text": "已完成" }]
+                }),
+            })
+            .unwrap();
+        reply.await.unwrap();
+        assert_eq!(
+            hooked.lock().unwrap().as_slice(),
+            ["abcd1234"],
+            "审批钩子应收到单号"
+        );
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.iter().all(|t| !t.contains("abcd1234")),
+            "富消息命中后审批文本不应重复走普通发送: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|t| t.contains("已完成")),
+            "钩子命中后仍应送达收束答复: {sent:?}"
+        );
+        drop(sent);
+        let ws = core.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
