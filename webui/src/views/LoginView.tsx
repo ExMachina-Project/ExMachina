@@ -49,8 +49,7 @@ export function LoginView({ onUnlock }: { onUnlock: () => void }): React.ReactEl
       {/* 背景十六进制字节雨（左右两列）：放在 login-wrap 内部（它是定位祖先），z-index 低于 login-core */}
       <DataStream side="left" />
       <DataStream side="right" />
-      {/* 角落微标（hero 左下/右下语汇）：EST. 2026 / 链接，mono 微号宽字距 */}
-      <span className="login-corner login-corner-left mono">EST. 2026</span>
+      {/* 角落微标（hero 右下语汇）：项目链接，mono 微号宽字距 */}
       <span className="login-corner login-corner-right mono">EXMACHINA-PROJECT</span>
       <div className="login-core">
         <div className="login-figure">

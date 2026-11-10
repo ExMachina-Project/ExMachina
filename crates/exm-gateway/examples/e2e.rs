@@ -5,6 +5,7 @@
 use axum::response::IntoResponse;
 use axum::Json;
 use exm_core::{config::ExmConfig, Core};
+use parking_lot::Mutex;
 #[allow(unused_imports)]
 use serde_json::json;
 use std::sync::Arc;
@@ -330,6 +331,16 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(false)
     });
     c.check("技能包随派发注入", skill_injected);
+
+    // 派发审计（agent-budget-audit 3.4）：该轮派发须落审计记录
+    // （派发者会话 / 目标个体 / 摘要 / 耗时 / token / 状态）
+    let dispatch_audit = core.store.list_dispatch_audit(&sid, 20).unwrap_or_default();
+    c.check(
+        "子代理派发落审计记录",
+        dispatch_audit
+            .iter()
+            .any(|a| a["agentId"].is_string() && a["durationMs"].is_u64() && a["status"].is_string()),
+    );
     // 流式修复回归：token/thinking 增量只走实时广播、不落事件库（否则事件页被逐字刷屏）
     c.check(
         "流式增量不落事件库",
@@ -758,6 +769,55 @@ async fn main() -> anyhow::Result<()> {
         "配置热生效",
         core.config().max_concurrency == 3 && core.config().memory_recall_limit == 6,
     );
+    // 主动搜索纪律开关（proactive-search）：设置面写入 → 热生效读回；
+    // 三态语义与既有 search 字段一致（None=沿用），serde 兼容旧 body 缺字段
+    let put_search = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({
+            "search": { "provider": "tavily", "endpoint": "", "apiKey": "e2e-k", "maxResults": 5, "proactive": false }
+        }))
+        .send()
+        .await?;
+    c.check("search 配置 PUT 200", put_search.status().is_success());
+    c.check(
+        "proactive 开关热生效",
+        !core.config().search.proactive && !core.orchestrator().tools.search_discipline_ready(),
+    );
+    let put_search2 = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({
+            "search": { "provider": "tavily", "endpoint": "", "apiKey": "e2e-k", "maxResults": 5 }
+        }))
+        .send()
+        .await?;
+    c.check("search 旧 body PUT 200", put_search2.status().is_success());
+    c.check(
+        "旧 body 缺 proactive 默认开",
+        core.config().search.proactive && core.orchestrator().tools.search_discipline_ready(),
+    );
+    // 浏览器搜索（browser-search）：引擎配置透出 + 旧 browser 配置缺字段默认 bing
+    let cfg_browser: serde_json::Value = client
+        .get(format!("{base}/config"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "browser 配置透出 searchEngine",
+        cfg_browser["browser"]["searchEngine"].is_string(),
+    );
+    let put_browser = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({
+            "browser": { "executable": "", "headless": true, "timeoutSecs": 30, "maxChars": 8000 }
+        }))
+        .send()
+        .await?;
+    c.check("browser 旧 body PUT 200", put_browser.status().is_success());
+    c.check(
+        "browser 旧 body 缺 searchEngine 默认 bing",
+        core.config().browser.search_engine == "bing",
+    );
     let schema: serde_json::Value = client
         .get(format!("{base}/config/schema"))
         .send()
@@ -824,6 +884,29 @@ async fn main() -> anyhow::Result<()> {
     c.check(
         "记忆写入（群体）",
         added["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+    );
+
+    // 调试视图（8.4）：刚写入的条目必然词项命中（标题/正文含「构建」「入口」）
+    let dbg: serde_json::Value = client
+        .post(format!("{base}/memory/search"))
+        .json(&serde_json::json!({"query": "构建 入口", "limit": 5}))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "记忆检索调试字段：命中词项透出",
+        dbg["hits"]
+            .as_array()
+            .map(|a| {
+                a.iter().any(|h| {
+                    h["matchedTerms"]
+                        .as_object()
+                        .map(|m| !m.is_empty())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false),
     );
 
     // 个体记忆：写入归属 scout-agent 的私有记忆，验证不可见于他人检索
@@ -1257,15 +1340,15 @@ async fn main() -> anyhow::Result<()> {
     c.check("定时任务已删除", cron_gone.status().as_u16() == 404);
 
     // webhook 通道：入站受理 + 出站回调（本进程内起一个接收器捕获回调载荷）
-    let captured: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured: std::sync::Arc<Mutex<Option<serde_json::Value>>> =
+        std::sync::Arc::new(Mutex::new(None));
     let captured_for_handler = captured.clone();
     let reply = axum::Router::new().route(
         "/reply",
         axum::routing::post(move |Json(payload): Json<serde_json::Value>| {
             let captured = captured_for_handler.clone();
             async move {
-                *captured.lock().unwrap() = Some(payload);
+                *captured.lock() = Some(payload);
                 "ok"
             }
         }),
@@ -1308,7 +1391,7 @@ async fn main() -> anyhow::Result<()> {
     let mut delivered = false;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        if captured.lock().unwrap().is_some() {
+        if captured.lock().is_some() {
             delivered = true;
             break;
         }
@@ -1377,47 +1460,16 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     c.check("流 read 非法 id 400", bad_read.status().as_u16() == 400);
 
-    // 流内会话切换（experience-iteration）：sessions 列表含当前绑定（active 标记）；
-    // PUT active 改绑同源状态；跨流会话错绑被拒
-    let fs_list: serde_json::Value = client
+    // 流内会话切换已退役（聊天流固定单会话）：sessions/active 端点已移除——
+    // 404 即正确行为；消毒复用同会话断言（下方）覆盖「固定单会话」不变式
+    let fs_gone = client
         .get(format!("{base}/channels/flows/{flow_id}/sessions"))
         .send()
-        .await?
-        .json()
         .await?;
-    let bound_sid = inbound["sessionId"].as_str().unwrap_or("").to_string();
-    let has_active = fs_list
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .any(|s| s["id"] == bound_sid.as_str() && s["active"] == true)
-        })
-        .unwrap_or(false);
-    c.check("流内会话列表含当前绑定且标记 active", has_active);
-    // 幂等改绑：绑回同一会话 ok
-    let rebind: serde_json::Value = client
-        .put(format!("{base}/channels/flows/{flow_id}/active"))
-        .json(&serde_json::json!({ "sessionId": bound_sid }))
-        .send()
-        .await?
-        .json()
-        .await?;
-    c.check("流绑定改绑（同会话幂等）", rebind["ok"] == true);
-    // 跨流错绑被拒：造一个不属于该流的会话 id
-    let foreign: serde_json::Value = client
-        .post(format!("{base}/sessions"))
-        .json(&serde_json::json!({ "title": "foreign-session" }))
-        .send()
-        .await?
-        .json()
-        .await?;
-    let foreign_id = foreign["id"].as_str().unwrap_or("").to_string();
-    let bad_bind = client
-        .put(format!("{base}/channels/flows/{flow_id}/active"))
-        .json(&serde_json::json!({ "sessionId": foreign_id }))
-        .send()
-        .await?;
-    c.check("跨流会话错绑 400", bad_bind.status().as_u16() == 400);
+    c.check(
+        "流会话切换端点已退役（404）",
+        fs_gone.status().as_u16() == 404,
+    );
 
     // 入站消毒（inbound-sanitization）：注入消息受理 + 审计条目落会话事件流（不含原文全文）
     let sanitize_sid = inbound["sessionId"].as_str().unwrap_or("").to_string();
@@ -1506,6 +1558,56 @@ async fn main() -> anyhow::Result<()> {
         schema_text.contains("superAgent") && schema_text.contains("autoAgent"),
     );
 
+    // Auto Agent Eval→act 链路（9.2）：mock 替身对 Eval 提示词确定性两态——
+    // 开关开 + Eval 通过 → 开会话执行并落 auto.eval/auto.act 事件；
+    // Eval 拒绝 → 空转计数递增（退避拉长），只落 auto.eval。
+    {
+        // 订阅全局事件流（auto.* 事件 session 为空，广播可捕获）
+        let mut rx = core.subscribe();
+        // 开开关
+        let _on: serde_json::Value = client
+            .put(format!("{base}/config"))
+            .json(&json!({ "experiments": { "autoAgent": true } }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        // tick 1：Eval 拒绝路径（user 固定文本「执行一次自评。」不含「值得做」→ act:false）
+        let m1 = tokio::time::Instant::now().elapsed().as_secs() as i64 / 60 + 10_000;
+        let rejected = core.auto_agent_tick(m1).await;
+        c.check("Eval 拒绝时不触发行动", rejected.is_none());
+        while let Ok(evt) = rx.try_recv() {
+            if evt.kind == "auto.eval" {
+                c.check("Eval 拒绝事件（act:false）", evt.payload["act"] == false);
+                break;
+            }
+        }
+        // tick 2：周期未到（同分钟粒度内 backoff 未满足）→ 直接跳过不评
+        let skipped = core.auto_agent_tick(m1 + 1).await;
+        c.check("退避期内 tick 被跳过", skipped.is_none());
+
+        // tick 3：Eval 通过路径——距上次足够远（退避上限内），且需让 user 文本带「值得做」
+        // （auto_agent_tick 固定发「执行一次自评。」→ 走 act:false；通过路径由单测替身覆盖，
+        // 此处断言周期判定与事件契约：推进到退避窗口外再 tick，仍应完成一次自评并落事件）
+        let m3 = m1 + 60; // 60 分钟后，必然越过任意配置的退避窗口
+        let _again = core.auto_agent_tick(m3).await;
+        let mut saw_eval = false;
+        while let Ok(evt) = rx.try_recv() {
+            if evt.kind == "auto.eval" {
+                saw_eval = true;
+            }
+        }
+        c.check("退避窗口外再次自评（事件落库）", saw_eval);
+        // 关开关回默认（后续段落不受实验开关影响）
+        let _off: serde_json::Value = client
+            .put(format!("{base}/config"))
+            .json(&json!({ "experiments": { "autoAgent": false } }))
+            .send()
+            .await?
+            .json()
+            .await?;
+    }
+
     // 元智能体实验（experiments.metaAgent）：管理面契约——开关下发 + schema 收录
     // （提议/审批/应用全链路在 exm-core meta_approval_tests 集成测试；此处锚定设置页可达）
     let meta_down = cfg_view["experiments"]["metaAgent"].is_boolean();
@@ -1517,6 +1619,19 @@ async fn main() -> anyhow::Result<()> {
     c.check(
         "元智能体 schema 收录（设置页可配）",
         schema_text.contains("metaAgent") && schema_text.contains("metaIntervalMin"),
+    );
+
+    // 自主记忆摘要实验（experiments.autoMemoryDigest，9.1）：管理面契约——
+    // 开关与触发轮数下发 + schema 收录（归纳/去重全链路在 exm-core 单测）
+    let digest_down = cfg_view["experiments"]["autoMemoryDigest"].is_boolean();
+    let digest_turns = cfg_view["automation"]["memoryDigestMinTurns"].is_u64();
+    c.check(
+        "自主记忆摘要开关下发（autoMemoryDigest + 轮数）",
+        digest_down && digest_turns,
+    );
+    c.check(
+        "自主记忆摘要 schema 收录（设置页可配）",
+        schema_text.contains("autoMemoryDigest") && schema_text.contains("memoryDigestMinTurns"),
     );
 
     // 通道平台校验 + 掩码回显语义（supervisor 只在 serve() 拉起，e2e 内无适配器连接行为，全部确定性）
@@ -1779,6 +1894,102 @@ async fn main() -> anyhow::Result<()> {
         "审批单不存在返回 404",
         approve_missing.status().as_u16() == 404,
     );
+
+    // ---- 三档放行（approval-ergonomics）：once 不建授权 / session 建授权 /
+    // ---- allowlist 写配置 + 未知档位 400 + 兼容旧无 body 调用
+    {
+        use exm_core::types::{now_iso, ApprovalRequest};
+        let mk_ap = |core: &Core, sid: &str, cmd: &str| {
+            let ap = ApprovalRequest {
+                id: exm_core::types::new_id()[..8].to_string(),
+                session_id: sid.into(),
+                node_id: None,
+                agent_id: "e2e".into(),
+                command: cmd.into(),
+                status: "pending".into(),
+                result: None,
+                created_at: now_iso(),
+                decided_at: None,
+                origin_user: None,
+                origin_role: None,
+                meta_json: None,
+            };
+            core.store.add_approval(&ap).unwrap();
+            ap.id
+        };
+        let mk_session = |core: &Core| core.create_session("档位测试").unwrap().id;
+        // once：不建授权
+        let sid = mk_session(&core);
+        let once_id = mk_ap(&core, &sid, "echo once-scope");
+        let r: serde_json::Value = client
+            .post(format!("{base}/approvals/{once_id}/approve"))
+            .json(&serde_json::json!({ "scope": "once" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("once 档执行成功", r["status"] == "executed");
+        c.check(
+            "once 档不建会话授权",
+            !r["result"].as_str().unwrap_or("").contains("会话授权"),
+        );
+        // session：建授权,同前缀第二次免审批直通
+        let ap2 = mk_ap(&core, &sid, "echo session-scope");
+        let r2: serde_json::Value = client
+            .post(format!("{base}/approvals/{ap2}/approve"))
+            .json(&serde_json::json!({ "scope": "session" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("session 档执行成功", r2["status"] == "executed");
+        c.check(
+            "session 档建会话授权",
+            r2["result"].as_str().unwrap_or("").contains("会话授权"),
+        );
+        c.check(
+            "同前缀命令命中授权",
+            core.session_granted(&sid, "echo session-scope again").is_some(),
+        );
+        // allowlist：前缀写入配置可读回
+        let sid3 = mk_session(&core);
+        let ap3 = mk_ap(&core, &sid3, "echo allowlist-scope");
+        let r3: serde_json::Value = client
+            .post(format!("{base}/approvals/{ap3}/approve"))
+            .json(&serde_json::json!({ "scope": "allowlist" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("allowlist 档执行成功", r3["status"] == "executed");
+        let cfg_now = core.config();
+        c.check(
+            "allowlist 档写入配置",
+            cfg_now
+                .security
+                .exec_allowlist
+                .iter()
+                .any(|p| p == "echo allowlist-scope"),
+        );
+        drop(cfg_now);
+        // 未知档位 → 400
+        let sid4 = mk_session(&core);
+        let ap4 = mk_ap(&core, &sid4, "echo bad-scope");
+        let bad: reqwest::Response = client
+            .post(format!("{base}/approvals/{ap4}/approve"))
+            .json(&serde_json::json!({ "scope": "forever" }))
+            .send()
+            .await?;
+        c.check("未知档位返回 400", bad.status().as_u16() == 400);
+        // 旧客户端无 body 兼容（缺省 once）
+        let r5: serde_json::Value = client
+            .post(format!("{base}/approvals/{ap4}/approve"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("无 body 兼容缺省 once", r5["status"] == "executed");
+    }
 
     // ---- 经验优化（docs/10 §5）：合成要点 → 后续派发携带修订号 → 重置 ----
     // 模拟规划器按 identifier 序取前几名派发：动态选取排序后第 2 个子个体，保证其必被派发
@@ -2414,12 +2625,12 @@ async fn main() -> anyhow::Result<()> {
         .await;
 
     // ---- 多 Key 粘性负载均衡（docs/11 §1）：k1 恒 429 → 切 k2 并粘住 ----
-    let key_stats: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key_stats: std::sync::Arc<Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::Arc::new(Mutex::new(std::collections::HashMap::new()));
     let ks_for_handler = key_stats.clone();
     // 记录每次到达 fake 的 system prompt（单体人设注入验证用）
-    let prompt_log: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let prompt_log: std::sync::Arc<Mutex<Vec<String>>> =
+        std::sync::Arc::new(Mutex::new(Vec::new()));
     let pl_for_handler = prompt_log.clone();
     let fake = axum::Router::new().route(
         "/v1/chat/completions",
@@ -2445,8 +2656,8 @@ async fn main() -> anyhow::Result<()> {
                                 .join("\n")
                         })
                         .unwrap_or_default();
-                    pl.lock().unwrap().push(system_text);
-                    let mut seen = ks.lock().unwrap();
+                    pl.lock().push(system_text);
+                    let mut seen = ks.lock();
                     let first_time = !seen.contains_key(&key);
                     *seen.entry(key.clone()).or_insert(0) += 1;
                     drop(seen);
@@ -2543,7 +2754,7 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    let stats = key_stats.lock().unwrap().clone();
+    let stats = key_stats.lock().clone();
     println!("    [key stats] {:?}", stats);
     // 首次请求 429 → 轮换到另一把并粘住；第二轮不再触碰首次失败的键位顺序
     c.check(
@@ -2647,7 +2858,7 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    let tok_stats = key_stats.lock().unwrap().clone();
+    let tok_stats = key_stats.lock().clone();
     c.check(
         "替换后的主 Key 已在运行时生效（fake 端点捕获）",
         tok_stats.contains_key("sk-tok-new") && !tok_stats.contains_key("sk-tok-old"),
@@ -2719,7 +2930,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
     {
-        let pl = prompt_log.lock().unwrap().clone();
+        let pl = prompt_log.lock().clone();
         let tail = pl.iter().rev().take(3).cloned().collect::<Vec<_>>();
         c.check(
             "单体人设注入：plan/converge 的 system prompt 均含人设文本",
@@ -2742,7 +2953,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tokio::time::sleep(Duration::from_millis(2500)).await;
     {
-        let pl = prompt_log.lock().unwrap().clone();
+        let pl = prompt_log.lock().clone();
         let tail = pl.iter().rev().take(2).cloned().collect::<Vec<_>>();
         c.check(
             "单体人设重置：回落默认人设且不再含自定义文本",
@@ -3113,6 +3324,60 @@ async fn main() -> anyhow::Result<()> {
             .json()
             .await?;
         c.check("批量归档作用计数=2", bar["affected"] == 2 && bar["ok"] == true);
+        // 幂等（长程迭代 4.3）：重复归档成功、archived_at 不刷新（归档区排序稳定）；
+        // 不存在 id 进 failed 明细（错误语义保留）
+        let arch_first: serde_json::Value = client
+            .get(format!("{base}/sessions?archived=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let at_first = arch_first
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["id"].as_str() == Some(a1.as_str())))
+            .and_then(|s| s["archivedAt"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let bar2: serde_json::Value = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "archive", "ids": [a1] }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("重复归档幂等成功", bar2["affected"] == 1 && bar2["ok"] == true);
+        let arch_again: serde_json::Value = client
+            .get(format!("{base}/sessions?archived=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let at_again = arch_again
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["id"].as_str() == Some(a1.as_str())))
+            .and_then(|s| s["archivedAt"].as_str())
+            .unwrap_or("")
+            .to_string();
+        c.check("重复归档不刷新归档时间", !at_first.is_empty() && at_first == at_again);
+        let bar_missing: serde_json::Value = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "archive", "ids": ["no-such-id"] }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "不存在 id 进 failed 明细",
+            bar_missing["affected"] == 0
+                && bar_missing["failed"]
+                    .as_array()
+                    .map(|f| f.len() == 1 && f[0]["id"] == "no-such-id")
+                    .unwrap_or(false),
+        );
         // 主列表（all 视角）不再含这两条
         let main: serde_json::Value = client
             .get(format!("{base}/sessions?all=true"))
@@ -3183,6 +3448,360 @@ async fn main() -> anyhow::Result<()> {
             .send()
             .await?;
         c.check("未知批量动作 400", bad.status().as_u16() == 400);
+    }
+
+    // ---- 来源标注与按流归档（session-management）----
+    {
+        // 列表补齐：通道会话带 origin/originLabel，控制台会话 origin=console
+        let all: serde_json::Value = client
+            .get(format!("{base}/sessions?all=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let arr = all.as_array().cloned().unwrap_or_default();
+        let ch_sess = arr.iter().find(|s| s["title"] == "channel:e2e-hook:user-a");
+        c.check(
+            "通道会话带结构化来源",
+            ch_sess
+                .map(|s| s["origin"] == "channel:e2e-hook:user-a" && s["originLabel"].is_string())
+                .unwrap_or(false),
+        );
+        c.check(
+            "控制台会话来源为 console",
+            arr.iter()
+                .any(|s| !s["title"].as_str().unwrap_or("").starts_with("channel:") && s["origin"] == "console"),
+        );
+
+        // 造第二个流会话（不触发执行——直接建会话 + 绑流，模拟历史会话）
+        let old_flow_sess: String = client
+            .post(format!("{base}/sessions"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "title": "channel:e2e-hook:user-a:旧话题" }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        // 按流归档：旧会话归档、活跃绑定豁免
+        let fr: serde_json::Value = client
+            .post(format!("{base}/sessions/flow-archive"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({
+                "scope": "flow", "channelId": "e2e-hook", "chatKey": "user-a"
+            }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "按流归档豁免活跃绑定",
+            fr["ok"] == true && fr["archived"].as_u64().unwrap_or(0) >= 1 && fr["skipped"] == 1,
+        );
+        let all2: serde_json::Value = client
+            .get(format!("{base}/sessions?all=true"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let active_kept = all2
+            .as_array()
+            .map(|a| a.iter().any(|s| s["title"] == "channel:e2e-hook:user-a"))
+            .unwrap_or(false);
+        c.check("流活跃会话保留主列表", active_kept);
+        // 非法 scope 400
+        let bad_scope: reqwest::Response = client
+            .post(format!("{base}/sessions/flow-archive"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "scope": "flow", "channelId": "e2e-hook" }))
+            .send()
+            .await?;
+        c.check("flow 缺 chatKey 400", bad_scope.status().as_u16() == 400);
+        // 清理旧话题会话
+        let _ = client
+            .post(format!("{base}/sessions/batch"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "delete", "ids": [old_flow_sess] }))
+            .send()
+            .await?;
+    }
+
+    // ---- 工具预算熔断事件（agent-budget-audit 3.2）----
+    // 模型驱动的 chat 在 Mock 下不发工具调用，走工具执行漏斗的直连路径：
+    // 收紧单轮预算 → execute_named 两次 → 第二次必须受限回灌 + tool.budget 事件广播
+    // （事件页条目 + 通道 take_reply 内联提示的数据源）。
+    {
+        let mut rx_b = core.subscribe();
+        let sid = core.create_session("预算熔断测试").unwrap().id;
+        // 预算收紧：单轮 1（config 快照由 FileGuard 兜底还原；块尾恢复默认）。
+        // 注意先改配置再取 tools 引用——apply_config 重建 orchestrator（新网关带新预算）。
+        let mut cfg_b = (*core.config()).clone();
+        cfg_b.security.tool_call_budget.per_turn = 1;
+        cfg_b.security.tool_call_budget.per_session = 0;
+        cfg_b.security.tool_call_budget.per_window = 0;
+        core.apply_config(cfg_b).unwrap();
+        let tools = core.orchestrator().tools.clone();
+        let allow = [exm_core::types::ToolName::parse("read").unwrap()];
+        let args = serde_json::json!({ "path": "README.md" });
+        let r1 = tools
+            .execute_named("e2e", &sid, &allow, "read", &args)
+            .await;
+        let r2 = tools
+            .execute_named("e2e", &sid, &allow, "read", &args)
+            .await;
+        // 恢复默认预算（后续断言不受影响）
+        let mut cfg_r = (*core.config()).clone();
+        cfg_r.security.tool_call_budget = exm_core::config::ToolCallBudget::default();
+        core.apply_config(cfg_r).unwrap();
+        c.check(
+            "预算首次放行二次受限",
+            !r1.error.clone().unwrap_or_default().contains("预算受限")
+                && r2.error.clone().unwrap_or_default().contains("预算受限"),
+        );
+        // tool.budget 事件广播（熔断条目数据源）
+        let mut budget_evt = false;
+        while let Ok(evt) = rx_b.try_recv() {
+            if evt.kind == "tool.budget" && evt.session_id == sid {
+                budget_evt = true;
+            }
+        }
+        c.check("tool.budget 事件广播", budget_evt);
+        let _ = core.delete_session(&sid);
+    }
+
+    // ---- 事件载荷脱敏（agent-budget-audit 3.5）----
+    // 带密钥参数的工具调用：tool.call 事件载荷必须打码（事件库是明文面）
+    {
+        let mut rx_s = core.subscribe();
+        let sid = core.create_session("脱敏测试").unwrap().id;
+        let tools = core.orchestrator().tools.clone();
+        let allow = [exm_core::types::ToolName::parse("terminal").unwrap()];
+        // 审批 off + 白名单外 → 落审批单（不执行），但 tool.call 事件已发（含参数）
+        let _ = tools
+            .execute_named(
+                "e2e",
+                &sid,
+                &allow,
+                "terminal",
+                &serde_json::json!({
+                    "command": "curl -H 'Authorization: Bearer abcdefghijklmnop12345' https://x.io",
+                    "api_key": "sk-abcdefgh12345678"
+                }),
+            )
+            .await;
+        let mut leaked = true;
+        let mut masked = false;
+        while let Ok(evt) = rx_s.try_recv() {
+            if evt.kind == "tool.call" && evt.session_id == sid {
+                let raw = serde_json::to_string(&evt.payload).unwrap_or_default();
+                if raw.contains("abcdefghijklmnop12345") || raw.contains("sk-abcdefgh12345678") {
+                    leaked = true;
+                } else if raw.contains("***") {
+                    leaked = false;
+                    masked = true;
+                }
+            }
+        }
+        c.check("tool.call 事件密钥脱敏", !leaked && masked);
+        let _ = core.delete_session(&sid);
+    }
+
+    // ---- 审计与用量端点（e2e 断言补强 5.2）：/audit 工具面 + kind=dispatch 派发面 + /sessions/:id/tokens ----
+    {
+        // 工具审计面：上面预算/脱敏块已产生真实 tool.call 记录 → items 非空且字段齐
+        let audit: serde_json::Value = client
+            .get(format!("{base}/audit?limit=50"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let items = audit["items"].as_array().cloned().unwrap_or_default();
+        c.check("工具审计端点返回条目", !items.is_empty());
+        // 条目结构：agentId + tool + ok（审计页过滤与高亮的数据源）
+        let has_fields = items
+            .iter()
+            .any(|it| it.get("agentId").is_some() && it.get("tool").is_some() && it.get("ok").is_some());
+        c.check("审计条目结构完整（agentId/tool/ok）", has_fields);
+        // 派发审计面（kind=dispatch）：跨会话聚合结构（可能为空——结构断言即可）
+        let dispatch: serde_json::Value = client
+            .get(format!("{base}/audit?kind=dispatch&limit=50"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("派发审计端点结构有效", dispatch["items"].is_array());
+        // 会话用量：既有会话（预算块已跑过工具）→ tokens 返回结构含用量字段
+        let any_sid = core
+            .list_sessions_in_group("exmachina")
+            .unwrap_or_default()
+            .iter()
+            .find(|s| s.title.contains("channel:e2e-hook") || s.title.contains("预算"))
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        let tokens: serde_json::Value = client
+            .get(format!("{base}/sessions/{any_sid}/tokens"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        let tok_ok = tokens.get("promptTokens").is_some()
+            || tokens.get("prompt_tokens").is_some()
+            || tokens.get("total").is_some()
+            || tokens.get("used").is_some();
+        c.check("会话用量端点返回结构", tok_ok);
+    }
+
+    // ---- 资产下载语义（REST 通用约定：404 不存在 / 403 越界口径分离）----
+    {
+        let dl404: reqwest::Response = client
+            .get(format!("{base}/asset/download?path=no-such-file.txt"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?;
+        c.check("资产下载：不存在文件 404", dl404.status().as_u16() == 404);
+        let dl403: reqwest::Response = client
+            .get(format!("{base}/asset/download?path=../../etc/passwd"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?;
+        c.check("资产下载：路径越界 403", dl403.status().as_u16() == 403);
+    }
+
+    // ---- 开箱自检（onboarding-selfcheck）：四类体检结构 + 分级 + 指引 ----
+    {
+        let sc: serde_json::Value = client
+            .get(format!("{base}/selfcheck"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "自检：总体结构与四类条目",
+            sc.get("overall").is_some()
+                && sc.get("ok").is_some()
+                && sc["items"].as_array().map(|a| a.len() == 4).unwrap_or(false),
+        );
+        let names_ok = sc["items"]
+            .as_array()
+            .map(|a| {
+                a.iter().all(|i| {
+                    i.get("level").is_some()
+                        && i.get("name").is_some()
+                        && i.get("detail").is_some()
+                })
+            })
+            .unwrap_or(false);
+        c.check("自检：每项含 level/name/detail", names_ok);
+        // e2e 环境（mock 或配了探针端点）：存储类应为 ok 且含「可写」
+        let storage_ok = sc["items"]
+            .as_array()
+            .and_then(|a| a.iter().find(|i| i["name"] == "存储").map(|i| i["level"].clone()))
+            .map(|l| l == "ok")
+            .unwrap_or(false);
+        c.check("自检：存储体检 ok（数据目录可写）", storage_ok);
+        // error 级条目必须带可操作指引（hint）
+        let err_hint_ok = sc["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["level"] == "error")
+                    .all(|i| i["hint"].as_str().is_some_and(|h| !h.is_empty()))
+            })
+            .unwrap_or(true);
+        c.check("自检：error 项必附指引", err_hint_ok);
+    }
+
+    // ---- Nexus 拓扑与连边（nexus-topology-admin）：graph 聚合 + bind/unbind + 冲突语义 ----
+    {
+        // 造连结体 + 智能体
+        let r: reqwest::Response = client
+            .post(format!("{base}/nexus/links"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({
+                "id": "e2e-link", "name": "E2E 连结", "kind": "exmachina",
+                "endpoint": "http://127.0.0.1:59999", "enabled": true
+            }))
+            .send()
+            .await?;
+        c.check("连结体：创建", r.status().as_u16() == 200);
+
+        let g: serde_json::Value = client
+            .get(format!("{base}/nexus/graph"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "拓扑：节点含新建连结体",
+            g["nodes"].as_array().map(|a| a.iter().any(|n| n["id"] == "e2e-link")).unwrap_or(false),
+        );
+
+        // bind 个体 → 边出现
+        let r: serde_json::Value = client
+            .put(format!("{base}/nexus/edges"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "bind", "agentId": "machina", "linkId": "e2e-link" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check("连边：绑定成功", r["ok"] == true);
+        let g: serde_json::Value = client
+            .get(format!("{base}/nexus/graph"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "拓扑：边出现",
+            g["edges"].as_array().map(|a| a.iter().any(|e| e["agentId"] == "machina" && e["linkId"] == "e2e-link")).unwrap_or(false),
+        );
+
+        // 重复 bind → 409
+        let r: reqwest::Response = client
+            .put(format!("{base}/nexus/edges"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "bind", "agentId": "machina", "linkId": "e2e-link" }))
+            .send()
+            .await?;
+        c.check("连边：重复绑定 409", r.status().as_u16() == 409);
+
+        // unbind → 边消失
+        let r: reqwest::Response = client
+            .put(format!("{base}/nexus/edges"))
+            .header("x-auth-key", "e2e-secret")
+            .json(&serde_json::json!({ "action": "unbind", "agentId": "machina", "linkId": "e2e-link" }))
+            .send()
+            .await?;
+        c.check("连边：解绑成功", r.status().as_u16() == 200);
+        let g: serde_json::Value = client
+            .get(format!("{base}/nexus/graph"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?
+            .json()
+            .await?;
+        c.check(
+            "拓扑：边已清",
+            g["edges"].as_array().map(|a| !a.iter().any(|e| e["linkId"] == "e2e-link")).unwrap_or(false),
+        );
+
+        // 清理
+        let _: reqwest::Response = client
+            .delete(format!("{base}/nexus/links/e2e-link"))
+            .header("x-auth-key", "e2e-secret")
+            .send()
+            .await?;
     }
 
     server.abort();

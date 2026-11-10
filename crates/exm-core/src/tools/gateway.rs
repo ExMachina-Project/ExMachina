@@ -17,6 +17,57 @@ pub type SpawnExec = Arc<
 /// 插件凭据解析闭包：(插件 id, 键) → 真值（None = 未配置）
 pub type PluginCredResolver = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
 
+/// 会话授权查询闭包（approval-ergonomics）：(会话 id, 命令全文) → 是否命中会话授权
+pub type SessionGrantProbe =
+    std::sync::Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+/// 会话工具调用计数器（agent-budget-audit 三值预算）
+#[derive(Debug, Default, Clone)]
+pub struct ToolCallCounter {
+    /// 本轮调用数（chat_execute 进入时清零）
+    pub turn: usize,
+    /// 会话累计（进程生命周期）
+    pub session_total: usize,
+    /// 时间窗内的调用时刻戳（毫秒；滑动窗口裁剪）
+    pub window_stamps: std::collections::VecDeque<u64>,
+}
+
+impl ToolCallCounter {
+    /// 裁剪时间窗外旧戳并返回窗内计数
+    fn window_count(&mut self, now_ms: u64, window_secs: u64) -> usize {
+        if window_secs == 0 {
+            return 0;
+        }
+        let horizon = now_ms.saturating_sub(window_secs * 1000);
+        while let Some(&t) = self.window_stamps.front() {
+            if t < horizon {
+                self.window_stamps.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.window_stamps.len()
+    }
+}
+
+/// capability 档位预算表（agent-budget-audit）：chat < tools < computer。
+/// config 的 ToolCallBudget 是 computer 档全量值；低档位按比例收严：
+/// chat 取 1/4（对话优先,工具只做轻量补充）、tools 取 1/2。
+/// 0 值单项在低档位同样收严为 0 内保留（只在全量档关闭才关闭）。
+pub fn scope_budget(full: &crate::config::ToolCallBudget, scope: crate::types::ToolScope) -> crate::config::ToolCallBudget {
+    let (t, s, w) = match scope {
+        crate::types::ToolScope::Chat => (full.per_turn / 4, full.per_session / 4, full.per_window / 4),
+        crate::types::ToolScope::Tools => (full.per_turn / 2, full.per_session / 2, full.per_window / 2),
+        crate::types::ToolScope::Computer => (full.per_turn, full.per_session, full.per_window),
+    };
+    crate::config::ToolCallBudget {
+        per_turn: t,
+        per_session: s,
+        per_window: w,
+        window_secs: full.window_secs,
+    }
+}
+
 pub struct ToolGateway {
     pub(crate) workspace_root: PathBuf,
     pub(crate) store: Arc<Store>,
@@ -34,6 +85,9 @@ pub struct ToolGateway {
     /// 子智能体派生执行器（spawn 工具；未注入 = spawn 返回未装配错误）。
     /// RwLock 槽：Core 装配后回接（tools 已 Arc 共享给 runtime，无法再拿可变引用）
     pub(crate) spawn_executor: parking_lot::RwLock<Option<SpawnExec>>,
+    /// 会话授权查询（approval-ergonomics）：Core 装配后回接——gate_command
+    /// 落审批单前先查会话授权表，命中直通。槽位语义同 spawn_executor。
+    pub(crate) session_grant_probe: parking_lot::RwLock<Option<SessionGrantProbe>>,
     /// 上下文压缩执行器（context_compact 工具，实验性；未注入 = 工具返回未装配说明）。
     /// 槽位语义同 spawn_executor：Core 装配后回接 (provider, model)。
     pub(crate) compactor: parking_lot::RwLock<Option<(Arc<dyn LlmProvider>, String)>>,
@@ -80,6 +134,15 @@ pub struct ToolGateway {
     >,
     /// 会话级步数预算覆盖（自动任务「防失控」面；None = 走三级默认解析）
     pub(crate) session_step_budgets: parking_lot::RwLock<std::collections::HashMap<String, usize>>,
+    /// 工具调用预算计数（agent-budget-audit）：会话 → 计数器。
+    /// 三值口径：单轮（chat_execute 进入时清零）/ 会话累计 / 时间窗（滑动）。
+    /// 内存态：进程重启清零（防失控是运行时关注,不是持久治理）。
+    pub(crate) tool_call_counters:
+        parking_lot::Mutex<std::collections::HashMap<String, ToolCallCounter>>,
+    /// 会话作用域快照（agent-budget-audit 预算档位判定）：通道会话由
+    /// ChannelRun::begin 写入 capability 档位;缺省 Computer（控制台全量）。
+    pub(crate) session_scopes:
+        parking_lot::RwLock<std::collections::HashMap<String, crate::types::ToolScope>>,
     /// 记忆库（memory_read/write/link 三工具的受控入口；组隔离在工具层强制）
     pub(crate) memory: Option<Arc<crate::memory::MemoryStore>>,
     /// 深层记忆开关（config.memory.enabled）。false = 文件记忆模式：
@@ -113,6 +176,7 @@ impl ToolGateway {
             hooks: crate::config::HooksConfig::default(),
             cron: None,
             spawn_executor: parking_lot::RwLock::new(None),
+            session_grant_probe: parking_lot::RwLock::new(None),
             compactor: parking_lot::RwLock::new(None),
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
@@ -130,6 +194,8 @@ impl ToolGateway {
             dynamic_tools: parking_lot::RwLock::new(std::collections::BTreeMap::new()),
             session_scoped_tools: parking_lot::RwLock::new(std::collections::HashMap::new()),
             session_step_budgets: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            tool_call_counters: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            session_scopes: parking_lot::RwLock::new(std::collections::HashMap::new()),
             memory: None,
             // 默认深层记忆开启 = 历史行为（未接线 memory 模式的调用方零感知）
             memory_deep: true,
@@ -148,6 +214,12 @@ impl ToolGateway {
     /// 并发/超时控制由网关层实现（spec: subagent-spawn）。
     pub fn set_spawn_executor(&self, exec: SpawnExec) {
         *self.spawn_executor.write() = Some(exec);
+    }
+
+    /// 注入会话授权查询（approval-ergonomics）：Core 装配后回接。
+    /// 闭包签名：(会话 id, 命令全文) → 是否命中会话授权（前缀口径见 command_head）。
+    pub fn set_session_grant_probe(&self, f: SessionGrantProbe) {
+        *self.session_grant_probe.write() = Some(f);
     }
 
     /// 注入上下文压缩执行器（context_compact 工具，实验性开关开启时由 Core 装配后回接）
@@ -359,6 +431,97 @@ impl ToolGateway {
         self.session_step_budgets.read().get(session_id).copied()
     }
 
+    /// 单轮预算清零（agent-budget-audit）：chat_execute 每轮进入时调用——
+    /// 单轮预算只约束「一轮用户输入」内的工具循环,跨轮不累计。
+    pub fn reset_turn_tool_budget(&self, session_id: &str) {
+        if let Some(c) = self.tool_call_counters.lock().get_mut(session_id) {
+            c.turn = 0;
+        }
+    }
+
+    /// 会话删除时清理预算计数（与步数覆盖/授权表同生命周期）
+    pub fn clear_tool_budget(&self, session_id: &str) {
+        self.tool_call_counters.lock().remove(session_id);
+        self.session_scopes.write().remove(session_id);
+    }
+
+    /// 记录会话作用域（agent-budget-audit）：ChannelRun::begin 快照通道 capability。
+    /// 控制台/CLI 会话不写（缺省 Computer 全量档）。
+    pub fn set_session_scope(&self, session_id: &str, scope: crate::types::ToolScope) {
+        self.session_scopes
+            .write()
+            .insert(session_id.to_string(), scope);
+    }
+
+    /// 查会话作用域（缺省 Computer）
+    pub(crate) fn session_scope_of(&self, session_id: &str) -> crate::types::ToolScope {
+        self.session_scopes
+            .read()
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// 工具调用预算预检 + 计数（agent-budget-audit）。
+    /// 超限返回余量说明（调用方以受限结果回灌模型收束）;未超限计数并放行。
+    /// scope 取会话快照（通道 capability;缺省 Computer）,档位表 scope_budget。
+    pub fn consume_tool_budget(&self, session_id: &str) -> Result<(), String> {
+        let scope = self.session_scope_of(session_id);
+        let full = self.security.tool_call_budget;
+        if full.disabled() {
+            return Ok(());
+        }
+        let b = scope_budget(&full, scope);
+        let now = crate::types::now_ms();
+        let mut map = self.tool_call_counters.lock();
+        let c = map.entry(session_id.to_string()).or_default();
+        if b.per_turn > 0 && c.turn >= b.per_turn {
+            return Err(format!(
+                "单轮工具调用预算已耗尽（上限 {}，本轮已用 {}）。请基于已有结果收束本轮回复；下轮输入后预算恢复。",
+                b.per_turn, c.turn
+            ));
+        }
+        if b.per_session > 0 && c.session_total >= b.per_session {
+            return Err(format!(
+                "本会话工具调用累计预算已耗尽（上限 {}）。继续操作请开新会话或让管理员调整 security.toolCallBudget。",
+                b.per_session
+            ));
+        }
+        if b.per_window > 0 && c.window_count(now, b.window_secs) >= b.per_window {
+            return Err(format!(
+                "时间窗工具调用预算已耗尽（{} 秒内上限 {}）。请稍候重试或减少连续调用。",
+                b.window_secs, b.per_window
+            ));
+        }
+        c.turn += 1;
+        c.session_total += 1;
+        if b.per_window > 0 {
+            c.window_stamps.push_back(now);
+        }
+        Ok(())
+    }
+
+    /// 预算余量快照（事件载荷/调试用）
+    pub fn tool_budget_snapshot(&self, session_id: &str) -> serde_json::Value {
+        let scope = self.session_scope_of(session_id);
+        let full = self.security.tool_call_budget;
+        if full.disabled() {
+            return serde_json::json!({ "enabled": false });
+        }
+        let b = scope_budget(&full, scope);
+        let map = self.tool_call_counters.lock();
+        let c = map.get(session_id);
+        let turn_used = c.map(|c| c.turn).unwrap_or(0);
+        let session_used = c.map(|c| c.session_total).unwrap_or(0);
+        serde_json::json!({
+            "enabled": true,
+            "scope": format!("{scope:?}"),
+            "perTurn": b.per_turn, "turnUsed": turn_used,
+            "perSession": b.per_session, "sessionUsed": session_used,
+            "perWindow": b.per_window, "windowSecs": b.window_secs,
+        })
+    }
+
     /// 该个体可见的自定义工具 schema（与内置工具一起随 function calling 下发）。
     /// 插件工具（`<plugin>__<tool>` 命名空间）一并发下——清单未配 agents = 全体可见。
     pub fn custom_specs_for(&self, agent_id: &str) -> Vec<crate::provider::ToolSpec> {
@@ -450,6 +613,13 @@ impl ToolGateway {
     /// 搜索后端是否就绪（决定 web_search 是否出现在下发给模型的工具表里）
     pub fn search_ready(&self) -> bool {
         self.search.ready()
+    }
+
+    /// 主动搜索纪律注入门控（proactive-search）：任一搜索通路可用
+    /// （API 后端就绪 / 浏览器可探测）且开关开启。全部不可用或显式关闭时
+    /// 返回 false——提示层零注入（零回归语义）。
+    pub fn search_discipline_ready(&self) -> bool {
+        self.search.proactive && (self.search.ready() || self.browser_ready())
     }
 
     /// 测试可见：审批单断言用
@@ -572,14 +742,16 @@ impl ToolGateway {
                 .take(200)
                 .collect()
         };
-        let _ = self.store.audit_tool_ex(
+        if let Err(e) = self.store.audit_tool_ex(
             agent_id,
             full_name,
             args,
             &summary,
             started.elapsed().as_millis() as u64,
             result.ok,
-        );
+        ) {
+            eprintln!("[audit] 审计落库失败：{}", e);
+        }
         // 轮次过程轨迹：随收束落盘到最终消息（过程收起栏数据源）
         crate::round_trace::push_tool(
             session_id,
@@ -719,14 +891,15 @@ impl ToolGateway {
         );
         push(
             ToolName::Filesystem,
-            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）",
+            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）、send_file（把工作区内文件发送给用户——任意类型含二进制，本轮收束时经通道直发；要给用户交付文件时优先用这个）",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["write", "mkdir", "list", "delete", "rename"] },
+                    "op": { "type": "string", "enum": ["write", "mkdir", "list", "delete", "rename", "send_file"] },
                     "path": { "type": "string", "description": "相对工作区的路径" },
                     "content": { "type": "string", "description": "op=write 时的文件内容" },
-                    "newPath": { "type": "string", "description": "op=rename 时的目标路径（相对工作区；目标存在则拒绝）" }
+                    "newPath": { "type": "string", "description": "op=rename 时的目标路径（相对工作区；目标存在则拒绝）" },
+                    "caption": { "type": "string", "description": "op=send_file 时的文件说明（随文件一起展示，可选）" }
                 },
                 "required": ["op", "path"]
             }),
@@ -744,7 +917,7 @@ impl ToolGateway {
         }));
         push(
             ToolName::WebSearch,
-            "联网搜索并返回结果摘要（标题 + 链接 + 摘要）",
+            "联网搜索并返回结果摘要（标题 + 链接 + 摘要）。主动使用：时效性问题（新闻/版本/价格）、待核验的具体事实（数字/日期/参数）、没把握的概念——先搜再答，不要凭训练记忆编造；搜索未果换关键词重试（最多 2 轮）后如实说明",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -778,10 +951,11 @@ impl ToolGateway {
             },
             "required": ["op"]
         }));
-        push(ToolName::Browser, "浏览器自动化（headless Chrome + CDP）：导航网页、取渲染后正文、执行 JS、截图。适合抓动态页面 / 走一遍网页流程 / 留存页面证据", serde_json::json!({
+        push(ToolName::Browser, "浏览器自动化（Chrome + CDP）：搜索网页（无需搜索 API）、导航网页、取渲染后正文、执行 JS、截图。适合抓动态页面 / 走一遍网页流程 / 留存页面证据；搜索后端未配置时 op=search 是联网检索的主路径", serde_json::json!({
             "type": "object",
             "properties": {
-                "op": { "type": "string", "enum": ["open", "text", "eval", "screenshot", "close"], "description": "默认 open" },
+                "op": { "type": "string", "enum": ["open", "search", "text", "eval", "screenshot", "close"], "description": "默认 open" },
+                "query": { "type": "string", "description": "op=search：搜索词（导航搜索引擎取结果，无需 API Key）" },
                 "url": { "type": "string", "description": "op=open：http(s):// 或 file:// 地址" },
                 "expression": { "type": "string", "description": "op=eval：页面内执行的 JS 表达式（可点击/填表：document.querySelector('#x').click()）" },
                 "name": { "type": "string", "description": "op=screenshot：截图文件名（不含扩展名；缺省用时间戳）" },
@@ -1023,14 +1197,30 @@ impl ToolGateway {
         let plugin_attr = crate::plugin::parse_namespaced(name)
             .map(|(p, _)| serde_json::json!(p))
             .unwrap_or(serde_json::Value::Null);
+        // 载荷脱敏（agent-budget-audit 3.5）：密钥类参数（token/sk-/password…）
+        // 进事件与审计前打码——事件库与广播都是明文面，原文只留在工具执行现场。
+        let args_redacted = super::redact::redact_json(args);
         self.emit_and_persist(CoreEvent {
             kind: "tool.call".into(),
             session_id: session_id.to_string(),
             payload: serde_json::json!({
-                "callId": call_id, "agentId": agent_id, "tool": name, "args": args,
+                "callId": call_id, "agentId": agent_id, "tool": name, "args": args_redacted,
                 "plugin": plugin_attr,
             }),
         });
+        // 工具调用预算（agent-budget-audit）：超限即熔断——不执行本次调用,
+        // 受限结果回灌模型（说明预算状态）,模型自然收束本轮;事件页可见熔断条目。
+        if let Err(reason) = self.consume_tool_budget(session_id) {
+            self.emit_and_persist(CoreEvent {
+                kind: "tool.budget".into(),
+                session_id: session_id.to_string(),
+                payload: serde_json::json!({
+                    "callId": call_id, "tool": name, "reason": reason,
+                    "budget": self.tool_budget_snapshot(session_id),
+                }),
+            });
+            return ToolResult::err(format!("【预算受限】{reason}"));
+        }
         // 计划模式拦截（spec: plan-mode）：写类工具不执行，转为计划条目累积清单。
         // 读取类工具放行（read/grep/glob/web/截屏/git 只读等）
         if let Some(tool) = ToolName::parse(name) {
@@ -1109,14 +1299,16 @@ impl ToolGateway {
                         out.clone()
                     };
                     let blocked = ToolResult::err(format!("preTool 钩子拦截：{why}"));
-                    let _ = self.store.audit_tool_ex(
+                    if let Err(e) = self.store.audit_tool_ex(
                         agent_id,
                         name,
                         args,
                         "preTool 钩子拦截",
                         started.elapsed().as_millis() as u64,
                         false,
-                    );
+                    ) {
+            eprintln!("[audit] 审计落库失败：{}", e);
+        }
                     self.emit_tool_result(session_id, &call_id, agent_id, name, &blocked, &started);
                     return blocked;
                 }
@@ -1274,14 +1466,16 @@ impl ToolGateway {
                 .take(200)
                 .collect()
         };
-        let _ = self.store.audit_tool_ex(
+        if let Err(e) = self.store.audit_tool_ex(
             agent_id,
             name,
             args,
             &summary,
             started.elapsed().as_millis() as u64,
             result.ok,
-        );
+        ) {
+            eprintln!("[audit] 审计落库失败：{}", e);
+        }
         // 轮次过程轨迹：与 execute_mcp 一致,内置/自定义工具执行同样随收束落盘到最终消息
         crate::round_trace::push_tool(
             session_id,

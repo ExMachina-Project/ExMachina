@@ -26,6 +26,20 @@ export interface ChatMessage {
   thinking?: string;
   /** 有序过程步骤（思考段落 / 工具调用按发生顺序交错；服务端留存） */
   steps?: MessageStep[];
+  /** 本轮产物附件（send-file 能力）：控制台会话在 run.finished 事件携带；
+   *  IM 通道由适配器直发，不进这里 */
+  artifacts?: ArtifactItem[];
+  /** 入站附件（im-inbound-attach）：外部通道用户随消息发来的媒体（图片缩略图/文件卡片） */
+  attachments?: InboundAttachment[];
+}
+
+/** 会话产物附件（outbox 登记 → 轮次收束排空投递） */
+export interface ArtifactItem {
+  /** image | file | voice */
+  kind: string;
+  /** 工作区相对路径（下载经 /api/asset/download）或绝对路径 */
+  path: string;
+  caption?: string;
 }
 
 /** 有序过程步骤：kind=tool 时 callId 关联 toolCalls 记录 */
@@ -33,6 +47,14 @@ export interface MessageStep {
   kind: "thinking" | "tool";
   text?: string;
   callId?: string;
+}
+
+/** 入站附件（im-inbound-attach）：外部通道用户随消息发来的媒体元数据，
+ *  随 user 消息落库（path 为工作区相对路径，/api/asset 预览） */
+export interface InboundAttachment {
+  kind: string;
+  path: string;
+  name: string;
 }
 
 /** 工具执行轨迹（tool.call / tool.result 事件组装）：编程软件式过程透明 */
@@ -104,6 +126,11 @@ export interface Session {
   archivedAt?: string;
   /** 消息条数（管理页附加） */
   messageCount?: number;
+  /** 会话来源（读时派生）：console 或 channel:{channelId}:{chatKey}。
+   *  旧网关不返回该字段（undefined）——分组视图降级隐藏，回落平铺。 */
+  origin?: string;
+  /** 来源展示名（通道会话 = 流显示名·标签；控制台会话缺省） */
+  originLabel?: string;
 }
 
 /** 会话检索命中片段（session-search） */

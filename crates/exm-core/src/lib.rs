@@ -16,6 +16,7 @@ pub mod config;
 pub mod cron;
 pub mod fsdb;
 pub mod image_stash;
+pub mod inbox_stash;
 pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
@@ -32,8 +33,10 @@ pub mod registry;
 pub mod remote;
 pub mod round_trace;
 pub mod runtime;
+pub mod session_origin;
 pub mod store;
 pub mod store_sqlite;
+pub mod task_queue;
 pub mod task;
 pub mod todo;
 pub mod tools;
@@ -54,9 +57,13 @@ use crate::runtime::AgentRuntime;
 use crate::store::Store;
 use crate::tools::ToolGateway;
 use crate::types::*;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 use tokio::sync::broadcast;
+
+/// 自主记忆摘要提示词（experiments.autoMemoryDigest，9.1）：单次非流式归纳。
+/// 输出契约：第一行一句话主题，随后 ≤300 字要点（目标/关键结论/未决事项）。
+const DIGEST_SYSTEM_PROMPT: &str = "你是会话记忆归纳器【自主记忆摘要】。把给定会话转录归纳为一条可长期检索的记忆：第一行一句话主题（≤40 字），随后不超过 300 字的要点（目标、关键结论、决策、未决事项）。只输出记忆正文，不要任何前后缀与解释。";
 
 /// Auto Agent 运行态（实验性）：空转连续次数（退避用）+ 上次 Eval 的分钟键
 #[derive(Debug, Default)]
@@ -82,11 +89,30 @@ pub struct Core {
     /// Auto Agent 运行态（实验性 experiments.autoAgent）：空转计数 + 上次 tick 分钟
     auto_state: parking_lot::RwLock<AutoAgentState>,
     meta_state: parking_lot::RwLock<MetaAgentState>,
-    /// 会话级运行串行：同一会话的并发输入排队（followup），不互踩任务图
+    /// 会话级运行串行：同一会话的并发输入排队（followup），不互踩编排图
     run_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 聊天流未读计数（流粒度，内存态）：智能体在流绑定会话产出回复且用户未打开
     /// 该会话时累积；打开即清零。未读是瞬时 UI 状态，重启归零合理（D5 单一事实源）。
     flow_unread: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 一次性标记（agent-budget-audit 内联提示去重等）：key → 已置位。
+    /// 进程内存态；key 由调用方自带语义前缀与生命周期（会话删除不清理——
+    /// 预算提示「每进程每会话一次」符合预期）。
+    once_flags: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// 审批决定互斥（竞态 P1-1）：审批 id → 执行锁。decide 全程 try_lock 占位，
+    /// 双击/多端并发时第二击等先到者收束后返回最新单据（先到者代执行语义），
+    /// 命令只执行一次。锁条目不清理（审批单量有限，内存开销可忽略）。
+    approval_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 流级互斥（竞态 P1-3）：flow_id → 锁。同 chat_key 并发消息的
+    /// 「查绑定→建会话→回写绑定」与「touch 预览」各自临界区——否则双建会话
+    /// （孤儿+绑定互抹）或 touch 读改写覆盖他方 bind（上下文永久分裂）。
+    flow_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    /// 会话级审批授权（approval-ergonomics）：会话 → {命令前缀 → ()}。
+    /// 「本会话允许」档批准时写入；内存态（重启即清）、随会话删除清理。
+    /// 红线：[root] 提权单与破坏性命令永不入表（写入侧校验）。
+    session_grants: parking_lot::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, ()>>>,
+    /// 自引用弱句柄（approval-ergonomics）：attach_session_grant_probe 首次注入后
+    /// 缓存；orchestrator 重建路径（rebind_plugin_tools）用它重挂授权探针。
+    self_weak: parking_lot::RwLock<Option<std::sync::Weak<Core>>>,
     /// MCP 服务器池（与 Orchestrator 内工具网关共用同一实例）
     mcp: Arc<crate::mcp::McpRegistry>,
     /// 远程执行器（工作者池；网关在 serve 时注入）
@@ -200,6 +226,11 @@ impl Core {
             meta_state: parking_lot::RwLock::new(MetaAgentState { last_tick_minute: 0 }),
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            once_flags: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            approval_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            flow_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            session_grants: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            self_weak: parking_lot::RwLock::new(None),
             mcp: mcp_handle.clone(),
             remote: parking_lot::RwLock::new(None),
             plugins: parking_lot::RwLock::new(plugins),
@@ -207,6 +238,22 @@ impl Core {
             orchestrator: RwLock::new(orchestrator),
             config: config_shared,
         })
+    }
+
+    /// 装配会话授权查询（approval-ergonomics）：把 session_grants 查询面回接到
+    /// 工具网关（gate_command 落单前短路）。必须经 Arc<Core> 调用——闭包持 Weak
+    /// 引用避免与 orchestrator 成环（tools 由 orchestrator 持有,强引用即环）。
+    /// orchestrator 重建路径（apply_config / set_remote 等）由 rebind_plugin_tools
+    /// 尾部统一重挂。
+    pub fn attach_session_grant_probe(self: &std::sync::Arc<Self>) {
+        let weak = std::sync::Arc::downgrade(self);
+        *self.self_weak.write() = Some(weak.clone());
+        let orch = self.orchestrator.read().clone();
+        orch.tools.set_session_grant_probe(std::sync::Arc::new(
+            move |sid: &str, cmd: &str| {
+                weak.upgrade().is_some_and(|c| c.session_granted(sid, cmd).is_some())
+            },
+        ));
     }
 
     /// 配置热更新（设置页）：重建 Provider / Runtime / Orchestrator
@@ -398,6 +445,29 @@ impl Core {
             Some(&gid),
             None,
         )
+    }
+
+    /// 调试检索（8.4 记忆检索调试视图）：与对话内召回同口径——语义检索
+    /// 启用时嵌入查询向量（词项 + 语义混合命中，分数与 reasons 可解释）；
+    /// 未启用等价 memory_recall（仅词项）。嵌入失败静默回落词项（调试视图
+    /// 不应因嵌入端点抖动把检索本身打挂）。
+    pub async fn memory_recall_debug(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        agent: Option<&str>,
+    ) -> anyhow::Result<Vec<RecallHit>> {
+        let qe = self
+            .orchestrator()
+            .memory_query_embedding(query)
+            .await;
+        let gid = self.registry.active_group();
+        let cfg = self.config();
+        let limit = limit.unwrap_or(cfg.memory_recall_limit);
+        match agent {
+            Some(id) => self.memory.recall_for_agent(id, query, limit, Some(&gid), qe.as_deref()),
+            None => self.memory.recall(query, limit, None, Some(&gid), qe.as_deref()),
+        }
     }
 
     /// 个体检索：该智能体私有 + 群体共享（范围 = 激活组 + 全局条目）
@@ -652,7 +722,7 @@ impl Core {
         }
         std::fs::write(&target, content)?;
         // 审计：agent_id = webui，与智能体审计同账本、来源可区分
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "webui",
             "filesystem",
             &serde_json::json!({ "op": "write", "path": norm, "via": "editor" }),
@@ -711,6 +781,86 @@ impl Core {
         format!("{channel_id}:{chat_key}")
     }
 
+    /// 流级锁的 Arc（竞态 P1-3）：同 flow 的「查绑定→建会话→回写绑定」/
+    /// 「touch 预览」临界区互斥。锁粒度 = flow_id（不同流互不影响）；
+    /// parking_lot::Mutex（锁迁移 5.18：持锁 panic 不中毒）——临界区内全是同步
+    /// fs 操作，持锁不跨 await。
+    /// 用法：`let lock = self.flow_lock_arc(ch, key); let _g = lock.lock();`
+    /// （先 clone Arc 再 lock，guard 借局部 Arc，安全）
+    fn flow_lock_arc(&self, channel_id: &str, chat_key: &str) -> Arc<Mutex<()>> {
+        let id = Self::flow_id(channel_id, chat_key);
+        let mut locks = self.flow_locks.lock();
+        locks.entry(id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    }
+
+    /// 原子版「查绑定→(缺绑定)建会话→回写绑定」（竞态 P1-3）：
+    /// ensure_flow_session 的 check-then-act 序列整体进同一临界区——
+    /// 并发两条同流消息不再各建会话（孤儿+绑定互抹）。
+    /// scope 由调用方解析（组 id）；title 为会话标题；legacy 认领在锁内。
+    pub fn ensure_flow_session_atomic(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        scope: &str,
+        title: &str,
+        flow_name: Option<&str>,
+        is_group: bool,
+    ) -> Option<String> {
+        let flock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = flock.lock();
+        // 锁内直接读流文档（不走 flow_active_session——那会重复拿同一把锁，死锁）：
+        // 绑定有效且会话仍存在 → 复用（他人可能已在此临界区建好绑定）
+        if let Some(flow) = self.channel_flow(channel_id, chat_key) {
+            if let Some(sid) = flow.active_session.clone() {
+                if self.store.get_session(&sid).ok().flatten().is_some() {
+                    // 流名回填（空填不覆盖；与 ensure_flow_named 同语义但在锁内）
+                    if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
+                        if flow.display_name.trim().is_empty() {
+                            let mut f = flow.clone();
+                            f.display_name = n.trim().to_string();
+                            f.is_group = f.is_group || is_group;
+                            let _ = self.store.put_channel_flow(&f);
+                        }
+                    }
+                    return Some(sid);
+                }
+            }
+        }
+        // 旧 title 会话认领（升级迁移），否则新建
+        let legacy = self
+            .store
+            .list_sessions_in_group(scope)
+            .ok()
+            .and_then(|list| list.into_iter().find(|s| s.title == title));
+        let sid = match legacy {
+            Some(s) => s.id,
+            None => self.store.create_session(title, scope).ok()?.id,
+        };
+        // 回写绑定也直接操作（bind_flow_session_named 内部重复拿锁）：
+        // 读流→合并名→写回，单临界区内完成
+        let mut flow = self.channel_flow(channel_id, chat_key).unwrap_or_else(|| ChannelFlow {
+            id: Self::flow_id(channel_id, chat_key),
+            channel_id: channel_id.to_string(),
+            chat_key: chat_key.to_string(),
+            display_name: flow_name.unwrap_or("").trim().to_string(),
+            is_group,
+            active_session: None,
+            last_message: String::new(),
+            last_active_at: String::new(),
+            created_at: now_iso(),
+        });
+        if flow.display_name.trim().is_empty() {
+            if let Some(n) = flow_name {
+                flow.display_name = n.trim().to_string();
+            }
+        }
+        flow.is_group = flow.is_group || is_group;
+        flow.active_session = Some(sid.clone());
+        flow.last_active_at = now_iso();
+        let _ = self.store.put_channel_flow(&flow);
+        Some(sid)
+    }
+
     /// 取流（不存在返回 None）
     pub fn channel_flow(&self, channel_id: &str, chat_key: &str) -> Option<ChannelFlow> {
         self.store
@@ -734,6 +884,12 @@ impl Core {
 
     /// 流未读 +1（智能体在流绑定会话产出回复时调用；spawn_reply 收束点）。
     /// 流不存在时忽略（未绑定流的会话无未读语义）。
+    /// 一次性标记消费（agent-budget-audit 内联提示去重）：首次返回 true 并置位，
+    /// 此后 false。进程内存态。
+    pub fn consume_once_flag(&self, key: &str) -> bool {
+        self.once_flags.lock().insert(key.to_string())
+    }
+
     pub fn bump_flow_unread(&self, channel_id: &str, chat_key: &str) {
         let id = Self::flow_id(channel_id, chat_key);
         if self.store.get_channel_flow(&id).ok().flatten().is_none() {
@@ -762,6 +918,10 @@ impl Core {
 
     /// 流绑定的活跃会话；不存在或已删 → None（调用方开新会话后回写绑定）
     pub fn flow_active_session(&self, channel_id: &str, chat_key: &str) -> Option<String> {
+        // 临界区（竞态 P1-3）：查绑定 + 失效清理原子化——与 bind/touch 互斥，
+        // 防止清理与他方回写交错抹掉刚落的绑定
+        let lock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = lock.lock();
         let flow = self.channel_flow(channel_id, chat_key)?;
         let sid = flow.active_session?;
         // 会话可能已被用户在控制台删除：失效绑定顺带清理，下次重建
@@ -779,6 +939,46 @@ impl Core {
         chat_key: &str,
         session_id: &str,
     ) -> anyhow::Result<()> {
+        self.bind_flow_session_named(channel_id, chat_key, session_id, None, None)
+    }
+
+    /// 流名维护（会话管理可用性修复 2026-11）：流的展示名（群名 / 对端昵称）
+    /// 只在为空时回填——不覆盖既有值（可能是用户改过的自定义名，或更早来源
+    /// 的更好名称）。适配器每次入站都带最新名调用，首次到达即落名。
+    pub fn ensure_flow_named(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        display_name: &str,
+        is_group: bool,
+    ) {
+        if display_name.trim().is_empty() {
+            return;
+        }
+        let Some(mut flow) = self.channel_flow(channel_id, chat_key) else {
+            return;
+        };
+        if flow.display_name.trim().is_empty() {
+            flow.display_name = display_name.trim().to_string();
+            flow.is_group = flow.is_group || is_group;
+            let _ = self.store.put_channel_flow(&flow);
+        }
+    }
+
+    /// bind_flow_session 带名变体：建流时直接落展示名（避免先建空名流再补名
+    /// 的窗口期——控制台流列表显示裸 chat_key 不可辨认）
+    pub fn bind_flow_session_named(
+        &self,
+        channel_id: &str,
+        chat_key: &str,
+        session_id: &str,
+        display_name: Option<&str>,
+        is_group: Option<bool>,
+    ) -> anyhow::Result<()> {
+        // 临界区（竞态 P1-3）：读流→建/改→回写原子化——并发 bind（同流两条消息
+        // 各建会话）不再互抹绑定、不再双建流文档
+        let flock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = flock.lock();
         let id = Self::flow_id(channel_id, chat_key);
         let mut flow = self
             .channel_flow(channel_id, chat_key)
@@ -786,13 +986,22 @@ impl Core {
                 id: id.clone(),
                 channel_id: channel_id.to_string(),
                 chat_key: chat_key.to_string(),
-                display_name: String::new(),
-                is_group: false,
+                display_name: display_name.unwrap_or("").trim().to_string(),
+                is_group: is_group.unwrap_or(false),
                 active_session: None,
                 last_message: String::new(),
                 last_active_at: String::new(),
                 created_at: now_iso(),
             });
+        // 既有流只补空名（不覆盖用户自定义）
+        if flow.display_name.trim().is_empty() {
+            if let Some(n) = display_name {
+                flow.display_name = n.trim().to_string();
+            }
+        }
+        if let Some(g) = is_group {
+            flow.is_group = flow.is_group || g;
+        }
         flow.active_session = Some(session_id.to_string());
         flow.last_active_at = now_iso();
         self.store.put_channel_flow(&flow)
@@ -805,6 +1014,10 @@ impl Core {
         chat_key: &str,
         preview: &str,
     ) -> anyhow::Result<()> {
+        // 临界区（竞态 P1-3）：读改写原子化——touch 的整流写回不再覆盖
+        // 期间他方落的 bind（active_session）
+        let flock = self.flow_lock_arc(channel_id, chat_key);
+        let _g = flock.lock();
         if let Some(mut flow) = self.channel_flow(channel_id, chat_key) {
             flow.last_message = preview.chars().take(120).collect();
             flow.last_active_at = now_iso();
@@ -907,6 +1120,26 @@ impl Core {
         });
     }
 
+    /// 通用会话事件广播 + 落事件库（task_queue.updated 等运行时状态面；
+    /// 与 ToolGateway::emit_and_persist 同口径——广播供 WS 实时、落库供事件页/刷新回放）
+    pub fn emit_session_event(&self, session_id: &str, kind: &str, payload: serde_json::Value) {
+        let evt = crate::types::CoreEvent {
+            kind: kind.to_string(),
+            session_id: session_id.to_string(),
+            payload,
+        };
+        let _ = self.events.send(evt.clone());
+        let env = crate::types::Envelope::new(
+            format!("session.{session_id}.events"),
+            "core",
+            "broadcast",
+            "event",
+            session_id.to_string(),
+            serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
+        );
+        let _ = self.store.append_event(&env);
+    }
+
     /// 入站消毒审计事件（inbound-sanitization）：广播 + 落事件库（事件页可查）。
     /// payload 只记模式摘要（通道/账号/模式/处置），MUST NOT 含原文全文。
     pub fn emit_sanitize_finding(&self, payload: serde_json::Value) {
@@ -989,9 +1222,12 @@ impl Core {
         let archived = self.store.truncate_messages(session_id, cursor)?;
 
         // 上下文重建：截断后滚动摘要失效（摘要覆盖越过游标即重置，按截断后历史重建）
-        let session = self.store.get_session(session_id)?.unwrap();
-        if session.summary_upto.map(|u| u > cursor).unwrap_or(false) {
-            let _ = self.store.update_compaction(session_id, "", 0);
+        // P2-8：上一行存在性校验与此处重查之间会话可被并发删除——不再 unwrap，
+        // 查不到按「无摘要」处理（截断已成功，摘要重建跳过不致命）
+        if let Some(session) = self.store.get_session(session_id)? {
+            if session.summary_upto.map(|u| u > cursor).unwrap_or(false) {
+                let _ = self.store.update_compaction(session_id, "", 0);
+            }
         }
 
         // 检查点联动回滚：该轮之后各快照登记的文件变更，按轮次倒序恢复
@@ -1019,7 +1255,7 @@ impl Core {
 
         // 孤儿快照清理 + 审计 + 事件
         let _ = self.store.prune_turn_snapshots_after(session_id, upto_turn);
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "webui",
             "session_undo",
             &serde_json::json!({ "session": session_id, "uptoTurn": upto_turn, "restoreFiles": restore_files }),
@@ -1069,6 +1305,8 @@ impl Core {
             id: new_id(),
             title: format!("{}（分支·至第 {upto_turn} 轮）", src.title),
             status: "active".into(),
+            origin: None,
+            origin_label: None,
             group_id: src.group_id.clone(), // 权限与组继承
             memory_partition: src.memory_partition.clone(), // 记忆分区随会话继承
             rolling_summary: None,          // 摘要按副本历史重建
@@ -1088,7 +1326,7 @@ impl Core {
         let copied = self
             .store
             .copy_messages_prefix(session_id, &fork.id, cursor)?;
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "webui",
             "session_fork",
             &serde_json::json!({ "source": session_id, "uptoTurn": upto_turn, "fork": fork.id }),
@@ -1182,7 +1420,7 @@ impl Core {
         }
         crate::round_trace::request_cancel(session_id);
         let n = crate::round_trace::tool_count(session_id);
-        let _ = self.store.audit_tool(
+        self.store.audit_tool_best_effort(
             "system",
             "session_stop",
             &serde_json::json!({ "session": session_id }),
@@ -1400,6 +1638,15 @@ impl Core {
                 }
             }
         }
+        // 会话授权探针重挂（approval-ergonomics）：orchestrator 重建后 ToolGateway
+        // 是新实例,旧探针闭包指向旧网关——用缓存的 Weak<Core> 重新注入。
+        if let Some(weak) = self.self_weak.read().clone() {
+            orch.tools.set_session_grant_probe(std::sync::Arc::new(
+                move |sid: &str, cmd: &str| {
+                    weak.upgrade().is_some_and(|c| c.session_granted(sid, cmd).is_some())
+                },
+            ));
+        }
     }
 
     /// 暂存图片附件（随该会话下一轮对话注入规划；每轮取走即清）
@@ -1437,7 +1684,38 @@ impl Core {
 
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
         crate::orchestrator::unmark_im_session(id);
+        // 会话删除连带清理审批授权与工具预算计数（生命周期 = 会话生命周期）
+        self.session_grants.lock().remove(id);
+        self.orchestrator().tools.clear_tool_budget(id);
         self.store.delete_session(id)
+    }
+
+    /// 会话审批授权写入（approval-ergonomics「本会话允许」档）：
+    /// 前缀口径见 allowlist::command_head。红线校验在 approval_decide 调用侧——
+    /// [root] 提权单与破坏性命令不会走到这里。
+    pub fn grant_session(&self, session_id: &str, prefix: &str) {
+        if prefix.is_empty() {
+            return;
+        }
+        self.session_grants
+            .lock()
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(prefix.to_string(), ());
+    }
+
+    /// 会话授权命中判定：命令前缀在授权表内即视为已批准。
+    /// 返回命中的前缀（调试/审计可见），未命中返回 None。
+    pub fn session_granted(&self, session_id: &str, cmd: &str) -> Option<String> {
+        let head = crate::tools::command_head(cmd);
+        if head.is_empty() {
+            return None;
+        }
+        self.session_grants
+            .lock()
+            .get(session_id)?
+            .contains_key(&head)
+            .then_some(head)
     }
 
     /// 会话置顶切换（列表置顶分组数据源）
@@ -1458,6 +1736,7 @@ impl Core {
             s.last_active_at = Some(s.updated_at.clone());
             s.message_count = Some(self.store.message_count(&s.id));
         }
+        self.attach_session_origins(&mut list);
         Ok(list)
     }
 
@@ -1467,7 +1746,135 @@ impl Core {
         for s in list.iter_mut() {
             s.message_count = Some(self.store.message_count(&s.id));
         }
+        self.attach_session_origins(&mut list);
         Ok(list)
+    }
+
+    /// 会话来源派生补齐（session-management）：title 约定解析 + flow 表 join。
+    /// 通道会话 origin = `channel:{id}:{key}`、origin_label = `流显示名·标签`；
+    /// 控制台会话 origin = `console`、label 缺省（title 即展示名）。
+    fn attach_session_origins(&self, list: &mut [Session]) {
+        // flow 表一次读全（量级 = 流数，远小于会话数），join 在内存完成：
+        // flow_id（channelId:chatKey）→ 流显示名（缺省 chat_key）
+        let flow_names: std::collections::HashMap<String, String> = self
+            .channel_flows(None)
+            .into_iter()
+            .map(|f| {
+                let name = if f.display_name.trim().is_empty() {
+                    f.chat_key.clone()
+                } else {
+                    f.display_name.clone()
+                };
+                (f.id, name)
+            })
+            .collect();
+        for s in list.iter_mut() {
+            let origin = crate::session_origin::parse_session_origin(&s.title);
+            s.origin = Some(origin.key());
+            if let crate::session_origin::SessionOrigin::Channel {
+                channel_id,
+                chat_key,
+                label,
+            } = origin
+            {
+                let flow_id = format!("{channel_id}:{chat_key}");
+                let flow_name = flow_names.get(&flow_id).cloned().unwrap_or(chat_key);
+                s.origin_label = Some(match label {
+                    Some(l) if !l.trim().is_empty() => format!("{flow_name}·{l}"),
+                    _ => flow_name,
+                });
+            } else {
+                s.origin_label = None;
+            }
+        }
+    }
+
+    /// 闲置流会话归档扫描（session-management 生命周期治理）。
+    /// 口径：通道会话（title 约定解析）· 未归档 · `updated_at` 距 `now` 超过
+    /// `idle_days` 天 · 非所在流的活跃绑定会话（flow.active_session 豁免）。
+    /// 返回 (归档数, 豁免数)。批量归档复用同一豁免口径（archive_flow_sessions）。
+    pub fn archive_idle_flow_sessions(
+        &self,
+        idle_days: u32,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<(usize, usize)> {
+        if idle_days == 0 {
+            return Ok((0, 0));
+        }
+        let horizon = now - chrono::Duration::days(idle_days as i64);
+        let horizon_iso = horizon.to_rfc3339();
+        let mut targets: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        for s in self.store.list_sessions()? {
+            if s.archived_at.is_some() {
+                continue;
+            }
+            let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
+                crate::session_origin::parse_session_origin(&s.title)
+            else {
+                continue;
+            };
+            // 活跃绑定豁免：下条消息将继续复用该会话
+            if self
+                .flow_active_session(&channel_id, &chat_key)
+                .as_deref()
+                == Some(s.id.as_str())
+            {
+                skipped += 1;
+                continue;
+            }
+            if s.updated_at < horizon_iso {
+                targets.push(s.id.clone());
+            }
+        }
+        for id in &targets {
+            self.set_session_archived(id, true)?;
+        }
+        if !targets.is_empty() {
+            let _ = self.events.send(CoreEvent {
+                kind: "session.idle_archived".into(),
+                session_id: String::new(),
+                payload: serde_json::json!({ "count": targets.len(), "idleDays": idle_days }),
+            });
+        }
+        Ok((targets.len(), skipped))
+    }
+
+    /// 按流/按通道归档旧会话（session-management 批量工具）：
+    /// 圈定范围内未归档会话全部归档，各流活跃绑定会话豁免。
+    /// 返回 (归档数, 豁免数)。
+    pub fn archive_flow_sessions(
+        &self,
+        scope: crate::session_origin::ArchiveScope,
+    ) -> anyhow::Result<(usize, usize)> {
+        let mut targets: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        for s in self.store.list_sessions()? {
+            if s.archived_at.is_some() {
+                continue;
+            }
+            let origin = crate::session_origin::parse_session_origin(&s.title);
+            if !scope.matches(&origin) {
+                continue;
+            }
+            if let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
+                &origin
+            {
+                if self
+                    .flow_active_session(channel_id, chat_key)
+                    .as_deref()
+                    == Some(s.id.as_str())
+                {
+                    skipped += 1;
+                    continue;
+                }
+            }
+            targets.push(s.id.clone());
+        }
+        for id in &targets {
+            self.set_session_archived(id, true)?;
+        }
+        Ok((targets.len(), skipped))
     }
 
     pub fn create_session(&self, title: &str) -> anyhow::Result<Session> {
@@ -1534,6 +1941,83 @@ impl Core {
         self.registry.delete_group(gid)
     }
 
+    /// 组信息更新（group-card-menu）：改名 / 改 id 一步完成。id 变更时迁移全部
+    /// 外部引用（会话归属、记忆条目、定时任务、事件触发器），激活组拒绝改 id。
+    pub fn update_group_meta(
+        &self,
+        gid: &str,
+        name: &str,
+        new_id: Option<&str>,
+    ) -> anyhow::Result<GroupMeta> {
+        // 改 id 前置守卫：激活组不可改（active_group 落盘引用与运行中轮次按 id 寻址）
+        if let Some(nid) = new_id {
+            let nid = nid.trim();
+            if nid != gid && self.registry.active_group() == gid {
+                anyhow::bail!("激活组不可改 id：请先切换到其他组再操作");
+            }
+        }
+        // 1) 名称（registry 落盘 group.json）
+        let meta = self.registry.rename_group(gid, name)?;
+        // 2) id（目录迁移 + 内存键迁移），随后迁移外部引用
+        match new_id.map(str::trim).filter(|s| !s.is_empty() && *s != gid) {
+            Some(nid) => {
+                let meta = self.registry.change_group_id(gid, nid)?;
+                self.rename_group_refs(gid, nid)?;
+                Ok(meta)
+            }
+            None => Ok(meta),
+        }
+    }
+
+    /// 组 id 迁移的外部引用清扫（change_group_id 成功后调用）：
+    /// 会话归属（sessions/group_id）、记忆条目（memory/entries/group_id）、
+    /// 定时任务（cron jobs group）、事件触发器（event_triggers group）。
+    /// 全部为文档存储的纯字段改写：逐条读-改-写，失败即中断（调用方已先落盘组目录，
+    /// 此处失败留下悬空引用——量级小、重跑同 id 迁移可自愈，不做分布式事务）。
+    fn rename_group_refs(&self, old_id: &str, new_id: &str) -> anyhow::Result<()> {
+        // 会话（含归档）
+        for sid in [
+            self.store.list_sessions()?,
+            self.store.list_archived_sessions()?,
+        ]
+        .concat()
+        {
+            if sid.group_id == old_id {
+                let mut s = sid;
+                s.group_id = new_id.to_string();
+                self.store.update_session_group(&s.id, new_id)?;
+            }
+        }
+        // 记忆条目（组维度归属）
+        let entries = self.memory.entries_public()?;
+        for e in entries {
+            if e.group_id.as_deref() == Some(old_id) {
+                self.memory.retag_group(&e.id, new_id)?;
+            }
+        }
+        // 定时任务
+        let mut jobs = self.cron.list()?;
+        let mut dirty = false;
+        for j in jobs.iter_mut() {
+            if j.group.as_deref() == Some(old_id) {
+                j.group = Some(new_id.to_string());
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.cron.save(&jobs)?;
+        }
+        // 事件触发器
+        for t in self.store.list_event_triggers(None)? {
+            if t.group.as_deref() == Some(old_id) {
+                let mut t2 = t.clone();
+                t2.group = Some(new_id.to_string());
+                self.store.put_event_trigger(&t2)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn group_meta(&self, gid: &str) -> Option<GroupMeta> {
         self.registry.group_meta(gid)
     }
@@ -1594,6 +2078,44 @@ impl Core {
         id: &str,
         approve: bool,
     ) -> anyhow::Result<ApprovalRequest> {
+        self.approval_decide_scoped(id, ApprovalScope::Once { approve }).await
+    }
+
+    /// 审批决定（approval-ergonomics 三档粒度）：
+    /// - Once：本次执行（旧行为，缺省档）
+    /// - Session：本次执行 + 同命令前缀本会话后续自动放行（内存态）
+    /// - Allowlist：本次执行 + 前缀写入 security.execAllowlist（持久）
+    ///
+    /// 红线：[root] 等特殊前缀单与破坏性命令不支持 Session/Allowlist 档——
+    /// 越权档位自动降级 Once。
+    pub async fn approval_decide_scoped(
+        &self,
+        id: &str,
+        decision: ApprovalScope,
+    ) -> anyhow::Result<ApprovalRequest> {
+        // 决定互斥（竞态 P1-1）：双击批准/WebUI+通道并发时，同一审批单只有一个
+        // 决定流能走下去——否则双执行命令（执行窗口可达数分钟）。占不到锁 =
+        // 另一个决定在途：等它收束后返回最新单据（语义：「你的点击已生效，
+        // 由先到者代执行」而非报错）。
+        let lock = {
+            let mut locks = self.approval_locks.lock();
+            locks
+                .entry(id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let Ok(_guard) = lock.try_lock() else {
+            // 另一个决定在途：轮询等最终态（上限 60s，防永挂）
+            for _ in 0..120 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Some(req) = self.store.get_approval(id)? {
+                    if req.status != "pending" {
+                        return Ok(req);
+                    }
+                }
+            }
+            anyhow::bail!("审批决定超时：另一决定长时间未收束");
+        };
         let mut req = self
             .store
             .get_approval(id)?
@@ -1601,6 +2123,24 @@ impl Core {
         if req.status != "pending" {
             anyhow::bail!("审批单已处理: {}", req.status);
         }
+        // 红线校验：特殊前缀单与破坏性命令不允许升档（拒绝类决定不受限）
+        let effective = if decision.is_approve() {
+            let special = req.command.starts_with('[');
+            let destructive =
+                crate::tools::is_destructive_command(&req.command.to_lowercase());
+            if matches!(
+                decision,
+                ApprovalScope::Session | ApprovalScope::Allowlist
+            ) && (special || destructive)
+            {
+                ApprovalScope::Once { approve: true }
+            } else {
+                decision
+            }
+        } else {
+            ApprovalScope::Once { approve: false }
+        };
+        let approve = effective.is_approve();
         // 视频动作审批单（[video] 前缀）：批准 = 回调代发执行器，拒绝 = 记录跳过
         if req.command.starts_with("[video]") {
             let payload = req.command.trim_start_matches("[video]").trim().to_string();
@@ -1705,8 +2245,22 @@ impl Core {
             let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
             req.status = if out.ok { "executed".into() } else { "failed".into() };
             let text = if out.ok { out.output } else { out.error.unwrap_or_default() };
-            req.result =
-                Some(format!("[root 执行] {eff_cmd}\n{}", text).chars().take(4000).collect());
+            // 红线降级注明（approval-ergonomics）：[root] 提权单不允许升档,
+            // 越权档位自动降级 once——审批结果注明让裁决者知情
+            let downgrade_note = if matches!(
+                decision,
+                ApprovalScope::Session | ApprovalScope::Allowlist
+            ) {
+                "\n[红线] 提权单不支持会话授权/白名单档，已按本次执行"
+            } else {
+                ""
+            };
+            req.result = Some(
+                format!("[root 执行] {eff_cmd}\n{}{downgrade_note}", text)
+                    .chars()
+                    .take(4000)
+                    .collect(),
+            );
             self.store.update_approval(&req)?;
             self.emit_approval_resolved(&req);
             return Ok(req);
@@ -1719,10 +2273,17 @@ impl Core {
             return Ok(req);
         }
         // 普通审批单代执行收口（agent-exec-confinement）：与直通执行同一加固路径——
-        // 审批放行的是命令内容,不是特权;execUser 降权/沙箱净化照常生效
+        // 审批放行的是命令内容,不是特权;execUser 降权/沙箱净化照常生效。
+        // [红线] 前缀（agent-budget-audit 3.3 分档闸门标记）不是 shell 语法，
+        // 代执行前剥掉——审批的是命令本身，标记只用于档位溯源
+        let eff_cmd = req
+            .command
+            .strip_prefix("[红线]")
+            .map(|c| c.trim().to_string())
+            .unwrap_or_else(|| req.command.clone());
         let workspace = self.config().workspace_root.clone();
-        let opts = self.orchestrator().tools.shell_opts(&req.command);
-        let out = crate::tools::execute_shell_with(&workspace, &req.command, 300, &opts).await;
+        let opts = self.orchestrator().tools.shell_opts(&eff_cmd);
+        let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
         req.status = if out.ok {
             "executed".into()
         } else {
@@ -1734,6 +2295,36 @@ impl Core {
             out.error.unwrap_or_default()
         };
         req.result = Some(text.chars().take(4000).collect());
+        // 档位副作用（仅普通命令单走到这里;特殊前缀单已在上方分流 return）。
+        // 执行失败也建授权/白名单?不——失败说明命令本身有问题,放行同类无意义,
+        // 且用户批的是「这类命令可以跑」的意图以成功执行为前提更符合直觉。
+        if out.ok {
+            match effective {
+                ApprovalScope::Session => {
+                    let prefix = crate::tools::command_head(&req.command);
+                    self.grant_session(&req.session_id, &prefix);
+                    req.result = Some(format!(
+                        "{}\n[会话授权] 同前缀命令「{prefix}」本会话内自动放行",
+                        req.result.as_deref().unwrap_or("")
+                    ));
+                }
+                ApprovalScope::Allowlist => {
+                    let prefix = crate::tools::command_head(&req.command);
+                    if !prefix.is_empty() {
+                        let mut cfg = self.config().as_ref().clone();
+                        if !cfg.security.exec_allowlist.iter().any(|p| p == &prefix) {
+                            cfg.security.exec_allowlist.push(prefix.clone());
+                            self.apply_config(cfg)?;
+                        }
+                        req.result = Some(format!(
+                            "{}\n[白名单] 前缀「{prefix}」已写入全局白名单",
+                            req.result.as_deref().unwrap_or("")
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
         self.store.update_approval(&req)?;
         self.emit_approval_resolved(&req);
         Ok(req)
@@ -1807,7 +2398,10 @@ impl Core {
                     ap.status = "denied".into();
                     ap.decided_at = Some(now_iso());
                     ap.result = Some("计划被拒绝（清单保留可继续修改）".into());
-                    let _ = self.store.update_approval(&ap);
+                    // P2-7：审批了结落库失败必须可见——静默会造内存态/落库态分叉
+                    if let Err(e) = self.store.update_approval(&ap) {
+                        eprintln!("[approval] 计划拒绝落库失败（{}）：{e}", ap.id);
+                    }
                     self.emit_approval_resolved(&ap);
                 }
             }
@@ -1838,7 +2432,10 @@ impl Core {
                     ap.status = "executed".into();
                     ap.decided_at = Some(now_iso());
                     ap.result = Some("计划已批准回放".into());
-                    let _ = self.store.update_approval(&ap);
+                    // P2-7：同上——落库失败留日志防状态分叉
+                    if let Err(e) = self.store.update_approval(&ap) {
+                        eprintln!("[approval] 计划执行落库失败（{}）：{e}", ap.id);
+                    }
                     self.emit_approval_resolved(&ap);
                 }
             }
@@ -1926,6 +2523,10 @@ impl Core {
         if let Some(g) = group {
             if *g != prev_group && self.group_meta(g).is_some() {
                 switched = self.registry.set_active_group(g).is_ok();
+                // 抢占校验（竞态 P1-2）：切换后立即回读——被并发通道抢走则抢回一次
+                if switched && self.registry.active_group() != *g {
+                    let _ = self.registry.set_active_group(g);
+                }
             }
         }
         let gid = self.registry.active_group();
@@ -1967,9 +2568,14 @@ impl Core {
         if let Some(g) = &job.group {
             if *g != prev_group && self.group_meta(g).is_some() {
                 switched = self.registry.set_active_group(g).is_ok();
+                // 抢占校验（竞态 P1-2）：切换后立即回读——被并发通道抢走则抢回一次
+                if switched && self.registry.active_group() != *g {
+                    let _ = self.registry.set_active_group(g);
+                }
             }
         }
-        // 会话复用（限定本组）：按标题匹配已有会话，避免每次运行新建
+        // 会话复用（限定本组）：按标题匹配已有会话，避免每次运行新建。
+        // 创建失败（磁盘满/库忙）不 panic——落 failed 记录 + 事件，调度循环继续（审计 P1-3）
         let gid = self.registry.active_group();
         let existing = self
             .store
@@ -1978,7 +2584,35 @@ impl Core {
             .and_then(|list| list.into_iter().find(|s| s.title == title));
         let session = match existing {
             Some(s) => s,
-            None => self.create_session(&title).expect("定时任务会话创建失败"),
+            None => match self.create_session(&title) {
+                Ok(s) => s,
+                Err(e) => {
+                    if switched {
+                        let _ = self.registry.set_active_group(&prev_group);
+                    }
+                    let err = format!("会话创建失败：{e}");
+                    let _ = self.events.send(CoreEvent {
+                        kind: "cron.finished".into(),
+                        session_id: String::new(),
+                        payload: serde_json::json!({
+                            "jobId": job.id,
+                            "jobName": job.name,
+                            "status": "failed",
+                            "error": err,
+                        }),
+                    });
+                    return CronRun {
+                        id: new_id()[..8].to_string(),
+                        job_id: job.id.clone(),
+                        job_name: job.name.clone(),
+                        session_id: String::new(),
+                        started_at: started,
+                        finished_at: now_iso(),
+                        status: "failed".into(),
+                        summary: err,
+                    };
+                }
+            },
         };
         let result = self.chat(&session.id, &job.prompt).await;
         if switched {
@@ -1986,7 +2620,7 @@ impl Core {
         }
         let status = if result.is_ok() { "done" } else { "failed" };
         let summary = match result {
-            Ok(_) => "任务执行完成（详见会话与任务图）".to_string(),
+            Ok(_) => "任务执行完成（详见会话与编排图）".to_string(),
             Err(e) => format!("执行失败：{e}"),
         };
         let run = CronRun {
@@ -2047,31 +2681,27 @@ impl Core {
         let output = match orch.orch_provider.chat(req).await {
             Ok(r) => r.content,
             Err(e) => {
-                let _ = self.events.send(CoreEvent {
-                    kind: "auto.eval".into(),
-                    session_id: String::new(),
-                    payload: serde_json::json!({ "ok": false, "error": e.to_string() }),
-                });
+                orch.emit(
+                    "",
+                    "auto.eval",
+                    serde_json::json!({ "ok": false, "error": e.to_string() }),
+                );
                 return None;
             }
         };
         let Some((task, why)) = crate::autonomy::parse_auto_eval(&output) else {
-            // 无任务：空转计数 +1（退避拉长），发审计事件
+            // 无任务：空转计数 +1（退避拉长），发审计事件（广播 + 落库，事件页可查）
             self.auto_state.write().idle_streak += 1;
-            let _ = self.events.send(CoreEvent {
-                kind: "auto.eval".into(),
-                session_id: String::new(),
-                payload: serde_json::json!({ "ok": true, "act": false }),
-            });
+            orch.emit("", "auto.eval", serde_json::json!({ "ok": true, "act": false }));
             return None;
         };
         // Eval 通过：空传统计复位，开自主行动会话执行
         self.auto_state.write().idle_streak = 0;
-        let _ = self.events.send(CoreEvent {
-            kind: "auto.eval".into(),
-            session_id: String::new(),
-            payload: serde_json::json!({ "ok": true, "act": true, "task": task, "why": why }),
-        });
+        orch.emit(
+            "",
+            "auto.eval",
+            serde_json::json!({ "ok": true, "act": true, "task": task, "why": why }),
+        );
         let title = format!("auto-agent:{}", task.chars().take(30).collect::<String>());
         let session = self.create_session(&title).ok()?;
         let prompt = format!(
@@ -2080,16 +2710,116 @@ impl Core {
             crate::autonomy::auto_act_max_steps(&cfg),
         );
         let result = self.chat(&session.id, &prompt).await;
-        let _ = self.events.send(CoreEvent {
-            kind: "auto.act".into(),
-            session_id: session.id.clone(),
-            payload: serde_json::json!({
+        orch.emit(
+            &session.id,
+            "auto.act",
+            serde_json::json!({
                 "task": task,
                 "status": if result.is_ok() { "done" } else { "failed" },
                 "error": result.err().map(|e| e.to_string()),
             }),
-        });
+        );
         Some((task, why))
+    }
+
+    /// 自主记忆摘要（实验性 experiments.autoMemoryDigest，9.1）：把一个长会话
+    /// 历史归纳为记忆条目。低峰期由调度器对每个达标会话调用（当日全库只跑一次）。
+    /// 返回 Some(标题) = 本次产出/命中记忆；None = 会话不达标或调用失败（留事件）。
+    ///
+    /// 设计约束（任务 9.1）：
+    /// - token 预算：转录每条截 400 字符、最多取 200 条（compaction 同口径），
+    ///   单会话一次非流式调用，无工具循环；
+    /// - 去重：落库走 memory.remember（内容哈希去重——重复摘要提升重要性
+    ///   而非新建条目）；
+    /// - 默认关：关闭态调度器不调用（零任务零 token）。
+    pub async fn memory_digest_session(&self, session_id: &str) -> Option<String> {
+        let cfg = self.config();
+        let min_turns = cfg.automation.memory_digest_min_turns.max(5);
+        let count = self.store.message_count(session_id);
+        if count < min_turns {
+            return None;
+        }
+        let msgs = self
+            .store
+            .list_messages(session_id, 200)
+            .unwrap_or_default();
+        if msgs.is_empty() {
+            return None;
+        }
+        let transcript: String = msgs
+            .iter()
+            .map(|m| {
+                let who = match m.role {
+                    crate::types::MessageRole::User => "用户",
+                    crate::types::MessageRole::Orchestrator => {
+                        m.agent_id.as_deref().unwrap_or("指挥体")
+                    }
+                    crate::types::MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
+                    crate::types::MessageRole::System => "系统",
+                };
+                let body = m
+                    .statements
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("；");
+                format!("[{who}] {}", body.chars().take(400).collect::<String>())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let orch = self.orchestrator();
+        let req = crate::provider::ChatRequest::new(
+            orch.orch_model.clone(),
+            vec![
+                crate::provider::ChatMessage::system(DIGEST_SYSTEM_PROMPT),
+                crate::provider::ChatMessage::user(format!(
+                    "## 会话转录（{count} 条消息）\n{transcript}"
+                )),
+            ],
+        );
+        let output = match orch.orch_provider.chat(req).await {
+            Ok(r) => r.content,
+            Err(e) => {
+                orch.emit(
+                    session_id,
+                    "memory.digest",
+                    serde_json::json!({ "ok": false, "error": e.to_string() }),
+                );
+                return None;
+            }
+        };
+        // 摘要落记忆（内容哈希去重；来源指向会话）
+        let title = format!("会话摘要：{}", output.chars().take(40).collect::<String>());
+        let draft = crate::memory::MemoryDraft::new(
+            crate::memory::MemoryKind::Digest,
+            &title,
+            output.chars().take(600).collect::<String>(),
+        )
+        .session(session_id);
+        match self.memory.remember(&draft) {
+            Ok(entry) => {
+                orch.emit(
+                    session_id,
+                    "memory.digest",
+                    serde_json::json!({
+                        "ok": true,
+                        "entryId": entry.id,
+                        "deduped": entry.updated_at != entry.created_at,
+                        "messageCount": count,
+                    }),
+                );
+                Some(title)
+            }
+            Err(e) => {
+                orch.emit(
+                    session_id,
+                    "memory.digest",
+                    serde_json::json!({ "ok": false, "error": e.to_string() }),
+                );
+                None
+            }
+        }
     }
 
     /// Meta Agent 一次巡检 tick（实验性 experiments.metaAgent）：周期判定 →
@@ -2423,6 +3153,7 @@ pub fn build_orchestrator(
         vision_relay_target: cfg.vision_relay_model.clone(),
         max_concurrency: cfg.max_concurrency,
         max_unit_steps: cfg.automation.unit_max_steps,
+        queue_draining: parking_lot::Mutex::new(std::collections::HashSet::new()),
         auto_adapt: cfg.automation.auto_adapt,
         config_snapshot: Arc::new(parking_lot::RwLock::new(cfg.clone())),
     })
@@ -2610,6 +3341,42 @@ mod im_discipline_tests {
         // 不存在的会话：报错不 panic
         assert!(core.set_session_archived("no-such", true).is_err());
     }
+    /// 流名维护（会话管理可用性修复）：空填不覆盖——既有名（用户自定义或
+    /// 更早来源）不被新名冲掉；空名流首名即落。
+    #[test]
+    fn 流名维护_空填不覆盖() {
+        let dir = std::env::temp_dir().join(format!("exm-flowname-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let core = crate::Core::create(&dir).expect("创建 Core 失败");
+        let sid = core.create_session("fn-test").unwrap().id;
+        // 建流带名
+        core.bind_flow_session_named("ch1", "12345", &sid, Some("萝莉领主二群"), Some(true))
+            .unwrap();
+        let f = core.channel_flow("ch1", "12345").unwrap();
+        assert_eq!(f.display_name, "萝莉领主二群");
+        assert!(f.is_group, "群聊标记应落");
+        // 再补名不覆盖（群改名事件到达也不冲掉——展示名以首次为准，
+        // 用户在控制台改名后更不能被冲）
+        core.ensure_flow_named("ch1", "12345", "新群名", true);
+        let f = core.channel_flow("ch1", "12345").unwrap();
+        assert_eq!(f.display_name, "萝莉领主二群", "已有名不得被覆盖");
+        // 空名流首名即落（ensure_flow_named 空填路径）
+        let sid2 = core.create_session("fn-test-2").unwrap().id;
+        core.bind_flow_session_named("ch1", "67890", &sid2, None, None)
+            .unwrap();
+        assert_eq!(
+            core.channel_flow("ch1", "67890").unwrap().display_name,
+            "",
+            "无名建流保持空"
+        );
+        core.ensure_flow_named("ch1", "67890", "终夜", false);
+        assert_eq!(core.channel_flow("ch1", "67890").unwrap().display_name, "终夜");
+        // 空串补名是 no-op（解析失败的适配器不该写入空名）
+        core.ensure_flow_named("ch1", "67890", "", false);
+        assert_eq!(core.channel_flow("ch1", "67890").unwrap().display_name, "终夜");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 流未读计数（spec experience-iteration 未读徽标服务端口径）：
     /// 有流才计数、累积不溢出、清零即除名、无流 bump 静默忽略。
     #[test]
@@ -3306,6 +4073,157 @@ mod root_approval_tests {
     }
 }
 
+/// 会话级审批授权（approval-ergonomics）：
+/// 三档粒度 / 红线（[root]、破坏性永不入表）/ 会话删除清理 / gate 短路。
+#[cfg(test)]
+mod session_grant_tests {
+    use super::*;
+    use crate::types::ApprovalScope;
+
+    fn grant_core() -> Core {
+        let dir = std::env::temp_dir().join(format!("exm-grant-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn pending_ap(core: &Core, sid: &str, cmd: &str) -> crate::types::ApprovalRequest {
+        let ap = crate::types::ApprovalRequest {
+            id: crate::types::new_id()[..8].to_string(),
+            session_id: sid.into(),
+            node_id: None,
+            agent_id: "a1".into(),
+            command: cmd.into(),
+            status: "pending".into(),
+            result: None,
+            created_at: crate::types::now_iso(),
+            decided_at: None,
+            origin_user: None,
+            origin_role: None,
+            meta_json: None,
+        };
+        core.store.add_approval(&ap).unwrap();
+        ap
+    }
+
+    #[tokio::test]
+    async fn session档_建立授权并命中() {
+        let core = grant_core();
+        let sid = core.create_session("授权").unwrap().id;
+        let ap = pending_ap(&core, &sid, "echo hello");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Session)
+            .await
+            .unwrap();
+        assert_eq!(decided.status, "executed");
+        assert!(decided.result.as_deref().unwrap_or("").contains("会话授权"));
+        // 命中判定：前缀（echo hello）后接任意参数命中
+        assert!(core.session_granted(&sid, "echo hello world").is_some());
+        // 次 token 不同即不同类别（口径与白名单「命令+子命令」对齐）
+        assert!(core.session_granted(&sid, "echo world").is_none());
+        // 完全不同的命令不命中
+        assert!(core.session_granted(&sid, "mkdir /tmp/x").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn once档_不建立授权() {
+        let core = grant_core();
+        let sid = core.create_session("单次").unwrap().id;
+        let ap = pending_ap(&core, &sid, "mkdir -p /tmp/x");
+        core.approval_decide_scoped(&ap.id, ApprovalScope::Once { approve: true })
+            .await
+            .unwrap();
+        assert!(core.session_granted(&sid, "mkdir /tmp/y").is_none(), "once 档不建授权");
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn root单_session档被降级() {
+        let core = grant_core();
+        let sid = core.create_session("红线").unwrap().id;
+        let ap = pending_ap(&core, &sid, "[root] sudo id");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Session)
+            .await
+            .unwrap();
+        assert_eq!(decided.status, "executed");
+        // 红线：[root] 单不允许升档——结果无 [会话授权] 注记（有 [红线] 降级说明）,也不建授权
+        assert!(!decided.result.as_deref().unwrap_or("").contains("[会话授权]"));
+        assert!(decided.result.as_deref().unwrap_or("").contains("[红线]"), "应注明降级");
+        assert!(core.session_granted(&sid, "id").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn 破坏性命令_session档被降级() {
+        let core = grant_core();
+        let sid = core.create_session("破坏").unwrap().id;
+        let ap = pending_ap(&core, &sid, "git push --force origin main");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Session)
+            .await
+            .unwrap();
+        // 执行本身按 once 发生(可能失败——force push 无远端;关键是档位被降)
+        assert!(!decided.result.as_deref().unwrap_or("").contains("[会话授权]"));
+        assert!(core.session_granted(&sid, "git push").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn allowlist档_写入配置() {
+        let core = grant_core();
+        let sid = core.create_session("白名单").unwrap().id;
+        let ap = pending_ap(&core, &sid, "echo allowlist-test");
+        let decided = core
+            .approval_decide_scoped(&ap.id, ApprovalScope::Allowlist)
+            .await
+            .unwrap();
+        assert!(decided.result.as_deref().unwrap_or("").contains("白名单"));
+        // 前缀口径 = 命令名 + 首 token（echo allowlist-test）,与 command_head 一致
+        assert!(core
+            .config()
+            .security
+            .exec_allowlist
+            .iter()
+            .any(|p| p == "echo allowlist-test"), "前缀应写入 execAllowlist");
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    #[tokio::test]
+    async fn 会话删除后授权失效() {
+        let core = grant_core();
+        let sid = core.create_session("删除").unwrap().id;
+        core.grant_session(&sid, "cargo build");
+        assert!(core.session_granted(&sid, "cargo build --release").is_some());
+        core.delete_session(&sid).unwrap();
+        assert!(core.session_granted(&sid, "cargo build --release").is_none());
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+
+    /// gate_command 短路：探针注入 + 授权命中 → 不落审批单直接执行
+    #[tokio::test]
+    async fn gate短路_授权命中不落单() {
+        let core = grant_core();
+        let sid = core.create_session("短路").unwrap().id;
+        // 授权前缀与 command_head 口径一致（echo + 首参数 token）
+        core.grant_session(&sid, "echo granted-ok");
+        // 探针注入（生产由 attach_session_grant_probe 完成;测试手动）
+        let core = std::sync::Arc::new(core);
+        core.attach_session_grant_probe();
+        let orch = core.orchestrator.read().clone();
+        let r = orch.tools.gate_command("a1", &sid, "echo granted-ok").await;
+        assert!(r.ok, "授权直通应执行成功: {:?}", r.output);
+        assert!(r.output.contains("granted-ok"));
+        // 无新审批单产生
+        let pendings = core.approval_list(Some("pending"), 10).unwrap();
+        assert!(pendings.is_empty(), "授权命中不应落审批单");
+        let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+}
+
 /// [meta] 提议单全链路（meta-agent）：落单 → 批准应用 / 拒绝回流 → 各 kind 语义
 #[cfg(test)]
 mod meta_approval_tests {
@@ -3529,5 +4447,204 @@ mod meta_approval_tests {
             .map(|d| d.description.contains("数据整理"))
             .unwrap_or(false), "worker 描述应被更新");
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
+    }
+}
+
+/// 会话来源派生（session-management）：title 解析 + flow join 口径。
+#[cfg(test)]
+mod session_origin_tests {
+    use super::*;
+    use crate::types::ChannelFlow;
+
+    fn core() -> Core {
+        let dir = std::env::temp_dir().join(format!("exm-origin-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = ExmConfig::load(&dir);
+        Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn flow(id: &str, key: &str, name: &str) -> ChannelFlow {
+        ChannelFlow {
+            id: format!("{id}:{key}"),
+            channel_id: id.into(),
+            chat_key: key.into(),
+            display_name: name.into(),
+            is_group: true,
+            active_session: None,
+            last_message: String::new(),
+            last_active_at: String::new(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn 列表补齐_通道会话带来源与流名() {
+        let c = core();
+        // 流存在（display_name 提供友好名）
+        c.save_channel_flow(&flow("c-tg", "123", "技术群")).unwrap();
+        c.create_session("channel:c-tg:123").unwrap();
+        c.create_session("channel:c-tg:123:20251101").unwrap();
+        // 流不在 flow 表（已删流）：回落 chat_key
+        c.create_session("channel:c-qq:g9").unwrap();
+        c.create_session("控制台随手记").unwrap();
+
+        let list = c.list_sessions_admin().unwrap();
+        let by_title: std::collections::HashMap<_, _> =
+            list.iter().map(|s| (s.title.clone(), s.clone())).collect();
+
+        let bare = &by_title["channel:c-tg:123"];
+        assert_eq!(bare.origin.as_deref(), Some("channel:c-tg:123"));
+        assert_eq!(bare.origin_label.as_deref(), Some("技术群"));
+
+        let labeled = &by_title["channel:c-tg:123:20251101"];
+        assert_eq!(labeled.origin.as_deref(), Some("channel:c-tg:123"));
+        assert_eq!(labeled.origin_label.as_deref(), Some("技术群·20251101"));
+
+        let orphan = &by_title["channel:c-qq:g9"];
+        assert_eq!(orphan.origin_label.as_deref(), Some("g9"), "无流记录回落 chat_key");
+
+        let console = &by_title["控制台随手记"];
+        assert_eq!(console.origin.as_deref(), Some("console"));
+        assert!(console.origin_label.is_none(), "控制台会话 label 缺省");
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 归档列表_同样补齐() {
+        let c = core();
+        c.save_channel_flow(&flow("c-x", "k1", "测试流")).unwrap();
+        let s = c.create_session("channel:c-x:k1").unwrap();
+        c.set_session_archived(&s.id, true).unwrap();
+        let archived = c.list_archived_sessions().unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].origin.as_deref(), Some("channel:c-x:k1"));
+        assert_eq!(archived[0].origin_label.as_deref(), Some("测试流"));
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+}
+
+/// 闲置归档与按流归档（session-management 生命周期治理）。
+#[cfg(test)]
+mod flow_archive_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn core() -> Core {
+        let dir = std::env::temp_dir().join(format!("exm-idle-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Core::with_config(ExmConfig::load(&dir)).expect("创建 Core 失败")
+    }
+
+    fn at(days_ago: i64) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 4, 4, 0, 0).unwrap() - chrono::Duration::days(days_ago)
+    }
+
+    /// 把会话 updated_at 拨回 N 天前（直接改存储行）
+    fn age(c: &Core, id: &str, days: i64) {
+        let iso = (Utc.with_ymd_and_hms(2026, 11, 4, 4, 0, 0).unwrap()
+            - chrono::Duration::days(days))
+            .to_rfc3339();
+        c.store.set_session_active_at(id, &iso).unwrap();
+    }
+
+    #[test]
+    fn 闲置归档_阈值与豁免() {
+        let c = core();
+        let s_old = c.create_session("channel:c-tg:g1").unwrap();
+        let s_fresh = c.create_session("channel:c-tg:g2").unwrap();
+        let s_bound = c.create_session("channel:c-tg:g3").unwrap();
+        let s_console = c.create_session("控制台会话").unwrap();
+        c.bind_flow_session("c-tg", "g3", &s_bound.id).unwrap();
+        age(&c, &s_old.id, 10);
+        age(&c, &s_bound.id, 10); // 绑定会话同样老旧 → 仍须豁免
+        age(&c, &s_console.id, 10);
+
+        let now = at(0);
+        let (archived, skipped) = c.archive_idle_flow_sessions(7, now).unwrap();
+        assert_eq!(archived, 1, "只有闲置非绑定流会话归档");
+        assert_eq!(skipped, 1, "绑定会话豁免计数");
+        let archived_list = c.list_archived_sessions().unwrap();
+        assert_eq!(archived_list.len(), 1);
+        assert_eq!(archived_list[0].id, s_old.id);
+        // 新鲜流会话与控制台会话不受影响
+        assert!(c.store.get_session(&s_fresh.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c.store.get_session(&s_console.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 闲置归档_零天关闭() {
+        let c = core();
+        let s = c.create_session("channel:c-x:g").unwrap();
+        age(&c, &s.id, 365);
+        let (archived, _) = c.archive_idle_flow_sessions(0, at(0)).unwrap();
+        assert_eq!(archived, 0, "0 = 关闭零行为");
+        assert!(c.store.get_session(&s.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 按流归档_绑定豁免与范围圈定() {
+        let c = core();
+        let f1_active = c.create_session("channel:c-a:g1").unwrap();
+        let f1_old = c.create_session("channel:c-a:g1:旧话题").unwrap();
+        let f2 = c.create_session("channel:c-a:g2").unwrap();
+        let other = c.create_session("channel:c-b:g1").unwrap();
+        c.bind_flow_session("c-a", "g1", &f1_active.id).unwrap();
+
+        let (archived, skipped) = c
+            .archive_flow_sessions(crate::session_origin::ArchiveScope::Flow {
+                channel_id: "c-a".into(),
+                chat_key: "g1".into(),
+            })
+            .unwrap();
+        assert_eq!((archived, skipped), (1, 1), "流内旧会话归档、绑定豁免");
+        assert!(c.store.get_session(&f1_old.id).unwrap().unwrap().archived_at.is_some());
+        assert!(c.store.get_session(&f1_active.id).unwrap().unwrap().archived_at.is_none());
+        // 范围外不受影响
+        assert!(c.store.get_session(&f2.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c.store.get_session(&other.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+
+    #[test]
+    fn 按通道归档_全流旧会话() {
+        let c = core();
+        let a1 = c.create_session("channel:c-a:g1:old1").unwrap();
+        let a2 = c.create_session("channel:c-a:g2:old2").unwrap();
+        let bound = c.create_session("channel:c-a:g2").unwrap();
+        let b = c.create_session("channel:c-b:g1").unwrap();
+        c.bind_flow_session("c-a", "g2", &bound.id).unwrap();
+
+        let (archived, skipped) = c
+            .archive_flow_sessions(crate::session_origin::ArchiveScope::Channel {
+                channel_id: "c-a".into(),
+            })
+            .unwrap();
+        assert_eq!((archived, skipped), (2, 1));
+        assert!(c.store.get_session(&a1.id).unwrap().unwrap().archived_at.is_some());
+        assert!(c.store.get_session(&a2.id).unwrap().unwrap().archived_at.is_some());
+        assert!(c.store.get_session(&bound.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c.store.get_session(&b.id).unwrap().unwrap().archived_at.is_none());
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
+    }
+}
+
+/// 一次性标记（once_flags）：预算内联提示去重等
+#[cfg(test)]
+mod once_flag_tests {
+    use super::*;
+
+    #[test]
+    fn 一次性标记_首次置位后续拒绝() {
+        let dir = std::env::temp_dir().join(format!("exm-once-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Core::with_config(ExmConfig::load(&dir)).expect("创建 Core 失败");
+        let key = "budget-notified:s1";
+        assert!(c.consume_once_flag(key), "首次返回 true");
+        assert!(!c.consume_once_flag(key), "后续返回 false");
+        assert!(!c.consume_once_flag(key));
+        assert!(c.consume_once_flag("budget-notified:s2"), "不同 key 互不影响");
+        let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 }

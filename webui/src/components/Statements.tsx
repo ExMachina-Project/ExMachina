@@ -34,7 +34,20 @@ export function StatementLine({ s }: { s: Statement }): React.ReactElement {
   );
 }
 
-export function StatementList({ statements }: { statements: Statement[] }): React.ReactElement {
+export function StatementList({ statements, plain }: { statements: Statement[]; plain?: boolean }): React.ReactElement {
+  // plain（聊天流只读视角）：正文直排，不带句式 tag / 证据徽标——流内每条
+  // user 消息落库统一是「要求」标签，逐条徽标是满屏噪音（部署实测反馈）
+  if (plain) {
+    return (
+      <div>
+        {statements.map((s, i) => (
+          <div key={i} className="stmt-line stmt-plain">
+            <span>{s.text}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div>
       {statements.map((s, i) => (

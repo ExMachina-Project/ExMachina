@@ -1,7 +1,7 @@
 # agent-terminal-tools Specification
 
 ## Purpose
-TBD - created by archiving change harness-tools-round2. Update Purpose after archive.
+定义 Agent 终端工具面的白名单只读命令、后台任务可寻址、grep 上下文行与 read 图像副产物，让终端探查既安全又够用。
 
 ## Requirements
 

@@ -308,6 +308,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 is_group: true,
                                 mentioned: mentioned || self_user.is_empty(),
                                 chat_key: &room,
+                                flow_name: None,
                             };
                             match admit(core.as_ref(), &ch, &gate_ctx).await {
                                 GateDecision::Allow(clean) => {
@@ -577,7 +578,8 @@ async fn handle_message(
         run.with_origin(mark)
     } else {
         run
-    };
+    }
+    .with_external_id(sender);
     run.run(&text).await;
     let _ = reply.await;
 }

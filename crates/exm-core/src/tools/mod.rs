@@ -20,12 +20,13 @@ use std::time::Instant;
 pub use result::ToolResult;
 /// 外部内容隔离包装（inbound-sanitization）：供网关侧工具（RSS digest 等）复用
 pub use external_wrap::wrap_external as wrap_external_for;
-pub use allowlist::{is_destructive_command};
+pub use allowlist::{is_destructive_command, command_head};
+pub use redact::{redact_json, redact_str};
 pub use terminal::{BgTask, SpawnBgState, SpawnBgTask};
 pub use hooks::run_hook_command;
 pub use sandbox::{ShellOpts, WinJob, is_network_command, execute_shell_command_timed, execute_shell_with, windows_job_available};
 pub use dynamic::{DynamicToolOutput, DynamicToolExec, dynamic_exec, dynamic_exec_images};
-pub use gateway::{SpawnExec, PluginCredResolver, ToolGateway};
+pub use gateway::{SpawnExec, PluginCredResolver, ToolGateway, SessionGrantProbe, scope_budget};
 
 
 // 跨子模块共享的内部项（原 tools.rs 同文件私有；拆分后经 tools 根再导出保持 sibling 可见）。
@@ -64,6 +65,7 @@ pub(crate) use meta::MetaProposal;
 mod computer;
 mod approval;
 mod external_wrap;
+mod redact;
 mod web;
 mod browser;
 mod schedule;

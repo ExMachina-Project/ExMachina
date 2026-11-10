@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// 原生 function calling：暴露给模型的工具定义（parameters = JSON Schema 对象）
@@ -578,7 +579,7 @@ pub struct OpenAiCompatibleProvider {
     api_format: String,
     /// Key 池：多把 Key 负载均衡——按发起方粘性选键，仅限额时前进（保留端点侧 KV 缓存）
     keys: Vec<String>,
-    sticky: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    sticky: Mutex<std::collections::HashMap<String, usize>>,
     client: reqwest::Client,
 }
 
@@ -596,8 +597,17 @@ impl OpenAiCompatibleProvider {
             base_url: base_url.into(),
             api_format: fmt.into(),
             keys: keys.into_iter().filter(|k| !k.trim().is_empty()).collect(),
-            sticky: std::sync::Mutex::new(std::collections::HashMap::new()),
-            client: reqwest::Client::new(),
+            sticky: Mutex::new(std::collections::HashMap::new()),
+            // 全局请求超时（审计 错误处理 P1-1）：端点 TCP 建连后僵死（代理半开/服务商挂起）
+            // 时 reqwest 默认无总超时 → chat/embed 永久阻塞 → run 永不收束、run_lock 永久持有。
+            // 300s = 非流式调用的宽上限（对比 transcribe/speak 已有的 120s）；
+            // 流式不能套总超时（长回答合法超 5 分钟），改在收流处加帧间 deadline
+            // （call_orch_stream 的 idle 超时）+ 建连/首响超时（connect_timeout 30s）。
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -651,6 +661,13 @@ impl OpenAiCompatibleProvider {
             .client
             .post(self.url(model, stream))
             .header(name, value);
+        // 流式请求覆盖总超时为 600s 宽上限：SSE 长回答合法超过 client 的 300s
+        // 非流式上限；帧间卡死由收流侧 idle deadline 兜底（见 call_orch_stream）
+        let rb = if stream {
+            rb.timeout(std::time::Duration::from_secs(600))
+        } else {
+            rb
+        };
         match self.api_format.as_str() {
             "anthropic" => rb.header("anthropic-version", "2023-06-01").json(&body),
             _ => rb.json(&body),
@@ -664,7 +681,7 @@ impl OpenAiCompatibleProvider {
 
     /// 粘性选键：同 hint 稳定命中同一把；首次按 hint 散列分布（不同个体自然错开不同 Key）
     fn pick_index(&self, hint: &str) -> usize {
-        let mut m = self.sticky.lock().unwrap();
+        let mut m = self.sticky.lock();
         *m.entry(hint.to_string()).or_insert_with(|| {
             let seed: u32 = hint
                 .bytes()
@@ -675,7 +692,7 @@ impl OpenAiCompatibleProvider {
 
     /// 限额切换：前进到下一把并粘住
     fn rotate_index(&self, hint: &str) -> usize {
-        let mut m = self.sticky.lock().unwrap();
+        let mut m = self.sticky.lock();
         let next = (*m.entry(hint.to_string()).or_insert(0) + 1) % self.keys.len().max(1);
         m.insert(hint.to_string(), next);
         next
@@ -691,6 +708,24 @@ impl OpenAiCompatibleProvider {
             || low.contains("insufficient")
             || low.contains("too many requests")
             || low.contains("resource_exhausted")
+    }
+
+    /// 限额/配额错误 → 固定话术（IM 可读性）。各家上游 429 载荷格式不一
+    /// （聚合端点嵌套 JSON / 官方端点纯文本 / 字段名各异），不做内容提取——
+    /// 只按状态码给固定建议；原始响应体走 stderr 留排障线索，不进用户回复。
+    fn quota_error_summary(status: u16, body: &str) -> String {
+        // 排障线索进日志（截 400 字）；用户侧只见通用话术
+        eprintln!(
+            "[llm-provider] 配额失败 HTTP {status}: {}",
+            body.chars().take(400).collect::<String>()
+        );
+        match status {
+            402 => "模型服务额度已用尽（余额不足，HTTP 402）。请充值或更换 API Key 后重试".into(),
+            403 => "模型服务拒绝访问（HTTP 403）。请检查 API Key 权限或该模型的开通状态".into(),
+            // 429 两种可能：瞬时限流（稍等即恢复）或日/月配额用尽（要等重置或换
+            // Key）——载荷格式不一无法可靠区分，话术并列提示，不预设哪一种
+            _ => "模型服务额度受限（HTTP 429）：可能是短时限流，也可能是当前周期配额已用尽。请稍等几分钟再试一次；若反复出现，检查 API Key 配额余量或补充备用 Key".into(),
+        }
     }
 
     fn key_for(&self, hint: &str) -> String {
@@ -1357,6 +1392,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     self.rotate_index(&hint);
                     continue; // 限额 → 切换下一把 Key 并粘住
                 }
+                if Self::is_quota_failure(status, &text) {
+                    // 单 Key 也限额：摘要化（IM 直投可读），不泼原始 JSON
+                    anyhow::bail!("模型额度不足：{}", Self::quota_error_summary(status, &text));
+                }
                 anyhow::bail!(
                     "LLM 请求失败 {status}: {}",
                     text.chars().take(300).collect::<String>()
@@ -1426,6 +1465,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     last_quota = Some(status);
                     self.rotate_index(&hint);
                     continue; // 限额 → 切换下一把 Key 并粘住
+                }
+                if Self::is_quota_failure(status, &text) {
+                    anyhow::bail!("模型额度不足：{}", Self::quota_error_summary(status, &text));
                 }
                 anyhow::bail!(
                     "LLM 流式请求失败 {status}: {}",
@@ -1776,6 +1818,12 @@ impl LlmProvider for UnconfiguredProvider {
 /// 仅在测试代码或显式设置 `EXM_LLM_MOCK=1`（联调流程时）启用；产品运行时不参与推理。
 pub struct MockLlmProvider;
 
+/// Eval→act 通过路径开关（仅测试）：置位后下一次 Auto Agent Eval 产出
+/// act:true（一次性，用毕复位）——auto_agent_tick 的 user 文本固定，无法用
+/// 输入标记驱动；通过路径由测试显式拨动此开关断言全链路。
+pub static MOCK_EVAL_ACT_ONCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 确定性伪嵌入（Mock 通道）：64 维，token 哈希累加后归一——同义文本向量稳定相近
 fn mock_embedding(text: &str) -> Vec<f32> {
     let mut v = vec![0f32; 64];
@@ -1883,6 +1931,20 @@ fn respond(req: &ChatRequest) -> String {
     if system.contains("记忆压缩") {
         let kept: String = user.chars().take(120).collect();
         format!("- 【已压缩】{kept}\n- 细节已归档，按需查阅")
+    } else if system.contains("Auto Agent Eval") {
+        // Auto Agent 自评（9.2 e2e）：确定性两态——开关拨动（一次性）或 user 文本
+        // 带标记时产出「值得做」，否则保守拒绝（与 parse_auto_eval 契约对齐，
+        // 驱动 Eval→act 链路与退避断言）
+        let act = MOCK_EVAL_ACT_ONCE.swap(false, std::sync::atomic::Ordering::SeqCst)
+            || user.contains("值得做");
+        if act {
+            r#"{"act": true, "task": "检查记忆库健康度", "why": "e2e 驱动的确定性自评"}"#.to_string()
+        } else {
+            r#"{"act": false}"#.to_string()
+        }
+    } else if system.contains("自主记忆摘要") {
+        // 记忆归纳（9.1）：确定性摘要输出（不依赖模型质量，驱动去重/落库断言）
+        format!("E2E 会话主题归纳。{}", user.chars().take(60).collect::<String>())
     } else if system.contains("会话压缩") {
         "目标与进展：用户持续在推进当前任务；关键结论与未决事项已由最近对话承载。".to_string()
     } else if system.contains("经验改进要点合成") {
@@ -2113,7 +2175,7 @@ fn converge_text(user: &str) -> String {
         "- 目标：以用户输入为准；排除项：不可逆变更与越权动作。".into(),
         "".into(),
         "## 已启用链路".into(),
-        "- 链路与个体序列见任务图；并行安排按 DAG 拓扑执行（模拟通道）。".into(),
+        "- 链路与个体序列见编排图；并行安排按 DAG 拓扑执行（模拟通道）。".into(),
         "".into(),
         "## 关键结论".into(),
         "- 【报告】全部节点已回流并通过 SyncReport 契约校验。（证据B，置信度 0.82）".into(),
@@ -2369,5 +2431,25 @@ mod stream_tests {
         }
         assert_eq!(text, "你好，世界");
         assert_eq!(think, "想一想");
+    }
+}
+
+#[cfg(test)]
+mod quota_summary_tests {
+    use super::*;
+
+    /// 限额错误 → 固定话术：不解析上游内容（各家载荷格式不一），只按状态码
+    /// 分叉；用户回复里不得出现任何上游原始文本。
+    #[test]
+    fn 限额摘要_固定话术不含上游内容() {
+        // 真实聚合端点 429 载荷（部署实测）：原始 JSON 不得外发
+        let body = r#"{"error":{"message":"[minimax-cn/MiniMax-M3.1-Flash] All minimax-cn accounts have exhausted their quota (reset after 5m)","retry_after":300}}"#;
+        let s = OpenAiCompatibleProvider::quota_error_summary(429, body);
+        assert!(!s.contains("minimax"), "不得夹带上游内容：{s}");
+        assert!(!s.contains("{\"error\""), "不得外发原始 JSON：{s}");
+        assert!(s.contains("429") && s.contains("额度"), "按状态码给话术：{s}");
+        // 402 余额 / 403 权限各自分叉
+        assert!(OpenAiCompatibleProvider::quota_error_summary(402, "x").contains("余额"));
+        assert!(OpenAiCompatibleProvider::quota_error_summary(403, "x").contains("权限"));
     }
 }

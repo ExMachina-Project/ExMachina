@@ -20,6 +20,7 @@ const CRON_TEMPLATES: { expr: string; labelKey: "cron.tpl.daily" | "cron.tpl.wee
 export function AutomationsView(): React.ReactElement {
   const t = useT();
   const { groups, activeGroup, sessions } = useExm();
+  const requestNav = useExm((st) => st.requestNav);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(false);
@@ -125,7 +126,7 @@ export function AutomationsView(): React.ReactElement {
             {
               title: t("cron.colJob"),
               render: (_, j) => (
-                <Space direction="vertical" size={0}>
+                <Space orientation="vertical" size={0}>
                   <b>{j.name}</b>
                   <span className="mono dim">{j.id}</span>
                 </Space>
@@ -137,7 +138,7 @@ export function AutomationsView(): React.ReactElement {
                 // 任务类型（v0.4.0 三类型）：缺省按 cron/at 有无推断，与后端 job_kind 同口径
                 const kind = j.kind ?? (j.cron ? "cron" : "at");
                 return (
-                  <Space direction="vertical" size={2}>
+                  <Space orientation="vertical" size={2}>
                     {kind === "queue" ? (
                       <Tag>{t("cron.kind.queue")}</Tag>
                     ) : kind === "at" ? (
@@ -165,7 +166,7 @@ export function AutomationsView(): React.ReactElement {
             {
               title: t("cron.colGroup"),
               render: (_, j) => (
-                <Space direction="vertical" size={0}>
+                <Space orientation="vertical" size={0}>
                   <span className="mono">{j.group ?? t("cron.currentGroup")}</span>
                   {j.notifyChannels && j.notifyChannels.length > 0 && (
                     <span className="mono dim">
@@ -210,7 +211,7 @@ export function AutomationsView(): React.ReactElement {
         />
       </Spin>
 
-      <Drawer title={t("cron.runsTitle", { name: runsFor?.name ?? "" })} open={runsFor !== null} onClose={() => setRunsFor(null)} width={520}>
+      <Drawer title={t("cron.runsTitle", { name: runsFor?.name ?? "" })} open={runsFor !== null} onClose={() => setRunsFor(null)} size={520}>
         {runs.length === 0 && <BrandEmpty description={t("cron.noRuns")} />}
         {runs.map((r) => (
           <div key={r.id} className="run-row">
@@ -219,7 +220,15 @@ export function AutomationsView(): React.ReactElement {
               <span className="mono dim">{r.startedAt}</span>
             </div>
             <div className="dim">
-              {t("cron.sessionLabel")} <span className="mono">{r.sessionId.slice(0, 8)}</span> · {r.summary}
+              {t("cron.sessionLabel")}{" "}
+              <button
+                className="link-btn mono dim"
+                title={t("tasks.pickOne")}
+                onClick={() => requestNav("chat", r.sessionId)}
+              >
+                {r.sessionId.slice(0, 8)}
+              </button>{" "}
+              · {r.summary}
             </div>
           </div>
         ))}

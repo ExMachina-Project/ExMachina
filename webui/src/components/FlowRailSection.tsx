@@ -6,13 +6,14 @@
  *  点流即跳到它绑定的会话；无绑定则提示「下条消息自动开新会话」。
  */
 import React, { useCallback, useEffect, useState } from "react";
-import { api, type Channel, type ChannelFlow, type ChannelStatus, type FlowSessionInfo } from "../api";
+import { api, type Channel, type ChannelFlow, type ChannelStatus } from "../api";
 import { relativeTime } from "../time";
 import { useExm } from "../store";
 
 /** 平台短标（通道 type → 展示名），与通道页 platformTag 同口径 */
 const PLATFORM_LABEL: Record<string, string> = {
   napcat: "QQ",
+  snowluma: "QQ",
   qqbot: "QQ 机器人",
   telegram: "Telegram",
   discord: "Discord",
@@ -31,12 +32,6 @@ export function FlowRailSection({ t }: { t: (k: never) => string }): React.React
   const selectSession = useExm((st) => st.selectSession);
   const sessions = useExm((st) => st.sessions);
   const sessionId = useExm((st) => st.sessionId);
-  /** 展开的流 id（同屏只展开一条；再点收起）——hooks 必须在早退之前：
-   *  条件 return 后再声明 hooks 会触发 React Hooks 顺序违规（白屏）。 */
-  const [expanded, setExpanded] = useState<string | null>(null);
-  /** 流内会话列表（展开的流） */
-  const [flowSessions, setFlowSessions] = useState<FlowSessionInfo[]>([]);
-  const [fsLoading, setFsLoading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -57,46 +52,11 @@ export function FlowRailSection({ t }: { t: (k: never) => string }): React.React
 
   useEffect(() => {
     void load();
-    // 会话切换时刷新（绑定可能被 /new /use 改）
+    // 会话切换时刷新（绑定可能被控制台操作改）
     const h = () => void load();
     window.addEventListener("exm:flows-refresh", h);
     return () => window.removeEventListener("exm:flows-refresh", h);
   }, [load, sessionId]);
-
-  /** 展开流 → 拉流内会话列表（与通道 /sessions 指令同源） */
-  const toggleExpand = useCallback(
-    (f: ChannelFlow) => {
-      if (expanded === f.id) {
-        setExpanded(null);
-        return;
-      }
-      setExpanded(f.id);
-      setFsLoading(true);
-      setFlowSessions([]);
-      void api
-        .listFlowSessions(f.id)
-        .then(setFlowSessions)
-        .catch(() => setFlowSessions([]))
-        .finally(() => setFsLoading(false));
-    },
-    [expanded],
-  );
-
-  /** 改绑流活跃会话（与 /use 同源状态；绑定后打开该会话并刷新流列表） */
-  const switchFlowSession = useCallback(
-    (f: ChannelFlow, sid: string) => {
-      void api
-        .setFlowActiveSession(f.id, sid)
-        .then(() => {
-          setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, activeSession: sid } : x)));
-          setExpanded(null);
-          void selectSession(sid);
-          window.dispatchEvent(new Event("exm:flows-refresh"));
-        })
-        .catch(() => undefined);
-    },
-    [selectSession],
-  );
 
   if (loading || flows.length === 0) return <></>;
 
@@ -174,42 +134,8 @@ export function FlowRailSection({ t }: { t: (k: never) => string }): React.React
                         <span className="flow-unread">{f.unread > 99 ? "99+" : f.unread}</span>
                       )}
                       {active && <span className="flow-live" />}
-                      {/* 流内会话切换入口（spec：与 /new /use 同源绑定状态） */}
-                      <button
-                        className={`flow-expand ${expanded === f.id ? "open" : ""}`}
-                        title={t("chat.flowSessions" as never)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleExpand(f);
-                        }}
-                      >
-                        {expanded === f.id ? "▾" : "◂"}
-                      </button>
                     </span>
                   </div>
-                  {expanded === f.id && (
-                    <div className="flow-session-list">
-                      {fsLoading && <div className="flow-session-empty">…</div>}
-                      {!fsLoading && flowSessions.length === 0 && (
-                        <div className="flow-session-empty">{t("chat.flowNoSessions" as never)}</div>
-                      )}
-                      {flowSessions.map((s) => (
-                        <div
-                          key={s.id}
-                          className={`flow-session-item ${s.active ? "active" : ""}`}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => switchFlowSession(f, s.id)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") switchFlowSession(f, s.id);
-                          }}
-                        >
-                          <span className="flow-session-label">{s.active ? "● " : "○ "}{s.label}</span>
-                          <span className="flow-session-time">{relativeTime(s.updatedAt)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                   </React.Fragment>
                 );
               })}

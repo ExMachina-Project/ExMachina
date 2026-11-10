@@ -348,22 +348,38 @@ pub async fn fetch_targz(url: &str, tmp: &Path) -> Result<(), String> {
         std::fs::copy(url, tmp).map_err(|e| format!("读取本地包失败：{e}"))?;
         return Ok(());
     }
-    let resp = reqwest::get(url)
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("构建客户端失败：{e}"))?
+        .get(url)
+        .send()
         .await
         .map_err(|e| format!("下载包失败：{e}"))?
         .error_for_status()
         .map_err(|e| format!("下载包失败：{e}"))?;
-    let bytes = resp
-        .bytes()
+    // 流式落盘 + 超限即断（P2-3）：不整包读内存——恶意/误配的大包在累计超过
+    // MAX_TOTAL_BYTES 时立即中止下载并删除半成品，RSS 不随包大小膨胀
+    let mut total: u64 = 0;
+    let mut out = std::fs::File::create(tmp).map_err(|e| format!("写临时文件失败：{e}"))?;
+    use futures_util::StreamExt;
+    use std::io::Write;
+    let mut body = resp.bytes_stream();
+    while let Some(chunk) = body
+        .next()
         .await
-        .map_err(|e| format!("读取包内容失败：{e}"))?;
-    if bytes.len() as u64 > MAX_TOTAL_BYTES {
-        return Err(format!(
-            "包超过总上限（{}MB）",
-            MAX_TOTAL_BYTES / 1024 / 1024
-        ));
+        .transpose()
+        .map_err(|e| format!("下载中断：{e}"))?
+    {
+        total += chunk.len() as u64;
+        if total > MAX_TOTAL_BYTES {
+            drop(out);
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!("包超过总上限（{}MB），已中止下载", MAX_TOTAL_BYTES / 1024 / 1024));
+        }
+        out.write_all(&chunk)
+            .map_err(|e| format!("写临时文件失败：{e}"))?;
     }
-    std::fs::write(tmp, &bytes).map_err(|e| format!("写临时包失败：{e}"))?;
     Ok(())
 }
 

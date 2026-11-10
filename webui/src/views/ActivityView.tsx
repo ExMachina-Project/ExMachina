@@ -16,6 +16,7 @@ function eventGroup(kind: string): string {
   if (kind.startsWith("sync") || kind.startsWith("ledger")) return "ev-sync";
   if (kind.includes("arbitration")) return "ev-arbitration";
   if (kind.startsWith("run.error")) return "ev-error";
+  if (kind.startsWith("tool.budget")) return "ev-error";
   if (kind.startsWith("memory")) return "ev-memory";
   if (kind.startsWith("run.finished")) return "ev-finished";
   return "";
@@ -23,7 +24,7 @@ function eventGroup(kind: string): string {
 
 /** 事件语义色：对齐资产行为 —— 灰阶为主、紫点缀（arbitration）、红仅报错误 */
 function colorOf(kind: string): string {
-  if (kind.startsWith("run.error")) return "red";
+  if (kind.startsWith("run.error") || kind.startsWith("tool.budget")) return "red";
   if (kind.includes("arbitration")) return "purple";
   return "default";
 }
@@ -44,6 +45,12 @@ function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; co
       break;
     case "session.created":
       text = t("activity.sessionCreated");
+      break;
+    case "tool.budget":
+      text = t("activity.toolBudget", {
+        tool: String(p.tool ?? ""),
+        reason: String(p.reason ?? ""),
+      });
       break;
     default:
       if (Object.keys(inner).length === 0) {
@@ -74,7 +81,7 @@ function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; co
 export function ActivityView(): React.ReactElement {
   const t = useT();
   const { sessions, timeline } = useExm();
-  const [tab, setTab] = useState<"events" | "audit">("events");
+  const [tab, setTab] = useState<"events" | "audit" | "dispatch">("events");
   const [sid, setSid] = useState<string>("");
   const [events, setEvents] = useState<StoredEvent[]>([]);
   const [loading, setLoading] = useState(false);
@@ -92,10 +99,66 @@ export function ActivityView(): React.ReactElement {
             <Button type={tab === "audit" ? "primary" : "default"} size="small" onClick={() => setTab("audit")}>
               {t("activity.tabAudit")}
             </Button>
+            <Button type={tab === "dispatch" ? "primary" : "default"} size="small" onClick={() => setTab("dispatch")}>
+              {t("activity.tabDispatch")}
+            </Button>
           </Space>
         }
       />
-      <div className="pane-body">{tab === "events" ? <EventsPane /> : <AuditPane />}</div>
+      <div className="pane-body">
+        {tab === "events" ? <EventsPane /> : tab === "audit" ? <AuditPane /> : <DispatchPane />}
+      </div>
+    </div>
+  );
+}
+
+/** 子代理派发审计（agent-budget-audit 3.4）：派发者/目标/摘要/耗时/token/结果；
+ *  异常（失败、受阻）红标高亮。 */
+function DispatchPane(): React.ReactElement {
+  const t = useT();
+  const [items, setItems] = useState<Array<Record<string, unknown>>>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await api.audit({ kind: "dispatch", limit: 300 });
+      setItems(r.items);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <div className="pane-body">
+      <Space style={{ marginBottom: 10 }} wrap>
+        <Button icon={<ReloadOutlined />} onClick={() => void load()}>{t("common.refresh")}</Button>
+        <span className="dim">{t("activity.dispatchHint")}</span>
+      </Space>
+      <Spin spinning={loading}>
+        {items.length === 0 && <BrandEmpty description={t("activity.dispatchEmpty")} className="pane-empty" />}
+        {items.map((it, idx) => {
+          const key = String(it.id ?? idx);
+          const ok = Boolean(it.ok);
+          const abnormal = !ok || String(it.status ?? "") === "Blocked" || String(it.status ?? "") === "Failed";
+          return (
+            <Card key={key} size="small" className="hud" style={{ marginBottom: 6 }}>
+              <div className="audit-row">
+                <Tag color={abnormal ? "error" : "success"}>{String(it.status ?? "")}</Tag>
+                <span className="mono">{String(it.agentId ?? "")}</span>
+                <span className="dim">{String(it.summary ?? "")}</span>
+                <span className="dim mono" style={{ marginLeft: "auto" }} title={fullTime(String(it.createdAt ?? ""))}>
+                  {String(it.createdAt ?? "").replace("T", " ").slice(5, 16)} · {String(it.durationMs ?? 0)}ms · ↑{String(it.promptTokens ?? 0)} ↓{String(it.completionTokens ?? 0)}
+                </span>
+              </div>
+            </Card>
+          );
+        })}
+      </Spin>
     </div>
   );
 }

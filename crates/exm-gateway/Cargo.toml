@@ -19,6 +19,8 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# QQ 官方机器人扫码绑定：生成 32 字节绑定密钥（两组 UUIDv4）
+uuid.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 futures-util.workspace = true
@@ -37,6 +39,8 @@ async-trait.workspace = true
 parking_lot = "0.12"
 # NapCat 媒体段 base64:// 数据（远程部署免文件系统共享）
 base64 = "0.22"
+# QQ 官方机器人扫码绑定：botEncryptSecret 为 AES-256-GCM 密文（qqbot-bind）
+aes-gcm = "0.10"
 # 事件触发器（7.1）：工作区文件监听；glob 模式匹配复用 globset（ignore 同源实现）
 notify = "8"
 globset = "0.4"

@@ -18,12 +18,13 @@
 use crate::fsdb::FsDb;
 use crate::types::*;
 use anyhow::Result;
+use parking_lot::Mutex;
 use std::path::Path;
 
 pub struct Store {
     db: FsDb,
     /// 三账为读-改-写热点（并发节点同时回流），此锁保证不丢更新
-    ledger_lock: std::sync::Mutex<()>,
+    ledger_lock: Mutex<()>,
 }
 
 const MAX_AUDIT_LINES: usize = 2000;
@@ -32,7 +33,7 @@ impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         Ok(Store {
             db: FsDb::open(root)?,
-            ledger_lock: std::sync::Mutex::new(()),
+            ledger_lock: Mutex::new(()),
         })
     }
 
@@ -48,6 +49,8 @@ impl Store {
             id: new_id(),
             title: title.to_string(),
             status: "active".into(),
+            origin: None,
+            origin_label: None,
             group_id: if group_id.trim().is_empty() {
                 "exmachina".into()
             } else {
@@ -83,6 +86,8 @@ impl Store {
             id: new_id(),
             title: title.to_string(),
             status: "active".into(),
+            origin: None,
+            origin_label: None,
             group_id: parent.group_id.clone(),
             memory_partition: parent.memory_partition.clone(),
             rolling_summary: None,
@@ -102,8 +107,11 @@ impl Store {
         Ok(child)
     }
 
-    /// 会话置顶切换（会话列表置顶分组数据源）
+    /// 会话置顶切换（会话列表置顶分组数据源）。
+    /// 持 ledger_lock：与 update_ledger/mutate_ledger 等同族读改写互斥——
+    /// 并发时 pin 的整会话写回会把三账/消息数改动静默覆盖（审计竞态 P1-5 场景B）。
     pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> Result<()> {
+        let _guard = self.ledger_lock.lock();
         match self.get_session(id)? {
             Some(mut s) => {
                 s.pinned = pinned;
@@ -119,6 +127,11 @@ impl Store {
     pub fn set_session_archived(&self, id: &str, archived: bool) -> Result<()> {
         match self.get_session(id)? {
             Some(mut s) => {
+                // 同状态幂等（批量端点重试安全，长程迭代 4.3）：重复归档/重复恢复
+                // 不刷新 archived_at——归档区按归档时间倒序，重试不应把旧条目顶到顶部
+                if s.archived_at.is_some() == archived {
+                    return Ok(());
+                }
                 s.archived_at = if archived { Some(now_iso()) } else { None };
                 self.db.put("sessions", &s.id, &s)?;
                 Ok(())
@@ -187,7 +200,7 @@ impl Store {
     }
 
     pub fn update_ledger(&self, session_id: &str, ledger: &SessionLedger) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -202,7 +215,7 @@ impl Store {
     where
         F: FnOnce(&mut SessionLedger),
     {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -228,7 +241,7 @@ impl Store {
         session_id: &str,
         partition: Option<&str>,
     ) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -248,7 +261,7 @@ impl Store {
     /// 更新会话滚动摘要（上下文压缩，docs/架构与设计.md）
     /// 更新会话标题（重命名）
     pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -258,9 +271,33 @@ impl Store {
         self.db.put("sessions", session_id, &session)
     }
 
+    /// 会话归属组迁移（组改 id 的引用清扫，group-id-migration）：只改 group_id，
+    /// 不动标题/时间戳/账目——组维度的列表与过滤随新 id 即时生效。
+    pub fn update_session_group(&self, session_id: &str, group_id: &str) -> Result<()> {
+        let _guard = self.ledger_lock.lock();
+        let mut session = match self.get_session(session_id)? {
+            Some(s) => s,
+            None => anyhow::bail!("会话不存在: {session_id}"),
+        };
+        session.group_id = group_id.to_string();
+        self.db.put("sessions", session_id, &session)
+    }
+
+    /// 直接设置会话活跃时间（测试与数据修正用；不动消息与账目）。
+    /// 闲置归档判定读 updated_at，此入口让测试能把会话拨回任意时点。
+    pub fn set_session_active_at(&self, session_id: &str, iso: &str) -> Result<()> {
+        let _guard = self.ledger_lock.lock();
+        let mut session = match self.get_session(session_id)? {
+            Some(s) => s,
+            None => anyhow::bail!("会话不存在: {session_id}"),
+        };
+        session.updated_at = iso.to_string();
+        self.db.put("sessions", session_id, &session)
+    }
+
     /// 更新会话滚动摘要（上下文压缩，docs/架构与设计.md）
     pub fn update_compaction(&self, session_id: &str, summary: &str, upto: usize) -> Result<()> {
-        let _guard = self.ledger_lock.lock().unwrap();
+        let _guard = self.ledger_lock.lock();
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
             None => anyhow::bail!("会话不存在: {session_id}"),
@@ -308,6 +345,7 @@ impl Store {
             thinking: None,
             tool_calls: Vec::new(),
             steps: Vec::new(),
+            attachments: Vec::new(),
             last_message_preview: None,
             last_active_at: None,
         };
@@ -351,6 +389,31 @@ impl Store {
 
     pub fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<ChatMessage>> {
         self.db.read_lines("messages", session_id, limit)
+    }
+
+    /// 按消息 id 回填入站附件（im-inbound-attach）：落库与暂存取走之间无原子性，
+    /// 回填失败静默降级（占位文本仍在，只是缩略图缺失）——不阻塞消息主链。
+    pub fn attach_inbound(&self, session_id: &str, message_id: &str, items: Vec<crate::types::InboundAttachment>) {
+        if items.is_empty() {
+            return;
+        }
+        let ok = (|| -> Result<bool> {
+            let mut all: Vec<ChatMessage> = self.db.read_lines("messages", session_id, 0)?;
+            let mut hit = false;
+            if let Some(slot) = all.iter_mut().find(|m| m.id == message_id) {
+                slot.attachments.extend(items);
+                hit = true;
+            }
+            if !hit {
+                return Ok(false);
+            }
+            self.db.rewrite_lines("messages", session_id, &all)?;
+            Ok(true)
+        })()
+        .unwrap_or(false);
+        if !ok {
+            eprintln!("[store] 入站附件回填失败（消息 {message_id}）");
+        }
     }
 
     // ---------------- 会话内容检索（session-search） ----------------
@@ -555,6 +618,22 @@ impl Store {
         self.db.read_lines("evidence", session_id, 0)
     }
 
+    /// 尽力而为审计（P2-6 吞错收敛）：审计落库失败不打断业务主流程，
+    /// 但 MUST 留日志痕迹（磁盘满/IO 故障时「无审计痕迹」可从日志发现，
+    /// 而非静默成功——高危操作无审计是安全问题，不能零观测）
+    pub fn audit_tool_best_effort(
+        &self,
+        agent_id: &str,
+        tool: &str,
+        args: &serde_json::Value,
+        result_summary: &str,
+        duration_ms: u64,
+    ) {
+        if let Err(e) = self.audit_tool(agent_id, tool, args, result_summary, duration_ms) {
+            eprintln!("[audit] 审计落库失败（{agent_id}/{tool}）：{e}");
+        }
+    }
+
     pub fn audit_tool(
         &self,
         agent_id: &str,
@@ -599,6 +678,33 @@ impl Store {
 
     pub fn list_tool_audit(&self, agent_id: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
         self.db.read_lines("tool_audit", agent_id, limit)
+    }
+
+    /// 子代理派发审计（agent-budget-audit 3.4）：按主会话追加 jsonl。
+    /// 记录面：派发者会话 / 目标个体 / 任务摘要 / 耗时 / token 消耗 / 结果状态；
+    /// 异常（failed/blocked/timeout）由查询侧按 status 高亮。
+    pub fn audit_dispatch(&self, session_id: &str, entry: &serde_json::Value) -> Result<()> {
+        self.db.append_line("dispatch_audit", session_id, entry)?;
+        // 容量裁剪与 tool_audit 同口径
+        let mut lines: Vec<serde_json::Value> = self.db.read_lines("dispatch_audit", session_id, 0)?;
+        if lines.len() > MAX_AUDIT_LINES {
+            let keep = lines.split_off(lines.len() - MAX_AUDIT_LINES / 2);
+            self.db.rewrite_lines("dispatch_audit", session_id, &keep)?;
+        }
+        Ok(())
+    }
+
+    /// 派发审计查询（按会话；时间倒序 limit 封顶）
+    pub fn list_dispatch_audit(&self, session_id: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+        self.db.read_lines("dispatch_audit", session_id, limit)
+    }
+
+    /// 跨会话派发审计聚合（时间倒序 limit 封顶；审计页数据源）
+    pub fn list_dispatch_audit_all(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let mut all: Vec<serde_json::Value> = self.db.list_all_lines("dispatch_audit")?;
+        all.reverse();
+        all.truncate(limit);
+        Ok(all)
     }
 
     /// 跨个体聚合的工具审计查询（agent/tool 过滤，时间倒序，limit 封顶）
@@ -1038,14 +1144,14 @@ mod store_tests {
     #[test]
     fn 审计_写入与跨文件过滤读回() {
         let store = test_store();
-        let _ = store.audit_tool(
+        store.audit_tool_best_effort(
             "machina",
             "fs.read",
             &serde_json::json!({"path": "/a"}),
             "ok",
             3,
         );
-        let _ = store.audit_tool(
+        store.audit_tool_best_effort(
             "webui",
             "editor.save",
             &serde_json::json!({"path": "/b"}),
@@ -1173,6 +1279,36 @@ mod store_tests {
         assert!(store.get_event_trigger("t2").unwrap().is_none());
     }
 
+    /// 入站附件回填（im-inbound-attach）：落库后按 id 回填 → list_messages 读回可见
+    #[test]
+    fn 入站附件回填() {
+        let store = test_store();
+        let s = store.create_session("附件回填", "exmachina").unwrap();
+        let msg = store
+            .add_message(
+                &s.id,
+                MessageRole::User,
+                Some("im:测试用户"),
+                vec![Statement::new(SpeechTag::要求, "（用户发来附件：图片 x1）")],
+            )
+            .unwrap();
+        let items = vec![crate::types::InboundAttachment {
+            kind: "image".into(),
+            path: ".exmachina/inbox/napcat-exm/pic.png".into(),
+            name: "pic.png".into(),
+        }];
+        store.attach_inbound(&s.id, &msg.id, items);
+        let read = store.list_messages(&s.id, 10).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].attachments.len(), 1, "回填后应能读回附件");
+        assert_eq!(read[0].attachments[0].path, ".exmachina/inbox/napcat-exm/pic.png");
+        assert_eq!(read[0].attachments[0].name, "pic.png");
+        // 空回填（无附件通道）不影响消息
+        store.attach_inbound(&s.id, &msg.id, Vec::new());
+        let again = store.list_messages(&s.id, 10).unwrap();
+        assert_eq!(again[0].attachments.len(), 1);
+    }
+
     /// 检索：标题 / 正文 / 大小写 / 同会话去重 / 片段截断
     #[test]
     fn 检索_标题正文与片段() {
@@ -1257,6 +1393,26 @@ mod store_tests {
     }
 
     /// 检索：归档会话排除、200 条窗口边界、空查询、Unicode 小写展开不 panic
+    #[test]
+    fn 归档幂等_同状态不刷新时间戳() {
+        let store = test_store();
+        let s = store.create_session("幂等归档", "exmachina").unwrap();
+        store.set_session_archived(&s.id, true).unwrap();
+        let first = store.get_session(&s.id).unwrap().unwrap().archived_at.clone();
+        assert!(first.is_some());
+        // 同状态重复归档：成功且时间戳不变（归档区排序稳定，批量重试安全）
+        store.set_session_archived(&s.id, true).unwrap();
+        let second = store.get_session(&s.id).unwrap().unwrap().archived_at.clone();
+        assert_eq!(first, second, "重复归档不刷新 archived_at");
+        // 重复恢复同理
+        store.set_session_archived(&s.id, false).unwrap();
+        store.set_session_archived(&s.id, false).unwrap();
+        let got = store.get_session(&s.id).unwrap().unwrap();
+        assert!(got.archived_at.is_none(), "恢复后归档时间清除");
+        // 不存在的 id 仍报错（错误语义保留：操作者应知道目标消失，进 failed 明细）
+        assert!(store.set_session_archived("no-such", true).is_err());
+    }
+
     #[test]
     fn 检索_归档窗口与边界() {
         let store = test_store();

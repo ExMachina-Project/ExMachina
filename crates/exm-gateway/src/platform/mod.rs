@@ -59,4 +59,6 @@ mod tests_plan;
 #[cfg(test)]
 mod tests_channel_boundary;
 #[cfg(test)]
+mod tests_channel_approval;
+#[cfg(test)]
 mod tests_plugin_secret_mask;

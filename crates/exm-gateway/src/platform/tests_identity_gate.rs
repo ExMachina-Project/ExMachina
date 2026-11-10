@@ -42,6 +42,7 @@ mod identity_gate_tests {
             is_group: true,
             mentioned: true,
             chat_key: "g100",
+                    flow_name: None,
         }
     }
 
@@ -53,6 +54,7 @@ mod identity_gate_tests {
             is_group,
             mentioned,
             chat_key: "test",
+                    flow_name: None,
         }
     }
 
@@ -234,10 +236,10 @@ mod identity_gate_tests {
         assert_eq!(core.purge_expired_pairing_codes(), 0);
     }
 
-    /// 聊天流（chat flow）会话管理：/new 开新绑定、/sessions 列表、/use 切换、
-    /// 普通消息固定复用流绑定会话（不切换就一直同一会话）
+    /// 聊天流（chat flow）固定单会话：普通消息固定复用流绑定会话；
+    /// /new /sessions /use 已退役——只回执说明，不改任何绑定状态
     #[tokio::test]
-    async fn 聊天流_会话绑定与切换() {
+    async fn 聊天流_固定单会话_指令退役() {
         let core = std::sync::Arc::new(test_core());
         let ch = chan(None);
 
@@ -256,10 +258,7 @@ mod identity_gate_tests {
         let (run2, _) = ChannelRun::begin(&core, &ch, "g100").await.unwrap();
         assert_eq!(run2.session_id, sid1, "不切换时应复用流绑定会话");
 
-        // /new：开新会话并改绑（ctx 与 begin 同 chat_key，命中同一流）
-        // 间隔 5ms：会话时间戳为毫秒精度，同毫秒时序号排序退化为 id 破平
-        // （随机 UUID 不保证时序）——/use 序号断言需要真实的新旧次序
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // /new：已退役——回执说明且不改绑定
         let g_ctx = InboundCtx {
             text: "/new 调研",
             external_id: "u1",
@@ -267,42 +266,32 @@ mod identity_gate_tests {
             is_group: true,
             mentioned: true,
             chat_key: "g100",
+                    flow_name: None,
         };
         let r = admit(&core, &ch, &g_ctx).await;
         match r {
-            GateDecision::Deny(msg) => assert!(msg.contains("已开新会话"), "{msg}"),
-            _ => panic!("/new 应回执开新结果"),
+            GateDecision::Deny(msg) => assert!(msg.contains("固定使用一个会话"), "{msg}"),
+            _ => panic!("/new 应回执退役说明"),
         }
-        let sid2 = core.flow_active_session(&ch.id, "g100").expect("新会话应已绑定");
-        assert_ne!(sid1, sid2, "/new 应改绑到新会话");
-
-        // /sessions：列出流内会话（新旧都在，当前带 ● 标记）
-        let g_sessions = InboundCtx { text: "/sessions", ..g_ctx_like() };
-        let r = admit(&core, &ch, &g_sessions).await;
-        match r {
-            GateDecision::Deny(msg) => {
-                assert!(msg.contains("●"), "应标记当前会话：{msg}");
-                assert!(msg.contains("调研"), "自定义标题应可见：{msg}");
+        // /sessions 与 /use 同样退役
+        for cmd in ["/sessions", "/use 0"] {
+            let g = InboundCtx { text: cmd, ..g_ctx_like() };
+            let r = admit(&core, &ch, &g).await;
+            match r {
+                GateDecision::Deny(msg) => assert!(msg.contains("固定使用一个会话"), "{cmd}: {msg}"),
+                _ => panic!("{cmd} 应回执退役说明"),
             }
-            _ => panic!("/sessions 应回执列表"),
         }
-
-        // /use 0：切回首轮会话
-        let g_use = InboundCtx { text: "/use 1", ..g_ctx_like() };
-        let r = admit(&core, &ch, &g_use).await;
-        match r {
-            GateDecision::Deny(msg) => assert!(msg.contains("已切换"), "{msg}"),
-            _ => panic!("/use 应回执切换结果"),
-        }
+        // 三个指令都不产生新会话、不改绑定
         assert_eq!(
             core.flow_active_session(&ch.id, "g100").as_deref(),
             Some(sid1.as_str()),
-            "/use 后绑定应回到旧会话"
+            "退役指令不得改绑"
         );
 
-        // 切换后普通消息落在切回的会话
+        // 后续普通消息仍落同一会话（固定单会话不变式）
         let (run3, _) = ChannelRun::begin(&core, &ch, "g100").await.unwrap();
-        assert_eq!(run3.session_id, sid1, "切换后消息应落进切回的会话");
+        assert_eq!(run3.session_id, sid1, "指令退役后消息应仍落原会话");
     }
 
     /// 流绑定会话被删（控制台清理）：失效绑定自动重建，不炸不挂
@@ -463,6 +452,7 @@ mod ambient_context_tests {
             is_group: true,
             mentioned,
             chat_key: key,
+                    flow_name: None,
         }
     }
 
@@ -537,6 +527,7 @@ mod ambient_context_tests {
             is_group: false,
             mentioned: false,
             chat_key: "p1",
+                    flow_name: None,
         };
         match admit(&core, &ch, &ctx).await {
             GateDecision::Allow(_) => {}
