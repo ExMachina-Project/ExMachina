@@ -31,8 +31,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (resp.status === 401) {
-    // 密钥失效：清除并回到登录门（登录门自身的 verify 不触发重载，交由调用方处理）
-    if (path !== "/auth/verify") {
+    // 密钥失效才清键回登录门；无 key 的 401 = 未登录（dev 源首访 / 角标预热早于
+    // 登录门），不 reload——否则挂载期轮询（approvals/flows 角标）会触发
+    // 401→清键→reload 死循环，页面永远卡在 CONNECTING（dev 预览实测踩中）
+    if (localStorage.getItem("exm.key") && path !== "/auth/verify") {
       localStorage.removeItem("exm.key");
       window.location.reload();
     }
@@ -364,6 +366,18 @@ export interface TodoItem {
   id: string;
   content: string;
   status: "pending" | "in_progress" | "done";
+}
+
+// 任务队列（task-queue）：task_queue.updated 事件负载中的单条任务
+export interface QueuedTaskItem {
+  id: string;
+  task: string;
+  runMode: "parallel" | "queued";
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  spawnId?: string;
+  createdAt: string;
+  finishedAt?: string;
+  note?: string;
 }
 
 // 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件数据

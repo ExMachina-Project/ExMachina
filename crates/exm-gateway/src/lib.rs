@@ -27,8 +27,10 @@ pub mod matrix;
 pub mod napcat;
 pub mod napcat_tools;
 pub mod nexus_api;
+pub mod plan_mode_tools;
 pub mod platform;
 pub mod plugin_admin;
+pub mod task_queue_tools;
 pub mod plugins;
 pub mod qqbot;
 pub mod singles;
@@ -443,6 +445,23 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
     matrix::spawn_supervisor(core.clone());
     // 插件装载面：builtin 插件注册 + watcher 拉起（video 走新路径，行为等价）
     plugins::spawn_all(core.clone());
+    // 会话任务队列工具（task__queue）：全局动态工具——智能体执行中收到新任务时
+    // 自主决定并行（spawn 派生）或排队（收束钩子串行执行），机制见 task_queue_tools。
+    core.orchestrator()
+        .tools
+        .register_dynamic_tool(
+            crate::task_queue_tools::tool_spec(),
+            crate::task_queue_tools::build_exec(core.clone()),
+        );
+    // 计划模式工具（plan__mode）：智能体自主决定「先计划再执行」节奏——
+    // 用户对话中要求先计划、或 agent 判断任务复杂/高风险时自行进入计划模式；
+    // WebUI 不再提供硬开关（plan-mode-tools：模式决定权归 agent）
+    core.orchestrator()
+        .tools
+        .register_dynamic_tool(
+            crate::plan_mode_tools::tool_spec(),
+            crate::plan_mode_tools::build_exec(core.clone()),
+        );
     // 视频互动审批代发执行器（video__act approval=always 批准后的 [video] 回调）
     {
         let core_for_act = core.clone();
