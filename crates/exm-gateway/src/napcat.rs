@@ -509,6 +509,37 @@ async fn on_text(
     let peer = group_id
         .map(|g| g.to_string())
         .or(user_id.map(|u| u.to_string()));
+    // 旁听媒体预下载（ambient-media-attach）：**未被 @** 的群媒体在闸门**前**
+    // 下载入窗——record_ambient 落占位消息时要能从窗口快照回填附件展示元数据，
+    // 窗口得先于闸门就绪（旧序：gate 内 record_ambient 先落库、gate 后 push 窗口，
+    // 旁听图片永远拿不到附件）。仅未提及消息预下载：@ 轮次走主链自行下载注入，
+    // 预下载会造成同图双份（take 取走 + 主链再下）。take 语义不变（取走即清）。
+    let will_be_ambient = group_id.is_some()
+        && !media.is_empty()
+        && !is_mentioned(
+            v.get("message").unwrap_or(&serde_json::Value::Null),
+            v_self_id(&v),
+        );
+    if will_be_ambient {
+        let mut prewindowed = Vec::new();
+        for (kind, src) in &media {
+            if kind != "image" {
+                continue;
+            }
+            let name = format!("napcat-{}.png", exm_core::types::now_ms());
+            let bytes = if let Some(local) = src.strip_prefix("file://") {
+                std::fs::read(local).ok()
+            } else {
+                crate::platform::download_bytes(src).await
+            };
+            if let Some(b) = bytes {
+                if let Some(p) = crate::platform::save_inbound_media(&core, &ch, &name, b).await {
+                    prewindowed.push((kind.clone(), p, name));
+                }
+            }
+        }
+        ambient_media::push(&ch.id, peer.as_deref().unwrap_or(""), prewindowed);
+    }
     if !ch.allowed_chats.is_empty() {
         let ok = peer
             .as_deref()
@@ -541,36 +572,10 @@ async fn on_text(
         let Some((external_id, text, sender_mark)) =
             napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
         else {
-            // 旁听媒体窗口（ambient-media）：未 @ 的群媒体也下载落盘入窗——
-            // 「先发图、后 @ 问」时取走并入多模态注入。仅群聊进窗口（私聊无旁听语义）；
-            // 语音不入窗（转写依赖当轮上下文，隔轮转写语义漂移）。
-            let peer = group_id
-                .map(|g| g.to_string())
-                .or_else(|| user_id.map(|u| u.to_string()))
-                .unwrap_or_default();
-            if group_id.is_some() {
-                let mut windowed = Vec::new();
-                for (kind, src) in media {
-                    if kind != "image" {
-                        continue;
-                    }
-                    let name = format!("napcat-{}.png", exm_core::types::now_ms());
-                    let bytes = if let Some(local) = src.strip_prefix("file://") {
-                        std::fs::read(local).ok()
-                    } else {
-                        crate::platform::download_bytes(&src).await
-                    };
-                    if let Some(b) = bytes {
-                        if let Some(p) =
-                            crate::platform::save_inbound_media(&core, &ch, &name, b).await
-                        {
-                            windowed.push((kind, p, name));
-                        }
-                    }
-                }
-                ambient_media::push(&ch.id, &peer, windowed);
-            }
-            return; // 闸门拦截（忽略 / 已回复）
+            // 闸门拦截（忽略 / 已回复）：旁听媒体已在闸门前预下载入窗
+            // （ambient-media-attach），占位消息的附件回填由 record_ambient
+            // 从窗口快照完成；这里无需再下载。
+            return;
         };
         // 入站媒体（组 6.4）：下载或本地 file:// 复制 → 注入（段清单已在闸门前盘好）；
         // 语音段（record/voice）顺带转写为文本注记——telegram 同款能力，
