@@ -3,10 +3,11 @@
 use super::*;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct EffortBody {
     /// low | medium | high；空/null = 恢复端点默认
     effort: Option<String>,
-    /// 推理 token 硬上限（≥1024 生效；null = 端点默认）。reasoning+content
+    /// 推理 token 硬上限（≥1024 生效；null = 默认安全网 16384）。reasoning+content
     /// 共享预算，防推理模型思考无限烧（anti-runaway-thinking）
     #[serde(default)]
     reasoning_token_cap: Option<u32>,
