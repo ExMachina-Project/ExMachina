@@ -649,7 +649,14 @@ pub(crate) async fn admit(
 /// - collect 不并入 goal（群聊旁听是背景，不是本轮任务输入）；
 /// - 模型侧渲染「群聊·发送者」，展示层署名 + 「群聊」标签；
 /// - 文本仍经入站消毒——旁听会进入未来轮次的模型上下文，不能成为注入面。
-async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>) {
+///
+/// 媒体附件（ambient-media-attach）：适配器在闸门前已把旁听媒体下载落盘
+/// （napcat 旁听窗口等），此处把附件元数据随占位消息回填——部署实测缺陷：
+/// 群里未 @ 的纯图走旁听路径，图片文件落了盘（inbox 有文件）、占位文本
+/// 落了库（「（用户发来附件：图片 x1）」），但附件元数据从未随消息存储，
+/// 聊天流里永远看不到图。窗口条目不 take（TTL 窗口仍供后续 @ 轮次取走
+/// 注入模型），这里只登记展示层元数据。
+pub(crate) async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>) {
     let text = ctx.text.trim();
     if text.is_empty() {
         return;
@@ -683,7 +690,7 @@ async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_
     .map(|m| m.trim_start_matches("im:").to_string())
     .unwrap_or_default();
     let origin = format!("imctx:{sender}");
-    let _ = core.store.add_message(
+    let msg = core.store.add_message(
         &sid,
         exm_core::types::MessageRole::User,
         Some(origin.as_str()),
@@ -692,6 +699,28 @@ async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_
             clean.as_str(),
         )],
     );
+    // 旁听媒体随占位消息回填展示层元数据（不注入模型——旁听不触发轮次；
+    // 模型注入走 @ 轮次 take 旁听媒体窗口的既有链路）
+    let ambient = crate::ambient_media::snapshot(&ch.id, ctx.chat_key);
+    if let (Ok(m), false) = (&msg, ambient.is_empty()) {
+        let rels: Vec<exm_core::types::InboundAttachment> = ambient
+            .iter()
+            .map(|a| {
+                let rel = std::path::Path::new(&a.path)
+                    .strip_prefix(&core.config().workspace_root)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| a.path.clone());
+                exm_core::types::InboundAttachment {
+                    kind: a.kind.clone(),
+                    path: rel,
+                    name: a.name.clone(),
+                }
+            })
+            .collect();
+        if !rels.is_empty() {
+            let _ = core.store.attach_inbound(&sid, &m.id, rels);
+        }
+    }
     // 流预览跟随最新群消息（控制台流列表展示「群里刚说了什么」）
     let _ = core.touch_flow_message(&ch.id, ctx.chat_key, &clean);
 }
