@@ -294,6 +294,78 @@ mod identity_gate_tests {
         assert_eq!(run3.session_id, sid1, "指令退役后消息应仍落原会话");
     }
 
+    /// /reset 重置聊天上下文：旧会话归档、流绑定切新会话、后续消息落新会话
+    #[tokio::test]
+    async fn 聊天流_reset_归档旧会话并切新() {
+        let core = std::sync::Arc::new(test_core());
+        let ch = chan(None);
+        // 流已有绑定会话并落过消息
+        let (run, _) = ChannelRun::begin(&core, &ch, "g200").await.unwrap();
+        let sid1 = run.session_id.clone();
+        core.store.add_message(&sid1, exm_core::types::MessageRole::User, None, vec![exm_core::types::Statement::new(exm_core::types::SpeechTag::要求, "旧上下文")]).unwrap();
+
+        let ctx = InboundCtx {
+            text: "/reset",
+            external_id: "u1",
+            display_name: "u1",
+            is_group: true,
+            mentioned: true,
+            chat_key: "g200",
+            flow_name: Some("重置测试群"),
+        };
+        let r = admit(&core, &ch, &ctx).await;
+        match r {
+            GateDecision::Deny(msg) => assert!(msg.contains("已重置"), "{msg}"),
+            _ => panic!("/reset 应回执成功说明"),
+        }
+        // 旧会话已归档（archived_at 置位，消息保留）
+        let old = core.store.get_session(&sid1).ok().flatten().expect("旧会话应保留");
+        assert!(old.archived_at.is_some(), "旧会话应归档");
+        let msgs = core.store.list_messages(&sid1, 10).unwrap();
+        assert!(!msgs.is_empty(), "归档不删消息（归档区可回看）");
+        // 流绑定切到新会话
+        let sid2 = core.flow_active_session(&ch.id, "g200").expect("重置后应有新绑定");
+        assert_ne!(sid1, sid2, "绑定应切到新会话");
+        // 新会话为空（从零开始）
+        let new_msgs = core.store.list_messages(&sid2, 10).unwrap();
+        assert!(new_msgs.is_empty(), "新会话应从零开始");
+        // 后续普通消息落新会话
+        let (run2, _) = ChannelRun::begin(&core, &ch, "g200").await.unwrap();
+        assert_eq!(run2.session_id, sid2, "重置后消息应落新会话");
+    }
+
+    /// /reset 无会话时也可用（建一个干净的）；非整词不误触发
+    #[tokio::test]
+    async fn 聊天流_reset_空流与非整词() {
+        let core = std::sync::Arc::new(test_core());
+        let ch = chan(None);
+        // 流尚无会话：/reset 直接建新
+        let ctx = InboundCtx {
+            text: "/reset",
+            external_id: "u1",
+            display_name: "u1",
+            is_group: true,
+            mentioned: true,
+            chat_key: "g300",
+            flow_name: None,
+        };
+        let r = admit(&core, &ch, &ctx).await;
+        match r {
+            GateDecision::Deny(msg) => assert!(msg.contains("已重置"), "{msg}"),
+            _ => panic!("空流 /reset 应回执成功"),
+        }
+        assert!(core.flow_active_session(&ch.id, "g300").is_some(), "空流应建会话");
+        // 非整词（如「/reset一下」或正文提到）不触发
+        let noise = InboundCtx {
+            text: "帮我看看 /reset 是什么意思",
+            ..ctx
+        };
+        match admit(&core, &ch, &noise).await {
+            GateDecision::Allow(_) => {}
+            _ => panic!("非整词 /reset 不应拦截"),
+        }
+    }
+
     /// 流绑定会话被删（控制台清理）：失效绑定自动重建，不炸不挂
     #[tokio::test]
     async fn 聊天流_绑定会话删除后自愈() {
