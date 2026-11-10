@@ -575,14 +575,14 @@ fn normalize_effort(v: &str) -> String {
 
 // ------------------------------------------------- 推理预算硬上限（anti-runaway-thinking）
 
-/// 进程级推理 token 上限（None = 端点默认不下发）：请求未显式设 max_tokens 时，
-/// OpenAI 兼容端点以此值写 max_completion_tokens（reasoning+content 共享预算）。
+/// 进程级推理 token 上限：OpenAI 兼容端点写 max_tokens（reasoning+content 共享预算）。
 /// 部署实证：不设上限时模型在规划阶段心算大数分解，单轮 thinking 20 万字符
 /// （943s 延迟并触发上游 429 限流）——这是对推理模型唯一有效的「思考时长」硬闸。
-/// 网关经 /api/llm/effort 同一入口设置（body.reasoningTokenCap）。
+/// 优先级：请求级 max_tokens > 进程级本值 > 默认安全网 16384（拦 9 万 token 级
+/// 失控心算，不拦正常长回答）。网关经 /api/llm/effort 设置（body.reasoningTokenCap）。
 static REASONING_TOKEN_CAP: parking_lot::RwLock<Option<u32>> = parking_lot::RwLock::new(None);
 
-/// 设置全局推理 token 上限；None 或 <1024 = 端点默认。
+/// 设置全局推理 token 上限；None 或 <1024 = 回落默认安全网。
 pub fn set_reasoning_token_cap(v: Option<u32>) {
     let mut w = REASONING_TOKEN_CAP.write();
     *w = v.filter(|v| *v >= 1024);
@@ -834,19 +834,20 @@ impl OpenAiCompatibleProvider {
         // 推理预算硬上限（anti-runaway-thinking）：OpenAI 兼容端点的 max_tokens
         // 是 reasoning+content 共享预算——对推理模型是唯一有效的「思考时长」硬闸。
         // 部署实证：规划调用不设上限时模型心算大数分解，单轮 thinking 烧到 20 万
-        // 字符（≈943s 延迟 + 触发上游 429 限流）。请求级显式值优先，否则回落
-        // 进程级设置；None = 端点默认（兼容端点普遍 4k+，聊天/规划档够用）。
+        // 字符（≈943s 延迟 + 触发上游 429 限流）。
+        // 参数选择（端点实测）：本端点忽略 max_completion_tokens（设 1500 照样
+        // 烧满 3000），尊重 max_tokens（finish=length 正确截断）——写旧参数。
+        // 请求级显式值优先，否则回落进程级设置；默认安全网 16384（不拦正常
+        // 长回答，只拦 9 万 token 级的失控心算）。
         let openai_compat = self.api_format.is_empty() || self.api_format == "openai";
         if openai_compat {
-            let cap = req
-                .max_tokens
-                .or_else(reasoning_token_cap)
-                .map(|v| v.max(1024));
-            if let Some(cap) = cap {
-                // max_completion_tokens（新参数）：旧 max_tokens 在部分推理端点
-                // 只约束 content 不约束 reasoning，防不住 thinking
-                base["max_completion_tokens"] = serde_json::json!(cap);
-            }
+            // 下限 1024 只作用于自动值（安全网/进程级），不抬显式请求值
+            let cap = req.max_tokens.or_else(|| {
+                reasoning_token_cap()
+                    .or(Some(16_384))
+                    .map(|v| v.max(1024))
+            });
+            base["max_tokens"] = serde_json::json!(cap);
         }
         // 模型思考强度：请求级显式值优先，否则回落进程级设置；None = 端点默认不下发
         let effort = req.reasoning.clone().or_else(reasoning_effort);
@@ -2252,6 +2253,33 @@ mod reasoning_effort_tests {
         set_reasoning_effort(None);
         let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
         assert!(p.body(&req, false).get("reasoning_effort").is_none());
+    }
+
+    /// 推理预算硬上限（anti-runaway-thinking）：OpenAI 兼容端点必写 max_tokens
+    /// （端点实测：忽略 max_completion_tokens，尊重 max_tokens 的共享预算截断）。
+    /// 优先级：请求级显式值 > 进程级 reasoning_token_cap > 默认安全网 16384。
+    #[test]
+    fn openai_推理预算硬上限_默认安全网与覆盖优先级() {
+        let p = OpenAiCompatibleProvider::with_format("http://x", vec![], "openai");
+        // 无任何设置 → 默认安全网 16384（拦 9 万 token 级失控心算）
+        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        assert_eq!(p.body(&req, false)["max_tokens"], 16384);
+        // 请求级显式值优先
+        let mut req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        req.max_tokens = Some(500);
+        assert_eq!(p.body(&req, false)["max_tokens"], 500);
+        // 进程级 cap 覆盖默认安全网
+        set_reasoning_token_cap(Some(4096));
+        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        assert_eq!(p.body(&req, false)["max_tokens"], 4096);
+        set_reasoning_token_cap(None);
+        // 清除后回落安全网
+        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        assert_eq!(p.body(&req, false)["max_tokens"], 16384);
+        // anthropic 协议不受此默认网影响（自带 max_tokens=1024 历史默认与 thinking budget 机制）
+        let pa = OpenAiCompatibleProvider::with_format("http://x", vec![], "anthropic");
+        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        assert_eq!(pa.body(&req, false)["max_tokens"], 1024);
     }
 
     #[test]
