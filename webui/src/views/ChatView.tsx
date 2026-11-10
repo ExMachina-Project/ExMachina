@@ -425,12 +425,14 @@ export function ChatView(): React.ReactElement {
     bottomRef.current?.scrollIntoView({ behavior: "auto" });
   }, [messages, liveOrch, liveParts, runToolCalls, timeline]);
   // 审批卡到达：强制拉到卡位（审批是阻塞等待，时效性强——
-  // 用户上翻回看时也该被打断，错过 = 工具在等待窗内一直挂着）
+  // 用户上翻回看时也该被打断，错过 = 工具在等待窗内一直挂着）。
+  // 只对本会话单滚动（approval-session-scope 同口径）：跨会话单不弹卡也不抢视线。
   useEffect(() => {
-    if (approvals.length === 0) return;
+    const mine = approvals.filter((a) => !a.sessionId || a.sessionId === sessionId);
+    if (mine.length === 0) return;
     stickRef.current = true;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [approvals.length]);
+  }, [approvals.length, sessionId]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -1107,8 +1109,13 @@ export function ChatView(): React.ReactElement {
           )}
           {/* 内联审批：渲染在消息流内（live 区之后、贴底锚之前）——
               审批到达时随消息流滚动进视线；原先渲染在 chat-scroll 外的静态区，
-              流式输出期间用户盯着底部，上方的卡根本看不到（审批交互不可见 bug） */}
-          {approvals.map((a) => (
+              流式输出期间用户盯着底部，上方的卡根本看不到（审批交互不可见 bug）。
+              只渲染本会话单（approval-session-scope）：跨会话单不再在别的会话里
+              弹卡（曾导致任何会话都挂着子会话的审批卡、批准入口错位）——
+              跨会话单走侧栏审批页（带「跳转子会话」导航）。 */}
+          {approvals
+            .filter((a) => !a.sessionId || a.sessionId === sessionId)
+            .map((a) => (
             <Card key={a.approvalId} size="small" className="approval-card">
               <div className="approval-head">
                 <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
@@ -1158,7 +1165,7 @@ export function ChatView(): React.ReactElement {
                 <span className="approval-hint">{t("chat.approvalHint")}</span>
               </div>
             </Card>
-          ))}
+            ))}
           {showBottomBtn && (
             <button
               className="scroll-bottom-btn"
