@@ -2189,7 +2189,7 @@ impl Orchestrator {
         let messages = vec![
             ChatMessage::system(system_prompt),
             ChatMessage::user(format!(
-                "【收束请求】\n目标：{}\n验收：{}\n\n各节点回流摘要：\n{digest}\n\n【要求】按固定六段结构输出最终收束结果（任务边界/已启用链路/关键结论/冲突裁决/残余未知/最终交付），语言纪律：客观简洁，自然陈述，零情绪。",
+                "【收束请求】\n目标：{}\n验收：{}\n\n各节点回流摘要：\n{digest}\n\n【要求】综合各节点结果，直接向用户交付最终回复。表达形态完全由上方系统提示决定（IM 会话 = 聊天消息体：结论先行、几句话说清、禁止标题/清单/分节；控制台 = 正常陈述文）。任务有缺口就说明缺什么、卡在哪；完成就交付结果本身。禁止输出「任务边界/已启用链路/关键结论/冲突裁决/残余未知/最终交付」这类审计分节结构——那是内部过程，不是用户要看的回复。",
                 plan.goal,
                 plan.acceptance.join("；")
             )),
@@ -3139,24 +3139,19 @@ fn sanitize_adaptation(text: &str) -> String {
 
 // ---------------------------------------------------------------- 收束文本 → 陈述序列
 
-/// 收束降级文本：收束 LLM 不可用时，把各节点回流按固定结构聚合为最终交付。
+/// 收束降级文本：收束 LLM 不可用时，把各节点回流按最小结构聚合为最终交付。
 /// 为什么不直接报错：调度已执行完毕、子个体回流已落库，因「收束这一跳」失败而丢弃
 /// 全部成果太亏——降级输出保留节点状态、摘要、阻塞项与失败原因，轮次仍有可执行结论。
+/// 形态纪律（anti-audit-converge）：不用分节标题的审计腔——用户要的是「结果 + 缺口」
+/// 两件事，几行说完；节点明细是支撑信息，压缩进列表即可。
 fn fallback_converge_text(
     plan: &OrchestratorPlan,
     reports: &Reports,
     graph: &TaskGraphModel,
     reason: &str,
 ) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("## 任务边界".into());
-    lines.push(format!("- 目标：{}", plan.goal));
-    if !plan.acceptance.is_empty() {
-        lines.push(format!("- 验收：{}", plan.acceptance.join("；")));
-    }
-    lines.push(String::new());
-    lines.push("## 节点回流".into());
     let (mut done, mut blocked, mut failed) = (0usize, 0usize, 0usize);
+    let mut node_lines: Vec<String> = Vec::new();
     for n in graph.list() {
         match n.status {
             TaskStatus::Done => done += 1,
@@ -3165,7 +3160,7 @@ fn fallback_converge_text(
             _ => {}
         }
         let Some(r) = reports.get(&n.id) else {
-            lines.push(format!(
+            node_lines.push(format!(
                 "- {} {}({})：无回流",
                 n.id, n.title, n.agent_identifier
             ));
@@ -3177,7 +3172,7 @@ fn fallback_converge_text(
             n.title,
             n.agent_identifier,
             n.status.label(),
-            r.summary.chars().take(400).collect::<String>()
+            r.summary.chars().take(300).collect::<String>()
         );
         for b in &r.blockers {
             line.push_str(&format!(
@@ -3185,19 +3180,24 @@ fn fallback_converge_text(
                 b.reason, b.unblock_condition
             ));
         }
-        lines.push(line);
+        node_lines.push(line);
+    }
+    let mut lines: Vec<String> = Vec::new();
+    // 目标一句话 + 结果统计先行（用户最先要知道的）
+    lines.push(format!(
+        "目标「{}」执行完毕：{} 个节点，完成 {done}、受阻 {blocked}、失败 {failed}。",
+        plan.goal,
+        graph.list().len()
+    ));
+    if !plan.acceptance.is_empty() {
+        lines.push(format!("验收口径：{}。", plan.acceptance.join("；")));
     }
     lines.push(String::new());
-    lines.push("## 降级说明（残余未知）".into());
-    lines.push(format!(
-        "- 收束 LLM 调用失败（{reason}），本轮结论为各节点回流的确定性聚合，未经主智能体综合裁决。"
-    ));
-    lines.push("- 恢复模型通道后可重新发起同类任务以获得综合收束。".into());
+    lines.push("各节点结果：".into());
+    lines.extend(node_lines);
     lines.push(String::new());
-    lines.push("## 最终交付".into());
     lines.push(format!(
-        "- 节点统计：完成 {done}、受阻/待裁决 {blocked}、失败 {failed}，共 {} 个节点。",
-        graph.list().len()
+        "（综合裁决未完成：收束模型调用失败 {reason}。以上为各节点回流的直接聚合，未经主智能体综合；恢复模型通道后重发同类任务可获得综合结论。）"
     ));
     lines.join("\n")
 }
@@ -3694,11 +3694,19 @@ mod fallback_converge_tests {
             "先完成 T1",
             "全部模型候选失败：网络不可达",
             "完成 1",
-            "受阻/待裁决 1",
+            "受阻 1",
         ] {
             assert!(
                 text.contains(needle),
                 "降级文本应含「{needle}」\n---\n{text}"
+            );
+        }
+        // 反审计腔（anti-audit-converge）：不再输出分节标题（部署实测用户反馈：
+        // 六段审计结构在对话里是废话载体）
+        for banned in ["## 任务边界", "## 节点回流", "## 降级说明", "## 最终交付"] {
+            assert!(
+                !text.contains(banned),
+                "降级文本不应含审计分节标题「{banned}」\n---\n{text}"
             );
         }
     }
@@ -3735,7 +3743,7 @@ mod fallback_converge_tests {
             text.contains("T1 独立执行(solo-agent)：无回流"),
             "无回流节点应显式标注：\n{text}"
         );
-        assert!(text.contains("降级说明"), "应包含降级说明段");
+        assert!(text.contains("综合裁决未完成"), "应说明降级原因");
     }
 }
 
