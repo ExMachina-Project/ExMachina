@@ -36,6 +36,7 @@ pub mod runtime;
 pub mod session_origin;
 pub mod store;
 pub mod store_sqlite;
+pub mod task_queue;
 pub mod task;
 pub mod todo;
 pub mod tools;
@@ -1123,6 +1124,14 @@ impl Core {
     /// payload 只记模式摘要（通道/账号/模式/处置），MUST NOT 含原文全文。
     pub fn emit_sanitize_finding(&self, payload: serde_json::Value) {
         self.orchestrator.read().emit("", "sanitize.finding", payload);
+    }
+
+    /// 通用会话事件广播 + 落事件库（task_queue.updated 等运行时状态面；
+    /// 与 Orchestrator::emit 同口径——广播供 WS 实时、落库供事件页/刷新回放。
+    /// gateway 侧动态工具（task__queue / plan__mode）经此发会话级事件，
+    /// 不必绕道 orchestrator() 取锁）
+    pub fn emit_session_event(&self, session_id: &str, kind: &str, payload: serde_json::Value) {
+        self.orchestrator().emit(session_id, kind, payload);
     }
 
     /// 回滚检查点：`date` 为空取最近一份；返回被覆盖的文件相对路径
@@ -3132,6 +3141,7 @@ pub fn build_orchestrator(
         vision_relay_target: cfg.vision_relay_model.clone(),
         max_concurrency: cfg.max_concurrency,
         max_unit_steps: cfg.automation.unit_max_steps,
+        queue_draining: parking_lot::Mutex::new(std::collections::HashSet::new()),
         auto_adapt: cfg.automation.auto_adapt,
         config_snapshot: Arc::new(parking_lot::RwLock::new(cfg.clone())),
     })
