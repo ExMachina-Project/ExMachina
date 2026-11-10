@@ -315,7 +315,9 @@ pub(crate) fn split_reply(text: &str, max_chars: usize) -> Vec<String> {
         let unit = unit.trim_end().to_string();
         if unit.chars().count() > max_chars {
             flush_hard(&mut buf, &mut out);
-            // 硬切：按行聚合，超过预算开新片，带续接标注
+            // 硬切：按行聚合，超过预算开新片。不加「（续 n/m）」标注——
+            // IM 聊天里机器腔的分段序号是噪音（部署实测用户反馈），分段
+            // 本身已按顺序投递，序号没有信息量。
             hard_parts.clear();
             let mut piece = String::new();
             for line in unit.split_inclusive('\n') {
@@ -344,14 +346,7 @@ pub(crate) fn split_reply(text: &str, max_chars: usize) -> Vec<String> {
             if !piece.trim().is_empty() {
                 hard_parts.push(piece.trim_end().to_string());
             }
-            let total = hard_parts.len();
-            for (i, p) in hard_parts.iter().enumerate() {
-                if total > 1 {
-                    out.push(format!("{p}\n（续 {}/{}）", i + 1, total));
-                } else {
-                    out.push(p.clone());
-                }
-            }
+            out.extend(hard_parts.iter().cloned());
             continue;
         }
         if buf.chars().count() + unit.chars().count() + 2 > max_chars && !buf.is_empty() {
@@ -408,13 +403,16 @@ mod reply_split_tests {
     }
 
     #[test]
-    fn 超长单元硬切带续接序号() {
+    fn 超长单元硬切多片() {
         let block = format!("```text\n{}\n```", "x".repeat(200));
         let out = split_reply(&block, 60);
         assert!(out.len() >= 3, "硬切应多片: {}", out.len());
-        assert!(out.first().unwrap().contains("（续 1/"));
-        assert!(out.last().unwrap().contains("）") && out.last().unwrap().contains("（续 "));
-        // 每片（含标注）接近但不远超预算
+        // 不加机器腔续接标注（部署实测用户反馈：聊天里「（续 1/2）」是噪音）
+        assert!(
+            out.iter().all(|s| !s.contains("（续 ")),
+            "硬切不应带续接序号: {out:?}"
+        );
+        // 每片接近但不远超预算
         for s in &out {
             assert!(s.chars().count() <= 60 + 20, "{}", s.chars().count());
         }
