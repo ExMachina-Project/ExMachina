@@ -1,47 +1,23 @@
-//! 渲染：句式前缀着色 + 角色标签（CLI 视图）
+//! 渲染：正文直排 + 证据等级标注（CLI 视图）
 
-use exm_core::types::{SpeechTag, Statement, TaskStatus};
+use exm_core::types::{Statement, TaskStatus};
 use owo_colors::OwoColorize;
-
-pub fn tag_color(tag: SpeechTag) -> String {
-    match tag {
-        SpeechTag::肯定 => "肯定".green().to_string(),
-        SpeechTag::否定 => "否定".red().to_string(),
-        SpeechTag::疑问 => "疑问".yellow().to_string(),
-        SpeechTag::报告 => "报告".cyan().to_string(),
-        SpeechTag::提案 => "提案".magenta().to_string(),
-        SpeechTag::警告 => "警告".bright_red().to_string(),
-        SpeechTag::要求 => "要求".blue().to_string(),
-        SpeechTag::观测 => "观测".bright_black().to_string(),
-    }
-}
 
 pub fn render_statement(s: &Statement) -> String {
     let level = s
         .evidence_level
         .map(|l| format!(" {}", format!("(证据{})", l.label()).bright_black()))
         .unwrap_or_default();
-    format!("【{}】{}{}", tag_color(s.tag), s.text, level)
+    format!("{}{}", s.text, level)
 }
 
-/// 连续同标签的陈述只标一次标签，其余缩进对齐：
-/// 一屏回答里出现 19 行「【报告】」时，标签噪声压过内容本身。
+/// 正文按行直排，不添加任何句式前缀（是否写【报告】等由模型自己决定）。
 pub fn render_statements(statements: &[Statement]) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut prev: Option<SpeechTag> = None;
-    for s in statements {
-        if prev == Some(s.tag) {
-            let level = s
-                .evidence_level
-                .map(|l| format!(" {}", format!("(证据{})", l.label()).bright_black()))
-                .unwrap_or_default();
-            out.push(format!("  {}{}", s.text, level));
-        } else {
-            out.push(render_statement(s));
-            prev = Some(s.tag);
-        }
-    }
-    out.join("\n")
+    statements
+        .iter()
+        .map(render_statement)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn render_role(role: &str, agent: Option<&str>, statements: &[Statement]) -> String {

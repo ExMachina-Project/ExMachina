@@ -280,7 +280,7 @@ export function PluginsView(): React.ReactElement {
                 onClick={() => void openDetail(p.id)}
                 style={{ cursor: "pointer" }}
               >
-                <Space direction="vertical" size={4}>
+                <Space orientation="vertical" size={4}>
                   <Typography.Text type="secondary">{p.description || p.id}</Typography.Text>
                   <Space size={4} wrap>
                     {p.version && <Tag>{`v${p.version}`}</Tag>}
@@ -338,7 +338,7 @@ export function PluginsView(): React.ReactElement {
                 title: "插件",
                 key: "plugin",
                 render: (_, e) => (
-                  <Space direction="vertical" size={0}>
+                  <Space orientation="vertical" size={0}>
                     <Space size={8}>
                       <Typography.Text strong>{e.name || e.id}</Typography.Text>
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -358,7 +358,7 @@ export function PluginsView(): React.ReactElement {
                 key: "version",
                 width: 140,
                 render: (_, e) => (
-                  <Space direction="vertical" size={0}>
+                  <Space orientation="vertical" size={0}>
                     <span>{`v${e.version}`}</span>
                     {e.localVersion && (
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -447,11 +447,11 @@ export function PluginsView(): React.ReactElement {
         }
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={520}
-        destroyOnClose
+        size={520}
+        destroyOnHidden
       >
         {detail && (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <Space orientation="vertical" size={16} style={{ width: "100%" }}>
             <Descriptions
               column={1}
               size="small"
@@ -503,9 +503,9 @@ export function PluginsView(): React.ReactElement {
                   {t("plugins.credentials.noFields")}
                 </Typography.Text>
               ) : (
-                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Space orientation="vertical" size={8} style={{ width: "100%" }}>
                   {credFields.map((f) => (
-                    <Space key={f.key} direction="vertical" size={2} style={{ width: "100%" }}>
+                    <Space key={f.key} orientation="vertical" size={2} style={{ width: "100%" }}>
                       <Typography.Text style={{ fontSize: 12 }}>
                         {f.label}
                         {f.sensitive ? t("plugins.credentials.sensitive") : ""}

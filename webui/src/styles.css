@@ -219,9 +219,11 @@ input, textarea { caret-color: var(--accent); }
 .app-shell { display: flex; height: 100dvh; overflow: hidden; }
 
 .app-sider {
-  /* 208px：EN 品牌副标（AGENT CLUSTER // CONSOLE，mono+0.1em 字距 ≈168px）
-     为宽度硬底，双语文本均不折行；移动端另有 min(78vw, 300px) 覆盖 */
+  /* 收起态 208px（EN 品牌副标 mono+0.1em 字距 ≈168px 的宽度硬底，双语不折行）；
+     页面侧栏（会话/聊天流/任务会话）在主内容右栏（.subbar-rail，300px），
+     主侧栏恒为 208px；移动端抽屉仍为 min(78vw, 300px) */
   width: 208px;
+  transition: width var(--dur-fast) var(--ease-out);
   flex: none;
   display: flex;
   flex-direction: column;
@@ -234,11 +236,11 @@ input, textarea { caret-color: var(--accent); }
 
 /* 品牌区 */
 .brand {
-  padding: 18px 16px 14px;
+  padding: 14px 14px 10px;
   border-bottom: 1px solid var(--line);
   position: relative;
 }
-.brand-row { display: flex; align-items: center; gap: 9px; }
+.brand-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .brand-name {
   /* 资产 hero 字标语汇：全大写 + 宽字距（7.5/1000 比例 → 屏幕上取 0.18em）+ mono */
   font-family: var(--mono);
@@ -257,9 +259,10 @@ input, textarea { caret-color: var(--accent); }
 }
 @keyframes led-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 .brand-sub {
-  /* hero 副标语（ABSOLUTE RATIONALITY · …）语汇：小号大写宽字距灰阶 */
+  /* hero 副标语（ABSOLUTE RATIONALITY · …）语汇：小号大写宽字距灰阶；
+     保留独立第二行，仅随 padding 收紧（margin-top 6→4） */
   font-family: var(--mono);
-  margin-top: 6px;
+  margin-top: 4px;
   font-size: 10px;
   color: var(--rank-3, var(--muted));
   letter-spacing: 0.1em;
@@ -782,6 +785,8 @@ textarea.ant-input:focus,
 .tl-sync::before { background: var(--green); }
 .tl-arbitration::before { background: var(--amber); }
 .tl-error::before { background: var(--red); }
+/* 预算熔断内联提示：警示琥珀（非错误红——预算是受控收束不是失败） */
+.tl-budget::before { background: var(--amber); }
 .tl-memory .tl-text { color: var(--blue); }
 .tl-memory::before { background: var(--blue); }
 .live-card {
@@ -956,7 +961,7 @@ textarea.ant-input:focus,
   .composer-hint { display: none; }
 }
 
-/* ============ 任务图 ============ */
+/* ============ 编排图 ============ */
 .graph-wrap {
   overflow: auto;
   background: var(--bg-panel);
@@ -1033,6 +1038,7 @@ textarea.ant-input:focus,
 }
 .memory-hits { margin-top: 12px; max-height: 320px; overflow: auto; }
 .memory-reason { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.memory-debug { color: var(--muted); font-size: 12px; font-family: var(--mono); opacity: 0.9; }
 .memory-body { color: var(--text); font-size: 12.5px; }
 .memory-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; }
 .memory-filter-kinds { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
@@ -1709,7 +1715,6 @@ textarea.ant-input:focus,
   color: var(--rank-4, var(--muted-dim));
   user-select: none;
 }
-.login-corner-left { left: 16px; }
 .login-corner-right { right: 16px; }
 .login-core { position: relative; z-index: 2; text-align: center; width: 420px; }
 .login-figure {
@@ -1939,34 +1944,6 @@ textarea.ant-input:focus,
   line-height: 16px; text-align: center;
   pointer-events: none;
 }
-/* 流内会话切换（spec：展开钮 + 会话子列表） */
-.flow-expand {
-  border: none; background: transparent; cursor: pointer;
-  color: var(--muted-dim); font-size: 10px; line-height: 1;
-  padding: 2px; border-radius: 4px;
-  pointer-events: auto;
-}
-.flow-expand:hover { color: var(--text); background: var(--bg-hover, rgba(128,128,128,.15)); }
-.flow-session-list {
-  display: flex; flex-direction: column; gap: 1px;
-  padding: 2px 6px 6px 24px;
-}
-.flow-session-empty {
-  font-size: 10px; color: var(--muted-dim); padding: 2px 4px;
-}
-.flow-session-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 6px;
-  padding: 3px 6px; border-radius: 6px; cursor: pointer;
-  font-size: 11px;
-}
-.flow-session-item:hover { background: var(--bg-hover, rgba(128,128,128,.12)); }
-.flow-session-item.active .flow-session-label { color: var(--accent); }
-.flow-session-label {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.flow-session-time {
-  flex: none; font-size: 10px; font-family: var(--mono); color: var(--muted-dim);
-}
 .flow-live {
   width: 6px; height: 6px; border-radius: var(--r-full);
   background: var(--accent);
@@ -2173,7 +2150,6 @@ textarea.ant-input:focus,
 
 .page-head { padding-bottom: 16px; }
 .page-head-ascii { position: absolute; left: 0; right: 0; bottom: 0; }
-.sider-divider { margin: 10px 14px 6px; }
 
 /* ============================================================
    CODING UX（编程软件式过程透明）
@@ -2333,6 +2309,18 @@ textarea.ant-input:focus,
 }
 .todo-chip.todo-in_progress { color: var(--text); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
 .todo-chip.todo-done { color: var(--ok, #46a758); border-color: color-mix(in srgb, var(--ok, #46a758) 35%, transparent); }
+
+/* 任务队列（task-queue）：与 todo-strip 同族的条状状态卡 */
+.tq-strip {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+}
+.tq-chip {
+  font-size: 11px; padding: 2px 8px; border-radius: var(--r-md);
+  border: 1px solid var(--line); background: var(--bg-sunken); color: var(--muted);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tq-chip.tq-running { color: var(--text); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.tq-chip.tq-queued { color: var(--muted); }
 
 /* 后台子任务卡（spec subagent-spawn WebUI 呈现） */
 .spawns-strip {
@@ -2814,6 +2802,40 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .msg-head .msg-copy { margin-left: 2px; opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
 .msg-bubble:hover .msg-copy { opacity: 1; }
 
+/* 会话产物附件（send-file 能力）：文件卡片 + 图片直览 */
+.msg-artifacts {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
+  padding-top: 10px; border-top: 1px dashed var(--line);
+}
+.msg-artifact {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--text); text-decoration: none; font-size: 13px;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  max-width: 100%;
+}
+.msg-artifact:hover { border-color: var(--accent); color: var(--accent); }
+/* 入站附件（im-inbound-attach）：聊天流 user 消息里的缩略图网格（ChatView 产物条同款卡片） */
+.msg-artifacts.inbound { border-top: none; padding-top: 4px; margin-top: 6px; }
+.msg-artifacts.inbound .msg-artifact.image { padding: 0; border: none; background: none; }
+.msg-artifacts.inbound .msg-artifact.image img {
+  max-width: 180px; max-height: 180px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); object-fit: cover; display: block;
+}
+.msg-artifacts.inbound .msg-artifact-kind {
+  font-size: 10.5px; color: var(--muted-dim); margin-left: auto;
+}
+.msg-artifact .msg-artifact-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;
+}
+.msg-artifact .msg-artifact-caption { color: var(--muted); font-size: 12px; }
+.msg-artifact.image {
+  flex-direction: column; align-items: flex-start; padding: 6px;
+}
+.msg-artifact.image img {
+  max-width: 280px; max-height: 200px; border-radius: var(--r-xs); object-fit: cover;
+}
+
 /* 骨架屏 */
 @keyframes skeleton-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 .skeleton-list, .skeleton-card { display: flex; flex-direction: column; gap: 8px; }
@@ -3230,7 +3252,6 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .tbar-spacer { flex: 1; }
 .tbar-seg.sys { border-right: none; border-left: 1px solid var(--line); }
 /* hero 角落微标语汇（EST. 2026）：mono 微号宽字距，弱化灰阶 */
-.tbar-est { font-family: var(--mono); font-size: 8px; letter-spacing: 0.275em; color: var(--rank-4, var(--muted-dim)); }
 
 @media (min-width: 861px) {
   .app-shell { height: calc(100dvh - var(--tel-h)); }
@@ -3238,8 +3259,9 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
      18px 页底内边距会把面板从遥测条上顶起来，留一条缝；这里把它归零，
     高度直接取外壳高度（视口 − 遥测条），面板底边正好落在遥测条上沿。 */
   .app-content:has(.chat-shell),
+  .app-content:has(.flows-shell),
   .app-content:has(.code-shell) { padding-bottom: 0; }
-  .chat-shell, .code-shell { height: calc(100dvh - var(--tel-h)); }
+  .chat-shell, .flows-shell, .code-shell { height: calc(100dvh - var(--tel-h)); }
   /* 设置页「短分类占满一屏」改由 flex 链达成（不写视口魔数）：
      滚动容器先把自己变成纵向 flex，让 view-stage → pane-wrap → settings2
      逐层把剩余高度下放；settings2 以 flex:1 收下，短页即占满（顶部对齐页头、
@@ -3308,16 +3330,33 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 .brand-empty-figure { width: 104px; height: 104px; }
 
 .chat-acquire {
-  min-height: 100%;
+  /* 空态垂直定位（不用 min-height:100%）：矮内容区（页头+输入框吃掉 ~270px，
+     718px 视口只剩 ~450px）下「min-height 撑满 + 180px 盘 + 文案」必然溢出，
+     产生「空页面也有滚动条」。改为 flex 布局由 chat-scroll 居中：
+     scroll 本身 flex 容器化（见 .chat-scroll:has(.chat-acquire)），空态收缩到内容高 */
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 4px;
-  padding: 30px 16px 40px;
+  padding: 20px 16px 24px;
   text-align: center;
 }
-.chat-acquire-figure { width: 180px; height: 180px; color: var(--accent); }
+/* 空态在场时 chat-scroll 变 flex 空间居中容器（消息在场时恢复块级正常流） */
+.chat-scroll:has(.chat-acquire) {
+  display: flex;
+  flex-direction: column;
+}
+.chat-scroll:has(.chat-acquire) .chat-acquire {
+  flex: 1;
+  min-height: 0;
+  justify-content: center;
+}
+.chat-acquire-figure { width: 180px; height: 180px; color: var(--accent); flex: none; }
+/* 矮内容区：盘收缩保空态一屏放下不滚（内容区高≈视口-267，阈值 700 视口 ≈ 430 内容区） */
+@media (max-height: 720px) {
+  .chat-acquire-figure { width: 120px; height: 120px; }
+}
 .chat-acquire-figure .emblem { opacity: 0.85; }
 .chat-acquire-title {
   margin-top: 12px;
@@ -3540,6 +3579,27 @@ mark.search-hit {
 }
 /* 表格：CSS 网格行列（role=table 语义 + 自绘样式，与 antd Table 解耦——批量工具条联动更直接） */
 .sessions-table { border: 1px solid var(--border, #20262f); border-radius: 10px; overflow: hidden; }
+/* 分组视图（session-management）：控制台组 + 通道组（组内按流聚簇）；
+   行网格沿用 sessions-tr，组/流头部是轻量标题行 */
+.sessions-groups { display: flex; flex-direction: column; gap: 14px; }
+.sessions-group { border: 1px solid var(--border, #20262f); border-radius: 10px; overflow: hidden; }
+.sessions-group-head {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: var(--bg-slot, #161b22); border-bottom: 1px solid var(--border, #20262f);
+}
+.sessions-group-title { font-weight: 600; font-size: 13px; }
+.sessions-group-count { font-size: 11px; color: var(--text-dim, #59626f); }
+.sessions-flow { padding: 0 0 2px; }
+.sessions-flow-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px 4px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border, #20262f) 45%, transparent);
+}
+.sessions-flow-name {
+  font-size: 12px; font-weight: 500; color: var(--text-dim, #8b95a5);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%;
+}
+.sessions-flow-count { font-size: 11px; color: var(--text-dim, #59626f); }
+.sessions-flow .sessions-row { padding-left: 20px; }
 .sessions-tr {
   display: grid;
   grid-template-columns: 40px minmax(220px, 1fr) 76px minmax(110px, 160px) 110px 84px 96px;
@@ -3682,4 +3742,311 @@ mark.search-hit {
   .history-modal { max-width: calc(100vw - 20px); }
   .history-item-ops { justify-content: stretch; }
   .history-item-ops .ant-btn { flex: 1; height: 32px; }
+}
+
+/* ---- 空态引导卡（onboarding-selfcheck）：置顶体检指引，error 不可关 ---- */
+.guide-item { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; line-height: 1.7; }
+.guide-item b { font-weight: 600; }
+.guide-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; }
+.guide-error { background: var(--danger, #ff4d4f); }
+.guide-warn { background: var(--warn, #faad14); }
+.guide-btn { margin-top: 6px; align-self: flex-start; }
+
+/* ---- Nexus 拓扑图（nexus-topology-admin）：确定性环形布局自绘 SVG ---- */
+.nexus-topo { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+/* 画布/详情卡：走主题面板底 + 直角纪律（曾用不存在的 --bg-2 回落 #0d0d10 恒黑、8px 圆角违反全站直角） */
+.nexus-topo-canvas { flex: 1 1 420px; min-width: 420px; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px; background: var(--bg-sunken); }
+.topo-edge { stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.topo-edge-sel { stroke: var(--accent); stroke-dasharray: none; stroke-width: 1.8; }
+.topo-dim { opacity: 0.25; }
+.topo-node { cursor: pointer; }
+.topo-node-circle { fill: var(--bg-panel); stroke: var(--accent, #7c6ff0); stroke-width: 1.6; }
+.topo-node-off .topo-node-circle { stroke: var(--line-strong); }
+.topo-node-sel .topo-node-circle { stroke-width: 3; filter: drop-shadow(0 0 6px rgba(124, 111, 240, 0.55)); }
+.topo-node-label { fill: var(--text-hi); font-size: 12.5px; font-weight: 600; }
+.topo-node-meta { fill: var(--muted-dim); font-size: 10.5px; letter-spacing: 0.4px; }
+.topo-agent rect { fill: var(--bg-panel); stroke: var(--muted); stroke-width: 1.2; }
+.topo-agent-label { fill: var(--muted); font-size: 11px; }
+.nexus-topo-detail { flex: 0 1 300px; border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; background: var(--bg-panel); }
+.topo-detail-head { display: flex; gap: 8px; align-items: center; }
+.topo-detail-sub { font-size: 11px; margin: 4px 0 10px; }
+.topo-detail-edges { display: flex; flex-direction: column; gap: 6px; }
+.topo-edge-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; font-size: 12.5px; }
+@media (max-width: 760px) {
+  .nexus-topo-canvas { min-width: 340px; }
+  .nexus-topo-detail { flex-basis: 100%; }
+}
+.nexus-topo-empty { display: flex; align-items: center; justify-content: center; min-height: 200px; }
+
+/* ============================================================
+   聊天页 / 任务页（信息架构 2026-11）：流列表 + 只读消息流
+   —— 对话页之外的非交互会话视图（外部通道流 + 系统任务流），无输入框。
+   ============================================================ */
+.flows-shell { display: flex; height: calc(100dvh - 26px); min-height: 0; gap: 0; }
+/* 高度契约说明：不能写 height:100%——.view-stage 是 auto 高度，百分比链断裂会让
+ * .flows-messages 被消息流撑高（8000 条历史可达上万 px），容器自身无溢出、
+ * 内部 scrollTo 静默无效，打开流永远停在最旧消息（部署实测「从下到上反直觉」缺陷）。
+ * 与 .chat-shell 同款显式高度（.app-content 底 padding 26px）钉住可视壳。 */
+.flows-rail {
+  width: 320px; flex: none;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--line);
+  min-height: 0;
+}
+.flows-rail-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px 8px;
+}
+.flows-title { font-size: 15px; font-weight: 600; color: var(--text-hi); }
+.flows-list { flex: 1; overflow-y: auto; padding: 0 10px 16px; min-height: 0; }
+.flows-channel { margin-bottom: 12px; }
+.flows-channel-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 9px 4px;
+  font-size: 11.5px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: background var(--dur-fast) var(--ease-out);
+  user-select: none;
+}
+.flows-channel-head:hover { background: var(--hover); }
+/* 账号筛选态（flow-account-filter）：选中账号高亮，箭头指示可点 */
+.flows-channel-head.filter-on {
+  background: var(--hover);
+  outline: 1px solid var(--primary, var(--text-hi));
+}
+.flows-filter-caret {
+  margin-left: 4px;
+  font-size: 9px;
+  opacity: 0.45;
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.flows-filter-caret.on { opacity: 1; transform: rotate(90deg); }
+
+/* 主智能体独立区块（orchestrator-first）：组详情页头等公民 */
+.primary-panel { display: grid; gap: 6px; }
+.primary-desc { font-size: 13px; line-height: 1.6; }
+.flows-channel-name { font-weight: 600; color: var(--text); }
+.flows-channel-platform {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted-dim);
+}
+/* 行复用 .flow-* 既有样式；页面级行稍大（列表主视觉） */
+.flow-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 9px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  border-radius: var(--r-sm);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.flow-item:hover { background: var(--hover); }
+.flow-item.active { background: var(--accent-soft); border-left-color: var(--accent); }
+.flow-item.active .flow-name { color: var(--text-hi); }
+/* 右侧只读消息流 */
+.flows-thread { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.flows-thread-head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.flows-thread-name { font-size: 15px; font-weight: 600; color: var(--text-hi); }
+.flows-thread-meta { font-size: 11px; color: var(--muted-dim); }
+.flows-messages { flex: 1; overflow-y: auto; padding: 14px 18px; min-height: 0; }
+.flows-msg { margin-bottom: 14px; }
+.flows-msg-head {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-bottom: 3px;
+}
+.flows-msg-role { font-size: 11.5px; font-weight: 600; color: var(--text); }
+.flows-msg.user .flows-msg-role { color: var(--accent); }
+.flows-msg-time { font-size: 10px; font-family: var(--mono); color: var(--muted-dim); }
+.flows-readonly {
+  flex: none;
+  padding: 8px 18px;
+  border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--muted-dim);
+  text-align: center;
+}
+.flows-back { flex: none; align-self: flex-start; margin: 8px 10px 0; }
+/* 窄屏：单列切换（列表 ↔ 消息流） */
+@media (max-width: 860px) {
+  .flows-shell { height: auto; flex: 1; min-height: 0; }
+  .flows-shell.thread .flows-rail { display: none; }
+  .flows-shell:not(.thread) .flows-thread { display: none; }
+  .flows-rail { width: 100%; border-right: none; }
+}
+
+/* ── 会话编排图内嵌卡（graph-inline）：聊天页消息流置顶，可折叠 ── */
+.dag-inline { margin: 0 14px 8px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--bg-raise); }
+.dag-inline-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 12px;
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; color: var(--text);
+  text-align: left;
+}
+.dag-inline-head:hover { background: var(--hover); }
+.dag-inline-meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted-dim); }
+.dag-inline-caret { color: var(--muted); }
+.dag-inline .graph-wrap { border-top: 1px solid var(--line); max-height: 300px; overflow: auto; padding: 8px; }
+
+/* ============================================================
+   侧栏手风琴（2026-11）：顶部「页面」折叠入口（二级侧边栏已迁右栏常驻）
+   （交互与视觉复用 .theme-switcher/.theme-toggle/.theme-panel，
+   和底部主题入口完全一致）；底部「主题」合并预设 + 强调色。
+   收起时侧栏只剩品牌 + 页面行 + 主题与状态栏。
+   ============================================================ */
+
+/* 弹性占位：手风琴收起时把主题与状态栏压到底部（与原菜单 flex:1 同效） */
+.sider-grow { flex: 1; min-height: 8px; }
+
+/* 主题块（预设 + 强调色，合并入口内的两段） */
+.theme-block { padding: 4px 0 8px; }
+.theme-block + .theme-block { border-top: 1px solid var(--line); }
+.theme-block-label {
+  padding: 6px 14px 2px;
+  font-size: 10.5px; font-family: var(--mono); letter-spacing: 0.08em;
+  color: var(--muted-dim); text-transform: uppercase;
+}
+
+/* 页面导航面板展开时拉满主侧栏剩余高度，菜单在面板内滚动 */
+.theme-switcher.acc-nav.open {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.theme-switcher.acc-nav.open > .theme-panel {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* 有顶部面板展开时，弹性占位让位给面板 */
+.app-sider.top-open .sider-grow { flex: 0; min-height: 0; }
+/* 菜单在拉满面板内滚动 */
+.theme-switcher.acc-nav.open .nav-menu { flex: 1; min-height: 0; }
+
+/* ── 二级侧边栏（右栏，2026-11）：页面自己的侧栏（会话/聊天流/任务会话/
+   设置分类导航）常驻主内容右侧——左右两栏各占各的列，无开关、进页即现。
+   面板本体挂 .app-shell 第三列。 ── */
+.subbar-rail {
+  width: 300px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 底色 = 页面底色（--bg）：卡片（--bg-panel）在其上浮起，边框/阴影可见——
+     原页内版就是这个层次（卡片浮在内容区底色上）。此前用 --bg-panel 与卡片
+     同色，卡片隐形、选中色块像直接糊在栏上（部署实测被斥「做的啥玩意」）。 */
+  background: var(--bg);
+  /* 无 border-left：栏底色与页面底色一致，分隔线没有信息量（部署实测被指「多余的分割线」）；
+     层次由浮起的卡片自身边框承担 */
+  /* 入场动效：与视图切换同族（淡入 + 右移入） */
+  animation: subbar-in 0.18s var(--ease-out);
+}
+/* 设置页右栏收窄贴合卡片：300px（为各页列表侧栏定的宽）装 200px 导航卡
+   会两侧各空 50px（部署实测被斥「看不见这么大的空隙吗」）；
+   卡片原封不动，让栏去贴合卡片宽度；紧凑化：单侧留白 8px */
+.subbar-rail-settings { width: 228px; }
+/* 设置页主区滚动条隐藏（长表单滚动仍可用）：滚动条竖在右栏 border-left 左侧，
+   被当成「多余的条」——视觉噪音，隐藏（部署实测被指「还有滚动条隐藏」） */
+.app-content:has(.pane-wrap > .settings2) { scrollbar-width: none; }
+.app-content:has(.pane-wrap > .settings2)::-webkit-scrollbar { display: none; }
+@keyframes subbar-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.subbar-rail .sider-subpanel { flex: 1; }
+/* 页面侧栏插槽：页面把自己的侧栏（会话/聊天流/任务会话/设置导航）portal 进来，占满面板。
+   全向 padding 14px：内容不贴栏边（chat-rail 原设计 272px 内边距卡片，拍平进 300px 栏
+   没有水平呼吸会左右全贴边——「什么鬼布局」截图）；上下同理不贴视口 */
+.sider-subpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 14px; }
+/* 设置分类导航在右栏：.cfg-nav 原封不动（200px 卡片全规格保留）。
+   卡片纵向吃满插槽（插槽自带 14px 留白），无多余空隙；
+   仅去掉吸顶（右栏是独立容器，无需 sticky） */
+.sider-subpanel .cfg-nav {
+  position: static;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  align-self: stretch;
+  margin: 0 auto;
+  width: 200px;
+}
+/* 右栏形态下隐藏滚动条（导航 19 项滚轮可用，视觉更干净） */
+.sider-subpanel .cfg-nav .cfg-nav-scroll { scrollbar-width: none; }
+.sider-subpanel .cfg-nav .cfg-nav-scroll::-webkit-scrollbar { display: none; }
+.sider-subpanel .chat-rail,
+.sider-subpanel .flows-rail {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+/* chat-rail 自带内边距去掉（subpanel 14px 已提供水平呼吸），避免双重 padding */
+.sider-subpanel .chat-rail { padding: 0; }
+.sider-subpanel .flows-rail { flex: 1; }
+
+/* —— 侧栏内页面侧栏的紧凑化（用户反馈：别太占空间）——
+ * 仅作用于侧栏面板内的 portal 版式；窄屏页内渲染保持原密度不动。 */
+/* 会话：面板顶部已有「会话」入口行，列表头（会话 N）与计数重复 → 隐藏 */
+.sider-subpanel .chat-rail .rail-head { display: none; }
+/* 目标区压成两行：标题行（01 交互目标 + 主智能体提示 flex 同排）+ 选择器 */
+.sider-subpanel .chat-rail .rail-section { margin-bottom: 8px; }
+/* 左标签右提示同一行：两端对齐、各自限宽截断，窄面板也不会叠字 */
+.sider-subpanel .chat-rail .rail-target-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  min-width: 0;
+}
+.sider-subpanel .chat-rail .rail-target-row .rail-label {
+  margin-bottom: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.sider-subpanel .chat-rail .rail-target-row .rail-label-en { color: var(--muted-dim); }
+.sider-subpanel .chat-rail .rail-target-row .rail-hint {
+  margin-top: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sider-subpanel .chat-rail .target-select.ant-select-single { height: 26px; }
+.sider-subpanel .chat-rail .target-select.ant-select-single .ant-select-selector { height: 26px; font-size: 12px; }
+.sider-subpanel .chat-rail .target-select.ant-select-single .ant-select-selection-item,
+.sider-subpanel .chat-rail .target-select.ant-select-single .ant-select-selection-placeholder {
+  line-height: 24px;
+  font-size: 12px;
+}
+/* 工具条贴紧目标区，列表拿回纵向空间 */
+.sider-subpanel .chat-rail .rail-toolbar { margin-bottom: 2px; }
+/* 聊天流 / 任务：去掉整块头部留白，列表贴着入口行排 */
+.sider-subpanel .flows-rail .flows-rail-head { display: none; }
+.sider-subpanel .flows-rail .flows-list { padding: 2px 2px 8px; }
+.sider-subpanel .flows-rail .flows-channel { margin-bottom: 8px; }
+
+/* 主题合并面板保持固定上限（不拉满，避免盖住状态栏） */
+.theme-switcher.theme-merged.open .theme-panel { max-height: 520px; overflow-y: auto; }
+
+/* 窄屏：主题面板随抽屉整页滚动；右栏不出现（页面侧栏仍在页内，
+ * 走原有的列表页/会话页切换） */
+@media (max-width: 860px) {
+  .theme-switcher.theme-merged.open .theme-panel { max-height: none; overflow-y: visible; }
+  .subbar-rail { display: none; }
 }

@@ -104,18 +104,30 @@ pub(crate) struct SearchBody {
 }
 
 pub(crate) async fn search_memory(State(st): State<AppState>, Json(b): Json<SearchBody>) -> impl IntoResponse {
-    let result = match &b.agent {
-        Some(agent) => st.core.memory_recall_for_agent(agent, &b.query, b.limit),
-        None => st.core.memory_recall(&b.query, b.limit),
-    };
+    // 调试检索（8.4）：语义检索启用时与对话内召回同口径（词项+语义混合），
+    // 并透出命中词项明细与语义分数数值，供记忆页调试开关呈现
+    let result = st
+        .core
+        .memory_recall_debug(&b.query, b.limit, b.agent.as_deref())
+        .await;
     match result {
         Ok(hits) => Json(json!({
             "query": b.query,
-            "hits": hits.iter().map(|h| json!({
-                "entry": serde_json::to_value(&h.entry).unwrap_or(Value::Null),
-                "score": h.score,
-                "reasons": h.reasons,
-            })).collect::<Vec<_>>()
+            "hits": hits.iter().map(|h| {
+                let mut m = json!({
+                    "entry": serde_json::to_value(&h.entry).unwrap_or(Value::Null),
+                    "score": h.score,
+                    "reasons": h.reasons,
+                });
+                // 调试视图（8.4）：命中词项明细与语义分数数值（有才透出）
+                if let Some(t) = &h.matched_terms {
+                    m["matchedTerms"] = json!(t);
+                }
+                if let Some(s) = h.semantic_score {
+                    m["semanticScore"] = json!(s);
+                }
+                m
+            }).collect::<Vec<_>>()
         }))
         .into_response(),
         Err(e) => (

@@ -52,11 +52,60 @@ mod memory_tool_tests {
         TestRig { gw, dir }
     }
 
+    /// send_file（文件投递）：工作区文件 → outbox 登记（收束时投递）；
+    /// 目录拒绝；相对路径口径与 write→outbox 一致。
+    #[tokio::test]
+    async fn 文件投递_send_file_登记与护栏() {
+        let rig = rig();
+        std::fs::write(rig.dir.join("report.md"), "# 报告\n内容").unwrap();
+        let r = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "report.md", "caption": "周报" }),
+            )
+            .await;
+        assert!(r.ok, "send_file 应成功: {:?}", r.error);
+        assert!(r.output.contains("已登记投递"));
+        // outbox 有登记（kind=file + 相对路径 + caption）
+        let items = rig.gw.store.outbox_drain("s-send").unwrap();
+        assert_eq!(items.len(), 1, "应登记一条");
+        assert_eq!(items[0]["kind"], "file");
+        assert_eq!(items[0]["path"], "report.md", "登记必须为工作区相对路径");
+        assert_eq!(items[0]["caption"], "周报");
+        // 目录 → 拒绝
+        let r2 = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "." }),
+            )
+            .await;
+        assert!(!r2.ok, "目录不得投递");
+        // 不存在 → 拒绝
+        let r3 = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "no-such.bin" }),
+            )
+            .await;
+        assert!(!r3.ok, "不存在文件不得投递");
+    }
+
     /// 通道记忆隔离（memory_isolation）：memory_write/read 必须跟随会话分区，
     /// 否则隔离平台的会话会把知识写进共享组、或读到共享组的记忆——隔离形同虚设。
     #[test]
-    fn 记忆隔离_工具读写跟随会话分区() {
-        let r = rig();
+    fn 记忆隔离_工具读写跟随会话分区() {        let r = rig();
         let mk = |title: &str, body: &str| serde_json::json!({ "kind": "fact", "title": title, "body": body });
         // 两个会话同组：shared 共享记忆；iso 开了隔离（模拟通道写入分区键）
         let shared = r.gw.store.create_session("共享会话", "t").unwrap();
@@ -136,6 +185,7 @@ mod memory_tool_tests {
             workspace: None,
             model: None,
             capabilities: None,
+            self_optimize: None,
             builtin,
             created_at: String::new(),
         }
@@ -1132,6 +1182,12 @@ mod terminal_gate_tests {
         assert!(!contains_shell_chain("curl -s \"https://x.com/a?b=1&c=2\""));
         // 引号内的管道不参与分段
         assert!(chain_allowed("echo \"a | b\" | cat"));
+        // `2>&1`：stderr 合并只读惯用法放行（部署实测：子个体查错被拒后乱绕行白耗步数）
+        assert!(!contains_shell_chain("git status --porcelain 2>&1 | head -20"));
+        assert!(chain_allowed("python3 -c \"print(1)\" 2>&1 | tail -2"));
+        // 但写重定向仍拒：`2>&1` 摘除后裸 `>` 仍在
+        assert!(contains_shell_chain("echo x > out.txt 2>&1"));
+        assert!(contains_shell_chain("cmd > file"));
     }
 
     #[test]
@@ -1509,10 +1565,10 @@ mod terminal_gate_tests {
         assert!(r.error.unwrap_or_default().contains("不在白名单"));
     }
 
-    /// risky 档：白名单外的日常命令转审批单（不等待，受阻回流但审批单已落库）
-    /// ——修复前这条路径是硬拒，agent 无从开发
+    /// risky 档：白名单外**无害**命令直通（审批经济学：无害命令全部放行，
+    /// 审批只拦真危险的东西）——修复前一律转审批，「跑个 mkdir 都要人工介入」
     #[tokio::test]
-    async fn 审批路径_risky档_白名单外命令转审批() {
+    async fn 审批路径_risky档_白名单外无害命令直通() {
         let gw = gw_with_approval("risky", 0);
         let r = gw
             .execute(
@@ -1521,22 +1577,59 @@ mod terminal_gate_tests {
                 &[ToolName::Terminal],
                 ToolName::Terminal,
                 &serde_json::json!({
-                    "command": "terraform apply"
+                    "command": "echo harmless-probe-ok"
                 }),
             )
             .await;
-        assert!(!r.ok, "未批准前不应放行");
-        let err = r.error.unwrap_or_default();
-        assert!(err.contains("审批"), "应转审批而非白名单硬拒: {err}");
-        // 审批单确实落库（用户可在面板批准）
+        assert!(r.ok, "白名单外无害命令应直通: {:?}", r.error);
+        assert!(r.output.contains("harmless-probe-ok"));
+        // 不落审批单
         let pending = gw
             .store
             .list_approvals(Some("pending"), 10)
             .unwrap_or_default();
         assert!(
-            pending.iter().any(|p| p.command.contains("terraform")),
-            "审批单应已落库"
+            !pending.iter().any(|p| p.command.contains("echo")),
+            "无害命令不应产生审批单"
         );
+    }
+
+    /// always 档：全拦语义降级为「高危必拦」——无害命令同样直通
+    #[tokio::test]
+    async fn 审批路径_always档_无害命令直通() {
+        let gw = gw_with_approval("always", 0);
+        let r = gw
+            .execute(
+                "a1",
+                "s-always",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": "echo always-harmless-ok"
+                }),
+            )
+            .await;
+        assert!(r.ok, "always 档无害命令应直通: {:?}", r.error);
+    }
+
+    /// 高危特征命令（risky/always）：照旧进审批——放行无害≠放行危险
+    #[tokio::test]
+    async fn 审批路径_always档_高危命令仍审批() {
+        let gw = gw_with_approval("always", 0);
+        let r = gw
+            .execute(
+                "a1",
+                "s-danger",
+                &[ToolName::Terminal],
+                ToolName::Terminal,
+                &serde_json::json!({
+                    "command": "git reset --hard HEAD~3"
+                }),
+            )
+            .await;
+        assert!(!r.ok, "高危命令未批准前不应放行");
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("审批"), "高危命令应转审批: {err}");
     }
 
     /// risky 档：白名单内安全命令不受影响，照常执行
@@ -2111,5 +2204,333 @@ mod session_tool_tests {
         gw.clear_session_tools("s-video");
         assert!(gw.session_tool_specs("s-video").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// 工具调用预算（agent-budget-audit）：三值熔断 / 档位联动 / 轮次恢复 / 会话清理。
+#[cfg(test)]
+mod tool_budget_tests {
+    use super::*;
+    use crate::config::ToolCallBudget;
+
+    fn gw_with(budget: ToolCallBudget) -> ToolGateway {
+        let dir = std::env::temp_dir().join(format!("exm-budget-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let sec = SecurityConfig {
+            tool_call_budget: budget,
+            terminal_timeout_secs: 5,
+            ..Default::default()
+        };
+        ToolGateway::new(&dir, store, registry, events, sec)
+    }
+
+    #[test]
+    fn 全零预算_不设限() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 0,
+            per_session: 0,
+            per_window: 0,
+            window_secs: 0,
+        });
+        assert!(gw.security.tool_call_budget.disabled());
+        for _ in 0..100 {
+            assert!(gw.consume_tool_budget("s").is_ok(), "全零 = 关闭");
+        }
+    }
+
+    #[test]
+    fn 单轮预算_熔断与恢复() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 3,
+            ..Default::default()
+        });
+        for i in 0..3 {
+            assert!(gw.consume_tool_budget("s").is_ok(), "第 {} 次应放行", i + 1);
+        }
+        let err = gw.consume_tool_budget("s").unwrap_err();
+        assert!(err.contains("单轮"), "超限说明应指明单轮: {err}");
+        // 轮次重置后恢复
+        gw.reset_turn_tool_budget("s");
+        assert!(gw.consume_tool_budget("s").is_ok(), "新轮次预算恢复");
+    }
+
+    #[test]
+    fn 会话累计_独立于轮次() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 2,
+            per_session: 3,
+            ..Default::default()
+        });
+        // 轮一 2 次
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_ok());
+        gw.reset_turn_tool_budget("s");
+        // 轮二 1 次 → 累计 3 满
+        assert!(gw.consume_tool_budget("s").is_ok());
+        let err = gw.consume_tool_budget("s").unwrap_err();
+        assert!(err.contains("累计"), "会话累计超限说明: {err}");
+        // 单轮重置不能绕过累计上限
+        gw.reset_turn_tool_budget("s");
+        assert!(gw.consume_tool_budget("s").is_err(), "累计上限跨轮生效");
+    }
+
+    #[test]
+    fn 时间窗_滑动过期() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 10,
+            per_window: 2,
+            window_secs: 1,
+            ..Default::default()
+        });
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_err(), "窗内超限");
+        // 快进时间戳:直接改计数器绕过 1 秒等待
+        {
+            let mut map = gw.tool_call_counters.lock();
+            map.get_mut("s").unwrap().window_stamps.clear();
+        }
+        assert!(gw.consume_tool_budget("s").is_ok(), "窗口滑出后恢复");
+    }
+
+    #[test]
+    fn 会话删除_计数清理() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 1,
+            ..Default::default()
+        });
+        assert!(gw.consume_tool_budget("s").is_ok());
+        assert!(gw.consume_tool_budget("s").is_err());
+        gw.clear_tool_budget("s");
+        assert!(gw.consume_tool_budget("s").is_ok(), "清理后重置");
+    }
+
+    #[test]
+    fn 档位表_chat严于computer() {
+        let full = ToolCallBudget {
+            per_turn: 48,
+            per_session: 100,
+            per_window: 40,
+            window_secs: 60,
+        };
+        let chat = crate::tools::scope_budget(&full, crate::types::ToolScope::Chat);
+        let tools = crate::tools::scope_budget(&full, crate::types::ToolScope::Tools);
+        let computer = crate::tools::scope_budget(&full, crate::types::ToolScope::Computer);
+        assert_eq!(chat.per_turn, 12, "chat = 全量 1/4");
+        assert_eq!(tools.per_turn, 24, "tools = 全量 1/2");
+        assert_eq!(computer.per_turn, 48);
+        assert!(chat.per_turn < tools.per_turn && tools.per_turn < computer.per_turn);
+        // 窗口秒数不随档位缩
+        assert_eq!(chat.window_secs, 60);
+    }
+
+    #[tokio::test]
+    async fn 执行面_超限受限结果回灌() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 1,
+            ..Default::default()
+        });
+        let dir = gw.workspace_root.clone();
+        // 第 1 次：放行（工具本身可能因参数缺失失败,但不是预算受限）
+        let r1 = gw
+            .execute_named("a1", "s-b", &[], "fs_read", &serde_json::json!({ "path": "x" }))
+            .await;
+        assert!(
+            !r1.error.clone().unwrap_or_default().contains("预算受限"),
+            "首次调用不受预算限制: {:?}",
+            r1.error
+        );
+        // 第 2 次：预算受限（不执行工具本体）
+        let r2 = gw
+            .execute_named("a1", "s-b", &[], "fs_read", &serde_json::json!({ "path": "x" }))
+            .await;
+        assert!(!r2.ok);
+        assert!(r2.error.unwrap_or_default().contains("【预算受限】"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 快照_余量可见() {
+        let gw = gw_with(ToolCallBudget {
+            per_turn: 5,
+            ..Default::default()
+        });
+        gw.consume_tool_budget("s").unwrap();
+        gw.consume_tool_budget("s").unwrap();
+        let snap = gw.tool_budget_snapshot("s");
+        assert_eq!(snap["enabled"], true);
+        assert_eq!(snap["perTurn"], 5);
+        assert_eq!(snap["turnUsed"], 2);
+    }
+}
+
+/// 命令分档闸门（agent-budget-audit 3.3）：Denied 档 off 模式也走审批。
+#[cfg(test)]
+mod tier_gate_tests {
+    use super::*;
+
+    fn gw_with_approval(mode: &str) -> ToolGateway {
+        let dir = std::env::temp_dir().join(format!("exm-tier-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let sec = SecurityConfig {
+            exec_approval: mode.into(),
+            approval_wait_secs: 0, // 不等待：直接受阻回流
+            terminal_timeout_secs: 5,
+            ..Default::default()
+        };
+        ToolGateway::new(&dir, store, registry, events, sec)
+    }
+
+    #[tokio::test]
+    async fn 破坏性命令_off档也落审批() {
+        let gw = gw_with_approval("off");
+        // rm：白名单外 + Denied → off 档不再硬拒，落 [红线] 审批单
+        let r = gw
+            .execute_named(
+                "a1",
+                "s-tier",
+                &[ToolName::Terminal],
+                "terminal",
+                &serde_json::json!({ "command": "rm -rf /tmp/cache-x" }),
+            )
+            .await;
+        // approval_wait_secs=0 → 受阻回流（不是执行成功，也不是白名单硬拒文案）
+        assert!(
+            !r.error.clone().unwrap_or_default().contains("不在白名单"),
+            "Denied 命令不走白名单硬拒: {:?}",
+            r.error
+        );
+        // 审批单已落库且带红线标记
+        let pending = gw.store.list_approvals(Some("pending"), 10).unwrap();
+        assert!(
+            pending.iter().any(|a| a.command.contains("[红线]") && a.command.contains("rm -rf")),
+            "应落 [红线] 审批单: {:?}",
+            pending.iter().map(|a| a.command.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn 白名单受控命令_off档照旧直通() {
+        let gw = gw_with_approval("off");
+        // cat 是 Safe 档 + 白名单内 → off 直通执行（历史行为不变）
+        let r = gw
+            .execute_named(
+                "a1",
+                "s-tier2",
+                &[ToolName::Terminal],
+                "terminal",
+                &serde_json::json!({ "command": "echo hello-tier" }),
+            )
+            .await;
+        assert!(r.ok, "echo 应直通: {:?}", r.error);
+        assert!(r.output.contains("hello-tier"));
+    }
+}
+
+/// 主动搜索纪律注入门控（proactive-search）：ready × proactive 矩阵
+#[cfg(test)]
+mod search_discipline_tests {
+    use super::*;
+
+    fn search_cfg(provider: &str, key: &str, proactive: bool) -> crate::config::SearchConfig {
+        crate::config::SearchConfig {
+            provider: provider.into(),
+            endpoint: String::new(),
+            api_key: key.into(),
+            max_results: 5,
+            proactive,
+        }
+    }
+
+    fn gw_with(search: crate::config::SearchConfig) -> ToolGateway {
+        let dir = std::env::temp_dir().join(format!("exm-sd-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        ToolGateway::new(&dir, store, registry, events, Default::default()).with_search(search)
+    }
+
+    #[test]
+    fn 注入门控矩阵() {
+        // ready + proactive → 注入
+        let gw = gw_with(search_cfg("tavily", "k-1", true));
+        assert!(gw.search_ready(), "后端就绪");
+        assert!(gw.search_discipline_ready(), "就绪且开启 → 注入");
+        // ready + 关闭 → 不注入（用户显式只要被动搜索）
+        let gw2 = gw_with(search_cfg("tavily", "k-1", false));
+        assert!(gw2.search_ready());
+        assert!(!gw2.search_discipline_ready(), "显式关闭 → 不注入");
+        // 未配置后端：注入与否取决于浏览器可探测性（browser-search 通路）
+        let gw3 = gw_with(search_cfg("", "", true));
+        assert!(!gw3.search_ready());
+        assert_eq!(
+            gw3.search_discipline_ready(),
+            gw3.browser_ready(),
+            "未配置后端时浏览器可用即注入（浏览器搜索通路）"
+        );
+        // proactive 默认 true（serde 兼容旧配置）
+        let legacy: crate::config::SearchConfig =
+            serde_json::from_str(r#"{"provider":"tavily","endpoint":"","apiKey":"k","maxResults":5}"#).unwrap();
+        assert!(legacy.proactive, "旧配置缺字段默认开");
+        // 浏览器搜索引擎缺省 bing（serde 兼容旧配置）
+        let legacy_browser: crate::config::BrowserConfig =
+            serde_json::from_str(r#"{"executable":"","headless":true,"timeoutSecs":30,"maxChars":8000}"#).unwrap();
+        assert_eq!(legacy_browser.search_engine, "bing", "旧 browser 配置缺字段默认 bing");
+    }
+}
+
+/// 浏览器搜索（browser-search）：真实拉起浏览器导航搜索页。
+/// 环境无浏览器时跳过（find_browser 探测）——CI 与本机均可跑。
+#[cfg(test)]
+mod browser_search_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn 浏览器搜索_返回结果或降级正文() {
+        let dir = std::env::temp_dir().join(format!("exm-bs-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, Default::default());
+        if !gw.browser_ready() {
+            eprintln!("    [skip] 环境无浏览器，跳过浏览器搜索实测");
+            return;
+        }
+        let r = gw
+            .execute_named(
+                "a1",
+                "s-browser-search",
+                &[ToolName::Browser],
+                "browser",
+                &serde_json::json!({ "op": "search", "query": "rust programming language" }),
+            )
+            .await;
+        // 网络可达：要么结构化结果、要么降级整页正文；两者都算搜索通路工作
+        if r.ok {
+            let text = r.output;
+            assert!(
+                text.contains("结果") || text.contains("回退整页正文"),
+                "应含结果列表或降级标注: {text}"
+            );
+            // 结构化结果形态：编号列表 + URL（降级路径另有标注）
+            assert!(
+                text.contains("https://"),
+                "结构化结果应含 URL: {}",
+                &text.chars().take(200).collect::<String>()
+            );
+        } else {
+            // 无外网环境：导航失败可接受，但错误信息应可理解
+            let err = r.error.unwrap_or_default();
+            assert!(!err.is_empty(), "失败也要有原因");
+            println!("    [browser-search] 网络不可达: {err}");
+        }
     }
 }
