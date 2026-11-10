@@ -2524,7 +2524,7 @@ mod browser_search_tests {
             assert!(
                 text.contains("https://"),
                 "结构化结果应含 URL: {}",
-                &text.chars().take(200).collect::<String>()
+                text.chars().take(200).collect::<String>()
             );
         } else {
             // 无外网环境：导航失败可接受，但错误信息应可理解
