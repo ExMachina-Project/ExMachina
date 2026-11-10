@@ -56,8 +56,8 @@ jobs:
             artifact: exmachina-windows-x64.zip
           - os: ubuntu-22.04
             artifact: exmachina-linux-x64.tar.gz
-          # macOS 暂停随版发布：runner 被平台侧拒配（job 秒取消，4 次复现），
-          # 解禁后恢复此条目即可。v0.6.2 的 mac 产物仍可从历史 Release 下载
+          - os: macos-14
+            artifact: exmachina-macos-arm64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -122,7 +122,8 @@ jobs:
             artifact: exmachina-desktop-windows-x64-setup.exe
           - os: ubuntu-22.04
             artifact: exmachina-desktop-linux-x64.AppImage
-          # macOS 暂停随版发布（同 server 矩阵注记），解禁后恢复
+          - os: macos-14
+            artifact: exmachina-desktop-macos-arm64.dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
