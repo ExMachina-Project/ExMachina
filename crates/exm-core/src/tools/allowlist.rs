@@ -535,6 +535,8 @@ const TERMINAL_ALLOW: &[AllowRule] = &[
 ///   （危险命令藏在任何一段都会被拒，攻击面与单命令一致）
 /// · 逃逸/写入语义（` $( > < &）：白名单管不住（命令替换绕过解析、
 ///   重定向写文件、后台执行），一律拒绝
+/// 例外：`2>&1`（stderr 合并进 stdout）是只读诊断惯用法（`cmd 2>&1 | head`），
+/// 不写文件不逃逸——放行（部署实测：子个体查错被拒后绕行探测，步数白耗）。
 const SHELL_CHAIN_SEPARATORS: &[&str] = &["&&", "||", "|", ";"];
 const SHELL_ESCAPE_MARKS: &[&str] = &["`", "$(", ">", "<", "&"];
 
@@ -563,7 +565,14 @@ pub(crate) fn strip_quoted(cmd: &str) -> String {
 
 pub(crate) fn contains_shell_chain(cmd: &str) -> bool {
     let bare = strip_quoted(cmd);
+    // `2>&1` 先摘除（stderr 合并是只读惯用法；裸 `>` `<` `&` 仍走拦截）
+    let bare = replace_all(&bare, "2>&1", "");
     SHELL_ESCAPE_MARKS.iter().any(|m| bare.contains(m))
+}
+
+/// 字面替换（无依赖 stdstr::replace 的等价；处理 &str → String 已在上面完成）
+fn replace_all(s: &str, from: &str, to: &str) -> String {
+    s.replace(from, to)
 }
 
 /// 链式命令分段（引号感知）：`a | b && c` → ["a", "b", "c"]。

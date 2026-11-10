@@ -1120,18 +1120,30 @@ impl Core {
         });
     }
 
+    /// 通用会话事件广播 + 落事件库（task_queue.updated 等运行时状态面；
+    /// 与 ToolGateway::emit_and_persist 同口径——广播供 WS 实时、落库供事件页/刷新回放）
+    pub fn emit_session_event(&self, session_id: &str, kind: &str, payload: serde_json::Value) {
+        let evt = crate::types::CoreEvent {
+            kind: kind.to_string(),
+            session_id: session_id.to_string(),
+            payload,
+        };
+        let _ = self.events.send(evt.clone());
+        let env = crate::types::Envelope::new(
+            format!("session.{session_id}.events"),
+            "core",
+            "broadcast",
+            "event",
+            session_id.to_string(),
+            serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
+        );
+        let _ = self.store.append_event(&env);
+    }
+
     /// 入站消毒审计事件（inbound-sanitization）：广播 + 落事件库（事件页可查）。
     /// payload 只记模式摘要（通道/账号/模式/处置），MUST NOT 含原文全文。
     pub fn emit_sanitize_finding(&self, payload: serde_json::Value) {
         self.orchestrator.read().emit("", "sanitize.finding", payload);
-    }
-
-    /// 通用会话事件广播 + 落事件库（task_queue.updated 等运行时状态面；
-    /// 与 Orchestrator::emit 同口径——广播供 WS 实时、落库供事件页/刷新回放。
-    /// gateway 侧动态工具（task__queue / plan__mode）经此发会话级事件，
-    /// 不必绕道 orchestrator() 取锁）
-    pub fn emit_session_event(&self, session_id: &str, kind: &str, payload: serde_json::Value) {
-        self.orchestrator().emit(session_id, kind, payload);
     }
 
     /// 回滚检查点：`date` 为空取最近一份；返回被覆盖的文件相对路径
