@@ -2984,6 +2984,20 @@ pub fn build_orchestrator(
     remote: Option<Arc<dyn crate::remote::RemoteExecutor>>,
     cron: Option<Arc<CronStore>>,
 ) -> anyhow::Result<Orchestrator> {
+    // 启动期推理治理（anti-runaway-thinking 部署固化）：进程级 effort / token cap
+    // 经环境变量 EXM_REASONING_EFFORT / EXM_REASONING_TOKEN_CAP 注入——否则容器
+    // 重启即回端点默认，「响应太慢」随每次部署复发（effort 是进程内存态）。
+    // 运行时仍可经 /api/llm/effort 覆盖（进程内存优先于启动环境）。
+    if let Ok(v) = std::env::var("EXM_REASONING_EFFORT") {
+        if !v.trim().is_empty() {
+            crate::provider::set_reasoning_effort(Some(v.trim()));
+        }
+    }
+    if let Ok(v) = std::env::var("EXM_REASONING_TOKEN_CAP") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            crate::provider::set_reasoning_token_cap(Some(n));
+        }
+    }
     // 全局通道：有端点与密钥即真实推理；未配置时——测试替身模式给替身，产品模式给「未配置」指引通道
     let provider: Arc<dyn LlmProvider> = {
         let mut keys = cfg.llm.api_keys.clone();
