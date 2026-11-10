@@ -3,6 +3,7 @@
  * 字段定义来自后端 config_schema()；LLM 接入在「提供商」页维护。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Alert, Button, Input, InputNumber, message, Select, Switch, Card, Tag } from "antd";
 import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DeleteOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import { useExm } from "../store";
@@ -13,6 +14,8 @@ import { PageHeader } from "../components/PageHeader";
 import { MaskedPasswordInput } from "../components/MaskedInput";
 import { api, limitsStats, sanitizeStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../api";
 import { loadNotifyPrefs, saveNotifyPrefs, type NotifyPrefs } from "../store";
+import { useSubbarSlot } from "../components/Subbar";
+import { useIsNarrow } from "../useIsNarrow";
 
 /** 分组元数据。ui 是本地偏好分区，不属于后端 config schema */
 const SECTIONS: Record<string, { icon: React.ReactNode; titleKey: TKey; descKey: TKey }> = {
@@ -236,6 +239,9 @@ export function SettingsView(): React.ReactElement {
   const setLang = useLang((s) => s.setLang);
   const setStream = useTheme((s) => s.setStream);
   const t = useT();
+  // 分类导航挂右栏（subbar-rail，与对话/聊天/任务页同机制）；窄屏回落页内
+  const subbarSlot = useSubbarSlot();
+  const narrow = useIsNarrow();
   const [schema, setSchema] = useState<ConfigSchema | null>(null);
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [selected, setSelected] = useState<string>("ui");
@@ -319,9 +325,10 @@ export function SettingsView(): React.ReactElement {
     <div className="pane-wrap">
       <PageHeader en="CONFIG" title={t("settings.title")} />
       <div className="settings2">
-        {/* 左侧分类导航：「界面」本地偏好置顶 + 后端 schema 分组 + 版本垫底。
-            外层 cfg-nav 是等高卡片（与右侧面板 stretch 对齐）；
-            内层 cfg-nav-scroll 承担 sticky 吸顶与自身滚动 */}
+        {/* 分类导航：桌面端 portal 到右栏（subbar-rail，与对话/聊天/任务页同机制）；
+            窄屏回落页内顶部（settings2 变纵排）。「界面」本地偏好置顶 + 后端
+            schema 分组 + 版本垫底；内层 cfg-nav-scroll 承担自身滚动 */}
+        {(narrow || !subbarSlot) && (
         <nav className="cfg-nav">
         <div className="cfg-nav-scroll">
           {/* 载入中：分类列表尚不可知，给骨架而非空白（空导航会被当成「配置项没了」） */}
@@ -353,6 +360,7 @@ export function SettingsView(): React.ReactElement {
           </button>
         </div>
         </nav>
+        )}
         {/* 右侧面板：仅当前分类 */}
         <section className="cfg-panel">
         {schemaErr ? (
@@ -474,6 +482,39 @@ export function SettingsView(): React.ReactElement {
         )}
         </section>
       </div>
+      {/* 分类导航的右栏 portal 版：与页内 .cfg-nav 完全同构（200px 卡片原样），仅位置不同 */}
+      {!narrow && subbarSlot && createPortal(
+        <nav className="cfg-nav">
+          <div className="cfg-nav-scroll">
+            {schemaLoading && !schemaErr &&
+              Array.from({ length: 8 }, (_, i) => (
+                <span key={`sk-r-${i}`} className="cfg-nav-item cfg-nav-skeleton" />
+              ))}
+            <button
+              className={`cfg-nav-item ${selected === "ui" ? "on" : ""}`}
+              onClick={() => setSelected("ui")}
+            >
+              <span className="cfg-nav-icon">{SECTIONS.ui.icon}</span>
+              <span>{t("sec.ui")}</span>
+            </button>
+            {groups.map((g) => (
+              <button
+                key={g.key}
+                className={`cfg-nav-item ${g.key === current?.key ? "on" : ""}`}
+                onClick={() => setSelected(g.key)}
+              >
+                <span className="cfg-nav-icon">{SECTIONS[g.key]?.icon ?? <SettingOutlined />}</span>
+                <span>{SECTIONS[g.key] ? t(SECTIONS[g.key]!.titleKey) : g.label}</span>
+              </button>
+            ))}
+            <button className={`cfg-nav-item ${selected === "version" ? "on" : ""}`} onClick={() => setSelected("version")}>
+              <span className="cfg-nav-icon">{SECTIONS.version.icon}</span>
+              <span>{t("sec.version")}</span>
+            </button>
+          </div>
+        </nav>,
+        subbarSlot,
+      )}
     </div>
   );
 }

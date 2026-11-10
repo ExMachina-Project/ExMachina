@@ -1,6 +1,6 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Tag, message } from "antd";
+import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
 import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { createPortal } from "react-dom";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
@@ -8,7 +8,7 @@ import { useSubbarSlot } from "../components/Subbar";
 
 import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
 import { agentIdEn } from "../models";
-import { isAutoSessionTitle } from "../session";
+import { isAutoSessionTitle, isTaskSideTitle } from "../session";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
 import { relativeTime } from "../time";
@@ -178,8 +178,9 @@ export function ChatView(): React.ReactElement {
     toggleSessionPin, unreadCounts, markAllRead,
     loadGroups,
     sessionsLoaded,
-    plan, planApplied, planPending, decidePlan, setPlanMode,
+    plan, planApplied, planPending, decidePlan,
     todo,
+    taskQueue,
     spawns, clearSpawns,
     graph,
   } = useExm();
@@ -530,9 +531,9 @@ export function ChatView(): React.ReactElement {
     () =>
       sessions
         // 对话页 = 用户直接发起的会话（信息架构 2026-11）：通道流会话（channel:）
-        // 与系统任务会话（job-* / 心跳巡检）不在这里——分别在「聊天」「任务」页，
-        // 无输入框；对话页每条会话都可输入。
-        .filter((s) => !s.title.startsWith("channel:") && !isAutoSessionTitle(s.title))
+        // 与任务侧会话（job-* / 心跳巡检 / 派发子会话 sub:）不在这里——分别在
+        // 「聊天」「任务」页，无输入框；对话页每条会话都可输入。
+        .filter((s) => !s.title.startsWith("channel:") && !isTaskSideTitle(s.title))
         .filter(
           (s) =>
             !sessionFilter ||
@@ -583,7 +584,7 @@ export function ChatView(): React.ReactElement {
     if (narrow || !sessionId) return;
     const raw = sessions.find((s) => s.id === sessionId);
     if (!raw) return; // 全表未及（新会话竞态）——不动
-    if (!raw.title.startsWith("channel:") && !isAutoSessionTitle(raw.title)) return;
+    if (!raw.title.startsWith("channel:") && !isTaskSideTitle(raw.title)) return;
     if (visibleSessions.length > 0) void selectSession(visibleSessions[0].id);
   }, [narrow, sessionId, sessions, visibleSessions, selectSession]);
 
@@ -901,18 +902,16 @@ export function ChatView(): React.ReactElement {
           <span className={`status-led ${wsConnected ? "ok" : "bad"}`} style={{ marginLeft: "auto" }} />
         </div>
         {!wsConnected && <Alert type="warning" title={t("chat.wsDown")} showIcon className="ws-alert app-banner" />}
-        {/* 计划模式（spec plan-mode：WebUI 跨端审批呈现）——模式开关 + 计划卡片 */}
+        {/* 计划模式（plan-mode-tools）：模式决定权归 agent——用户对话中要求先计划、
+            或 agent 判断任务复杂/高风险时自行切换（plan__mode 工具）。
+            UI 只呈现状态徽标（plan.mode 事件实时刷新），不再提供硬开关；
+            计划批准后自动回放执行并回执行模式，全程无需手动切换 */}
         <div className="plan-mode-bar">
-          <Segmented
-            size="small"
-            value={plan?.mode ?? "execute"}
-            onChange={(v) => void setPlanMode(v === "plan")}
-            options={[
-              { value: "execute", label: t("plan.modeExecute") },
-              { value: "plan", label: t("plan.modePlan") },
-            ]}
-          />
-          {plan?.mode === "plan" && <span className="plan-mode-hint">{t("plan.modeHint")}</span>}
+          {plan?.mode === "plan" && (
+            <span className="plan-mode-hint" title={t("plan.modeHint")}>
+              📋 {t("plan.modePlan")}
+            </span>
+          )}
           {/* 任务清单进度（spec agent-todo）：todo.updated 实时刷新 */}
           {todo && todo.count > 0 && (
             <span className={`todo-progress${todo.allDone ? " todo-all-done" : ""}`}>
@@ -933,6 +932,19 @@ export function ChatView(): React.ReactElement {
                 {it.status === "done" ? "✅" : it.status === "in_progress" ? "🔄" : "⬜"} {it.content}
               </span>
             ))}
+          </div>
+        )}
+        {/* 任务队列（task-queue）：智能体入队的新任务（并行/排队）实时状态条 */}
+        {taskQueue && (taskQueue.running > 0 || taskQueue.queued > 0) && (
+          <div className="tq-strip">
+            {taskQueue.items
+              .filter((it) => it.status === "queued" || it.status === "running")
+              .map((it) => (
+                <span key={it.id} className={`tq-chip tq-${it.status}`}>
+                  {it.status === "running" ? "⚙️" : "⏳"}
+                  {it.runMode === "parallel" ? "[并行]" : "[队列]"} {it.task.length > 40 ? `${it.task.slice(0, 40)}…` : it.task}
+                </span>
+              ))}
           </div>
         )}
         {/* 后台子任务卡（spec subagent-spawn WebUI 呈现）：运行中 spinner + 终态展开 + 清除 */}

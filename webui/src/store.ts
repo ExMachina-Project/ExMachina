@@ -12,7 +12,7 @@ import type {
   TaskGraph,
   ToolCallItem,
 } from "./types";
-import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type RecallHit, type SpawnBgItem, type TodoItem } from "./api";
+import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type QueuedTaskItem, type RecallHit, type SpawnBgItem, type TodoItem } from "./api";
 import { tr } from "./i18n/core";
 
 export interface TimelineItem {
@@ -66,11 +66,12 @@ interface ExmState {
   planDirtyAt: number;
   refreshPlan: (sessionId: string) => Promise<void>;
   decidePlan: (action: "approve" | "reject" | "setMode", plan?: boolean) => Promise<void>;
-  setPlanMode: (on: boolean) => Promise<void>;
   /** 任务清单（spec agent-todo）：todo.updated 事件快照 */
   todo: { count: number; doneCount: number; allDone: boolean; items: TodoItem[] } | null;
   /** 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件维护 */
   spawns: SpawnBgItem[];
+  /** 任务队列（task-queue）：task_queue.updated 事件快照（切会话/刷新后回放恢复） */
+  taskQueue: { running: number; queued: number; items: QueuedTaskItem[] } | null;
   /** 清除全部后台子任务卡（终态收讫后手动清理） */
   clearSpawns: () => void;
   timeline: TimelineItem[];
@@ -345,6 +346,7 @@ export const useExm = create<ExmState>((set, get) => ({
   planDirtyAt: 0,
   todo: null,
   spawns: [],
+  taskQueue: null,
   timeline: [],
   timelineSession: null,
   lastRecall: [],
@@ -464,6 +466,7 @@ export const useExm = create<ExmState>((set, get) => ({
       planPending: false,
       todo: null,
       spawns: [],
+      taskQueue: null,
       timeline: [],
       timelineSession: null,
       running: false,
@@ -484,6 +487,21 @@ export const useExm = create<ExmState>((set, get) => ({
               doneCount: Number(d.doneCount ?? 0),
               allDone: Boolean(d.allDone),
               items: (d.items ?? []) as unknown as TodoItem[],
+            },
+          });
+          break;
+        }
+      }
+      // 任务队列回放：快照只由事件维护（与 todo 同口径），刷新后从事件尾恢复
+      for (let i = evts.length - 1; i >= 0; i--) {
+        const p = evts[i].payload as { type?: string; payload?: Record<string, unknown> } | undefined;
+        if (p?.type === "task_queue.updated") {
+          const d = (p.payload ?? {}) as Record<string, unknown>;
+          set({
+            taskQueue: {
+              running: Number(d.running ?? 0),
+              queued: Number(d.queued ?? 0),
+              items: (d.items ?? []) as unknown as QueuedTaskItem[],
             },
           });
           break;
@@ -625,10 +643,6 @@ export const useExm = create<ExmState>((set, get) => ({
     }
   },
 
-  setPlanMode: async (on) => {
-    await get().decidePlan("setMode", on);
-  },
-
   clearSpawns: () => set({ spawns: [] }),
 
   navRequest: null,
@@ -743,6 +757,19 @@ export const useExm = create<ExmState>((set, get) => ({
       }
       return;
     }
+    // 任务队列（task-queue）：入队/出队/状态回填实时快照
+    if (evt.type === "task_queue.updated") {
+      if (evt.sessionId === get().sessionId) {
+        set({
+          taskQueue: {
+            running: Number(p.running ?? 0),
+            queued: Number(p.queued ?? 0),
+            items: (p.items ?? []) as unknown as QueuedTaskItem[],
+          },
+        });
+      }
+      return;
+    }
     // 后台子任务卡（spec subagent-spawn WebUI 呈现）：started 建条目 / finished 收终态
     if (evt.type === "spawn.started" || evt.type === "spawn.finished") {
       if (evt.sessionId !== get().sessionId) return;
@@ -784,6 +811,11 @@ export const useExm = create<ExmState>((set, get) => ({
           break;
         case "plan.pending":
           set({ planPending: true });
+          void get().refreshPlan(sid);
+          break;
+        case "plan.mode":
+          // agent 经 plan__mode 工具切换模式（plan-mode-tools）：plan 接口返回 mode 位，
+          // 防抖拉取刷新徽标（reason 由工具结果呈现给用户，前端不重复展示）
           void get().refreshPlan(sid);
           break;
         case "plan.approved":
