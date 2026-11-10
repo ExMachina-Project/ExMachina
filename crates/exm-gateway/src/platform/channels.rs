@@ -16,8 +16,8 @@ use super::*;
 ///   读取字幕/简介与评论 → 生成评论/回复 → 可选真发；默认 dry-run）；
 /// - `rss`：RSS/Atom 订阅阅读（plugins/rss，按配置轮询新条目 → 阅读简报 → 可选推送）。
 pub const CHANNEL_PLATFORMS: &[&str] = &[
-    "webhook", "telegram", "qqbot", "napcat", "discord", "slack", "matrix", "qq", "wechat",
-    "bilibili", "youtube", "rss",
+    "webhook", "telegram", "qqbot", "napcat", "snowluma", "discord", "slack", "matrix", "qq",
+    "wechat", "bilibili", "youtube", "rss",
 ];
 
 /// 通道定义：外部消息源接入点。平台 = `type`（webhook / telegram / qqbot / napcat …）。
@@ -459,7 +459,8 @@ pub async fn bili_qr_poll(Path(qrcode_key): Path<String>) -> impl IntoResponse {
 pub(crate) fn secret_config_keys(kind: &str) -> Vec<&'static str> {
     let static_keys: &[&'static str] = match kind {
         "qqbot" => &["appSecret"],
-        "napcat" => &["token"],
+        // napcat / snowluma 同为 OneBot 11 正向 WS：访问令牌敏感键一致
+        "napcat" | "snowluma" => &["token"],
         // Slack Socket Mode 应用级令牌（xapp-）；机器人令牌走顶层 token
         "slack" => &["appToken"],
         // B 站：登录态 Cookie（SESSDATA 鉴权 / biliJct 为 CSRF）；YouTube：API Key / OAuth
@@ -681,10 +682,12 @@ pub async fn create_channel(
         )
             .into_response();
     }
-    if platform == "napcat" && config.get("url").is_none_or(|v| v.trim().is_empty()) {
+    if matches!(platform.as_str(), "napcat" | "snowluma")
+        && config.get("url").is_none_or(|v| v.trim().is_empty())
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "napcat 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" })),
+            Json(json!({ "error": "napcat/snowluma 通道需要 config.url（OneBot 11 正向 WebSocket 地址）" })),
         )
             .into_response();
     }

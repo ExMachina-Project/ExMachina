@@ -256,9 +256,15 @@ pub fn spawn_supervisor(core: Arc<Core>) {
 }
 
 async fn reconcile(core: &Arc<Core>) {
+    // snowluma 同走本适配器：SnowLuma 是 OneBot 11 协议端（NapCat 同类替代），
+    // 正向 WS 接法与事件/动作契约完全一致——只区分 kind，运行链路零分叉。
     let desired: Vec<Channel> = crate::platform::load_channels(core)
         .into_iter()
-        .filter(|c| c.kind == "napcat" && c.enabled && c.cfg("url").is_some())
+        .filter(|c| {
+            matches!(c.kind.as_str(), "napcat" | "snowluma")
+                && c.enabled
+                && c.cfg("url").is_some()
+        })
         .collect();
 
     let mut guards = conns().lock();

@@ -81,6 +81,18 @@ const PLATFORMS: ChanPlat[] = [
     ],
   },
   {
+    key: "snowluma",
+    color: undefined,
+    tag: "SnowLuma",
+    labelKey: "channels.plat.snowluma",
+    helpKey: "channels.platHelp.snowluma",
+    replyBuiltin: true,
+    fields: [
+      { key: "url", labelKey: "channels.f.napUrl", required: true, ph: "ws://127.0.0.1:3001", helpKey: "channels.f.napUrlHelp" },
+      { key: "token", labelKey: "channels.f.napToken", secret: true, helpKey: "channels.f.napTokenHelp" },
+    ],
+  },
+  {
     key: "telegram",
     color: undefined,
     tag: "Telegram",

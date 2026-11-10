@@ -102,7 +102,7 @@ pub(crate) async fn push_channel_text(ch: &Channel, text: &str) -> bool {
                 .map(|r| r.status().is_success())
                 .unwrap_or(false)
         }
-        // napcat/qqbot：长连接适配器自有会话内出站，推送语义暂不支持（诚实返回 false）
+        // napcat / snowluma / qqbot：长连接适配器自有会话内出站，推送语义暂不支持（诚实返回 false）
         _ => false,
     }
 }
@@ -215,7 +215,8 @@ pub(crate) fn caps(kind: &str) -> ChannelCaps {
             voice: false,
             typing: false,
         },
-        "napcat" => ChannelCaps {
+        // napcat / snowluma：OneBot 11 正向 WS（图片/文件/语音出站齐备；无标准 typing 动作）
+        "napcat" | "snowluma" => ChannelCaps {
             image: true,
             file: true,
             voice: true,

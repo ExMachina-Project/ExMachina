@@ -885,6 +885,8 @@ export const en: Partial<Dict> = {
   "channels.tag.wechat": "WeChat Bridge",
   "channels.platHelp.qqbot": "Official bot on q.qq.com: fill in AppID / AppSecret from the bot console; WebSocket long connection, no public IP needed; replies to group @-mentions and private chats.",
   "channels.platHelp.napcat": "Connects to the WS server of a OneBot 11 implementation (NapCat / Lagrange); enable it in NapCat network settings. Group and private messages supported.",
+  "channels.platHelp.snowluma": "Connects to the WS server of SnowLuma (a OneBot 11 protocol implementation); enable the WebSocket server in SnowLuma settings. Group and private messages supported.",
+  "channels.plat.snowluma": "SnowLuma / OneBot 11 (forward WebSocket)",
   "channels.platHelp.telegram": "Bot token from BotFather; long-polls for messages, replies via the native API.",
   "channels.platHelp.discord": "Create an app in the Developer Portal and copy the bot token; enable the privileged MESSAGE_CONTENT intent or server-channel text arrives empty (DMs and @mentions still work).",
   "channels.platHelp.slack": "Enable Socket Mode with the connections:write scope: the bot token (xoxb-) posts replies, the app-level token (xapp-) opens the socket.",
