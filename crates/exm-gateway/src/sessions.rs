@@ -46,17 +46,18 @@ pub(crate) async fn search_sessions(
     }
 }
 
-/// 当前模型思考强度
+/// 当前模型思考强度与推理 token 上限（None = 默认安全网 16384）
 pub(crate) async fn get_effort() -> impl IntoResponse {
     Json(json!({
         "effort": exm_core::provider::reasoning_effort(),
         "reasoningTokenCap": exm_core::provider::reasoning_token_cap(),
+        "effectiveCap": exm_core::provider::reasoning_token_cap().unwrap_or(16384),
     }))
 }
 
 /// 设置模型思考强度（进程级，重启后回到端点默认；客户端可自行记忆并在启动时重设）。
-/// body.reasoningTokenCap：推理 token 硬上限（≥1024 生效；null/缺省 = 端点默认）——
-/// 对推理模型（reasoning+content 共享预算）这是防「思考无限烧」的唯一硬闸。
+/// body.reasoningTokenCap：推理 token 硬上限（≥1024 生效；null/缺省 = 默认安全网
+/// 16384）——对推理模型（reasoning+content 共享预算）这是防「思考无限烧」的硬闸。
 pub(crate) async fn put_effort(Json(body): Json<EffortBody>) -> impl IntoResponse {
     if let Some(raw) = body.effort.as_deref() {
         exm_core::provider::set_reasoning_effort(Some(raw));
@@ -68,6 +69,7 @@ pub(crate) async fn put_effort(Json(body): Json<EffortBody>) -> impl IntoRespons
         "ok": true,
         "effort": exm_core::provider::reasoning_effort(),
         "reasoningTokenCap": exm_core::provider::reasoning_token_cap(),
+        "effectiveCap": exm_core::provider::reasoning_token_cap().unwrap_or(16384),
     }))
 }
 
