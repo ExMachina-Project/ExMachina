@@ -757,7 +757,10 @@ textarea.ant-input:focus,
   color: var(--accent);
 }
 .msg-user .msg-head b { color: var(--text-hi); }
-.stmt-line { margin: 4px 0; line-height: 1.75; }
+.stmt-line { margin: 4px 0; line-height: 1.75; overflow-wrap: anywhere; }
+/* 聊天流纯文本直排（stmt-plain）：保换行结构 + 长不可断串（URL/base64/
+ * 长路径/代码原文）任意断行——否则会撑出内容区横向滚动（部署实测） */
+.stmt-plain { white-space: pre-wrap; }
 .stmt-tag { margin-right: 6px; }
 .stmt-level { margin-left: 6px; font-family: var(--mono); font-size: 11px; }
 
@@ -3850,10 +3853,11 @@ mark.search-hit {
   display: flex; align-items: baseline; gap: 10px;
   padding: 14px 18px 10px;
   border-bottom: 1px solid var(--line);
+  min-width: 0;
 }
-.flows-thread-name { font-size: 15px; font-weight: 600; color: var(--text-hi); }
+.flows-thread-name { font-size: 15px; font-weight: 600; color: var(--text-hi); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flows-thread-meta { font-size: 11px; color: var(--muted-dim); }
-.flows-messages { flex: 1; overflow-y: auto; padding: 14px 18px; min-height: 0; }
+.flows-messages { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 14px 18px; min-height: 0; }
 .flows-msg { margin-bottom: 14px; }
 .flows-msg-head {
   display: flex; align-items: baseline; gap: 8px;
