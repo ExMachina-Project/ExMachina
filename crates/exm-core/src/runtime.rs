@@ -27,6 +27,12 @@ fn tool_feedback(name: &str, r: &crate::tools::ToolResult) -> String {
 }
 
 /// 单智能体循环步数上限解析（三级覆盖）：
+/// 节点目标简述（降级报告用）：objective 优先，回落 title。
+fn node_objective_of(order: &DispatchOrder) -> String {
+    let t: String = order.objective.chars().take(80).collect();
+    t
+}
+
 /// 个体 maxSteps > 作用域档位偏好（Chat 档取全局半数作对话轮保护）> 全局默认。
 /// 全局 0 值视为无效回落 24（与 ToolGateway::chat_max_steps 同口径）。
 /// 工具面清单注入（防「能力幻觉」拒绝）：本轮实际生效的工具名逐个列出。
@@ -151,6 +157,7 @@ impl AgentRuntime {
         let mut usage_prompt: u64 = 0;
         let mut usage_completion: u64 = 0;
         let mut last_model = String::new();
+        let mut budget_warned = false;
         // 原生 function calling：按白名单生成工具 schema + 该个体可见的 MCP 工具
         // （web_search / computer 仅在后端就绪时下发——不承诺不存在的能力；
         //   文件记忆模式下 memory_write/link 必然失败，同样不下发）
@@ -189,11 +196,30 @@ impl AgentRuntime {
                 "【要求】以下是本节点的调度指令（DispatchOrder）。严格在边界内执行，最终只输出 SyncReport JSON。\n```json\n{order_json}\n```"
             )),
         ];
+        // 步数预算预告（unit-step-budget）：步数是硬上限，用完即失败回流——
+        // 模型不知道预算多大就会在外围探索里烧完步数（部署实测：interaction-agent
+        // 16 步全花在「找怎么发审批」的路上的外围翻查，44 个工具调用零收束）。
+        // 开局告知预算 + 提前规划；临近耗尽强提醒立即收束。
+        let total_steps = max_steps;
+        messages.push(ChatMessage::user(format!(
+            "【步数预算】本次执行最多 {total_steps} 轮「思考-调工具」。请规划好路径尽快达成目标：探索类操作尽量合并（一次 list 看全目录而非逐层翻），避免反复试错；第 {} 轮起必须开始收束，产出 SyncReport JSON。",
+            total_steps.saturating_sub(2).max(1)
+        )));
 
         for _step in 0..max_steps {
             // 停止检查点：会话被请求停止时终止本节点执行
             if crate::round_trace::is_cancelled(session_id) {
                 anyhow::bail!("本轮已被用户停止");
+            }
+            // 临近预算耗尽的强提醒（unit-step-budget）：还剩 2 轮时注入收束通牒——
+            // 模型常把步数当「软提示」无限探索，不点名剩余量就会一路烧到底。
+            // 注入一次即可（重复注入徒增上下文）。
+            let remain = max_steps - _step;
+            if remain == 2 && !budget_warned {
+                budget_warned = true;
+                messages.push(ChatMessage::user(format!(
+                    "【预算警告】剩余 2 轮。不要再发起新的探索或工具调用（除非是收束必需的最后一步验证）：立即汇总已有信息，下一轮输出 SyncReport JSON。已有的部分成果在报告中如实陈述即可，未完成项列入 blockers。"
+                )));
             }
             // 时限检查点：派发预算耗尽即快速失败（把并发槽还给调度器），而非等 LLM 挂到天荒地老
             if let Some(dl) = deadline {
@@ -333,10 +359,48 @@ impl AgentRuntime {
 
         self.tools
             .record_usage(session_id, usage_prompt, usage_completion, &last_model);
-        anyhow::bail!(
-            "个体 {} 超过最大步数 {max_steps} 仍未产出合法 SyncReport",
-            def.identifier
-        )
+        // 步数耗尽降级回流（unit-step-budget）：不再直接判死——用已收集的
+        // 过程轨迹构造 blocked SyncReport。部署实测：个体 16 步里做了 44 个
+        // 工具调用的大量真实工作，只差「最终收束」一步，判死等于把成果全扔
+        // 掉、指挥体只拿到一行失败串。降级报告如实陈述：已完成工作进 summary
+        // 与 statements，未达成目标进 blockers，指挥体可据实裁决（补步数重派
+        // / 换路径 / 放弃）。
+        let tool_trace = crate::round_trace::snapshot_tool_trace(session_id);
+        let tool_n = crate::round_trace::tool_count(session_id);
+        let work_note = if tool_n > 0 {
+            format!("已执行 {tool_n} 次工具调用（最近轨迹：{tool_trace}）")
+        } else {
+            "未留下工具调用记录".to_string()
+        };
+        Ok(SyncReport {
+            source_agent: def.identifier.clone(),
+            task_node_id: order.task_node_id.clone(),
+            status: crate::types::SyncStatus::Blocked,
+            statements: vec![
+                crate::types::Statement::report(format!(
+                    "步数预算（{max_steps} 轮）耗尽，未能产出最终收束；{}。",
+                    work_note
+                )),
+                crate::types::Statement::warn(
+                    "预算内完成的工作因缺少最终收束而状态未知；未完成项见 blockers。",
+                ),
+            ],
+            summary: format!(
+                "步数预算耗尽降级回流：{work_note}。目标「{}」未在预算内完成收束。",
+                node_objective_of(order)
+            ),
+            evidence: Vec::new(),
+            risks: Vec::new(),
+            blockers: vec![crate::types::BlockerItem {
+                reason: format!(
+                    "步数预算 {max_steps} 轮耗尽时未产出合法 SyncReport；最后行为：{tool_trace}"
+                ),
+                unblock_condition: "追加步数预算重派，或拆分目标缩小单次执行边界".into(),
+            }],
+            conflicts: None,
+            next_suggestion: crate::types::NextSuggestion::default(),
+            confidence: 0.3,
+        })
     }
 
     /// 截图回灌材料：读文件 → data URL；不可读时返回 None
@@ -845,6 +909,42 @@ mod timeout_tests {
     /// 挂死流替身：永不产出增量、长眠不醒（模拟端点挂死 / 网络黑洞）
     struct HangingStreamProvider;
 
+    /// 永动工具调用替身（unit-step-budget）：每轮都产出文本协议工具调用、
+    /// 从不产出 SyncReport——模拟「预算内一直在干活但收不了束」的个体。
+    struct AlwaysToolProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for AlwaysToolProvider {
+        fn name(&self) -> &'static str {
+            "always-tool"
+        }
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            Ok(ChatResponse {
+                content: r#"{"tool": "terminal", "args": {"command": "echo step"}}"#.into(),
+                reasoning: String::new(),
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                tool_calls: Vec::new(),
+            })
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            let _ = tx.send(StreamDelta::Text(
+                r#"{"tool": "terminal", "args": {"command": "echo step"}}"#.into(),
+            ));
+            Ok(ChatResponse {
+                content: r#"{"tool": "terminal", "args": {"command": "echo step"}}"#.into(),
+                reasoning: String::new(),
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl LlmProvider for HangingStreamProvider {
         fn name(&self) -> &'static str {
@@ -1005,6 +1105,49 @@ mod timeout_tests {
             .expect("时限充裕时应正常执行");
         assert_eq!(report.task_node_id, "T1");
         assert_eq!(report.status, crate::types::SyncStatus::Done);
+    }
+
+    /// 步数耗尽降级回流（unit-step-budget 回归）：个体预算内一直在干活
+    /// （工具调用不断）但没产出 SyncReport——旧行为 bail 一行失败串，
+    /// 已完成的全部工作被扔掉；现在应得到 blocked 降级报告（工作如实可见）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 步数耗尽_降级回流不丢工作() {
+        let rt = runtime_with(Arc::new(AlwaysToolProvider));
+        let def = def_with();
+        let mut order = order_with(600_000);
+        order.constraints.max_steps = 3; // 小预算快速触底
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), Arc::new(AlwaysToolProvider), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt
+            .execute(
+                &def,
+                &order,
+                chain,
+                "ses-budget",
+                "ses-budget",
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .expect("步数耗尽应降级回流而非失败");
+        assert_eq!(report.status, crate::types::SyncStatus::Blocked, "降级状态应为 blocked");
+        assert!(
+            report.summary.contains("步数预算耗尽"),
+            "摘要应注明预算耗尽: {}",
+            report.summary
+        );
+        assert!(
+            !report.blockers.is_empty(),
+            "未完成项应进 blockers（指挥体可据实裁决）"
+        );
+        assert!(
+            report.statements.iter().any(|s| s.text.contains("3 轮")),
+            "陈述应带预算值: {:?}",
+            report.statements
+        );
     }
 }
 
