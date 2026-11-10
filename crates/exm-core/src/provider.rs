@@ -573,6 +573,26 @@ fn normalize_effort(v: &str) -> String {
     }
 }
 
+// ------------------------------------------------- 推理预算硬上限（anti-runaway-thinking）
+
+/// 进程级推理 token 上限（None = 端点默认不下发）：请求未显式设 max_tokens 时，
+/// OpenAI 兼容端点以此值写 max_completion_tokens（reasoning+content 共享预算）。
+/// 部署实证：不设上限时模型在规划阶段心算大数分解，单轮 thinking 20 万字符
+/// （943s 延迟并触发上游 429 限流）——这是对推理模型唯一有效的「思考时长」硬闸。
+/// 网关经 /api/llm/effort 同一入口设置（body.reasoningTokenCap）。
+static REASONING_TOKEN_CAP: parking_lot::RwLock<Option<u32>> = parking_lot::RwLock::new(None);
+
+/// 设置全局推理 token 上限；None 或 <1024 = 端点默认。
+pub fn set_reasoning_token_cap(v: Option<u32>) {
+    let mut w = REASONING_TOKEN_CAP.write();
+    *w = v.filter(|v| *v >= 1024);
+}
+
+/// 当前全局推理 token 上限
+pub fn reasoning_token_cap() -> Option<u32> {
+    *REASONING_TOKEN_CAP.read()
+}
+
 pub struct OpenAiCompatibleProvider {
     base_url: String,
     /// API 协议：openai（默认，/chat/completions）| anthropic（/v1/messages）
@@ -811,6 +831,23 @@ impl OpenAiCompatibleProvider {
                 body
             }
         };
+        // 推理预算硬上限（anti-runaway-thinking）：OpenAI 兼容端点的 max_tokens
+        // 是 reasoning+content 共享预算——对推理模型是唯一有效的「思考时长」硬闸。
+        // 部署实证：规划调用不设上限时模型心算大数分解，单轮 thinking 烧到 20 万
+        // 字符（≈943s 延迟 + 触发上游 429 限流）。请求级显式值优先，否则回落
+        // 进程级设置；None = 端点默认（兼容端点普遍 4k+，聊天/规划档够用）。
+        let openai_compat = self.api_format.is_empty() || self.api_format == "openai";
+        if openai_compat {
+            let cap = req
+                .max_tokens
+                .or_else(reasoning_token_cap)
+                .map(|v| v.max(1024));
+            if let Some(cap) = cap {
+                // max_completion_tokens（新参数）：旧 max_tokens 在部分推理端点
+                // 只约束 content 不约束 reasoning，防不住 thinking
+                base["max_completion_tokens"] = serde_json::json!(cap);
+            }
+        }
         // 模型思考强度：请求级显式值优先，否则回落进程级设置；None = 端点默认不下发
         let effort = req.reasoning.clone().or_else(reasoning_effort);
         if let Some(effort) = effort {

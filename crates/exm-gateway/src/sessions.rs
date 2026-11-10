@@ -6,6 +6,10 @@ use super::*;
 pub(crate) struct EffortBody {
     /// low | medium | high；空/null = 恢复端点默认
     effort: Option<String>,
+    /// 推理 token 硬上限（≥1024 生效；null = 端点默认）。reasoning+content
+    /// 共享预算，防推理模型思考无限烧（anti-runaway-thinking）
+    #[serde(default)]
+    reasoning_token_cap: Option<u32>,
 }
 
 /// 会话内容检索参数（session-search）
@@ -44,15 +48,27 @@ pub(crate) async fn search_sessions(
 
 /// 当前模型思考强度
 pub(crate) async fn get_effort() -> impl IntoResponse {
-    Json(json!({ "effort": exm_core::provider::reasoning_effort() }))
+    Json(json!({
+        "effort": exm_core::provider::reasoning_effort(),
+        "reasoningTokenCap": exm_core::provider::reasoning_token_cap(),
+    }))
 }
 
-/// 设置模型思考强度（进程级，重启后回到端点默认；客户端可自行记忆并在启动时重设）
+/// 设置模型思考强度（进程级，重启后回到端点默认；客户端可自行记忆并在启动时重设）。
+/// body.reasoningTokenCap：推理 token 硬上限（≥1024 生效；null/缺省 = 端点默认）——
+/// 对推理模型（reasoning+content 共享预算）这是防「思考无限烧」的唯一硬闸。
 pub(crate) async fn put_effort(Json(body): Json<EffortBody>) -> impl IntoResponse {
-    let raw = body.effort.unwrap_or_default();
-    exm_core::provider::set_reasoning_effort(Some(&raw));
-    let effort = exm_core::provider::reasoning_effort();
-    Json(json!({ "ok": true, "effort": effort }))
+    if let Some(raw) = body.effort.as_deref() {
+        exm_core::provider::set_reasoning_effort(Some(raw));
+    }
+    if let Some(cap) = body.reasoning_token_cap {
+        exm_core::provider::set_reasoning_token_cap(Some(cap));
+    }
+    Json(json!({
+        "ok": true,
+        "effort": exm_core::provider::reasoning_effort(),
+        "reasoningTokenCap": exm_core::provider::reasoning_token_cap(),
+    }))
 }
 
 // ---------------------------------------------------------------- 工作目录（干活的项目）

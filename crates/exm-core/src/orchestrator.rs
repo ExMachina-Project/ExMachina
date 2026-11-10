@@ -83,7 +83,23 @@ pub fn is_probing_message(text: &str) -> bool {
 /// 探活消息 → 直答文案（按语义分类，避免「晚安」回「在」的错位）。
 /// None = 非探活（走完整轮次）。
 pub fn probe_reply(text: &str) -> Option<&'static str> {
-    let t = text.trim();
+    let mut t = text.trim();
+    // @ 前缀剥离（im-probe-at-prefix）：群聊唤醒消息必带「@机器人名/号」前缀，
+    // 不剥就撑过 10 字符上限——探活短路在群聊实际失效（部署实测：「@id 摸摸」
+    // 也要跑 46 步工具循环）。@ 名字/号本身非探活词，从首个非 @ 词起判定：
+    // 剥掉「@名字」记号（连续非空白直到空白或下一个 @），重复直到正文开头。
+    while let Some(rest) = t.strip_prefix('@') {
+        let after = rest.trim_start();
+        // @ 后的名字段：到空白或下一个 @ 为止
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == '@')
+            .unwrap_or(after.len());
+        t = after[end..].trim_start();
+    }
+    if t.is_empty() {
+        // 裸 @（只点名无正文）：在线确认语义
+        return Some("在。有什么需要直接说。");
+    }
     if t.chars().count() > 10 {
         return None;
     }
@@ -1878,6 +1894,12 @@ impl Orchestrator {
             // 组模式：规划契约由系统统一追加，组提示词只负责人格与工作方式
             // （简洁人格提示词 + 该契约 = 指挥体能力；自定义组同口径）
             system_prompt.push_str(PLANNING_CONTRACT);
+            // IM 会话路由纪律（im-fast-path）：聊天输入绝大多数是闲聊/短问句，
+            // 不值得拆解派发。部署实测反面案例：「@id 摸摸」被规划成 46 步
+            // 工具探索轮（67s 延迟）——闲聊进了任务流水线纯属浪费。
+            if is_im_session(session_id) {
+                system_prompt.push_str("\n\n## IM 路由纪律（强制）\n本会话是即时通讯聊天：绝大多数输入是闲聊、短问句或一句话指令——一律 L0 直答（finalAnswer 即回复），几句话说完。\n只有用户明确要求「做某件事」（查资料/写代码/分析文件/多步任务等）且单次回答无法完成时才拆解 nodes 派发；派发是例外不是默认。\n不使用任何工具探索上下文：会话历史里有的信息直接用，没有就按常识答或说明缺什么。");
+            }
         }
         // Super Agent（实验性）：组模式同样受深度委托纪律约束——规划轮决定拆解与
         // 派发策略（并行拆独立子任务）/ L0 直答决定回复口径，两处都按「静默推进、
@@ -3581,6 +3603,21 @@ mod statement_parse_tests {
         assert_eq!(probe_reply("test"), Some("收到，链路正常。"));
         // 非探活
         assert_eq!(probe_reply("对应"), None);
+    }
+
+    /// @ 前缀剥离（im-probe-at-prefix）：群聊唤醒必带 @机器人 前缀，不剥就
+    /// 撑过 10 字符上限，短路在群聊失效（部署实测「@id 摸摸」跑了 46 步工具循环）。
+    #[test]
+    fn 探活直答_群聊at前缀剥离() {
+        assert_eq!(probe_reply("@2511705734 在吗"), Some("在。有什么需要直接说。"));
+        assert_eq!(probe_reply("@黑星 晚安～"), Some("晚安。"));
+        assert_eq!(probe_reply("@2511705734"), Some("在。有什么需要直接说。"));
+        // 连 @（@甲 @乙 问候）
+        assert_eq!(probe_reply("@甲 @乙 早"), Some("你好，在的。有事直接说。"));
+        // 带任务语义的 @ 消息不短路（探活只认裸探活词；「摸摸」等聊天语
+        // 走规划 L0，不在此武断短路）
+        assert!(probe_reply("@黑星 帮我查下明天的天气").is_none());
+        assert!(probe_reply("@2511705734 摸摸").is_none());
     }
 
     #[test]
