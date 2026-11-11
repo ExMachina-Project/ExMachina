@@ -592,7 +592,7 @@ async fn handle_message(
     let ap_peer = peer.clone();
     let ap_msg_id = msg_id.clone();
     let ap_seq = seq.clone();
-    let approval_send: crate::platform::channel_runtime::ApprovalHook = Box::new(
+    let approval_send: crate::platform::channel::ApprovalHook = Box::new(
         move |prompt: ApprovalPrompt| -> std::pin::Pin<
             Box<dyn std::future::Future<Output = bool> + Send>,
         > {

@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 // `crate::platform::X` 与六个通道适配器（telegram/qqbot/napcat/discord/slack/matrix）
 // 及 lib.rs / channel_test.rs 的既有引用路径完全兼容。
 pub use channels::*;
-pub use channel_runtime::*;
+pub use channel::*;
 pub use skills::*;
 pub use groups::*;
 pub use events::*;
@@ -43,7 +43,7 @@ mod workbench;
 mod plan;
 mod proactive;
 pub mod channels;
-pub mod channel_runtime;
+pub mod channel;
 mod routes;
 
 #[cfg(test)]

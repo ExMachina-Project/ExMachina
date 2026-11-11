@@ -15,7 +15,7 @@ use exm_core::Core;
 use exm_core::provider::{ChatMessage, ChatRequest};
 
 use super::channels::Channel;
-use super::channel_runtime::InboundCtx;
+use super::channel::InboundCtx;
 
 /// 决策模型提示：只判断「值不值得回应」，输出严格 JSON。
 /// 上下文给最近群聊消息（含发送者署名）——是否值得回应高度依赖语境：

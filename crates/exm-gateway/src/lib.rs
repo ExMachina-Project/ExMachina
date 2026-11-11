@@ -600,7 +600,7 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             let lines: Vec<String> = enabled
                 .iter()
                 .map(|c| {
-                    let cp = platform::channel_runtime::caps(&c.kind);
+                    let cp = platform::channel::caps(&c.kind);
                     let media = |b: bool| if b { "✓" } else { "—" };
                     format!(
                         "{}[{}] {}（图{} 文{} 语{}）",
