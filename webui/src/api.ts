@@ -97,6 +97,18 @@ export interface GatewayConfig {
     heartbeatAgent?: string | null;
     /** 子个体单次派发的最大工具步数 */
     unitMaxSteps?: number;
+    /** Auto Agent 自评周期（分钟；experiments.autoAgent 开启才生效） */
+    autoAgentIntervalMinutes?: number;
+    /** Auto Agent 单次行动步数预算（0 = 用 unitMaxSteps） */
+    autoAgentMaxSteps?: number;
+    /** Auto Agent 空转退避上限（倍） */
+    autoAgentBackoffMax?: number;
+    /** Meta Agent 巡检周期（分钟；experiments.metaAgent 开启才生效） */
+    metaIntervalMin?: number;
+    /** 通道流会话闲置归档天数（0 = 关） */
+    flowIdleDays?: number;
+    /** 长会话记忆归纳触发轮数下限（experiments.autoMemoryDigest 配套） */
+    memoryDigestMinTurns?: number;
   };
   /** 联网搜索后端（web_search 工具；未配置则不下发该工具） */
   search?: { provider: string; endpoint: string; apiKey: string; maxResults: number };
@@ -110,6 +122,44 @@ export interface GatewayConfig {
   tools?: { custom: Array<Record<string, unknown>> };
   /** 回收站保留契约（保留期 + 容量上限） */
   trash?: { retentionDays: number; maxBytes: number };
+  /** 实验性功能开关 */
+  experiments?: {
+    dynamicCompaction: boolean;
+    groupSharedContext: boolean;
+    llmDrivenMemory: boolean;
+    slidingContextWindow: boolean;
+    superAgent: boolean;
+    autoAgent: boolean;
+    metaAgent: boolean;
+    autoMemoryDigest: boolean;
+  };
+  /** 通道身份（配对绑定与群聊唤醒门控） */
+  identity?: {
+    identityRequired: boolean;
+    pairingTtlSecs: number;
+    pairingMaxFailures: number;
+    pairingLockoutSecs: number;
+    groupGateDefault: boolean;
+  };
+  /** 用量限制（限流与配额） */
+  limits?: {
+    enabled: boolean;
+    windowSecs: number;
+    maxRequests: number;
+    quotaPeriod: string;
+    quotaTokens: number;
+    quotaRequests: number;
+    quotaRunningPolicy: string;
+  };
+  /** 事件触发器（文件监听 / 事件 webhook） */
+  triggers?: {
+    fileWatch: { enabled: boolean; debounceMs: number; exclude: string[] };
+    eventWebhook: { enabled: boolean; secret: string };
+  };
+  /** MCP 服务端（工具对外暴露） */
+  mcpServe?: { enabled: boolean; httpPath: string; allowedGroups: string[]; allowedTools: string[] };
+  /** 结果推送 */
+  notify?: { enabled: boolean; maxChars: number };
   mock: boolean;
 }
 
@@ -123,6 +173,10 @@ export interface ConfigSchemaField {
   help?: string;
   min?: number;
   max?: number;
+  /** 条件显示：依赖字段值匹配（equals 单值 / in 多值）才渲染该行 */
+  showIf?: { field: string; equals?: unknown; in?: unknown[] };
+  /** 组主开关标记：组内其余字段通常以其 showIf 联动 */
+  primary?: boolean;
 }
 
 export interface ConfigSchemaGroup {

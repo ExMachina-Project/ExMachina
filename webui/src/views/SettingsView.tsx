@@ -227,6 +227,88 @@ function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
       return listToText(cfg.hooks?.postTool);
     case "hooks.onRunEnd":
       return listToText(cfg.hooks?.onRunEnd);
+    // —— 实验性功能（含挪组的配套参数：key 保持 automation.*，回显读 automation）——
+    case "experiments.dynamicCompaction":
+      return cfg.experiments?.dynamicCompaction;
+    case "experiments.groupSharedContext":
+      return cfg.experiments?.groupSharedContext;
+    case "experiments.llmDrivenMemory":
+      return cfg.experiments?.llmDrivenMemory;
+    case "experiments.slidingContextWindow":
+      return cfg.experiments?.slidingContextWindow;
+    case "experiments.superAgent":
+      return cfg.experiments?.superAgent;
+    case "experiments.autoAgent":
+      return cfg.experiments?.autoAgent;
+    case "experiments.metaAgent":
+      return cfg.experiments?.metaAgent;
+    case "experiments.autoMemoryDigest":
+      return cfg.experiments?.autoMemoryDigest;
+    case "automation.autoAgentIntervalMinutes":
+      return cfg.automation?.autoAgentIntervalMinutes;
+    case "automation.autoAgentMaxSteps":
+      return cfg.automation?.autoAgentMaxSteps;
+    case "automation.autoAgentBackoffMax":
+      return cfg.automation?.autoAgentBackoffMax;
+    case "automation.metaIntervalMin":
+      return cfg.automation?.metaIntervalMin;
+    case "automation.memoryDigestMinTurns":
+      return cfg.automation?.memoryDigestMinTurns;
+    // —— 五组补链（此前 get 不回显：设置页永远显示 schema 默认值）——
+    case "computer.enabled":
+      return cfg.computer?.enabled;
+    case "computer.approval":
+      return cfg.computer?.approval;
+    case "computer.maxEdge":
+      return cfg.computer?.maxEdge;
+    case "computer.actionIntervalMs":
+      return cfg.computer?.actionIntervalMs;
+    case "identity.identityRequired":
+      return cfg.identity?.identityRequired;
+    case "identity.pairingTtlSecs":
+      return cfg.identity?.pairingTtlSecs;
+    case "identity.pairingMaxFailures":
+      return cfg.identity?.pairingMaxFailures;
+    case "identity.pairingLockoutSecs":
+      return cfg.identity?.pairingLockoutSecs;
+    case "identity.groupGateDefault":
+      return cfg.identity?.groupGateDefault;
+    case "limits.enabled":
+      return cfg.limits?.enabled;
+    case "limits.windowSecs":
+      return cfg.limits?.windowSecs;
+    case "limits.maxRequests":
+      return cfg.limits?.maxRequests;
+    case "limits.quotaPeriod":
+      return cfg.limits?.quotaPeriod;
+    case "limits.quotaTokens":
+      return cfg.limits?.quotaTokens;
+    case "limits.quotaRequests":
+      return cfg.limits?.quotaRequests;
+    case "limits.quotaRunningPolicy":
+      return cfg.limits?.quotaRunningPolicy;
+    case "triggers.fileWatch.enabled":
+      return cfg.triggers?.fileWatch?.enabled;
+    case "triggers.fileWatch.debounceMs":
+      return cfg.triggers?.fileWatch?.debounceMs;
+    case "triggers.fileWatch.exclude":
+      return listToText(cfg.triggers?.fileWatch?.exclude);
+    case "triggers.eventWebhook.enabled":
+      return cfg.triggers?.eventWebhook?.enabled;
+    case "triggers.eventWebhook.secret":
+      return cfg.triggers?.eventWebhook?.secret;
+    case "mcpServe.enabled":
+      return cfg.mcpServe?.enabled;
+    case "mcpServe.httpPath":
+      return cfg.mcpServe?.httpPath;
+    case "mcpServe.allowedGroups":
+      return listToText(cfg.mcpServe?.allowedGroups);
+    case "mcpServe.allowedTools":
+      return listToText(cfg.mcpServe?.allowedTools);
+    case "notify.enabled":
+      return cfg.notify?.enabled;
+    case "notify.maxChars":
+      return cfg.notify?.maxChars;
     default:
       return undefined;
   }
@@ -294,7 +376,7 @@ export function SettingsView(): React.ReactElement {
     setSaving(true);
     try {
       const body: Record<string, unknown> = {};
-      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "trash", "experiments"];
+      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "trash", "experiments", "identity", "limits", "triggers", "mcpServe", "notify"];
       for (const [k, v] of Object.entries(values)) {
         if (v === undefined) continue;
         const dot = k.indexOf(".");
@@ -306,6 +388,19 @@ export function SettingsView(): React.ReactElement {
         const f = k.slice(dot + 1);
         if (!nested.includes(g)) {
           if (v !== "") body[k] = v;
+          continue;
+        }
+        // triggers 两层嵌套（triggers.fileWatch.enabled → { triggers: { fileWatch: { enabled } } }）
+        if (g === "triggers") {
+          const sub = f.slice(0, f.indexOf(".") > 0 ? f.indexOf(".") : undefined);
+          const leaf = f.slice(f.indexOf(".") + 1);
+          const trig = (body.triggers as Record<string, unknown>) ?? {};
+          if (["fileWatch", "eventWebhook"].includes(sub) && leaf) {
+            trig[sub] = { ...((trig[sub] as Record<string, unknown>) ?? {}), [leaf]: v };
+          } else {
+            trig[f] = v;
+          }
+          body.triggers = trig;
           continue;
         }
         // 空串表示「清除该项」（hooks 用空串清列表）；搜索凭据留空 = 沿用旧值，由后端判定
@@ -421,7 +516,16 @@ export function SettingsView(): React.ReactElement {
             {current.key === "limits" && <LimitsStatsCard />}
             {current.key === "security" && <SanitizeStatsCard />}
             <div className="cfg-list">
-              {current.fields.map((f) => {
+              {current.fields.filter((f) => {
+                // 条件显示（showIf）：依赖字段当前值不匹配则整行隐藏。
+                // 值取表单态（用户开了开关、未保存也立即显示配套参数——所见即所编）
+                const dep = f.showIf;
+                if (!dep) return true;
+                const v = values[dep.field];
+                if (dep.equals !== undefined) return v === dep.equals;
+                if (dep.in !== undefined) return dep.in.includes(v);
+                return true;
+              }).map((f) => {
                 const value = values[f.key];
                 const fi = FIELD_I18N[f.key];
                 const ctrl = ENUM_OVERRIDES[f.key] ? (

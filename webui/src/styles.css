@@ -1434,7 +1434,10 @@ textarea.ant-input:focus,
   padding: 2px 8px;
   border-left: 3px solid var(--amber);
   border-radius: var(--r-sm);
-  display: inline-block;
+  display: block;
+  /* tableLayout=fixed 下长命令不再参与列宽分配：列内自行断行（路径/参数长串兜底 anywhere） */
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 /* 审批行元信息跳转（移动端查漏）：无边框文本按钮，触屏热区靠行高撑 */
 .link-btn {
