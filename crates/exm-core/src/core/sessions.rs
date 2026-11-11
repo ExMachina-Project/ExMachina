@@ -1,5 +1,6 @@
 //! core/sessions.rs —— Core 会话域（codebase-refactor 拆分）：会话 CRUD、
-//! undo/edit/fork、轮次快照回看、检查点、审批会话授权的归属与查询、会话起源标记。
+//! undo/edit/fork、轮次快照回看、检查点、审批会话授权的归属与查询、会话起源
+//! 标记、空闲流批量归档（archive_idle_flow_sessions/archive_flow_sessions）。
 //! 纯搬移：方法签名与实现零改动；chat 系跨域粘合留 lib.rs 组合根。
 
 use super::super::Core;
@@ -347,4 +348,90 @@ impl Core {
         self.store.get_session_origin(session_id).ok().flatten()
     }
 
+    /// 闲置流会话归档扫描（session-management 生命周期治理）。
+    /// 口径：通道会话（title 约定解析）· 未归档 · `updated_at` 距 `now` 超过
+    /// `idle_days` 天 · 非所在流的活跃绑定会话（flow.active_session 豁免）。
+    /// 返回 (归档数, 豁免数)。批量归档复用同一豁免口径（archive_flow_sessions）。
+    pub fn archive_idle_flow_sessions(
+        &self,
+        idle_days: u32,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<(usize, usize)> {
+        if idle_days == 0 {
+            return Ok((0, 0));
+        }
+        let horizon = now - chrono::Duration::days(idle_days as i64);
+        let horizon_iso = horizon.to_rfc3339();
+        let mut targets: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        for s in self.store.list_sessions()? {
+            if s.archived_at.is_some() {
+                continue;
+            }
+            let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
+                crate::session_origin::parse_session_origin(&s.title)
+            else {
+                continue;
+            };
+            // 活跃绑定豁免：下条消息将继续复用该会话
+            if self
+                .flow_active_session(&channel_id, &chat_key)
+                .as_deref()
+                == Some(s.id.as_str())
+            {
+                skipped += 1;
+                continue;
+            }
+            if s.updated_at < horizon_iso {
+                targets.push(s.id.clone());
+            }
+        }
+        for id in &targets {
+            self.set_session_archived(id, true)?;
+        }
+        if !targets.is_empty() {
+            let _ = self.events.send(CoreEvent {
+                kind: "session.idle_archived".into(),
+                session_id: String::new(),
+                payload: serde_json::json!({ "count": targets.len(), "idleDays": idle_days }),
+            });
+        }
+        Ok((targets.len(), skipped))
+    }
+    /// 按流/按通道归档旧会话（session-management 批量工具）：
+    /// 圈定范围内未归档会话全部归档，各流活跃绑定会话豁免。
+    /// 返回 (归档数, 豁免数)。
+    pub fn archive_flow_sessions(
+        &self,
+        scope: crate::session_origin::ArchiveScope,
+    ) -> anyhow::Result<(usize, usize)> {
+        let mut targets: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        for s in self.store.list_sessions()? {
+            if s.archived_at.is_some() {
+                continue;
+            }
+            let origin = crate::session_origin::parse_session_origin(&s.title);
+            if !scope.matches(&origin) {
+                continue;
+            }
+            if let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
+                &origin
+            {
+                if self
+                    .flow_active_session(channel_id, chat_key)
+                    .as_deref()
+                    == Some(s.id.as_str())
+                {
+                    skipped += 1;
+                    continue;
+                }
+            }
+            targets.push(s.id.clone());
+        }
+        for id in &targets {
+            self.set_session_archived(id, true)?;
+        }
+        Ok((targets.len(), skipped))
+    }
 }
