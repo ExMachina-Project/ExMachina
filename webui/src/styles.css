@@ -310,6 +310,16 @@ input, textarea { caret-color: var(--accent); }
   color: var(--muted);
   transition: color var(--dur-fast) var(--ease-out);
 }
+/* 图标与文字间距：antd v6 给「图标后首个 span」加 margin-inline-start（默认 10px），
+   与上面 icon 的 margin-inline-end 叠加成 19px——归零收敛为单侧 9px。
+   :where 包裹下 antd 规则零优先级，直接类名覆盖即可稳定生效 */
+.app-sider .ant-menu-item .anticon + .ant-menu-title-content {
+  margin-inline-start: 0;
+}
+/* 同源间距：选中态右侧徽标/括注同样被加了 start margin，一并归零 */
+.app-sider .ant-menu-item .ant-menu-item-icon + .ant-menu-title-content {
+  margin-inline-start: 0;
+}
 .app-sider .ant-menu-item:hover {
   background: var(--hover) !important;
 }
