@@ -4,6 +4,10 @@ import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space,
 import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { createPortal } from "react-dom";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
+import { ChatMessages } from "./chat/ChatMessages";
+import { ChatComposer } from "./chat/ChatComposer";
+import { useChatStream } from "../hooks/useChatStream";
+import { useAttachments } from "../hooks/useAttachments";
 import { useSubbarSlot } from "../components/Subbar";
 
 import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
@@ -33,7 +37,7 @@ import { Emblem } from "../components/Emblem";
 
 import type { ChatMessage } from "../types";
 
-function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
+export function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; turn?: number; ops?: React.ReactNode; orchLabel?: string }): React.ReactElement {
   const tb = useT();
   const isUser = m.role === "user";
   // 自动任务标记：agentId 带 auto: 前缀的 user 消息是系统自动内容（视频观看等），非真人输入
@@ -164,6 +168,9 @@ export function ChatView(): React.ReactElement {
     spawns, clearSpawns,
     graph,
   } = useExm();
+  const { bottomRef, stickRef, showBottomBtn, usage } = useChatStream(sessionId ?? undefined, messages, running, approvals);
+  const { images, addImage, removeImage, clearImages } = useAttachments();
+
   // 会话编排图内嵌（graph-inline）：当前会话有编排图时在消息流上方给可折叠卡——
   // 看图不必跳「编排」页（那页保留全局会话切换视角）
   const [dagOpen, setDagOpen] = useState(true);
@@ -237,7 +244,6 @@ export function ChatView(): React.ReactElement {
   }, [focusMessage, sessionId, messages]);
 
   const [text, setText] = useState("");
-  const [images, setImages] = useState<string[]>([]);
   const [expandedSpawns, setExpandedSpawns] = useState<string[]>([]);
   /** `@` 文件提及（对话即编码）：输入 @ 触发候选弹层，选中插入路径 */
   const [mention, setMention] = useState<MentionState>({ open: false, query: "", start: 0 });
@@ -262,36 +268,8 @@ export function ChatView(): React.ReactElement {
   const screen: "list" | "thread" = narrow ? screenPref : "thread";
   const setScreen = setScreenPref;
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
-  const [usage, setUsage] = useState<{
-    estimate: number;
-    budget: number;
-    unlimited: boolean;
-    /** provider 上报的真实用量可用（否则为字符估算） */
-    measured?: boolean;
-  } | null>(null);
   /** 上箭头召回的游标（null = 未处于召回态） */
   const recallIdxRef = useRef<number | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  // 附件压缩：Canvas 缩到 ≤1280px、JPEG 82%（控制多模态请求体尺寸）
-  const addImage = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-        setImages((prev) => [...prev, dataUrl].slice(0, 4));
-      };
-      img.src = String(reader.result);
-    };
-    reader.readAsDataURL(file);
-  };
-
   // 子会话 = 派发运行台账：只读查看子个体过程流（不允许在子会话里开工新轮次）
   const isSubSession = Boolean(sessions.find((s) => s.id === sessionId)?.title.startsWith("sub:"));
 
@@ -300,7 +278,7 @@ export function ChatView(): React.ReactElement {
     if (text.trim()) {
       void send(text, images);
       setText("");
-      setImages([]);
+      clearImages();
     }
   };
 
@@ -310,9 +288,6 @@ export function ChatView(): React.ReactElement {
     setText(useExm.getState().drafts[sessionId] ?? "");
     recallIdxRef.current = null;
   }, [sessionId]);
-
-  // 是否已滚离底部（chat-ergonomics：显示「回到底部」按钮）
-  const [showBottomBtn, setShowBottomBtn] = useState(false);
 
   /** 检测输入末尾的 `@提及` 片段：光标前最近一个未被空格隔断的 @ 起段即触发 */
   const detectMention = useCallback((value: string, caret: number) => {
@@ -398,53 +373,9 @@ export function ChatView(): React.ReactElement {
     [mention, mentionNodes, mentionIdx, applyMention],
   );
 
-  // 流式跟随只在「用户本来就贴底」时进行：中途上翻回看不打断。
-  // 距底阈值 80px 兼容流式渲染的轻微抖动；用 ref 记录贴底态避免重渲染竞态。
-  const stickRef = React.useRef(true);
-  useEffect(() => {
-    const el = document.querySelector(".chat-scroll");
-    if (!el) return;
-    const onScroll = () => {
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
-      stickRef.current = atBottom;
-      // 用户主动回底 → 恢复跟随（按钮点击滚到底同样触发此路径）
-      setShowBottomBtn(!atBottom);
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, []);
-  useEffect(() => {
-    // 新消息（非流式增量）：重置跟随（新轮次开始视为用户关注最新）
-    stickRef.current = true;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    setShowBottomBtn(false);
-  }, [messages.length]);
-  useEffect(() => {
-    // 流式增量（live/token/timeline）：仅贴底时跟随，不抢滚动条
-    if (!stickRef.current) return;
-    bottomRef.current?.scrollIntoView({ behavior: "auto" });
-  }, [messages, liveOrch, liveParts, runToolCalls, timeline]);
-  // 审批卡到达：强制拉到卡位（审批是阻塞等待，时效性强——
-  // 用户上翻回看时也该被打断，错过 = 工具在等待窗内一直挂着）。
-  // 只对本会话单滚动（approval-session-scope 同口径）：跨会话单不弹卡也不抢视线。
-  useEffect(() => {
-    const mine = approvals.filter((a) => !a.sessionId || a.sessionId === sessionId);
-    if (mine.length === 0) return;
-    stickRef.current = true;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [approvals.length, sessionId]);
-
-  useEffect(() => {
-    if (!sessionId) return;
-    void (async () => {
-      try {
-        setUsage(await api.sessionTokens(sessionId));
-      } catch {
-        // 用量接口不可用时静默
-      }
-    })();
-  }, [sessionId, messages.length, running]);
-
+  const currentModel = target.mode === "single"
+    ? (singles.find((x) => x.identifier === target.id)?.modelHint ?? "")
+    : (groups.find((g) => g.id === target.id)?.model ?? "");
   // 单智能体模式：交互主体 = 该个体，过程（工具/思考）与正文同源——
   // liveOrch 卡已聚合 thinking 与工具栏（runToolCalls），liveParts 若再建卡
   // 就是同一个体被拆成两张分裂卡（identifier 一大一小写两张头像）。过滤掉。
@@ -457,9 +388,6 @@ export function ChatView(): React.ReactElement {
     ? (singles.find((x) => x.identifier === target.id)?.name ?? target.id)
     : t("chat.orchGroup", { group: activeMeta?.name ?? target.id });
   const targetValue = target.mode === "single" ? `single:${target.id}` : `group:${target.id}`;
-  const currentModel = target.mode === "single"
-    ? (singles.find((x) => x.identifier === target.id)?.modelHint ?? "")
-    : (groups.find((g) => g.id === target.id)?.model ?? "");
   const activeProfile = profiles.find((p) => p.id === activeProfileId);
   const modelOptions = [
     {
@@ -990,332 +918,69 @@ export function ChatView(): React.ReactElement {
             {dagOpen && <TaskGraphDag graph={graph} />}
           </div>
         ) : null}
-        <div className="chat-scroll">
-          {/* 空态：当前会话尚无消息且未在运行 —— 目标捕获盘（与桌面端空态同源母题） */}
-          {renderMessages.length === 0 && !running && (
-            <div className="chat-acquire">
-              <span className="capture-frame chat-acquire-figure">
-                <OrbitRings />
-                <Emblem size={224} />
-              </span>
-              <div className="chat-acquire-title">{t("chat.acquireTitle")}</div>
-              {/* 文案按目标模式分叉：单智能体说的是它自己的话（独立接单到交付），
-                  组目标才讲「切组/派发」——此前单一文案让单智能体空态也在讲组的故事 */}
-              <div className="chat-acquire-desc">
-                {target.mode === "single"
-                  ? t("chat.acquireDescSingle", { name: orchLabel })
-                  : t("chat.acquireDesc")}
-              </div>
-              <div className="chat-acquire-readouts">
-                <span className="readout"><span className="k">TGT</span><span className="v">{orchLabel}</span></span>
-                {target.mode === "single" ? (
-                  <span className="readout"><span className="k">AGENT</span><span className="v">{target.id}</span></span>
-                ) : (
-                  <span className="readout"><span className="k">GROUP</span><span className="v">{activeMeta?.name ?? activeGroup}</span></span>
-                )}
-                <span className="readout"><span className="k">LINK</span><span className={`v ${wsConnected ? "ok" : "err"}`}>{wsConnected ? "ONLINE" : "RECONN"}</span></span>
-              </div>
-            </div>
-          )}
-          {renderMessages.map(({ m, turn }) => (
-            <MessageBubble
-              key={m.id}
-              m={m}
-              turn={turn}
-              orchLabel={orchLabel}
-              ops={
-                turn != null && !running ? (
-                  <TurnOps turn={turn} onEdit={openEdit} onUndo={doUndo} onFork={doFork} />
-                ) : undefined
-              }
-            />
-          ))}
+        <ChatMessages
+          renderMessages={renderMessages}
+          running={running}
+          target={target}
+          orchLabel={orchLabel}
+          activeMeta={activeMeta}
+          activeGroup={activeGroup}
+          wsConnected={wsConnected}
+          liveOrch={liveOrch}
+          liveThinking={liveThinking}
+          liveUnitEntries={liveUnitEntries}
+          timeline={timeline}
+          timelineSession={timelineSession}
+          runToolCalls={runToolCalls}
+          approvals={approvals}
+          sessionId={sessionId}
+          showBottomBtn={showBottomBtn}
+          bottomRef={bottomRef}
+          onScrollBottom={() => {
+            stickRef.current = true;
+            bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+          }}
+          onOpenEdit={openEdit}
+          onUndo={doUndo}
+          onFork={doFork}
+          onDecideApproval={(id, ok, scope) => void decideApproval(id, ok, scope)}
+          onOpenSubSession={(id) => void selectSession(id)}
+          t={t}
+          TurnOps={TurnOps}
+          TimelineRows={TimelineRows}
+        />
 
-          {/* 等待首个输出：加载卡（一旦有流式输出/子个体产出即让位，避免与输出卡并存） */}
-          {running && !liveOrch && liveUnitEntries.length === 0 && (
-            <Card size="small" className="msg-bubble msg-agent">
-              <Space orientation="vertical" className="full-width">
-                <div>
-                  <Spin size="small" /> <b>{`${orchLabel} …`}</b>
-                </div>
-                {(liveThinking.trim() || timeline.length > 0 || runToolCalls.length > 0) && (
-                  <div className="msg-process">
-                    {liveThinking.trim() && (
-                      <UsageBar label={t("chat.usedThinking", { n: String(liveThinking.length) })} live>
-                        <pre className="usage-think">{liveThinking}</pre>
-                      </UsageBar>
-                    )}
-                    {(timeline.length > 0 || runToolCalls.length > 0) && (
-                      <UsageBar label={t("chat.usedTools", { n: runToolCalls.length + timeline.length })} live>
-                        <TimelineRows items={timeline} tb={t} onOpenSub={(id) => void selectSession(id)} />
-                        {runToolCalls.length > 0 && <ToolCallList calls={runToolCalls} />}
-                      </UsageBar>
-                    )}
-                  </div>
-                )}
-              </Space>
-            </Card>
-          )}
-
-          {/* 本轮调度轨迹（收束后保留）：派发/回流条目 + 子会话入口，直到下一次发送或切会话 */}
-          {!running && timeline.length > 0 && timelineSession === sessionId && (
-            <Card size="small" className="msg-bubble msg-agent turn-timeline-card">
-              <div className="msg-process">
-                <UsageBar label={t("chat.turnTimeline", { n: String(timeline.length) })} defaultOpen>
-                  <TimelineRows items={timeline} tb={t} onOpenSub={(id) => void selectSession(id)} />
-                </UsageBar>
-              </div>
-            </Card>
-          )}
-
-          {liveUnitEntries.map(([agent, parts]) => (
-            <Card key={agent} size="small" className="msg-bubble msg-agent live-card">
-              <div className="msg-head">
-                <RobotOutlined /> <b>{agent}</b> <Tag color="processing">{t("chat.executing")}</Tag>
-              </div>
-              {/* 思考/工具/输出按发生顺序交错展示（连续工具调用聚合为同一列表） */}
-              <ProcessSteps
-                parts={parts}
-                toolCalls={runToolCalls}
-                live
-                labelThinking={(n) => t("chat.usedThinking", { n: String(n) })}
-                labelTools={(n) => t("chat.usedTools", { n: String(n) })}
-              />
-            </Card>
-          ))}
-
-          {liveOrch && (
-            <Card size="small" className="msg-bubble msg-agent live-card">
-              <div className="msg-head">
-                <RobotOutlined /> <b>{orchLabel}</b> <Tag color="processing">{t("chat.streaming")}</Tag>
-              </div>
-              {(liveThinking.trim() || timeline.length > 0 || runToolCalls.length > 0) && (
-                <div className="msg-process">
-                  {liveThinking.trim() && (
-                    <UsageBar label={t("chat.usedThinking", { n: String(liveThinking.length) })} live>
-                      <pre className="usage-think">{liveThinking}</pre>
-                    </UsageBar>
-                  )}
-                  {(timeline.length > 0 || runToolCalls.length > 0) && (
-                    <UsageBar label={t("chat.usedTools", { n: runToolCalls.length + timeline.length })} live>
-                      <TimelineRows items={timeline} tb={t} onOpenSub={(id) => void selectSession(id)} />
-                      {runToolCalls.length > 0 && <ToolCallList calls={runToolCalls} />}
-                    </UsageBar>
-                  )}
-                </div>
-              )}
-              <pre className="live-pre">{liveOrch}</pre>
-            </Card>
-          )}
-          {/* 内联审批：渲染在消息流内（live 区之后、贴底锚之前）——
-              审批到达时随消息流滚动进视线；原先渲染在 chat-scroll 外的静态区，
-              流式输出期间用户盯着底部，上方的卡根本看不到（审批交互不可见 bug）。
-              只渲染本会话单（approval-session-scope）：跨会话单不再在别的会话里
-              弹卡（曾导致任何会话都挂着子会话的审批卡、批准入口错位）——
-              跨会话单走侧栏审批页（带「跳转子会话」导航）。 */}
-          {approvals
-            .filter((a) => !a.sessionId || a.sessionId === sessionId)
-            .map((a) => (
-            <Card key={a.approvalId} size="small" className="approval-card">
-              <div className="approval-head">
-                <span className="approval-title">⏸ {t("chat.approvalTitle")}</span>
-                <span className="approval-agent mono">{a.agentId}</span>
-              </div>
-              {a.command.startsWith("[root] ") && (
-                <div className="approval-root-flag" role="alert">
-                  🚨 {t("approval.rootElevation")} — {t("approval.rootElevationHelp")}
-                </div>
-              )}
-              <pre className="approval-cmd">{a.command}</pre>
-              <div className="approval-ops">
-                <Button
-                  type="primary"
-                  size="small"
-                  icon={<CheckOutlined />}
-                  onClick={() => void decideApproval(a.approvalId, true)}
-                >
-                  {t("chat.approvalApprove")}
-                </Button>
-                {/* 三档放行（approval-ergonomics）：升档按钮仅普通命令单可见——
-                    [root] 提权单与破坏性命令后端红线降级 once,UI 直接隐藏避免误导 */}
-                {!a.command.startsWith("[") && !isDestructiveCommand(a.command) && (
-                  <>
-                    <Button
-                      size="small"
-                      onClick={() => void decideApproval(a.approvalId, true, "session")}
-                    >
-                      {t("chat.approvalSession")}
-                    </Button>
-                    <Button
-                      size="small"
-                      onClick={() => void decideApproval(a.approvalId, true, "allowlist")}
-                    >
-                      {t("chat.approvalAllowlist")}
-                    </Button>
-                  </>
-                )}
-                <Button size="small" danger onClick={() => void decideApproval(a.approvalId, false)}>
-                  {t("chat.approvalDeny")}
-                </Button>
-                {a.sessionId && a.sessionId !== sessionId && (
-                  <Button size="small" type="link" onClick={() => void selectSession(a.sessionId!)}>
-                    {t("chat.openSubSession")}
-                  </Button>
-                )}
-                <span className="approval-hint">{t("chat.approvalHint")}</span>
-              </div>
-            </Card>
-            ))}
-          {showBottomBtn && (
-            <button
-              className="scroll-bottom-btn"
-              aria-label={t("chat.scrollToBottom")}
-              onClick={() => {
-                stickRef.current = true;
-                bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-              }}
-            >
-              ↓
-            </button>
-          )}
-          <div ref={bottomRef} />
-        </div>
-
-        <div className="chat-composer">
-          <FileMentionPopup
-            nodes={mentionNodes}
-            loading={mentionLoading}
-            state={mention}
-            idx={mentionIdx}
-            onIdxChange={setMentionIdx}
-            onPick={applyMention}
-          />
-          {images.length > 0 && (
-            <div className="attach-row">
-              {images.map((src, i) => (
-                <span key={i} className="attach-thumb">
-                  <img src={src} alt={`附件${i + 1}`} />
-                  <Button
-                    size="small"
-                    type="text"
-                    className="attach-del"
-                    icon={<CloseOutlined />}
-                    onClick={() => setImages(images.filter((_, j) => j !== i))}
-                  />
-                </span>
-              ))}
-            </div>
-          )}
-          <Input.TextArea
-            className="composer-textarea"
-            value={text}
-            disabled={isSubSession}
-            onChange={(e) => {
-              setText(e.target.value);
-              detectMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-              if (sessionId) useExm.getState().setDraft(sessionId, e.target.value);
-            }}
-            onBlur={() => {
-              // 延迟关闭：给 onMouseDown 选中留出事件窗口
-              setTimeout(() => setMention((m) => ({ ...m, open: false })), 150);
-            }}
-            autoSize={{ minRows: 1, maxRows: 6 }}
-            onPressEnter={(e) => {
-              if (mention.open) return; // 提及弹层接管 Enter
-              if (!e.shiftKey) {
-                e.preventDefault();
-                if (text.trim() && !running && !isSubSession) {
-                  doSend();
-                }
-              }
-            }}
-            onKeyDown={(e) => {
-              if (onMentionKey(e)) return; // 提及弹层优先接管方向键/确认/关闭
-              // 上/下箭头召回历史用户消息（chat-ergonomics）：仅在空输入时接管
-              if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
-              if (text.trim()) return;
-              const userMsgs = messages.filter((m) => m.role === "user");
-              if (userMsgs.length === 0) return;
-              e.preventDefault();
-              let idx = recallIdxRef.current;
-              if (e.key === "ArrowUp") {
-                idx = idx === null ? userMsgs.length - 1 : Math.max(0, idx - 1);
-              } else {
-                if (idx === null) return;
-                idx = idx + 1;
-                if (idx >= userMsgs.length) {
-                  recallIdxRef.current = null;
-                  setText("");
-                  return;
-                }
-              }
-              recallIdxRef.current = idx;
-              const recalled = userMsgs[idx]?.statements.map((st) => st.text).join("\n") ?? "";
-              setText(recalled);
-            }}
-          />
-          <div className="composer-bar">
-            <div className="composer-tools">
-              <label className="attach-btn composer-attach" title={t("chat.attachTip")}>
-                <PlusOutlined />
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  style={{ display: "none" }}
-                  onChange={(e) => {
-                    Array.from(e.target.files ?? []).slice(0, 4).forEach(addImage);
-                    e.target.value = "";
-                  }}
-                />
-              </label>
-              <span className="composer-model">
-                <RobotOutlined />
-                <Select
-                  value={currentModel}
-                  onChange={(v) => void changeModel(v)}
-                  options={modelOptions}
-                  variant="borderless"
-                  size="small"
-                  className="composer-model-select"
-                  popupMatchSelectWidth={false}
-                  disabled={isSubSession || profiles.length === 0}
-                />
-              </span>
-            </div>
-            <div className="composer-actions">
-              <span className="composer-hint">{t("chat.enterHint")}</span>
-              {running && sessionId ? (
-                <Popconfirm
-                  title={t("chat.stopConfirm")}
-                  onConfirm={() => {
-                    if (!sessionId) return;
-                    api.stopSession(sessionId)
-                      .then((r) => message.success(t("chat.stopDone", { n: String(r.toolsExecuted) })))
-                      .catch((e) => message.error(t("chat.stopFail", { err: String(e).slice(0, 120) })));
-                  }}
-                >
-                  <Button
-                    className="composer-send composer-stop"
-                    shape="circle"
-                    danger
-                    icon={<PauseCircleOutlined />}
-                    aria-label={t("chat.stop")}
-                  />
-                </Popconfirm>
-              ) : (
-                <Button
-                  className="composer-send"
-                  shape="circle"
-                  icon={<ArrowUpOutlined />}
-                  disabled={isSubSession || running || !text.trim()}
-                  onClick={doSend}
-                  aria-label={t("chat.send")}
-                />
-              )}
-            </div>
-          </div>
-        </div>
+        <ChatComposer
+          mention={mention}
+          mentionNodes={mentionNodes}
+          mentionLoading={mentionLoading}
+          mentionIdx={mentionIdx}
+          setMentionIdx={setMentionIdx}
+          applyMention={applyMention}
+          images={images}
+          removeImage={removeImage}
+          text={text}
+          setText={setText}
+          detectMention={detectMention}
+          onBlurMention={() => {
+            // 延迟关闭：给 onMouseDown 选中留出事件窗口
+            setTimeout(() => setMention((m) => ({ ...m, open: false })), 150);
+          }}
+          onMentionKey={onMentionKey}
+          sessionId={sessionId}
+          setDraft={(sid, txt) => useExm.getState().setDraft(sid, txt)}
+          messages={messages}
+          recallIdxRef={recallIdxRef}
+          isSubSession={isSubSession}
+          running={running}
+          doSend={doSend}
+          addImage={addImage}
+          currentModel={currentModel}
+          changeModel={(v) => void changeModel(v)}
+          modelOptions={modelOptions}
+          profiles={profiles}
+          t={t}
+        />
         {renaming && (
           <Modal
             open
