@@ -52,6 +52,7 @@ mod sandbox;
 mod sandbox_helpers;
 mod dynamic;
 mod gateway;
+mod schema;
 mod memory_tools;
 mod custom;
 mod agents;

@@ -13,6 +13,7 @@ pub mod autonomy;
 pub mod compaction;
 pub mod computer;
 pub mod config;
+pub mod config_schema;
 pub mod cron;
 pub mod fsdb;
 pub mod image_stash;
