@@ -1,6 +1,7 @@
 //! core/approvals.rs —— Core 审批域（codebase-refactor 拆分）：审批单清单/查询/
-//! 决定执行（decide 含会话内授权档）、会话级命令前缀授权（「本会话允许」）。
-//! 纯搬移：方法签名与实现零改动。
+//! 决定执行（decide 含会话内授权档）、会话级命令前缀授权（「本会话允许」）、
+//! WebUI git 破坏性操作审批单、计划模式裁决（set_plan_mode/plan_list/
+//! plan_reject/plan_approve）。纯搬移：方法签名与实现零改动。
 
 use super::super::Core;
 use crate::types::*;
@@ -325,5 +326,103 @@ impl Core {
             payload: serde_json::json!({ "approvalId": req.id, "agentId": "webui", "command": command }),
         });
         Ok(req)
+    }
+
+    /// 设置/清除会话计划模式（true = 只读规划，写操作转计划条目）
+    pub fn set_plan_mode(&self, session_id: &str, plan: bool) {
+        crate::plan::set_plan_mode(session_id, plan);
+        self.orchestrator.read().emit(
+            session_id,
+            if plan {
+                "plan.enabled"
+            } else {
+                "plan.disabled"
+            },
+            serde_json::json!({}),
+        );
+    }
+    /// 会话计划清单快照
+    pub fn plan_list(&self, session_id: &str) -> Vec<crate::plan::PlanItem> {
+        crate::plan::list_items(session_id)
+    }
+    /// 拒绝计划：保留清单（可继续修改），不切模式，广播事件；
+    /// 若 approvals 通道有关联待审批单则一并了结
+    pub fn plan_reject(&self, session_id: &str) -> Vec<crate::plan::PlanItem> {
+        let items = crate::plan::reject(session_id);
+        if let Some(ap_id) = crate::plan::take_pending_approval(session_id) {
+            if let Ok(Some(mut ap)) = self.store.get_approval(&ap_id) {
+                if ap.status == "pending" {
+                    ap.status = "denied".into();
+                    ap.decided_at = Some(now_iso());
+                    ap.result = Some("计划被拒绝（清单保留可继续修改）".into());
+                    // P2-7：审批了结落库失败必须可见——静默会造内存态/落库态分叉
+                    if let Err(e) = self.store.update_approval(&ap) {
+                        eprintln!("[approval] 计划拒绝落库失败（{}）：{e}", ap.id);
+                    }
+                    self.emit_approval_resolved(&ap);
+                }
+            }
+        }
+        self.orchestrator.read().emit(
+            session_id,
+            "plan.rejected",
+            serde_json::json!({ "count": items.len() }),
+        );
+        items
+    }
+    /// 批准计划：切 execute 并逐条回放执行（terminal 走 shell 执行器，
+    /// 其余工具走网关 execute——此时已非 plan 模式，不再拦截），
+    /// 每条执行结果广播 plan.applied 事件
+    pub async fn plan_approve(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<(crate::plan::PlanItem, crate::tools::ToolResult)>> {
+        let items = crate::plan::approve(session_id);
+        if items.is_empty() {
+            anyhow::bail!("计划清单为空（无可批准条目）");
+        }
+        // approvals 通道关联单了结（executed）
+        if let Some(ap_id) = crate::plan::take_pending_approval(session_id) {
+            if let Ok(Some(mut ap)) = self.store.get_approval(&ap_id) {
+                if ap.status == "pending" {
+                    ap.status = "executed".into();
+                    ap.decided_at = Some(now_iso());
+                    ap.result = Some("计划已批准回放".into());
+                    // P2-7：同上——落库失败留日志防状态分叉
+                    if let Err(e) = self.store.update_approval(&ap) {
+                        eprintln!("[approval] 计划执行落库失败（{}）：{e}", ap.id);
+                    }
+                    self.emit_approval_resolved(&ap);
+                }
+            }
+        }
+        self.orchestrator.read().emit(
+            session_id,
+            "plan.approved",
+            serde_json::json!({ "count": items.len() }),
+        );
+        let orch = self.orchestrator.read().clone();
+        let mut out = Vec::new();
+        for item in items {
+            let tool = crate::types::ToolName::parse(&item.tool);
+            let result = match tool {
+                Some(t) => {
+                    orch.tools
+                        .execute("plan-replay", session_id, &[t], t, &item.args)
+                        .await
+                }
+                None => crate::tools::ToolResult::err(format!("未知工具：{}", item.tool)),
+            };
+            self.orchestrator.read().emit(
+                session_id,
+                "plan.applied",
+                serde_json::json!({
+                    "itemId": item.id, "tool": item.tool, "target": item.target,
+                    "ok": result.ok,
+                }),
+            );
+            out.push((item, result));
+        }
+        Ok(out)
     }
 }

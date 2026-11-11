@@ -3,6 +3,7 @@
 //! 模块地图见 lib.rs 的 Core struct doc 注释「方法分布图」。
 
 pub(crate) mod approvals;
+pub(crate) mod autonomy;
 pub(crate) mod identity;
 pub(crate) mod memory;
 pub(crate) mod plugins;
