@@ -440,12 +440,26 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             }
         });
     }
-    telegram::spawn_supervisor(core.clone());
-    napcat::spawn_supervisor(core.clone());
-    qqbot::spawn_supervisor(core.clone());
-    discord::spawn_supervisor(core.clone());
-    slack::spawn_supervisor(core.clone());
-    matrix::spawn_supervisor(core.clone());
+    // 通道接入：EXM_CHANNELS=off / none 时全部不拉起（开发预览/本地调试用——
+    // 防止 dev 实例与生产实例同时连同一账号产生重复回复与配对竞争）。
+    // off 只关通道 supervisor（cron/心跳/插件照常），不影响控制台会话使用。
+    let channels_off = matches!(
+        std::env::var("EXM_CHANNELS")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "off" | "none" | "0" | "false"
+    );
+    if channels_off {
+        println!("[gateway]   通道  EXM_CHANNELS=off：全部通道不拉起（开发预览模式）");
+    } else {
+        telegram::spawn_supervisor(core.clone());
+        napcat::spawn_supervisor(core.clone());
+        qqbot::spawn_supervisor(core.clone());
+        discord::spawn_supervisor(core.clone());
+        slack::spawn_supervisor(core.clone());
+        matrix::spawn_supervisor(core.clone());
+    }
     // 插件装载面：builtin 插件注册 + watcher 拉起（video 走新路径，行为等价）
     plugins::spawn_all(core.clone());
     // 会话任务队列工具（task__queue）：全局动态工具——智能体执行中收到新任务时
