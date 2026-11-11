@@ -48,7 +48,7 @@ pub mod types;
 use crate::bus::{InProcessBus, MessageBus};
 use crate::config::ExmConfig;
 use crate::cron::CronStore;
-use crate::memory::{MemoryDraft, MemoryEntry, MemoryKind, MemoryStore, RecallHit};
+use crate::memory::MemoryStore;
 use crate::orchestrator::{Orchestrator, ORCHESTRATOR_ID};
 use crate::provider::{
     FailoverState, LlmProvider, MockLlmProvider, ModelPool, OpenAiCompatibleProvider,
@@ -442,223 +442,30 @@ impl Core {
 
     // ---------------- 记忆系统便捷方法（组感知，docs/09 §6） ----------------
 
-    /// 会话的记忆分区（外部通道「记忆隔离」）：None = 与同组共享。
-    pub fn memory_partition_for_session(&self, session_id: &str) -> Option<String> {
-        self.store
-            .get_session(session_id)
-            .ok()
-            .flatten()
-            .and_then(|s| s.memory_partition)
-    }
 
-    /// 会话的有效记忆命名空间：有分区用分区，否则用当前组。
-    /// 注意：这里返回的是**记忆维度**的组键，不改变 registry 的激活组。
-    pub fn memory_group_for_session(&self, session_id: &str) -> String {
-        self.memory_partition_for_session(session_id)
-            .unwrap_or_else(|| self.active_group())
-    }
 
-    pub fn memory_recall(
-        &self,
-        query: &str,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<RecallHit>> {
-        let cfg = self.config();
-        let gid = self.registry.active_group();
-        self.memory.recall(
-            query,
-            limit.unwrap_or(cfg.memory_recall_limit),
-            None,
-            Some(&gid),
-            None,
-        )
-    }
 
-    /// 全量检索（管理视角：群体 + 所有个体私有；范围 = 激活组 + 全局条目）
-    pub fn memory_recall_all(
-        &self,
-        query: &str,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<RecallHit>> {
-        let gid = self.registry.active_group();
-        self.memory.recall_all(
-            query,
-            limit.unwrap_or(self.config().memory_recall_limit),
-            Some(&gid),
-            None,
-        )
-    }
 
-    /// 调试检索（8.4 记忆检索调试视图）：与对话内召回同口径——语义检索
-    /// 启用时嵌入查询向量（词项 + 语义混合命中，分数与 reasons 可解释）；
-    /// 未启用等价 memory_recall（仅词项）。嵌入失败静默回落词项（调试视图
-    /// 不应因嵌入端点抖动把检索本身打挂）。
-    pub async fn memory_recall_debug(
-        &self,
-        query: &str,
-        limit: Option<usize>,
-        agent: Option<&str>,
-    ) -> anyhow::Result<Vec<RecallHit>> {
-        let qe = self
-            .orchestrator()
-            .memory_query_embedding(query)
-            .await;
-        let gid = self.registry.active_group();
-        let cfg = self.config();
-        let limit = limit.unwrap_or(cfg.memory_recall_limit);
-        match agent {
-            Some(id) => self.memory.recall_for_agent(id, query, limit, Some(&gid), qe.as_deref()),
-            None => self.memory.recall(query, limit, None, Some(&gid), qe.as_deref()),
-        }
-    }
 
-    /// 个体检索：该智能体私有 + 群体共享（范围 = 激活组 + 全局条目）
-    pub fn memory_recall_for_agent(
-        &self,
-        agent_id: &str,
-        query: &str,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<RecallHit>> {
-        let cfg = self.config();
-        let gid = self.registry.active_group();
-        self.memory.recall_for_agent(
-            agent_id,
-            query,
-            limit.unwrap_or(cfg.memory_recall_limit),
-            Some(&gid),
-            None,
-        )
-    }
 
-    /// 写入记忆：自动归属激活组（组内可见，其他组不可见）
-    pub fn memory_remember(&self, mut draft: MemoryDraft) -> anyhow::Result<MemoryEntry> {
-        if draft.group_id.is_none() {
-            draft.group_id = Some(self.registry.active_group());
-        }
-        let entry = self.memory.remember(&draft)?;
-        self.render_memory_md()?;
-        Ok(entry)
-    }
 
-    /// 写入全局记忆（跨组可见）
-    pub fn memory_remember_global(&self, draft: MemoryDraft) -> anyhow::Result<MemoryEntry> {
-        let mut draft = draft;
-        draft.group_id = None;
-        let entry = self.memory.remember(&draft)?;
-        self.render_memory_md()?;
-        Ok(entry)
-    }
 
-    pub fn memory_list(
-        &self,
-        kind: Option<MemoryKind>,
-        limit: usize,
-    ) -> anyhow::Result<Vec<MemoryEntry>> {
-        self.memory.list(kind, limit)
-    }
 
-    /// 按归属过滤列表：Some(id) => 该个体私有 + 群体共享；组范围 = 激活组 + 全局条目
-    pub fn memory_list_filtered(
-        &self,
-        kind: Option<MemoryKind>,
-        agent: Option<&str>,
-        limit: usize,
-    ) -> anyhow::Result<Vec<MemoryEntry>> {
-        let gid = self.registry.active_group();
-        self.memory.list_filtered(kind, agent, limit, Some(&gid))
-    }
 
-    pub fn memory_stats(&self) -> anyhow::Result<serde_json::Value> {
-        self.memory.stats()
-    }
 
-    pub fn memory_pin(&self, id: &str, pinned: bool) -> anyhow::Result<()> {
-        self.memory.pin(id, pinned)?;
-        self.render_memory_md()?;
-        Ok(())
-    }
 
-    pub fn memory_forget(&self, id: &str) -> anyhow::Result<()> {
-        self.memory.forget(id)?;
-        self.render_memory_md()?;
-        Ok(())
-    }
 
-    pub fn memory_reindex(&self) -> anyhow::Result<usize> {
-        self.memory.reindex()
-    }
 
-    /// 记忆整理：时间衰减 + 重新渲染 memory.md
-    pub fn memory_decay(&self, floor: f64) -> anyhow::Result<usize> {
-        let cfg = self.config();
-        let changed = self.memory.decay(cfg.memory_half_life_days, floor)?;
-        self.render_memory_md()?;
-        Ok(changed)
-    }
 
-    /// 重新生成基础记忆文件（memory.md，全局浅层视图）；
-    /// 同时刷新：每组一份 `groups/<gid>/MEMORY.md`（组浅层记忆）、每智能体一份 `entities/agents/<id>/MEMORY.md`。
-    /// 深层记忆始终在 MemoryStore（数据库检索/衰减/压缩）——MEMORY.md 只是容量受限的人读快照。
-    pub fn render_memory_md(&self) -> anyhow::Result<usize> {
-        let cfg = self.config();
-        let n = self.memory.render_memory_md(&cfg.memory_md_path)?;
-        let gid = self.registry.active_group();
-        for meta in self.registry.list_groups() {
-            if let Some(dir) = self.registry.group_dir(&meta.id) {
-                let _ = self
-                    .memory
-                    .render_group_memory_md(&meta.id, dir.join("MEMORY.md"));
-            }
-        }
-        for s in self.registry.list_singles() {
-            let dir = self.registry.singles_dir_pub().join(&s.identifier);
-            let _ = self.memory.render_agent_memory_md(
-                &s.identifier,
-                Some(&gid),
-                dir.join("MEMORY.md"),
-            );
-        }
-        Ok(n)
-    }
 
     // ---------------- 人设（说话风格） ----------------
 
-    pub fn persona(&self, identifier: &str) -> anyhow::Result<String> {
-        self.registry.persona(identifier)
-    }
 
-    pub fn persona_is_custom(&self, identifier: &str) -> anyhow::Result<bool> {
-        self.registry.persona_is_custom(identifier)
-    }
 
-    pub fn set_persona(&self, identifier: &str, text: &str) -> anyhow::Result<()> {
-        self.registry.set_persona(identifier, text)
-    }
 
-    pub fn reset_persona(&self, identifier: &str) -> anyhow::Result<bool> {
-        self.registry.reset_persona(identifier)
-    }
 
-    /// 统一对话入口：会话级串行（运行中的后续输入排队为 followup，收束后依次处理；
-    /// 排队窗内到达的多条输入由 handle_user_message 的 collect 合并为一轮）
-    /// 语音转写（全局生效档案，whisper 系模型；音频字节 → 文本）
-    pub async fn transcribe(&self, audio: &[u8], filename: &str) -> anyhow::Result<String> {
-        let orch = self.orchestrator();
-        orch.transcribe_audio(audio, filename).await
-    }
 
-    /// 语音合成（全局生效档案，tts 系模型；文本 → mp3 字节）
-    pub async fn speak(&self, text: &str) -> anyhow::Result<Vec<u8>> {
-        let orch = self.orchestrator();
-        orch.speak_audio(text).await
-    }
 
-    /// memory.md 超限自主压缩（LLM 简略 + 旧文归档）；返回 (压缩前, 压缩后) 字数
-    pub async fn compact_memory_md(&self) -> anyhow::Result<(usize, usize)> {
-        let max = self.config().memory_md_max_chars;
-        let orch = self.orchestrator();
-        orch.compact_memory_md(max).await
-    }
 
 
 
@@ -714,49 +521,15 @@ impl Core {
 
     // ---------------- 通道身份与配对码（gateway 身份闸门共用） ----------------
 
-    pub fn identity_of(&self, channel: &str, external_id: &str) -> Option<UserIdentity> {
-        self.store.get_identity(channel, external_id).ok().flatten()
-    }
 
-    pub fn identity_of_id(&self, id: &str) -> Option<UserIdentity> {
-        self.store.get_identity_by_id(id).ok().flatten()
-    }
 
-    pub fn identities(&self) -> Vec<UserIdentity> {
-        self.store.list_identities().unwrap_or_default()
-    }
 
-    pub fn save_identity(&self, identity: &UserIdentity) -> anyhow::Result<()> {
-        self.store.put_identity(identity)
-    }
 
-    pub fn drop_identity(&self, id: &str) -> anyhow::Result<()> {
-        self.store.delete_identity(id)
-    }
 
-    /// 撤销配对码（控制台删除；幂等：不存在也成功）
-    pub fn drop_pairing_code(&self, code: &str) -> anyhow::Result<()> {
-        self.store.delete_pairing_code(code)
-    }
 
-    /// 清理全部过期配对码，返回清理数（周期任务与控制台「一键清理」共用）
-    pub fn purge_expired_pairing_codes(&self) -> usize {
-        let now = now_ms();
-        let mut n = 0usize;
-        for c in self.pairing_codes() {
-            if now > c.expires_at_ms && self.drop_pairing_code(&c.code).is_ok() {
-                n += 1;
-            }
-        }
-        n
-    }
 
     // ---------------- 聊天流（chat flow）：外部通道的对话单元与会话绑定 ----------------
 
-    /// 流 id 口径：`{channelId}:{chatKey}`
-    pub fn flow_id(channel_id: &str, chat_key: &str) -> String {
-        format!("{channel_id}:{chat_key}")
-    }
 
     /// 流级锁的 Arc（竞态 P1-3）：同 flow 的「查绑定→建会话→回写绑定」/
     /// 「touch 预览」临界区互斥。锁粒度 = flow_id（不同流互不影响）；
@@ -770,323 +543,24 @@ impl Core {
         locks.entry(id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
-    /// 原子版「查绑定→(缺绑定)建会话→回写绑定」（竞态 P1-3）：
-    /// ensure_flow_session 的 check-then-act 序列整体进同一临界区——
-    /// 并发两条同流消息不再各建会话（孤儿+绑定互抹）。
-    /// scope 由调用方解析（组 id）；title 为会话标题；legacy 认领在锁内。
-    pub fn ensure_flow_session_atomic(
-        &self,
-        channel_id: &str,
-        chat_key: &str,
-        scope: &str,
-        title: &str,
-        flow_name: Option<&str>,
-        is_group: bool,
-    ) -> Option<String> {
-        let flock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = flock.lock();
-        // 锁内直接读流文档（不走 flow_active_session——那会重复拿同一把锁，死锁）：
-        // 绑定有效且会话仍存在 → 复用（他人可能已在此临界区建好绑定）
-        if let Some(flow) = self.channel_flow(channel_id, chat_key) {
-            if let Some(sid) = flow.active_session.clone() {
-                if self.store.get_session(&sid).ok().flatten().is_some() {
-                    // 流名回填（空填不覆盖；与 ensure_flow_named 同语义但在锁内）
-                    if let Some(n) = flow_name.filter(|n| !n.trim().is_empty()) {
-                        if flow.display_name.trim().is_empty() {
-                            let mut f = flow.clone();
-                            f.display_name = n.trim().to_string();
-                            f.is_group = f.is_group || is_group;
-                            let _ = self.store.put_channel_flow(&f);
-                        }
-                    }
-                    return Some(sid);
-                }
-            }
-        }
-        // 旧 title 会话认领（升级迁移），否则新建
-        let legacy = self
-            .store
-            .list_sessions_in_group(scope)
-            .ok()
-            .and_then(|list| list.into_iter().find(|s| s.title == title));
-        let sid = match legacy {
-            Some(s) => s.id,
-            None => self.store.create_session(title, scope).ok()?.id,
-        };
-        // 回写绑定也直接操作（bind_flow_session_named 内部重复拿锁）：
-        // 读流→合并名→写回，单临界区内完成
-        let mut flow = self.channel_flow(channel_id, chat_key).unwrap_or_else(|| ChannelFlow {
-            id: Self::flow_id(channel_id, chat_key),
-            channel_id: channel_id.to_string(),
-            chat_key: chat_key.to_string(),
-            display_name: flow_name.unwrap_or("").trim().to_string(),
-            is_group,
-            active_session: None,
-            last_message: String::new(),
-            last_active_at: String::new(),
-            created_at: now_iso(),
-        });
-        if flow.display_name.trim().is_empty() {
-            if let Some(n) = flow_name {
-                flow.display_name = n.trim().to_string();
-            }
-        }
-        flow.is_group = flow.is_group || is_group;
-        flow.active_session = Some(sid.clone());
-        flow.last_active_at = now_iso();
-        let _ = self.store.put_channel_flow(&flow);
-        Some(sid)
-    }
 
-    /// 取流（不存在返回 None）
-    pub fn channel_flow(&self, channel_id: &str, chat_key: &str) -> Option<ChannelFlow> {
-        self.store
-            .get_channel_flow(&Self::flow_id(channel_id, chat_key))
-            .ok()
-            .flatten()
-    }
 
-    pub fn channel_flows(&self, channel_id: Option<&str>) -> Vec<ChannelFlow> {
-        self.store.list_channel_flows(channel_id).unwrap_or_default()
-    }
 
-    /// 保存流（upsert）
-    pub fn save_channel_flow(&self, flow: &ChannelFlow) -> anyhow::Result<()> {
-        self.store.put_channel_flow(flow)
-    }
 
-    pub fn drop_channel_flow(&self, id: &str) -> anyhow::Result<()> {
-        self.store.delete_channel_flow(id)
-    }
 
-    /// 流未读 +1（智能体在流绑定会话产出回复时调用；spawn_reply 收束点）。
-    /// 流不存在时忽略（未绑定流的会话无未读语义）。
-    /// 一次性标记消费（agent-budget-audit 内联提示去重）：首次返回 true 并置位，
-    /// 此后 false。进程内存态。
-    pub fn consume_once_flag(&self, key: &str) -> bool {
-        self.once_flags.lock().insert(key.to_string())
-    }
 
-    pub fn bump_flow_unread(&self, channel_id: &str, chat_key: &str) {
-        let id = Self::flow_id(channel_id, chat_key);
-        if self.store.get_channel_flow(&id).ok().flatten().is_none() {
-            return;
-        }
-        let mut m = self.flow_unread.lock();
-        let c = m.entry(id).or_insert(0);
-        *c = c.saturating_add(1);
-    }
 
-    /// 流未读清零（用户打开该流绑定会话时调用；REST /flows/:id/read）
-    pub fn clear_flow_unread(&self, channel_id: &str, chat_key: &str) {
-        self.flow_unread
-            .lock()
-            .remove(&Self::flow_id(channel_id, chat_key));
-    }
 
-    /// 单条流未读数（列表输出用）
-    pub fn flow_unread_count(&self, channel_id: &str, chat_key: &str) -> u32 {
-        self.flow_unread
-            .lock()
-            .get(&Self::flow_id(channel_id, chat_key))
-            .copied()
-            .unwrap_or(0)
-    }
 
-    /// 流绑定的活跃会话；不存在或已删 → None（调用方开新会话后回写绑定）
-    pub fn flow_active_session(&self, channel_id: &str, chat_key: &str) -> Option<String> {
-        // 临界区（竞态 P1-3）：查绑定 + 失效清理原子化——与 bind/touch 互斥，
-        // 防止清理与他方回写交错抹掉刚落的绑定
-        let lock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = lock.lock();
-        let flow = self.channel_flow(channel_id, chat_key)?;
-        let sid = flow.active_session?;
-        // 会话可能已被用户在控制台删除：失效绑定顺带清理，下次重建
-        if self.store.get_session(&sid).ok().flatten().is_none() {
-            let _ = self.drop_channel_flow(&flow.id);
-            return None;
-        }
-        Some(sid)
-    }
 
-    /// 把流绑定到会话（流不存在则创建；顺带刷最后活跃）
-    pub fn bind_flow_session(
-        &self,
-        channel_id: &str,
-        chat_key: &str,
-        session_id: &str,
-    ) -> anyhow::Result<()> {
-        self.bind_flow_session_named(channel_id, chat_key, session_id, None, None)
-    }
 
-    /// 流名维护（会话管理可用性修复 2026-11）：流的展示名（群名 / 对端昵称）
-    /// 只在为空时回填——不覆盖既有值（可能是用户改过的自定义名，或更早来源
-    /// 的更好名称）。适配器每次入站都带最新名调用，首次到达即落名。
-    pub fn ensure_flow_named(
-        &self,
-        channel_id: &str,
-        chat_key: &str,
-        display_name: &str,
-        is_group: bool,
-    ) {
-        if display_name.trim().is_empty() {
-            return;
-        }
-        let Some(mut flow) = self.channel_flow(channel_id, chat_key) else {
-            return;
-        };
-        if flow.display_name.trim().is_empty() {
-            flow.display_name = display_name.trim().to_string();
-            flow.is_group = flow.is_group || is_group;
-            let _ = self.store.put_channel_flow(&flow);
-        }
-    }
 
-    /// bind_flow_session 带名变体：建流时直接落展示名（避免先建空名流再补名
-    /// 的窗口期——控制台流列表显示裸 chat_key 不可辨认）
-    pub fn bind_flow_session_named(
-        &self,
-        channel_id: &str,
-        chat_key: &str,
-        session_id: &str,
-        display_name: Option<&str>,
-        is_group: Option<bool>,
-    ) -> anyhow::Result<()> {
-        // 临界区（竞态 P1-3）：读流→建/改→回写原子化——并发 bind（同流两条消息
-        // 各建会话）不再互抹绑定、不再双建流文档
-        let flock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = flock.lock();
-        let id = Self::flow_id(channel_id, chat_key);
-        let mut flow = self
-            .channel_flow(channel_id, chat_key)
-            .unwrap_or(ChannelFlow {
-                id: id.clone(),
-                channel_id: channel_id.to_string(),
-                chat_key: chat_key.to_string(),
-                display_name: display_name.unwrap_or("").trim().to_string(),
-                is_group: is_group.unwrap_or(false),
-                active_session: None,
-                last_message: String::new(),
-                last_active_at: String::new(),
-                created_at: now_iso(),
-            });
-        // 既有流只补空名（不覆盖用户自定义）
-        if flow.display_name.trim().is_empty() {
-            if let Some(n) = display_name {
-                flow.display_name = n.trim().to_string();
-            }
-        }
-        if let Some(g) = is_group {
-            flow.is_group = flow.is_group || g;
-        }
-        flow.active_session = Some(session_id.to_string());
-        flow.last_active_at = now_iso();
-        self.store.put_channel_flow(&flow)
-    }
 
-    /// 流的消息预览回写（入站消息落库后调用；不建流——只有 begin 才建）
-    pub fn touch_flow_message(
-        &self,
-        channel_id: &str,
-        chat_key: &str,
-        preview: &str,
-    ) -> anyhow::Result<()> {
-        // 临界区（竞态 P1-3）：读改写原子化——touch 的整流写回不再覆盖
-        // 期间他方落的 bind（active_session）
-        let flock = self.flow_lock_arc(channel_id, chat_key);
-        let _g = flock.lock();
-        if let Some(mut flow) = self.channel_flow(channel_id, chat_key) {
-            flow.last_message = preview.chars().take(120).collect();
-            flow.last_active_at = now_iso();
-            self.store.put_channel_flow(&flow)?;
-        }
-        Ok(())
-    }
 
-    /// 签发一次性配对码（8 位短码，TTL 由调用方给）
-    pub fn issue_pairing_code(
-        &self,
-        note: &str,
-        platform: Option<&str>,
-        ttl_secs: u64,
-    ) -> anyhow::Result<PairingCode> {
-        self.issue_pairing_code_role(note, platform, ttl_secs, "member")
-    }
 
-    /// 带预设角色签发（admin = 管理者配对码；兑换即落 admin）
-    pub fn issue_pairing_code_role(
-        &self,
-        note: &str,
-        platform: Option<&str>,
-        ttl_secs: u64,
-        role: &str,
-    ) -> anyhow::Result<PairingCode> {
-        let code = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-        let c = PairingCode {
-            code: code.clone(),
-            note: note.to_string(),
-            channel_platform: platform.map(|s| s.to_string()),
-            created_by: "console".into(),
-            created_at: now_iso(),
-            expires_at_ms: now_ms() + ttl_secs * 1000,
-            role: if role == "admin" {
-                "admin".into()
-            } else {
-                "member".into()
-            },
-        };
-        self.store.put_pairing_code(&c)?;
-        Ok(c)
-    }
 
-    pub fn pairing_codes(&self) -> Vec<PairingCode> {
-        self.store.list_pairing_codes().unwrap_or_default()
-    }
 
-    /// 直接落一张配对码（迁移 / 测试 / 控制台定向写入）
-    pub fn save_pairing_code(&self, code: &PairingCode) -> anyhow::Result<()> {
-        self.store.put_pairing_code(code)
-    }
 
-    /// 兑换配对码 → 绑定身份（单次有效 + 过期校验；channel 为通道账号 id）
-    pub fn redeem_pairing(
-        &self,
-        code: &str,
-        channel: &str,
-        external_id: &str,
-        display_name: &str,
-        default_role: &str,
-    ) -> anyhow::Result<UserIdentity> {
-        let c = self
-            .store
-            .consume_pairing_code(code.trim())
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .ok_or_else(|| anyhow::anyhow!("配对码无效或已被使用"))?;
-        if now_ms() > c.expires_at_ms {
-            anyhow::bail!("配对码已过期，请重新签发");
-        }
-        if let Some(p) = &c.channel_platform {
-            if !channel.starts_with(p.as_str()) {
-                anyhow::bail!("配对码限定平台 {p}，当前通道不可用");
-            }
-        }
-        let identity = UserIdentity {
-            id: format!("{channel}:{external_id}"),
-            channel: channel.to_string(),
-            external_id: external_id.to_string(),
-            display_name: display_name.to_string(),
-            // 预设角色优先（签发时指定）；存量码无角色落 default_role（member）
-            role: if c.role.trim().is_empty() {
-                default_role.to_string()
-            } else {
-                c.role.clone()
-            },
-            paired_at: now_iso(),
-            note: c.note.clone(),
-        };
-        self.store.put_identity(&identity)?;
-        Ok(identity)
-    }
 
     /// 供网关在执行前拒绝时发运行错误事件（配额 / 治理类短路，走既有回帖通路）
     pub fn emit_run_error(&self, session_id: &str, message: &str) {
@@ -1758,32 +1232,11 @@ impl Core {
 
     // ---------------- 平台能力：技能包 / 定时任务 / 执行审批（docs/10） ----------------
 
-    pub fn skills(&self) -> anyhow::Result<Vec<SkillDef>> {
-        self.registry.load_skills()
-    }
 
-    pub fn add_skill(&self, skill: SkillDef) -> anyhow::Result<()> {
-        self.registry.write_skill(&skill)
-    }
 
-    /// 从 SKILL.md 原文导入技能（REST / CLI 共用；同 id 覆盖）
-    pub fn import_skill_md(&self, raw: &str) -> anyhow::Result<SkillDef> {
-        self.registry.import_skill_md(raw)
-    }
 
-    /// 导出技能为 SKILL.md 原文（可分享/迁移）
-    pub fn export_skill_md(&self, id: &str) -> anyhow::Result<Option<String>> {
-        self.registry.export_skill_md(id)
-    }
 
-    /// 技能使用统计回填（派发注入即计一次；节点终态回填成功标记）
-    pub fn record_skill_use(&self, id: &str, ok: bool) {
-        self.registry.record_skill_use(id, ok);
-    }
 
-    pub fn remove_skill(&self, id: &str) -> anyhow::Result<bool> {
-        self.registry.remove_skill(id)
-    }
 
 
 
@@ -2148,105 +1601,6 @@ impl Core {
         Some((task, why))
     }
 
-    /// 自主记忆摘要（实验性 experiments.autoMemoryDigest，9.1）：把一个长会话
-    /// 历史归纳为记忆条目。低峰期由调度器对每个达标会话调用（当日全库只跑一次）。
-    /// 返回 Some(标题) = 本次产出/命中记忆；None = 会话不达标或调用失败（留事件）。
-    ///
-    /// 设计约束（任务 9.1）：
-    /// - token 预算：转录每条截 400 字符、最多取 200 条（compaction 同口径），
-    ///   单会话一次非流式调用，无工具循环；
-    /// - 去重：落库走 memory.remember（内容哈希去重——重复摘要提升重要性
-    ///   而非新建条目）；
-    /// - 默认关：关闭态调度器不调用（零任务零 token）。
-    pub async fn memory_digest_session(&self, session_id: &str) -> Option<String> {
-        let cfg = self.config();
-        let min_turns = cfg.automation.memory_digest_min_turns.max(5);
-        let count = self.store.message_count(session_id);
-        if count < min_turns {
-            return None;
-        }
-        let msgs = self
-            .store
-            .list_messages(session_id, 200)
-            .unwrap_or_default();
-        if msgs.is_empty() {
-            return None;
-        }
-        let transcript: String = msgs
-            .iter()
-            .map(|m| {
-                let who = match m.role {
-                    crate::types::MessageRole::User => "用户",
-                    crate::types::MessageRole::Orchestrator => {
-                        m.agent_id.as_deref().unwrap_or("指挥体")
-                    }
-                    crate::types::MessageRole::Unit => m.agent_id.as_deref().unwrap_or("子个体"),
-                    crate::types::MessageRole::System => "系统",
-                };
-                let body = m
-                    .statements
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("；");
-                format!("[{who}] {}", body.chars().take(400).collect::<String>())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let orch = self.orchestrator();
-        let req = crate::provider::ChatRequest::new(
-            orch.orch_model.clone(),
-            vec![
-                crate::provider::ChatMessage::system(DIGEST_SYSTEM_PROMPT),
-                crate::provider::ChatMessage::user(format!(
-                    "## 会话转录（{count} 条消息）\n{transcript}"
-                )),
-            ],
-        );
-        let output = match orch.orch_provider.chat(req).await {
-            Ok(r) => r.content,
-            Err(e) => {
-                orch.emit(
-                    session_id,
-                    "memory.digest",
-                    serde_json::json!({ "ok": false, "error": e.to_string() }),
-                );
-                return None;
-            }
-        };
-        // 摘要落记忆（内容哈希去重；来源指向会话）
-        let title = format!("会话摘要：{}", output.chars().take(40).collect::<String>());
-        let draft = crate::memory::MemoryDraft::new(
-            crate::memory::MemoryKind::Digest,
-            &title,
-            output.chars().take(600).collect::<String>(),
-        )
-        .session(session_id);
-        match self.memory.remember(&draft) {
-            Ok(entry) => {
-                orch.emit(
-                    session_id,
-                    "memory.digest",
-                    serde_json::json!({
-                        "ok": true,
-                        "entryId": entry.id,
-                        "deduped": entry.updated_at != entry.created_at,
-                        "messageCount": count,
-                    }),
-                );
-                Some(title)
-            }
-            Err(e) => {
-                orch.emit(
-                    session_id,
-                    "memory.digest",
-                    serde_json::json!({ "ok": false, "error": e.to_string() }),
-                );
-                None
-            }
-        }
-    }
 
     /// Meta Agent 一次巡检 tick（实验性 experiments.metaAgent）：周期判定 →
     /// 数据快照注入的 Eval 自评 →（通过）开自主会话（装 meta 工具组）分析落提议。

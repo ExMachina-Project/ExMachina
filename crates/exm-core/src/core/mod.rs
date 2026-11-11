@@ -3,7 +3,10 @@
 //! 模块地图见 lib.rs 的 Core struct doc 注释「方法分布图」。
 
 pub(crate) mod approvals;
+pub(crate) mod identity;
+pub(crate) mod memory;
 pub(crate) mod sessions;
+pub(crate) mod skills;
 
 #[cfg(test)]
 mod tests;
