@@ -5,6 +5,7 @@
 pub(crate) mod approvals;
 pub(crate) mod identity;
 pub(crate) mod memory;
+pub(crate) mod plugins;
 pub(crate) mod sessions;
 pub(crate) mod skills;
 
