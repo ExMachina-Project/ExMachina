@@ -26,7 +26,7 @@ pub use terminal::{BgTask, SpawnBgState, SpawnBgTask};
 pub use hooks::run_hook_command;
 pub use sandbox::{ShellOpts, WinJob, is_network_command, execute_shell_command_timed, execute_shell_with, windows_job_available};
 pub use dynamic::{DynamicToolOutput, DynamicToolExec, dynamic_exec, dynamic_exec_images};
-pub use gateway::{SpawnExec, PluginCredResolver, ToolGateway, SessionGrantProbe, scope_budget};
+pub use gateway::{SpawnExec, PluginCredResolver, ToolGateway, SessionGrantProbe, SessionSendExec, scope_budget};
 
 
 // 跨子模块共享的内部项（原 tools.rs 同文件私有；拆分后经 tools 根再导出保持 sibling 可见）。
@@ -58,6 +58,8 @@ mod agents;
 mod files;
 mod git;
 mod spawn;
+mod sessions;
+mod skill_manage;
 mod terminal;
 mod todo;
 mod meta;

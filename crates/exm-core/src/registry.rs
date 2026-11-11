@@ -1284,7 +1284,155 @@ impl LocalRegistry {
                 out.push(s); // 同 id 的 SKILL.md 已收，旧 json 跳过
             }
         }
+        // 运行期统计（侧车聚合；SKILL.md 保持纯内容，统计不污染可分享的技能文件）
+        let usage = self.skill_usage_map();
+        for s in out.iter_mut() {
+            if s.source.trim().is_empty() {
+                s.source = "manual".into();
+            }
+            if let Some((count, success, last)) = usage.get(&s.id) {
+                s.use_count = *count;
+                s.success_count = *success;
+                s.last_used_at = last.clone();
+            }
+        }
         Ok(out)
+    }
+
+    fn skill_usage_path(&self) -> Option<PathBuf> {
+        self.skills_dir().map(|d| d.join(".usage.jsonl"))
+    }
+
+    /// 聚合使用统计：id → (使用次数, 成功次数, 最近使用时间)。
+    /// 侧车按追加写，读时按行聚合——避免每次使用都重写 SKILL.md（手工编辑零冲突）。
+    fn skill_usage_map(&self) -> std::collections::HashMap<String, (u64, u64, String)> {
+        let Some(path) = self.skill_usage_path() else {
+            return Default::default();
+        };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return Default::default();
+        };
+        let mut map: std::collections::HashMap<String, (u64, u64, String)> = Default::default();
+        for line in raw.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(id) = v.get("id").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+            // 兼容两种行：逐次事件（无 count）与压缩后的聚合行（count/success）
+            let count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(1);
+            let success = v
+                .get("success")
+                .and_then(|x| x.as_u64())
+                .unwrap_or_else(|| u64::from(ok));
+            let at = v
+                .get("at")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let e = map.entry(id.to_string()).or_insert((0, 0, String::new()));
+            e.0 += count;
+            e.1 += success;
+            if !at.is_empty() {
+                e.2 = at;
+            }
+        }
+        map
+    }
+
+    /// 记录一次技能使用（注入派发即计一次；节点完成/受阻回填成功标记）。
+    /// 写失败静默（统计是增强面，不阻塞任务主链）。
+    pub fn record_skill_use(&self, id: &str, ok: bool) {
+        let Some(path) = self.skill_usage_path() else {
+            return;
+        };
+        let line = serde_json::json!({
+            "id": id,
+            "at": crate::types::now_iso(),
+            "ok": ok,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}");
+        }
+        // 侧车封顶：超过 256KB 即聚合为「每技能一行」，避免长期运行无限增长
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 256 * 1024 {
+            self.compact_skill_usage(&path);
+        }
+    }
+
+    /// 把逐次事件压缩为每技能一行（count/success/at），统计口径不变、文件有界。
+    fn compact_skill_usage(&self, path: &Path) {
+        let map = self.skill_usage_map();
+        let mut ids: Vec<&String> = map.keys().collect();
+        ids.sort();
+        let body = ids
+            .into_iter()
+            .map(|id| {
+                let (count, success, last) = &map[id];
+                serde_json::json!({
+                    "id": id,
+                    "count": count,
+                    "success": success,
+                    "at": last,
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(path, format!("{body}\n"));
+    }
+
+    /// 删除某技能的使用统计（技能删除时一并清理，避免同名重建继承旧统计）
+    fn remove_skill_usage(&self, id: &str) {
+        let Some(path) = self.skill_usage_path() else {
+            return;
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let keep: Vec<&str> = raw
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                    .as_deref()
+                    != Some(id)
+            })
+            .collect();
+        let _ = std::fs::write(path, keep.join("\n") + "\n");
+    }
+
+    /// 导出单个技能为 SKILL.md 原文（可分享/迁移；不含运行期统计）
+    pub fn export_skill_md(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .load_skills()?
+            .into_iter()
+            .find(|s| s.id == id)
+            .map(|s| render_skill_md(&s)))
+    }
+
+    /// 从 SKILL.md 原文导入技能（标准 frontmatter + Markdown 正文）。
+    /// 来源标记 import；同 id 覆盖（与 write_skill 一致）。
+    pub fn import_skill_md(&self, raw: &str) -> anyhow::Result<crate::types::SkillDef> {
+        let mut skill = parse_skill_md(raw)
+            .map_err(|e| anyhow::anyhow!("SKILL.md 解析失败：{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("缺少 YAML frontmatter（需以 --- 开头）"))?;
+        if skill.source.trim().is_empty() {
+            skill.source = "import".into();
+        }
+        if skill.created_at.trim().is_empty() {
+            skill.created_at = crate::types::now_iso();
+        }
+        self.write_skill(&skill)?;
+        Ok(skill)
     }
 
     /// 写入技能包到全局目录（SKILL.md 格式：frontmatter + 正文=instructions）
@@ -1306,6 +1454,9 @@ impl LocalRegistry {
         std::fs::create_dir_all(dir.join(id))?;
         let mut skill = skill.clone();
         skill.id = id.to_string();
+        if skill.source.trim().is_empty() {
+            skill.source = "manual".into();
+        }
         std::fs::write(dir.join(id).join("SKILL.md"), render_skill_md(&skill))?;
         // 同 id 旧 json 一并清除（防双源分叉：load 已优先 SKILL.md，旧档留着徒增困惑）
         let legacy = dir.join(format!("{id}.json"));
@@ -1521,6 +1672,15 @@ impl LocalRegistry {
     }
 
     pub fn remove_skill(&self, id: &str) -> anyhow::Result<bool> {
+        let id = id.trim();
+        // 与 write_skill 同口径校验：删除路径由 id 拼接，禁止 .. / 分隔符穿越
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            anyhow::bail!("非法技能 id: {id}（仅允许字母/数字/-/_）");
+        }
         let Some(dir) = self.skills_dir() else {
             anyhow::bail!("无激活组")
         };
@@ -1535,6 +1695,9 @@ impl LocalRegistry {
         if legacy.exists() {
             std::fs::remove_file(&legacy)?;
             removed = true;
+        }
+        if removed {
+            self.remove_skill_usage(id);
         }
         Ok(removed)
     }
@@ -2110,6 +2273,7 @@ fn parse_skill_md(raw: &str) -> Result<Option<crate::types::SkillDef>, String> {
     let mut triggers: Vec<String> = Vec::new();
     let mut agents: Vec<String> = Vec::new();
     let mut created_at = String::new();
+    let mut source = String::new();
     let mut closed = false;
     // 逐行列表项的归属：跟随最近声明的列表字段（triggers → agents）
     let mut list_field: u8 = 0; // 0=无 1=triggers 2=agents
@@ -2147,6 +2311,7 @@ fn parse_skill_md(raw: &str) -> Result<Option<crate::types::SkillDef>, String> {
                 list_field = 2;
             }
             "createdAt" | "created_at" => created_at = v.to_string(),
+            "source" => source = v.to_string(),
             _ => {}
         }
     }
@@ -2168,6 +2333,10 @@ fn parse_skill_md(raw: &str) -> Result<Option<crate::types::SkillDef>, String> {
         instructions,
         agents,
         created_at,
+        use_count: 0,
+        success_count: 0,
+        last_used_at: String::new(),
+        source,
     }))
 }
 
@@ -2187,6 +2356,9 @@ fn render_skill_md(s: &crate::types::SkillDef) -> String {
     }
     if !s.created_at.trim().is_empty() {
         fm.push_str(&format!("createdAt: {}\n", s.created_at));
+    }
+    if !s.source.trim().is_empty() {
+        fm.push_str(&format!("source: {}\n", s.source));
     }
     fm.push_str("---\n\n");
     fm.push_str(s.instructions.trim());
@@ -2300,6 +2472,7 @@ mod skills_dir_tests {
             instructions: "1) 约束一\n2) 约束二".into(),
             agents: vec![],
             created_at: "2026-10-31T00:00:00.000Z".into(),
+            ..Default::default()
         };
         reg.write_skill(&s).unwrap();
         let dir = reg.skills_dir().unwrap();
@@ -2339,6 +2512,7 @@ mod skills_dir_tests {
             instructions: "新正文".into(),
             agents: vec![],
             created_at: String::new(),
+            ..Default::default()
         })
         .unwrap();
         assert!(!skills.join("dual.json").exists(), "write 应清除同 id 旧 json");
@@ -2359,6 +2533,44 @@ mod skills_dir_tests {
         assert!(parse_skill_md("---\nid: x\nname: y\n").is_err());
         // 缺正文
         assert!(parse_skill_md("---\nid: x\nname: y\n---\n").is_err());
+    }
+
+    /// 技能使用统计侧车 + 导入导出往返：统计不污染 SKILL.md，删除时一并清理
+    #[test]
+    fn 技能_使用统计与导入导出() {
+        let (reg, root) = mk_registry("usage");
+        let md = "---\nid: use-me\nname: 统计往返\ntriggers: [统计]\n---\n\n按步骤执行\n";
+        let s = reg.import_skill_md(md).unwrap();
+        assert_eq!(s.id, "use-me");
+        assert_eq!(s.source, "import");
+        reg.record_skill_use("use-me", true);
+        reg.record_skill_use("use-me", false);
+        let got = reg
+            .load_skills()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == "use-me")
+            .expect("导入后可读回");
+        assert_eq!(got.use_count, 2);
+        assert_eq!(got.success_count, 1);
+        assert!(!got.last_used_at.is_empty());
+        let exported = reg.export_skill_md("use-me").unwrap().unwrap();
+        assert!(exported.contains("id: use-me"));
+        assert!(exported.contains("按步骤执行"));
+        assert!(!exported.contains("useCount"), "统计不应写入 SKILL.md");
+        assert!(reg.remove_skill("use-me").unwrap());
+        // 路径穿越防护：非法 id 直接拒绝（删除路径由 id 拼接）
+        assert!(reg.remove_skill("../../evil").is_err());
+        // 同名重建：旧统计已被清理，不继承
+        reg.import_skill_md(md).unwrap();
+        let again = reg
+            .load_skills()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == "use-me")
+            .unwrap();
+        assert_eq!(again.use_count, 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 会话归属路由（切换人设无效的回归锚点）：轮次作用域（task-local）按

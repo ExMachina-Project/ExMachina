@@ -736,6 +736,125 @@ pub(crate) struct ExportQuery {
     format: Option<String>,
 }
 
+// ---------------------------------------------------------------- 训练轨迹导出
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrajectoryQuery {
+    /// json（缺省）| jsonl（每轮一行）
+    format: Option<String>,
+    include_thinking: Option<bool>,
+    include_tool_args: Option<bool>,
+    max_tool_chars: Option<usize>,
+}
+
+/// GET /api/sessions/:id/trajectory?format=json|jsonl&includeThinking=false&maxToolChars=2000
+/// 训练/评测样本：按轮次切分、默认剥离思维链、工具结果可控截断（schema: exm.trajectory/v1）。
+pub(crate) async fn export_trajectory(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<TrajectoryQuery>,
+) -> impl IntoResponse {
+    let Some(session) = st.core.store.get_session(&id).ok().flatten() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
+    };
+    let messages = st.core.store.list_messages(&id, 0).unwrap_or_default();
+    let opts = exm_core::trajectory::TrajectoryOptions {
+        include_thinking: q.include_thinking.unwrap_or(false),
+        include_tool_args: q.include_tool_args.unwrap_or(true),
+        max_tool_chars: q.max_tool_chars.unwrap_or(2000).clamp(100, 20_000),
+    };
+    let trajectory = exm_core::trajectory::build_trajectory(&session, &messages, &opts);
+    let jsonl = q.format.as_deref() == Some("jsonl");
+    let body = if jsonl {
+        exm_core::trajectory::trajectory_jsonl(&trajectory)
+    } else {
+        serde_json::to_string_pretty(&trajectory).unwrap_or_else(|_| "{}".into())
+    };
+    let safe_id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(12)
+        .collect();
+    let safe_id = if safe_id.is_empty() { "session".to_string() } else { safe_id };
+    let fname = format!(
+        "exm-trajectory-{}.{}",
+        safe_id,
+        if jsonl { "jsonl" } else { "json" }
+    );
+    (
+        StatusCode::OK,
+        [
+            (
+                "content-type",
+                if jsonl {
+                    "application/x-ndjson; charset=utf-8"
+                } else {
+                    "application/json; charset=utf-8"
+                },
+            ),
+            (
+                "content-disposition",
+                Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str()) as &str,
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------- 中断改向
+
+#[derive(Deserialize)]
+pub(crate) struct SteerBody {
+    pub text: String,
+}
+
+/// POST /api/sessions/:id/steer —— 中断当前轮次并把新输入排入下一轮。
+/// 语义：正在跑 → 置位取消令牌（工具循环在检查点终止），新消息走会话串行队列；
+/// 空闲 → 等价普通 chat。返回 interrupted 标记便于前端提示。
+pub(crate) async fn steer_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<SteerBody>,
+) -> impl IntoResponse {
+    let text = b.text.trim().to_string();
+    if text.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text 不能为空" })),
+        )
+            .into_response();
+    }
+    if st.core.store.get_session(&id).ok().flatten().is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
+    }
+    let interrupted = st.core.stop_session(&id).is_ok();
+    let core = st.core.clone();
+    tokio::spawn(async move {
+        if let Err(e) = core.chat(&id, &text).await {
+            let _ = core.events.send(exm_core::types::CoreEvent {
+                kind: "run.error".into(),
+                session_id: id.clone(),
+                payload: json!({ "message": e.to_string() }),
+            });
+        }
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "accepted": true, "interrupted": interrupted })),
+    )
+        .into_response()
+}
+
 /// GET /api/sessions/:id/export?format=markdown|json
 /// Markdown：消息 + 思考/工具摘要 + 审批记录（人读归档）；JSON：结构化全量（机读回放）。
 pub(crate) async fn export_session(

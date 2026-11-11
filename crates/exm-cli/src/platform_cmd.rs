@@ -56,6 +56,8 @@ pub fn run_skill_add(
         instructions: instructions.trim().to_string(),
         agents,
         created_at: exm_core::types::now_iso(),
+        source: "manual".into(),
+        ..Default::default()
     };
     core.add_skill(skill)?;
     println!("{} 技能包已创建：{}（全体组共用）", ok("完成"), id.cyan());
@@ -68,6 +70,79 @@ pub fn run_skill_remove(core: &Core, id: &str) -> anyhow::Result<()> {
         println!("{} 技能包已删除：{id}", ok("完成"));
     } else {
         anyhow::bail!("技能包不存在: {id}");
+    }
+    Ok(())
+}
+
+/// 从 SKILL.md 文件导入（标准 frontmatter + Markdown 正文；同 id 覆盖）
+pub fn run_skill_import(core: &Core, file: &str) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("读取文件失败 {file}: {e}"))?;
+    let skill = core.import_skill_md(&raw)?;
+    println!(
+        "{} 技能包已导入：{}（{}，触发词 {} 个，适用 {}）",
+        ok("完成"),
+        skill.id.cyan(),
+        skill.name,
+        skill.triggers.len(),
+        if skill.agents.is_empty() {
+            "全体".to_string()
+        } else {
+            skill.agents.join("、")
+        }
+    );
+    Ok(())
+}
+
+/// 导出技能为 SKILL.md（out 为空 = stdout）
+pub fn run_skill_export(core: &Core, id: &str, out: &str) -> anyhow::Result<()> {
+    let md = core
+        .export_skill_md(id)?
+        .ok_or_else(|| anyhow::anyhow!("技能包不存在: {id}"))?;
+    if out.trim().is_empty() {
+        print!("{md}");
+    } else {
+        std::fs::write(out, md)?;
+        println!("{} 已导出到 {}", ok("完成"), out.cyan());
+    }
+    Ok(())
+}
+
+/// 会话训练轨迹导出：按轮次切分，默认剥离思维链，工具结果可控截断
+pub fn run_trajectory(
+    core: &Core,
+    session_id: &str,
+    out: &str,
+    jsonl: bool,
+    include_thinking: bool,
+    max_tool_chars: usize,
+) -> anyhow::Result<()> {
+    let session = core
+        .store
+        .get_session(session_id)?
+        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+    let messages = core.store.list_messages(session_id, 0)?;
+    let opts = exm_core::trajectory::TrajectoryOptions {
+        include_thinking,
+        include_tool_args: true,
+        max_tool_chars: max_tool_chars.clamp(100, 20_000),
+    };
+    let trajectory = exm_core::trajectory::build_trajectory(&session, &messages, &opts);
+    let body = if jsonl {
+        exm_core::trajectory::trajectory_jsonl(&trajectory)
+    } else {
+        serde_json::to_string_pretty(&trajectory)?
+    };
+    if out.trim().is_empty() {
+        println!("{body}");
+    } else {
+        std::fs::write(out, body)?;
+        println!(
+            "{} 已导出 {} 条消息到 {}",
+            ok("完成"),
+            messages.len(),
+            out.cyan()
+        );
     }
     Ok(())
 }

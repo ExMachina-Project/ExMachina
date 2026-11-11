@@ -113,6 +113,10 @@ export function SkillsView(): React.ReactElement {
               <div className="skill-line">
                 {t("skills.applyLabel")}{s.agents.length ? s.agents.map((a) => <Tag key={a}>{a}</Tag>) : <Tag color="purple">{t("skills.allAgents")}</Tag>}
               </div>
+              <div className="skill-line dim">
+                {t("skills.usage", { used: s.useCount ?? 0, ok: s.successCount ?? 0 })}
+                {s.source && s.source !== "manual" ? ` · ${s.source}` : ""}
+              </div>
               <div className="skill-instructions">{s.instructions}</div>
             </Card>
           ))}

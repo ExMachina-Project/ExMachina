@@ -143,6 +143,13 @@ pub enum ToolName {
     /// 子智能体派生：主智能体把封闭子任务交给独立上下文的子智能体执行（单层限制，
     /// 子级无 spawn/agent_manage），返回结论摘要。并发与超时受控（spec: subagent-spawn）
     Spawn,
+    /// 跨会话互通：列示/检索同组会话、读取历史、向另一会话投递消息并触发执行。
+    /// 组隔离在工具层强制（只允许同 group_id 的会话互相可见）。
+    Sessions,
+    /// 技能自管理：列示/创建/更新/删除技能包与导出 SKILL.md。
+    /// 仅组主智能体与独立指挥体默认获得（子个体需在编成 tools 中显式声明）。
+    #[serde(rename = "skill_manage")]
+    SkillManage,
     /// 动态上下文压缩（实验性，experiments.dynamicCompaction 开启才下发）：
     /// 模型自行判断时机，把窗口外旧历史主动压成滚动摘要
     #[serde(rename = "context_compact")]
@@ -183,6 +190,8 @@ impl ToolName {
             ToolName::MemoryLink => "memory_link",
             ToolName::Git => "git",
             ToolName::Spawn => "spawn",
+            ToolName::Sessions => "sessions",
+            ToolName::SkillManage => "skill_manage",
             ToolName::ContextCompact => "context_compact",
             ToolName::Todo => "todo",
             ToolName::MetaObserve => "meta_observe",
@@ -226,6 +235,8 @@ impl ToolName {
             "memory_link" => Some(ToolName::MemoryLink),
             "git" => Some(ToolName::Git),
             "spawn" => Some(ToolName::Spawn),
+            "sessions" => Some(ToolName::Sessions),
+            "skill_manage" => Some(ToolName::SkillManage),
             "context_compact" => Some(ToolName::ContextCompact),
             "meta_observe" => Some(ToolName::MetaObserve),
             "meta_propose" => Some(ToolName::MetaPropose),
@@ -259,6 +270,8 @@ impl ToolName {
             ToolName::MemoryLink,
             ToolName::Git,
             ToolName::Spawn,
+            ToolName::Sessions,
+            ToolName::SkillManage,
             ToolName::ContextCompact,
             ToolName::Todo,
             ToolName::MetaObserve,
@@ -1129,7 +1142,7 @@ pub fn new_id() -> String {
 /// 技能包：任务目标命中触发词时，把指令注入相关个体的派发指令。
 /// 存储格式 = SKILL.md（YAML frontmatter + Markdown 正文=instructions，跨工具通用标准）；
 /// 旧 `*.json` 单文件仍可读（热转换，迁移零成本）。热装载，扩编不写代码。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDef {
     pub id: String,
@@ -1146,6 +1159,18 @@ pub struct SkillDef {
     pub agents: Vec<String>,
     #[serde(default)]
     pub created_at: String,
+    /// 运行期使用统计（由技能目录侧车 `.usage.jsonl` 聚合，不写入 SKILL.md）
+    #[serde(default)]
+    pub use_count: u64,
+    /// 成功完成次数（工具注入技能后所在节点终态为完成）
+    #[serde(default)]
+    pub success_count: u64,
+    /// 最近一次使用时间（ISO）
+    #[serde(default)]
+    pub last_used_at: String,
+    /// 来源：manual（手工）/ agent（智能体沉淀）/ import（外部导入）
+    #[serde(default)]
+    pub source: String,
 }
 
 impl SkillDef {

@@ -43,7 +43,7 @@ pub mod worker_hub;
 use assets::{download_asset, get_asset, health};
 use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
 use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
-use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
+use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, export_trajectory, steer_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
 use agents_admin::{list_agents, create_agent, remove_agent_from_group, remove_agent, set_agent_model, update_agent};
 use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, update_group, set_group_self_optimize, list_templates};
 use version::{version_info, version_check, version_apply, version_apply_status};
@@ -230,6 +230,8 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/sessions/:id", get(get_session).delete(delete_session))
         .route("/api/sessions/:id/messages", get(list_messages))
         .route("/api/sessions/:id/export", get(export_session))
+        .route("/api/sessions/:id/trajectory", get(export_trajectory))
+        .route("/api/sessions/:id/steer", post(steer_session))
         .route("/api/sessions/:id/chat", post(chat))
         .route("/api/sessions/:id/graph", get(get_graph))
         .route("/api/sessions/:id/evidence", get(get_evidence))
@@ -413,6 +415,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
 /// `host`：默认 `0.0.0.0`（公网可访问，方便本地开发用 `127.0.0.1` 收紧）。
 ///   可通过 `EXM_HOST` 环境变量覆盖；显式传 `None` 时读取环境变量，传 `Some(s)` 时强制使用 `s`。
 pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Result<()> {
+    core.attach_session_send_executor();
     platform::spawn_cron_scheduler(core.clone());
     // 回收站周期清理（spec: trash-retention；1h 间隔 + 启动错峰，supervisor 同款模式）
     {

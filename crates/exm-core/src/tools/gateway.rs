@@ -17,6 +17,19 @@ pub type SpawnExec = Arc<
 /// 插件凭据解析闭包：(插件 id, 键) → 真值（None = 未配置）
 pub type PluginCredResolver = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
 
+/// 跨会话投递执行器：(目标会话 id, 文本, 来源标记, 是否等待本轮完成) → 结果说明。
+/// Core 装配后回接（闭包持 Weak 引用，避免与 orchestrator 成环）。
+pub type SessionSendExec = Arc<
+    dyn Fn(
+            String,
+            String,
+            String,
+            bool,
+        ) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+        + Send
+        + Sync,
+>;
+
 /// 会话授权查询闭包（approval-ergonomics）：(会话 id, 命令全文) → 是否命中会话授权
 pub type SessionGrantProbe =
     std::sync::Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
@@ -85,6 +98,8 @@ pub struct ToolGateway {
     /// 子智能体派生执行器（spawn 工具；未注入 = spawn 返回未装配错误）。
     /// RwLock 槽：Core 装配后回接（tools 已 Arc 共享给 runtime，无法再拿可变引用）
     pub(crate) spawn_executor: parking_lot::RwLock<Option<SpawnExec>>,
+    /// 跨会话投递执行器（sessions 工具 op=send；未注入 = 返回未装配说明）
+    pub(crate) session_send_executor: parking_lot::RwLock<Option<SessionSendExec>>,
     /// 会话授权查询（approval-ergonomics）：Core 装配后回接——gate_command
     /// 落审批单前先查会话授权表，命中直通。槽位语义同 spawn_executor。
     pub(crate) session_grant_probe: parking_lot::RwLock<Option<SessionGrantProbe>>,
@@ -176,6 +191,7 @@ impl ToolGateway {
             hooks: crate::config::HooksConfig::default(),
             cron: None,
             spawn_executor: parking_lot::RwLock::new(None),
+            session_send_executor: parking_lot::RwLock::new(None),
             session_grant_probe: parking_lot::RwLock::new(None),
             compactor: parking_lot::RwLock::new(None),
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -214,6 +230,11 @@ impl ToolGateway {
     /// 并发/超时控制由网关层实现（spec: subagent-spawn）。
     pub fn set_spawn_executor(&self, exec: SpawnExec) {
         *self.spawn_executor.write() = Some(exec);
+    }
+
+    /// 注入跨会话投递执行器（sessions 工具 op=send）：Core 装配后回接。
+    pub fn set_session_send_executor(&self, exec: SessionSendExec) {
+        *self.session_send_executor.write() = Some(exec);
     }
 
     /// 注入会话授权查询（approval-ergonomics）：Core 装配后回接。
@@ -802,6 +823,15 @@ impl ToolGateway {
                 }
             }
         }
+        // 技能自管理 + 跨会话互通：组主智能体与独立指挥体默认获得。
+        // 技能是全局作业知识；sessions 只在本组作用域内可见/可投递（工具层强制）。
+        if is_primary || matches!(def.tier, Tier::Orchestrator) {
+            for t in [ToolName::SkillManage, ToolName::Sessions] {
+                if !allowlist.contains(&t) {
+                    allowlist.push(t);
+                }
+            }
+        }
         allowlist
     }
 
@@ -1048,6 +1078,32 @@ impl ToolGateway {
                 "spawnId": { "type": "string", "description": "op=status 时指定子任务" }
             },
             "required": []
+        }));
+        push(ToolName::Sessions, "跨会话互通（同组范围内）：列示/检索同组会话、读取指定会话最近历史、向另一会话投递消息并触发它执行。用于延续另一条对话的上下文、把任务转交给绑定其他通道的会话、或汇总本组多会话进展。组隔离强制执行——跨组会话不可见、不可投递", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["list", "search", "history", "send"], "description": "动作：list 列会话 / search 检索 / history 读历史 / send 投递" },
+                "query": { "type": "string", "description": "op=search：检索关键词" },
+                "sessionId": { "type": "string", "description": "op=history/send：目标会话 id" },
+                "limit": { "type": "integer", "description": "list/search/history 返回条数（默认 20，范围 1-100）" },
+                "text": { "type": "string", "description": "op=send：投递文本（会作为目标会话的用户输入）" },
+                "wait": { "type": "boolean", "description": "op=send：true = 等待目标会话跑完并返回结果；缺省 false = 投递后立即返回" }
+            },
+            "required": ["op"]
+        }));
+        push(ToolName::SkillManage, "技能包自管理：把可复用的流程沉淀为技能（SKILL.md 标准格式），或列示/更新/删除既有技能。技能在后续派发中按触发词自动注入相关个体。完成任务后若形成了可复用方法，应主动沉淀（id 稳定、触发词具体、指令可执行）；发现技能与实测不符时用 update 修正", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["list", "create", "update", "delete", "export", "import"], "description": "动作（缺省 list）" },
+                "id": { "type": "string", "description": "技能 id（仅字母/数字/-/_）" },
+                "name": { "type": "string", "description": "技能名" },
+                "description": { "type": "string", "description": "一句话说明" },
+                "triggers": { "type": "array", "items": { "type": "string" }, "description": "触发词：任务目标/节点标题包含任一词即注入" },
+                "instructions": { "type": "string", "description": "作业指令正文（create/update 必填）：步骤、约束、验收口径" },
+                "agents": { "type": "array", "items": { "type": "string" }, "description": "适用个体 identifier；空 = 全体" },
+                "content": { "type": "string", "description": "import：SKILL.md 原文（含 frontmatter）" }
+            },
+            "required": ["op"]
         }));
         push(ToolName::Todo, "维护会话任务清单（长任务自组织）：op=write 一次性全量重写整个清单（不是追加——每次都写全所有条目与最新状态）；清单会注入后续每轮上下文，让你随时掌握进度全景。任务开始时建清单、每完成一项立即更新状态、全部完成后收尾", serde_json::json!({
             "type": "object",
@@ -1594,6 +1650,8 @@ impl ToolGateway {
             ToolName::MemoryLink => self.tool_memory_link(agent_id, session_id, args),
             ToolName::Git => self.tool_git(agent_id, session_id, args).await,
             ToolName::Spawn => self.tool_spawn(agent_id, session_id, args).await,
+            ToolName::Sessions => self.tool_sessions(agent_id, session_id, args).await,
+            ToolName::SkillManage => self.tool_skill_manage(args),
             ToolName::Todo => self.tool_todo(session_id, args),
             ToolName::MetaObserve | ToolName::MetaPropose | ToolName::MetaBuild => {
                 self.tool_meta(agent_id, session_id, tool, args).await
