@@ -450,6 +450,10 @@ pub(crate) struct InboundCtx<'a> {
     /// 流展示名（群名 / 对端昵称；适配器尽力提供，None = 未知）——
     /// 建流/补名用（旁听路径建流也有名可用），见 ensure_flow_named
     pub flow_name: Option<&'a str>,
+    /// 本条消息自带的已落盘媒体（kind, 绝对路径, 文件名）——旁听路径的附件
+    /// 回填只挂本条消息的媒体（napcat 闸门前预下载并携带）。主链注入媒体
+    /// 不走此字段（各适配器自行下载暂存）。无旁听预下载的适配器传 `&[]`。
+    pub media: &'a [(String, String, String)],
 }
 
 pub(crate) enum GateDecision {
@@ -652,8 +656,8 @@ pub(crate) async fn admit(
 /// （napcat 旁听窗口等），此处把附件元数据随占位消息回填——部署实测缺陷：
 /// 群里未 @ 的纯图走旁听路径，图片文件落了盘（inbox 有文件）、占位文本
 /// 落了库（「（用户发来附件：图片 x1）」），但附件元数据从未随消息存储，
-/// 聊天流里永远看不到图。窗口条目不 take（TTL 窗口仍供后续 @ 轮次取走
-/// 注入模型），这里只登记展示层元数据。
+/// 聊天流里永远看不到图。只回填**本条消息自带**的媒体（`ctx.media`）；
+/// 窗口条目不 take（TTL 窗口仍供后续 @ 轮次取走注入模型）。
 pub(crate) async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>) {
     let text = ctx.text.trim();
     if text.is_empty() {
@@ -698,20 +702,23 @@ pub(crate) async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &In
         )],
     );
     // 旁听媒体随占位消息回填展示层元数据（不注入模型——旁听不触发轮次；
-    // 模型注入走 @ 轮次 take 旁听媒体窗口的既有链路）
-    let ambient = crate::ambient_media::snapshot(&ch.id, ctx.chat_key);
-    if let (Ok(m), false) = (&msg, ambient.is_empty()) {
-        let rels: Vec<exm_core::types::InboundAttachment> = ambient
+    // 模型注入走 @ 轮次 take 旁听媒体窗口的既有链路）。
+    // 只挂本条消息自带的媒体（ctx.media，napcat 闸门前预下载携带）——
+    // 曾用全窗快照回填：窗口内每条新旁听消息（含纯文本）都复读全部近期
+    // 图片，聊天流里同图在每条消息上重复出现（部署实测缺陷）。
+    if let Ok(m) = &msg {
+        let rels: Vec<exm_core::types::InboundAttachment> = ctx
+            .media
             .iter()
             .map(|a| {
-                let rel = std::path::Path::new(&a.path)
+                let rel = std::path::Path::new(&a.1)
                     .strip_prefix(&core.config().workspace_root)
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| a.path.clone());
+                    .unwrap_or_else(|_| a.1.clone());
                 exm_core::types::InboundAttachment {
-                    kind: a.kind.clone(),
+                    kind: a.0.clone(),
                     path: rel,
-                    name: a.name.clone(),
+                    name: a.2.clone(),
                 }
             })
             .collect();

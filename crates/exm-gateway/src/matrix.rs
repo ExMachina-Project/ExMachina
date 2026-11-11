@@ -309,6 +309,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                 mentioned: mentioned || self_user.is_empty(),
                                 chat_key: &room,
                                 flow_name: None,
+                                media: &[],
                             };
                             match admit(core.as_ref(), &ch, &gate_ctx).await {
                                 GateDecision::Allow(clean) => {

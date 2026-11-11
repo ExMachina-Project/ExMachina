@@ -10,7 +10,7 @@ import { useChatStream } from "../hooks/useChatStream";
 import { useAttachments } from "../hooks/useAttachments";
 import { useSubbarSlot } from "../components/Subbar";
 
-import { api, type LlmProfile, isDestructiveCommand, assetUrl, serverBase } from "../api";
+import { api, type LlmProfile, isDestructiveCommand, assetUrl, downloadUrl } from "../api";
 import { agentIdEn } from "../models";
 import { isAutoSessionTitle, isTaskSideTitle } from "../session";
 import { useExm, type TimelineItem } from "../store";
@@ -100,7 +100,7 @@ export function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; tur
             const name = a.path.split("/").pop() || a.path;
             // 后端登记统一为工作区相对路径；绝对路径兜底截取（旧数据容错）
             const rel = a.path;
-            const href = `${serverBase()}/api/asset/download?path=${encodeURIComponent(rel)}`;
+            const href = downloadUrl(rel);
             return a.kind === "image" ? (
               <a key={i} className="msg-artifact image" href={href} target="_blank" rel="noreferrer">
                 <img src={assetUrl(rel)} alt={a.caption || name} />

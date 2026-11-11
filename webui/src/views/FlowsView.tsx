@@ -17,7 +17,7 @@ import {
   NumberOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
-import { api, assetUrl, serverBase, type Channel, type ChannelFlow } from "../api";
+import { api, assetUrl, downloadUrl, type Channel, type ChannelFlow } from "../api";
 import type { ChatMessage, InboundAttachment } from "../types";
 import { relativeTime } from "../time";
 import { useExm } from "../store";
@@ -336,7 +336,7 @@ function InboundAttachments({ items }: { items: InboundAttachment[] }) {
   return (
     <div className="msg-artifacts inbound">
       {items.map((a, i) => {
-        const href = `${serverBase()}/api/asset/download?path=${encodeURIComponent(a.path)}`;
+        const href = downloadUrl(a.path);
         return a.kind === "image" ? (
           <a key={i} className="msg-artifact image" href={href} target="_blank" rel="noreferrer">
             <img src={assetUrl(a.path)} alt={a.name} loading="lazy" />
