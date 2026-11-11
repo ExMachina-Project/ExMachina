@@ -89,8 +89,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://127.0.0.1:4173", changeOrigin: true },
-      "/ws": { target: "ws://127.0.0.1:4173", ws: true },
+      // dev 代理目标默认指向本地空白端口（防误连生产 4173——dev 页面上的操作
+      // 会经代理直达生产实例）。需要联调时显式指定：EXM_DEV_API=http://127.0.0.1:4173 npm run dev
+      "/api": { target: process.env.EXM_DEV_API || "http://127.0.0.1:5999", changeOrigin: true },
+      "/ws": { target: (process.env.EXM_DEV_API || "http://127.0.0.1:5999").replace("http", "ws"), ws: true },
     },
   },
   build: {
