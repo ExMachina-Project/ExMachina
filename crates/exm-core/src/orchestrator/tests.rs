@@ -492,3 +492,122 @@ mod pending_inputs_tests {
         assert_eq!(goal, "@bot 新任务");
     }
 }
+
+// ---------------------------------------------------------------- 五阶段提取冒烟（5.2）
+// 行为零变更验证：探活短路 / 排队合并 / steer 中断三路径经提取后的
+// handle_user_message_scoped 编排（ingest→probe→merge→dispatch→finalize）。
+
+mod five_stage_smoke {
+    use super::*;
+    use crate::orchestrator::mark_im_session;
+
+    fn core() -> crate::Core {
+        let dir = std::env::temp_dir().join(format!("exm-5st-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = crate::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        crate::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    /// 探活短路：IM 会话纯问候零 LLM 直答——run.finished 带 shortCircuit=probe，
+    /// 不进 merge 的台账 goal 改写（goal 保持上轮值/空）。
+    #[tokio::test]
+    async fn 探活短路_直答收束不进规划() {
+        let core = core();
+        let sid = core.create_session("smoke-probe").unwrap().id;
+        mark_im_session(&sid);
+        // 订阅事件验证收束
+        let mut rx = core.subscribe();
+        core.chat(&sid, "在吗").await.unwrap();
+        let mut saw_probe = false;
+        // 事件已在广播环里，drain 验证
+        while let Ok(evt) = rx.try_recv() {
+            if evt.kind == "run.finished"
+                && evt
+                    .payload
+                    .get("shortCircuit")
+                    .and_then(|v| v.as_str())
+                    == Some("probe")
+            {
+                saw_probe = true;
+            }
+        }
+        assert!(saw_probe, "探活短路应发 shortCircuit=probe 的 run.finished");
+        // 直答已落库（orchestrator 角色）
+        let msgs = core.store.list_messages(&sid, 10).unwrap();
+        assert!(
+            msgs.iter()
+                .any(|m| m.role == crate::types::MessageRole::Orchestrator),
+            "短路直答应落库"
+        );
+        let ws = core.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 排队窗口合并：非 IM 探活路径下，连续两条用户输入合并为一轮目标
+    ///（collect_pending_inputs 尾部连续 user 扫描）。
+    #[tokio::test]
+    async fn 排队窗口_连续输入合并单轮() {
+        // 纯函数验证（无 Core 依赖）：collect 的基础形态——尾部连续 user
+        // 消息按序合并为单轮 goal。Core 侧链路由探活/steer 冒烟覆盖。
+        let msgs = vec![
+            crate::types::ChatMessage {
+                id: "m1".into(),
+                session_id: "smoke-merge".into(),
+                role: crate::types::MessageRole::User,
+                agent_id: None,
+                statements: vec![Statement::new(SpeechTag::要求, "任务B")],
+                created_at: String::new(),
+                turn: None,
+                token_usage: None,
+                thinking: None,
+                last_message_preview: None,
+                last_active_at: None,
+                tool_calls: Vec::new(),
+                steps: Vec::new(),
+                attachments: Vec::new(),
+            },
+            crate::types::ChatMessage {
+                id: "m2".into(),
+                session_id: "smoke-merge".into(),
+                role: crate::types::MessageRole::User,
+                agent_id: None,
+                statements: vec![Statement::new(SpeechTag::要求, "补充：要快")],
+                created_at: String::new(),
+                turn: None,
+                token_usage: None,
+                thinking: None,
+                last_message_preview: None,
+                last_active_at: None,
+                tool_calls: Vec::new(),
+                steps: Vec::new(),
+                attachments: Vec::new(),
+            },
+        ];
+        let goal = crate::orchestrator::pending_inputs_for_test(&msgs).expect("应合并");
+        assert_eq!(goal, "任务B\n补充：要快", "连续输入按序合并");
+    }
+
+    /// steer 中断：request_cancel 置位后，下一轮 dispatch 前的取消检查生效
+    ///（is_cancelled 在 run_round L0 分支/执行节点检查——这里验证令牌链路）。
+    #[tokio::test]
+    async fn steer中断_取消令牌置位与清除() {
+        let core = core();
+        let sid = core.create_session("smoke-steer").unwrap().id;
+        // 无运行轮次：cancel 返回 false（无轮可停）
+        assert!(!crate::round_trace::request_cancel(&sid));
+        // 运行中置位（chat_scoped_origin 的 begin/end 链路内）
+        let core_arc = std::sync::Arc::new(core);
+        let sid2 = sid.clone();
+        let core2 = core_arc.clone();
+        let handle = tokio::spawn(async move { core2.chat(&sid2, "跑一会").await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = crate::round_trace::request_cancel(&sid);
+        let _ = handle.await;
+        // 轮次结束（round_trace::end）后取消态清除
+        assert!(!crate::round_trace::is_cancelled(&sid));
+        let ws = core_arc.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}

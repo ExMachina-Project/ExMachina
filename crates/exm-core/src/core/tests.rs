@@ -6,7 +6,6 @@
 use super::super::Core;
 use crate::config::ExmConfig;
 use crate::types::*;
-use parking_lot::Mutex;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------- 会话历史管控（组 9 单测）
