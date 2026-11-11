@@ -80,6 +80,10 @@ export function ApprovalsView(): React.ReactElement {
           rowKey="id"
           pagination={{ pageSize: 12 }}
           scroll={{ x: narrow ? 560 : undefined }}
+          /* 固定布局：命令列的 .cmd-code（inline-block 长命令不可断行）在自动布局下
+             会把最小内容宽度撑到 infinity，表格从无宽度列（结果列）抢宽——表头被
+             压成一字宽竖排。fixed 布局按 width 均分剩余宽度，长命令在列内自行省略 */
+          tableLayout="fixed"
           dataSource={items}
           locale={{ emptyText: <BrandEmpty description={t("approvals.empty")} className="pane-empty" /> }}
           columns={[
