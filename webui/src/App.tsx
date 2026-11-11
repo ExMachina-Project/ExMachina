@@ -42,7 +42,7 @@ const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m
 const FlowsView = lazy(() => import("./views/FlowsView").then((m) => ({ default: m.FlowsView })));
 const TasksView = lazy(() => import("./views/TasksView").then((m) => ({ default: m.TasksView })));
 const SessionsView = lazy(() => import("./views/SessionsView").then((m) => ({ default: m.SessionsView })));
-const ModelsView = lazy(() => import("./views/ModelsView").then((m) => ({ default: m.ModelsView })));
+const ModelsView = lazy(() => import("./views/models/ModelsView").then((m) => ({ default: m.ModelsView })));
 const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default: m.GraphView })));
 const LedgerView = lazy(() => import("./views/LedgerView").then((m) => ({ default: m.LedgerView })));
 const MemoryView = lazy(() => import("./views/MemoryView").then((m) => ({ default: m.MemoryView })));

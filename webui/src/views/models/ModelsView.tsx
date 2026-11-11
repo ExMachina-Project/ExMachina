@@ -11,83 +11,22 @@ import {
   Button, Card, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch,
   Tag, Tooltip, message,
 } from "antd";
-import { BrandEmpty } from "../components/BrandEmpty";
-import { MaskedPasswordInput } from "../components/MaskedInput";
+import { BrandEmpty } from "../../components/BrandEmpty";
+import { MaskedPasswordInput } from "../../components/MaskedInput";
 import {
   ApiOutlined, AudioOutlined, CheckCircleOutlined, ClusterOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
-import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../api";
-import { buildCapabilityOptions } from "../models";
-import { getTestRecord, putTestRecord } from "../testLog";
-import { CapabilityBadges, badgesOfModel } from "../components/CapabilityBadges";
-import { PageHeader } from "../components/PageHeader";
-import { useT, type TKey } from "../i18n/core";
+import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../../api";
+import { buildCapabilityOptions } from "../../models";
+import { getTestRecord, putTestRecord } from "../../testLog";
+import { CapabilityBadges, badgesOfModel } from "../../components/CapabilityBadges";
+import { PageHeader } from "../../components/PageHeader";
+import { useT, type TKey } from "../../i18n/core";
 
 /** 厂商预设：选中即填端点、协议与常用模型名（模型名可在表单里改） */
-interface Preset {
-  key: string;
-  name: string;
-  baseUrl: string;
-  model: string;
-  apiFormat: string;
-}
-
-const PRESETS: Preset[] = [
-  { key: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4o", apiFormat: "openai" },
-  { key: "anthropic", name: "Anthropic", baseUrl: "https://api.anthropic.com", model: "claude-sonnet-4-5", apiFormat: "anthropic" },
-  { key: "gemini", name: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash", apiFormat: "gemini" },
-  { key: "azure", name: "Azure OpenAI", baseUrl: "https://<resource>.openai.azure.com", model: "<deployment>", apiFormat: "azure" },
-  { key: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", apiFormat: "openai" },
-  { key: "moonshot", name: "Moonshot / Kimi", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-32k", apiFormat: "openai" },
-  { key: "qwen", name: "Qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", apiFormat: "openai" },
-  { key: "zhipu", name: "Zhipu GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-plus", apiFormat: "openai" },
-  { key: "minimax", name: "MiniMax", baseUrl: "https://api.minimaxi.com/v1", model: "MiniMax-M1", apiFormat: "openai" },
-  { key: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "llama3.1", apiFormat: "openai" },
-];
-
-/** 预设的本地化显示名（覆盖 PRESETS.name 的只有中英写法不同的厂商） */
-const PRESET_LABEL: Partial<Record<string, TKey>> = {
-  qwen: "models.preset.qwen",
-  zhipu: "models.preset.zhipu",
-  ollama: "models.preset.ollama",
-  minimax: "models.preset.minimax",
-};
-
-const CUSTOM = "__custom__";
-
-/** 页内分页：提供商 ↔ 功能分配（能力模型拆开，两件事不再混排一页） */
-type Tab = "providers" | "caps";
-
-/** API 协议选项的显示名走 i18n（值为协议标识，与后端契约） */
-const API_FORMAT_KEYS: { value: string; key: TKey }[] = [
-  { value: "openai", key: "models.fmt.openai" },
-  { value: "anthropic", key: "models.fmt.anthropic" },
-  { value: "gemini", key: "models.fmt.gemini" },
-  { value: "azure", key: "models.fmt.azure" },
-];
-
-/** 密钥掩码哨兵：KEY_MASK 从 api.ts 引入（与后端契约一致：提交掩码位 = 服务端沿用旧值） */
-
-/** 协议短标签（卡片上的 Tag 用），显示名走 i18n */
-const FORMAT_LABEL_KEY: Record<string, TKey> = {
-  openai: "models.fmtShort.openai",
-  anthropic: "models.fmtShort.anthropic",
-  gemini: "models.fmtShort.gemini",
-  azure: "models.fmtShort.azure",
-};
-
-/** 表单字段：密钥为可增删的动态行；掩码行携带 keep = 旧池索引（提交结构化沿用，展示仍为掩码） */
-interface KeyForm {
-  keys?: { value?: string; keep?: number }[];
-}
-
-/** 取有效密钥行（去空白），保序返回行对象 */
-function liveRows(rows: KeyForm["keys"]): { value: string; keep?: number }[] {
-  return (rows ?? [])
-    .filter((r) => (r?.value ?? "").trim() !== "")
-    .map((r) => ({ value: (r?.value ?? "").trim(), keep: r?.keep }));
-}
+import { PRESETS, PRESET_LABEL, CUSTOM, API_FORMAT_KEYS, FORMAT_LABEL_KEY, type KeyForm, type Tab, liveRows } from "./presets";
+import { ModelPicker } from "./ModelPicker";
 
 export function ModelsView(): React.ReactElement {
   const t = useT();
@@ -872,47 +811,3 @@ export function ModelsView(): React.ReactElement {
 }
 
 /** 远端模型勾选列表：搜索过滤 + 全选/全不选；已在表单中的模型标记「已有」不可勾 */
-function ModelPicker({ models, selected, onChange }: {
-  models: string[];
-  selected: string[];
-  onChange: (selected: string[]) => void;
-}): React.ReactElement {
-  const t = useT();
-  const [q, setQ] = useState("");
-  const lowered = q.trim().toLowerCase();
-  const shown = lowered ? models.filter((m) => m.toLowerCase().includes(lowered)) : models;
-  const allChecked = shown.length > 0 && shown.every((m) => selected.includes(m));
-  const toggle = (m: string) =>
-    onChange(selected.includes(m) ? selected.filter((x) => x !== m) : [...selected, m]);
-  return (
-    <div className="model-picker">
-      <Space style={{ width: "100%", marginBottom: 8 }} orientation="vertical" size={6}>
-        <Input.Search
-          placeholder={t("models.pickerSearch")}
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          allowClear
-          size="small"
-        />
-        <Space size={8}>
-          <Button size="small" type="link" onClick={() => onChange(allChecked ? selected.filter((m) => !shown.includes(m)) : Array.from(new Set([...selected, ...shown])))}>
-            {allChecked ? t("models.pickerUnselectAll") : t("models.pickerSelectAll")}
-          </Button>
-          <span className="dim">{t("models.pickerCount", { sel: selected.length, total: models.length })}</span>
-        </Space>
-      </Space>
-      <div className="model-picker-list">
-        {shown.map((m) => {
-          const on = selected.includes(m);
-          return (
-            <label key={m} className={`model-picker-item ${on ? "on" : ""}`}>
-              <input type="checkbox" checked={on} onChange={() => toggle(m)} />
-              <span className="mono">{m}</span>
-            </label>
-          );
-        })}
-        {shown.length === 0 && <div className="dim" style={{ padding: 12 }}>{t("models.pickerEmpty")}</div>}
-      </div>
-    </div>
-  );
-}
