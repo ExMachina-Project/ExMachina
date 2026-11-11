@@ -189,6 +189,24 @@ async fn auth_middleware(
                 .get(axum::http::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ").map(|s| s.to_string()))
+        })
+        // 资产端点的 <img>/<a> 通道（部署实测缺陷）：浏览器无法为子资源
+        // 携带自定义请求头，只带头部校验时聊天流/会话视图的全部附件图
+        // 恒 401（破图）。与 /ws 同款查询参数密钥回退——仅限 GET 的
+        // /api/asset*（内联预览与下载两个端点），其余 API 维持「仅头部」
+        // 口径不降级。
+        .or_else(|| {
+            let is_asset_get =
+                req.method() == axum::http::Method::GET && path.starts_with("/api/asset");
+            if !is_asset_get {
+                return None;
+            }
+            req.uri().query().and_then(|q| {
+                q.split('&').find_map(|kv| {
+                    let (k, v) = kv.split_once('=')?;
+                    (k == "key").then(|| crate::ws::percent_decode(v))
+                })
+            })
         });
     match provided {
         Some(k) if k == st.core.config().security.auth_key => {

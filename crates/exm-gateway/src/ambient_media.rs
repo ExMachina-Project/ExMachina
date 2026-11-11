@@ -91,26 +91,6 @@ pub fn take(ch_id: &str, chat_key: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// 窗口只读快照（不取走；ambient-media-attach 用）：旁听消息落库时
-/// 回填附件展示元数据用——窗口条目仍留给后续 @ 轮次 take 注入模型。
-pub fn snapshot(ch_id: &str, chat_key: &str) -> Vec<AmbientMedia> {
-    let key = flow_key(ch_id, chat_key);
-    let win = {
-        let map = lock_std(windows());
-        map.get(&key).cloned()
-    };
-    let Some(win) = win else {
-        return Vec::new();
-    };
-    let w = lock_std(&win);
-    let now = exm_core::types::now_ms();
-    w.items
-        .iter()
-        .filter(|m| now - m.at_ms < TTL_MS)
-        .cloned()
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -598,6 +598,13 @@ export function assetUrl(relPath: string): string {
   return `${serverBase()}/api/asset?path=${encodeURIComponent(relPath)}&key=${encodeURIComponent(key)}`;
 }
 
+/** 工作区文件下载 URL（/api/asset/download）：<a target="_blank"> 导航同样无法带
+ *  请求头，密钥与 assetUrl 同款走查询参数（网关侧对 GET /api/asset* 开放该通道） */
+export function downloadUrl(relPath: string): string {
+  const key = localStorage.getItem("exm.key") ?? "";
+  return `${serverBase()}/api/asset/download?path=${encodeURIComponent(relPath)}&key=${encodeURIComponent(key)}`;
+}
+
 /** 校验远程网关连通性（高级用法：localStorage 手动设 exm.server 后探活） */
 export async function probeServer(base: string): Promise<{ ok: boolean; error?: string }> {
   try {
