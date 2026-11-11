@@ -40,6 +40,7 @@ pub mod task_queue;
 pub mod task;
 pub mod todo;
 pub mod tools;
+pub mod trajectory;
 pub mod trash;
 pub mod types;
 
@@ -143,6 +144,33 @@ fn parse_session_scope(
         return Some((g.to_string(), None));
     }
     None
+}
+
+/// 跨会话投递执行器工厂：闭包持 Weak<Core>，避免 tools ↔ orchestrator ↔ Core 成环。
+fn session_send_exec(weak: std::sync::Weak<Core>) -> crate::tools::SessionSendExec {
+    std::sync::Arc::new(move |target, text, origin, wait| {
+        let weak = weak.clone();
+        Box::pin(async move {
+            let Some(core) = weak.upgrade() else {
+                anyhow::bail!("Core 已释放");
+            };
+            let run = async move {
+                core.chat_scoped_origin(
+                    &target,
+                    &text,
+                    crate::types::ToolScope::Tools,
+                    Some(&origin),
+                )
+                .await
+            };
+            if wait {
+                run.await.map(|_| "目标会话已完成本轮".to_string())
+            } else {
+                tokio::spawn(run);
+                Ok("已投递（目标会话异步执行）".to_string())
+            }
+        })
+    })
 }
 
 impl Core {
@@ -254,6 +282,16 @@ impl Core {
                 weak.upgrade().is_some_and(|c| c.session_granted(sid, cmd).is_some())
             },
         ));
+    }
+
+    /// 装配跨会话投递执行器（sessions 工具 op=send）：必须经 Arc<Core> 调用。
+    /// 闭包持 Weak 引用（tools 由 orchestrator 持有，强引用即环）；orchestrator
+    /// 重建路径由 rebind_plugin_tools 尾部统一重挂。
+    pub fn attach_session_send_executor(self: &std::sync::Arc<Self>) {
+        let weak = std::sync::Arc::downgrade(self);
+        *self.self_weak.write() = Some(weak.clone());
+        let orch = self.orchestrator.read().clone();
+        orch.tools.set_session_send_executor(session_send_exec(weak));
     }
 
     /// 配置热更新（设置页）：重建 Provider / Runtime / Orchestrator
@@ -1647,6 +1685,10 @@ impl Core {
                 },
             ));
         }
+        // 跨会话投递执行器重挂（sessions 工具）：与授权探针同生命周期。
+        if let Some(weak) = self.self_weak.read().clone() {
+            orch.tools.set_session_send_executor(session_send_exec(weak));
+        }
     }
 
     /// 暂存图片附件（随该会话下一轮对话注入规划；每轮取走即清）
@@ -2054,6 +2096,21 @@ impl Core {
 
     pub fn add_skill(&self, skill: SkillDef) -> anyhow::Result<()> {
         self.registry.write_skill(&skill)
+    }
+
+    /// 从 SKILL.md 原文导入技能（REST / CLI 共用；同 id 覆盖）
+    pub fn import_skill_md(&self, raw: &str) -> anyhow::Result<SkillDef> {
+        self.registry.import_skill_md(raw)
+    }
+
+    /// 导出技能为 SKILL.md 原文（可分享/迁移）
+    pub fn export_skill_md(&self, id: &str) -> anyhow::Result<Option<String>> {
+        self.registry.export_skill_md(id)
+    }
+
+    /// 技能使用统计回填（派发注入即计一次；节点终态回填成功标记）
+    pub fn record_skill_use(&self, id: &str, ok: bool) {
+        self.registry.record_skill_use(id, ok);
     }
 
     pub fn remove_skill(&self, id: &str) -> anyhow::Result<bool> {

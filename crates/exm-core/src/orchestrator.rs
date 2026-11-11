@@ -1953,10 +1953,12 @@ impl Orchestrator {
                 format!(
                     "## 可用技能包
 {lines}
+
+技能维护：完成任务后若形成可复用流程，用 skill_manage 沉淀或修正（触发词要具体、指令可执行）。
 "
                 )
             }
-            _ => String::new(),
+            _ => "## 技能沉淀\n完成任务后若形成可复用流程，用 skill_manage 创建技能（id 稳定、触发词具体、指令可执行）。\n".to_string(),
         };
 
         // 链路模板清单（数据驱动）：与注册表一样注入规划提示，编成变化无需改代码
@@ -2637,6 +2639,20 @@ impl ExecCtx {
             };
         }
 
+        // 命中技能（注入与终态统计共用同一判定，避免二次加载口径漂移）
+        let matched_skills: Vec<crate::types::SkillDef> = o
+            .registry
+            .load_skills()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| {
+                s.applies_to(&def.identifier)
+                    && s.matches(&format!(
+                        "{} {} {}",
+                        self.plan.goal, node.title, node.objective
+                    ))
+            })
+            .collect();
         let order = DispatchOrder {
             task_node_id: node.id.clone(),
             objective: node.objective.clone(),
@@ -2701,18 +2717,12 @@ impl ExecCtx {
                     }
                 }
                 // 技能包注入（docs/10）：任务目标命中触发词时，把技能指令随派发下发
-                if let Ok(skills) = o.registry.load_skills() {
-                    let haystack = format!("{} {} {}", self.plan.goal, node.title, node.objective);
-                    for s in skills
-                        .iter()
-                        .filter(|s| s.applies_to(&def.identifier) && s.matches(&haystack))
-                    {
-                        inputs.push(DispatchInput {
-                            ref_id: format!("skill:{}", s.id),
-                            kind: "skill".into(),
-                            summary: s.instructions.clone(),
-                        });
-                    }
+                for s in &matched_skills {
+                    inputs.push(DispatchInput {
+                        ref_id: format!("skill:{}", s.id),
+                        kind: "skill".into(),
+                        summary: s.instructions.clone(),
+                    });
                 }
                 // 协议层注入（按需）：任务目标命中触发词的协议全文随派发下发
                 if let Ok(protocols) = o.registry.load_protocols() {
@@ -2936,6 +2946,14 @@ impl ExecCtx {
 
         match result {
             Ok(report) => {
+                // 技能使用统计：节点终态回填（Done = 成功；Blocked/需裁决 = 未成功）
+                let skill_ok = !matches!(
+                    report.status,
+                    SyncStatus::Blocked | SyncStatus::NeedArbitration
+                );
+                for s in &matched_skills {
+                    o.registry.record_skill_use(&s.id, skill_ok);
+                }
                 // 派发审计（agent-budget-audit 3.4）：成功/受阻/仲裁回流都记一条；
                 // token 口径 = 子会话累计（remote/local 执行都会写子会话 usage）
                 let (dp, dc, _) = o.store.usage_total(&trace_key);
@@ -3085,6 +3103,10 @@ impl ExecCtx {
                 NodeOutcome::done(node.id.clone()).with_appends(appends)
             }
             Err(e) => {
+                // 技能使用统计：执行失败记一次未成功（供后续 update 修正提供依据）
+                for s in &matched_skills {
+                    o.registry.record_skill_use(&s.id, false);
+                }
                 // 子会话留痕：失败原因 + 已收集的过程轨迹（思考/工具）一并落子会话，便于回看
                 let (thinking, tools, steps) = crate::round_trace::drain(&trace_key);
                 if trace_key != self.session_id {

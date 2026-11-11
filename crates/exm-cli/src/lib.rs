@@ -76,6 +76,22 @@ enum Commands {
     Tasks {
         session_id: String,
     },
+    /// 导出会话训练轨迹（按轮次切分；JSON 或 JSONL）
+    Trajectory {
+        session_id: String,
+        /// 输出文件（缺省打印到 stdout）
+        #[arg(long, default_value = "")]
+        out: String,
+        /// 每轮一行 JSONL（批处理/微调友好）
+        #[arg(long)]
+        jsonl: bool,
+        /// 保留思维链（默认剥离）
+        #[arg(long)]
+        include_thinking: bool,
+        /// 工具参数/结果摘要截断字符数（默认 2000）
+        #[arg(long, default_value_t = 2000)]
+        max_tool_chars: usize,
+    },
     /// 起网关（HTTP REST + WebSocket + WebUI 托管），供浏览器 / 第三方渠道接入
     #[command(alias = "serve")]
     Gateway {
@@ -233,6 +249,18 @@ enum SkillAction {
     },
     /// 删除技能包
     Remove { id: String },
+    /// 从 SKILL.md 文件导入技能（同 id 覆盖）
+    Import {
+        #[arg(long)]
+        file: String,
+    },
+    /// 导出技能为 SKILL.md（缺省打印到 stdout）
+    Export {
+        id: String,
+        /// 输出文件（缺省 stdout）
+        #[arg(long, default_value = "")]
+        out: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -465,7 +493,9 @@ fn normalize_root(ws: &Path) -> PathBuf {
 }
 
 fn build_core(workspace: &Path) -> anyhow::Result<Arc<Core>> {
-    Ok(Arc::new(Core::create(normalize_root(workspace))?))
+    let core = Arc::new(Core::create(normalize_root(workspace))?);
+    core.attach_session_send_executor();
+    Ok(core)
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -552,6 +582,17 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 render::dim(format!("共 {}（指挥体 1 + 子个体 {}）", core.registry.count(), core.registry.units().len()))
             );
             Ok(())
+        }
+        Commands::Trajectory { session_id, out, jsonl, include_thinking, max_tool_chars } => {
+            let core = build_core(&workspace)?;
+            platform_cmd::run_trajectory(
+                &core,
+                &session_id,
+                &out,
+                jsonl,
+                include_thinking,
+                max_tool_chars,
+            )
         }
         Commands::Tasks { session_id } => {
             let core = build_core(&workspace)?;
@@ -682,6 +723,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     platform_cmd::run_skill_add(&core, &id, &name, &instructions, &description, trigger, agent)
                 }
                 SkillAction::Remove { id } => platform_cmd::run_skill_remove(&core, &id),
+                SkillAction::Import { file } => platform_cmd::run_skill_import(&core, &file),
+                SkillAction::Export { id, out } => platform_cmd::run_skill_export(&core, &id, &out),
             }
         }
         Commands::Cron { action } => {

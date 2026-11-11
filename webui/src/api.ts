@@ -221,6 +221,12 @@ export interface SkillDef {
   instructions: string;
   agents: string[];
   createdAt: string;
+  /** 运行期统计（侧车聚合；不写入 SKILL.md） */
+  useCount?: number;
+  successCount?: number;
+  lastUsedAt?: string;
+  /** manual | agent | import */
+  source?: string;
 }
 
 /** 插件列表项（GET /api/plugins） */

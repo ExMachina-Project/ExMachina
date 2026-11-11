@@ -7,6 +7,8 @@ pub fn routes() -> Router<AppState> {
     use axum::routing::{get, post};
     Router::new()
         .route("/api/skills", get(list_skills).post(create_skill))
+        .route("/api/skills/import", post(import_skill))
+        .route("/api/skills/:id/export", get(export_skill))
         .route("/api/skills/:id", axum::routing::delete(delete_skill))
         .route("/api/groups/:id/agents", get(group_agents))
         .route("/api/groups/:id/primary", post(set_group_primary))
