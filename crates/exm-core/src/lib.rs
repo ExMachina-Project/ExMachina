@@ -23,6 +23,7 @@ pub mod memory;
 pub mod meta;
 pub mod nexus;
 
+pub(crate) mod core;
 pub mod orchestrator;
 pub mod parse;
 pub mod patch;
@@ -79,7 +80,29 @@ pub struct MetaAgentState {
     pub last_tick_minute: i64,
 }
 
-/// 核心句柄：所有渠道（CLI / Gateway / 未来桌面端）共用同一实例
+/// 核心句柄：所有渠道（CLI / Gateway / 未来桌面端）共用同一实例。
+///
+/// # 方法分布图（Core 领域拆分，codebase-refactor）
+///
+/// `impl Core` 按域分布在多个文件（同 crate 同 struct 多 impl 块），组合根留本文件：
+/// - `core/sessions.rs`：会话域——create/list/search/delete/undo/edit_resend/fork/
+///   stop/pin/archive/checkpoints/snapshots/tokens/usage/turn 快照/session_scope
+/// - `core/approvals.rs`：审批域——approval_list/get/decide(_scoped)/grant_session/
+///   session_grants/request_git_approval/approval_locks
+/// - `core/memory.rs`：记忆域——memory_*（recall/remember/list/stats/pin/forget/
+///   reindex/decay/digest）、render_memory_md/compact_memory_md、persona_*
+/// - `core/identity.rs`：通道身份与流绑定——identity_*/identities/pairing_*/
+///   issue_pairing/redeem/flow_*/channel_flow*/bind_flow/ensure_flow/touch_flow
+/// - `core/skills.rs`：技能域——skills/add_skill/import_skill_md/export_skill_md/
+///   record_skill_use/remove_skill
+/// - `core/plugins.rs`：插件域——plugins()/plugin_install/update/uninstall
+/// - `core/autonomy.rs`：实验体调度——auto_agent_tick/meta_agent_tick/
+///   memory_digest_session/run_cron_job/run_event_prompt
+/// - `lib.rs`（本文件）：组合根——struct 定义、create/with_config/apply_config、
+///   chat/chat_scoped(_origin)（跨域粘合）、emit_*、build_orchestrator、
+///   session_send_exec、attach_* 注入点、orchestrator()/config()/subscribe()
+/// - 注册表转发（agents/groups/playbooks 等对 registry 的薄转发）留本文件
+///   （一行转发的聚合视图，拆散反而破坏「Core 是唯一门面」契约）
 pub struct Core {
     pub bus: Arc<dyn MessageBus>,
     pub registry: Arc<LocalRegistry>,
@@ -126,25 +149,6 @@ pub struct Core {
     config: Arc<RwLock<Arc<ExmConfig>>>,
 }
 
-/// 会话归属键 → 轮次作用域元组：`"single:<id>"` → (单智能体原组回落, Some(id))；
-/// 组名 → (组名, None)。归属目标已被删除时返回 None（轮次回落全局激活态，
-/// 与旧 align_to_session_group 的「目标不存在保持现状」语义一致）。
-fn parse_session_scope(
-    registry: &LocalRegistry,
-    group_id: &str,
-) -> Option<(String, Option<String>)> {
-    if let Some(id) = group_id.strip_prefix("single:") {
-        if registry.single_exists(id) {
-            return Some((registry.active_group_global(), Some(id.to_string())));
-        }
-        return None;
-    }
-    let g = group_id.trim();
-    if !g.is_empty() && registry.group_exists(g) {
-        return Some((g.to_string(), None));
-    }
-    None
-}
 
 /// 跨会话投递执行器工厂：闭包持 Weak<Core>，避免 tools ↔ orchestrator ↔ Core 成环。
 fn session_send_exec(weak: std::sync::Weak<Core>) -> crate::tools::SessionSendExec {
@@ -656,83 +660,18 @@ impl Core {
         orch.compact_memory_md(max).await
     }
 
-    /// 会话 token 用量：优先真实用量（provider 上报），无记录时退回字符估算（全部消息陈述字符 / 4）
-    pub fn session_tokens_estimate(&self, session_id: &str) -> u64 {
-        let (prompt, completion, calls) = self.store.usage_total(session_id);
-        if calls > 0 {
-            return prompt + completion;
-        }
-        self.store
-            .list_messages(session_id, 500)
-            .unwrap_or_default()
-            .iter()
-            .map(|m| {
-                m.statements
-                    .iter()
-                    .map(|s| s.text.chars().count() as u64)
-                    .sum::<u64>()
-                    / 4
-            })
-            .sum()
-    }
 
-    /// 会话用量明细：(prompt, completion, 调用次数)
-    pub fn session_usage(&self, session_id: &str) -> (u64, u64, usize) {
-        self.store.usage_total(session_id)
-    }
 
     // ---------------- 文件检查点（写前快照的回看与回滚） ----------------
 
-    fn checkpoints_dir(&self) -> std::path::PathBuf {
-        self.config()
-            .workspace_root
-            .join(".exmachina")
-            .join("checkpoints")
-    }
 
-    /// 检查点清单：(日期, 相对路径, 字节数)，按日期倒序
-    pub fn list_checkpoints(&self) -> Vec<(String, String, u64)> {
-        let root = self.checkpoints_dir();
-        let mut out: Vec<(String, String, u64)> = Vec::new();
-        let Ok(days) = std::fs::read_dir(&root) else {
-            return out;
-        };
-        for day in days.flatten() {
-            if !day.path().is_dir() {
-                continue;
-            }
-            let date = day.file_name().to_string_lossy().to_string();
-            let mut stack = vec![day.path()];
-            while let Some(dir) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for e in entries.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        stack.push(p);
-                    } else if let Ok(rel) = p.strip_prefix(&root).map(|r| r.to_path_buf()) {
-                        // 去掉前缀的 <日期>/ 段
-                        let rel_str = rel
-                            .components()
-                            .skip(1)
-                            .map(|c| c.as_os_str().to_string_lossy().to_string())
-                            .collect::<Vec<_>>()
-                            .join("/");
-                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                        out.push((date.clone(), rel_str, size));
-                    }
-                }
-            }
-        }
-        out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        out
-    }
 
     /// 工作区文件保存（WebUI 编辑器写入口径）：路径防 `..` 兜底、写前检查点、工具审计。
     /// 与写类工具同规则（当日首次改动前的版本落 `.exmachina/checkpoints/`，供回滚）。
     /// 返回结果摘要；越界/非法路径报错。网关侧已做工作区规范化校验，此处兜底拒绝。
-    pub fn save_workspace_file(&self, rel: &str, content: &str) -> anyhow::Result<String> {
+    /// （当前无调用点——预留接口；pub(crate) 化待接入方出现再升 pub，codebase-refactor D2）
+    #[allow(dead_code)]
+    pub(crate) fn save_workspace_file(&self, rel: &str, content: &str) -> anyhow::Result<String> {
         let norm = rel.replace('\\', "/").trim_matches('/').to_string();
         if norm.is_empty()
             || std::path::Path::new(rel.trim()).is_absolute()
@@ -1184,35 +1123,6 @@ impl Core {
         self.orchestrator.read().emit("", "sanitize.finding", payload);
     }
 
-    /// 回滚检查点：`date` 为空取最近一份；返回被覆盖的文件相对路径
-    pub fn restore_checkpoint(&self, date: Option<&str>, rel: &str) -> anyhow::Result<String> {
-        let target = self
-            .config()
-            .workspace_root
-            .join(".exmachina")
-            .join("checkpoints");
-        let day = match date {
-            Some(d) if !d.trim().is_empty() => d.trim().to_string(),
-            _ => self
-                .list_checkpoints()
-                .first()
-                .map(|(d, _, _)| d.clone())
-                .ok_or_else(|| anyhow::anyhow!("没有可用的检查点"))?,
-        };
-        let src = target.join(&day).join(rel);
-        if !src.is_file() {
-            anyhow::bail!("检查点不存在：{day}/{rel}");
-        }
-        let dst = self.config().workspace_root.join(rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(&src, &dst)?;
-        Ok(format!(
-            "已回滚 {} → {rel}（来自检查点 {day}）",
-            dst.display()
-        ))
-    }
 
     // ---------------- 会话历史管控（undo / 编辑重发 / fork，组 9） ----------------
 
@@ -1238,146 +1148,8 @@ impl Core {
             .ok_or_else(|| anyhow::anyhow!("轮次快照不存在: turn {turn}（该轮未落快照或已被裁剪）"))
     }
 
-    /// 消息撤销（9.2）：空闲强校验 → 游标回退（截断部分归档可查）→ 上下文重建
-    /// → 可选检查点联动回滚 → 审计事件。返回 {archived, restored, cursor}。
-    pub async fn undo_session(
-        &self,
-        session_id: &str,
-        upto_turn: usize,
-        restore_files: bool,
-    ) -> anyhow::Result<serde_json::Value> {
-        let lock = self.run_lock(session_id);
-        // 空闲校验：处理中拒绝（spec 硬性要求）
-        let _guard = lock
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("会话正在处理中，请等待当前任务完成后再撤销"))?;
-        self.store
-            .get_session(session_id)?
-            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
-        let cursor = self.cursor_at_turn(session_id, upto_turn)?;
 
-        // 游标回退 + 归档（spec：被截断内容保留归档视图）
-        let archived = self.store.truncate_messages(session_id, cursor)?;
 
-        // 上下文重建：截断后滚动摘要失效（摘要覆盖越过游标即重置，按截断后历史重建）
-        // P2-8：上一行存在性校验与此处重查之间会话可被并发删除——不再 unwrap，
-        // 查不到按「无摘要」处理（截断已成功，摘要重建跳过不致命）
-        if let Some(session) = self.store.get_session(session_id)? {
-            if session.summary_upto.map(|u| u > cursor).unwrap_or(false) {
-                let _ = self.store.update_compaction(session_id, "", 0);
-            }
-        }
-
-        // 检查点联动回滚：该轮之后各快照登记的文件变更，按轮次倒序恢复
-        let mut restored: Vec<String> = Vec::new();
-        if restore_files {
-            let mut later: Vec<TurnSnapshot> = self
-                .store
-                .list_turn_snapshots(session_id)?
-                .into_iter()
-                .filter(|s| s.turn > upto_turn && !s.checkpoint_ids.is_empty())
-                .collect();
-            later.sort_by_key(|s| std::cmp::Reverse(s.turn)); // 后轮先回滚（后者覆盖前者的场景）
-            for snap in later {
-                for cp in snap.checkpoint_ids.iter().rev() {
-                    let Some((date, rel)) = cp.split_once('/') else {
-                        continue;
-                    };
-                    match self.restore_checkpoint(Some(date), rel) {
-                        Ok(_) => restored.push(cp.clone()),
-                        Err(e) => eprintln!("[undo] 检查点恢复失败 {cp}: {e}"),
-                    }
-                }
-            }
-        }
-
-        // 孤儿快照清理 + 审计 + 事件
-        let _ = self.store.prune_turn_snapshots_after(session_id, upto_turn);
-        self.store.audit_tool_best_effort(
-            "webui",
-            "session_undo",
-            &serde_json::json!({ "session": session_id, "uptoTurn": upto_turn, "restoreFiles": restore_files }),
-            &format!("撤销至第 {upto_turn} 轮：归档 {archived} 条，联动回滚 {} 个文件", restored.len()),
-            0,
-        );
-        let payload = serde_json::json!({
-            "session": session_id, "uptoTurn": upto_turn, "cursor": cursor,
-            "archived": archived, "restored": restored,
-        });
-        let _ = self.events.send(CoreEvent {
-            kind: "session.undo".into(),
-            session_id: session_id.to_string(),
-            payload: payload.clone(),
-        });
-        Ok(payload)
-    }
-
-    /// 编辑重发（9.3）：撤销至该轮之前（原内容归档可查）后以新内容触发新一轮处理。
-    /// `turn` 为被编辑的用户消息所在轮次。
-    pub async fn edit_resend(
-        &self,
-        session_id: &str,
-        turn: usize,
-        new_text: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        if new_text.trim().is_empty() {
-            anyhow::bail!("新内容不能为空");
-        }
-        let upto = turn.saturating_sub(1);
-        let info = self.undo_session(session_id, upto, true).await?;
-        // 以新内容重新执行（原内容已在归档中可查）
-        self.chat(session_id, new_text).await?;
-        Ok(serde_json::json!({ "undone": info, "resent": true, "turn": turn }))
-    }
-
-    /// 会话分支派生（9.4）：新会话携带截至该轮的完整历史副本与派生来源标注；
-    /// 组归属（= 权限与成员上下文）继承，原会话不变。返回新会话。
-    pub fn fork_session(&self, session_id: &str, upto_turn: usize) -> anyhow::Result<Session> {
-        let src = self
-            .store
-            .get_session(session_id)?
-            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
-        let cursor = self.cursor_at_turn(session_id, upto_turn)?;
-        let now = now_iso();
-        let fork = Session {
-            id: new_id(),
-            title: format!("{}（分支·至第 {upto_turn} 轮）", src.title),
-            status: "active".into(),
-            origin: None,
-            origin_label: None,
-            group_id: src.group_id.clone(), // 权限与组继承
-            memory_partition: src.memory_partition.clone(), // 记忆分区随会话继承
-            rolling_summary: None,          // 摘要按副本历史重建
-            summary_upto: None,
-            parent_session: Some(src.id.clone()),
-            parent_upto: Some(upto_turn),
-            last_message_preview: None,
-            last_active_at: None,
-            pinned: false, // 置顶不继承分支
-            archived_at: None, // 归档态不继承分支（分支从活跃态开始）
-            message_count: None,
-            ledger: src.ledger.clone(),
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        self.store.insert_session(&fork)?;
-        let copied = self
-            .store
-            .copy_messages_prefix(session_id, &fork.id, cursor)?;
-        self.store.audit_tool_best_effort(
-            "webui",
-            "session_fork",
-            &serde_json::json!({ "source": session_id, "uptoTurn": upto_turn, "fork": fork.id }),
-            &format!("派生分支会话 {}（复制 {copied} 条消息）", fork.id),
-            0,
-        );
-        let _ = self.events.send(CoreEvent {
-            kind: "session.fork".into(),
-            session_id: fork.id.clone(),
-            payload: serde_json::json!({ "source": session_id, "uptoTurn": upto_turn, "fork": fork.id, "copied": copied }),
-        });
-        Ok(fork)
-    }
 
     pub async fn chat(&self, session_id: &str, text: &str) -> anyhow::Result<()> {
         // 默认能力边界：完整工具面 + Computer（WebUI / CLI / 定时任务的既有行为）
@@ -1438,7 +1210,7 @@ impl Core {
         // 零污染——REST / 通道绑定 / 并发轮次读到的仍是各自显式设置的上下文
         // （旧实现写全局态再还原，run.finished 事件先于还原到达时会泄漏临时态）。
         // 归属目标已删除 → scope None → 回落全局激活态（轮次不中断）。
-        let ctx = parse_session_scope(&self.registry, &session.group_id);
+        let ctx = crate::core::sessions::parse_session_scope(&self.registry, &session.group_id);
         let result = crate::registry::round_scope_decl::ROUND_SCOPE
             .scope(ctx, async {
                 self.orchestrator()
@@ -1450,23 +1222,6 @@ impl Core {
         result
     }
 
-    /// 停止会话运行中的轮次：置位取消令牌（工具循环检查点终止），返回已执行的工具次数。
-    /// 空闲会话（无运行中轮次）返回错误。
-    pub fn stop_session(&self, session_id: &str) -> anyhow::Result<usize> {
-        if !crate::round_trace::is_running(session_id) {
-            anyhow::bail!("该会话当前没有运行中的任务");
-        }
-        crate::round_trace::request_cancel(session_id);
-        let n = crate::round_trace::tool_count(session_id);
-        self.store.audit_tool_best_effort(
-            "system",
-            "session_stop",
-            &serde_json::json!({ "session": session_id }),
-            &format!("用户请求停止（当时已执行 {n} 次工具调用）"),
-            0,
-        );
-        Ok(n)
-    }
 
     pub fn mcp(&self) -> Arc<crate::mcp::McpRegistry> {
         self.mcp.clone()
@@ -1714,83 +1469,14 @@ impl Core {
 
     // ---------------- 会话与编成便捷方法 ----------------
 
-    pub fn list_sessions_in_group(&self, gid: &str) -> anyhow::Result<Vec<Session>> {
-        self.store.list_sessions_in_group(gid)
-    }
 
-    /// 当前交互范围（组或智能体）的会话列表
-    pub fn list_sessions_in_scope(&self) -> anyhow::Result<Vec<Session>> {
-        self.store
-            .list_sessions_in_group(&self.registry.active_scope())
-    }
 
-    pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
-        crate::orchestrator::unmark_im_session(id);
-        // 会话删除连带清理审批授权与工具预算计数（生命周期 = 会话生命周期）
-        self.session_grants.lock().remove(id);
-        self.orchestrator().tools.clear_tool_budget(id);
-        self.store.delete_session(id)
-    }
 
-    /// 会话审批授权写入（approval-ergonomics「本会话允许」档）：
-    /// 前缀口径见 allowlist::command_head。红线校验在 approval_decide 调用侧——
-    /// [root] 提权单与破坏性命令不会走到这里。
-    pub fn grant_session(&self, session_id: &str, prefix: &str) {
-        if prefix.is_empty() {
-            return;
-        }
-        self.session_grants
-            .lock()
-            .entry(session_id.to_string())
-            .or_default()
-            .insert(prefix.to_string(), ());
-    }
 
-    /// 会话授权命中判定：命令前缀在授权表内即视为已批准。
-    /// 返回命中的前缀（调试/审计可见），未命中返回 None。
-    pub fn session_granted(&self, session_id: &str, cmd: &str) -> Option<String> {
-        let head = crate::tools::command_head(cmd);
-        if head.is_empty() {
-            return None;
-        }
-        self.session_grants
-            .lock()
-            .get(session_id)?
-            .contains_key(&head)
-            .then_some(head)
-    }
 
-    /// 会话置顶切换（列表置顶分组数据源）
-    pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> anyhow::Result<()> {
-        self.store.toggle_session_pin(id, pinned)
-    }
 
-    /// 会话归档 / 恢复（可逆状态：归档移出主列表，恢复回原分组）
-    pub fn set_session_archived(&self, id: &str, archived: bool) -> anyhow::Result<()> {
-        self.store.set_session_archived(id, archived)
-    }
 
-    /// 归档区列表（只含归档态，按归档时间倒序；预览口径与主列表一致）
-    pub fn list_archived_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        let mut list = self.store.list_archived_sessions()?;
-        for s in list.iter_mut() {
-            s.last_message_preview = self.store.last_message_preview(&s.id, 80);
-            s.last_active_at = Some(s.updated_at.clone());
-            s.message_count = Some(self.store.message_count(&s.id));
-        }
-        self.attach_session_origins(&mut list);
-        Ok(list)
-    }
 
-    /// 管理视角全量会话（含消息数计数；主列表口径 = 未归档）
-    pub fn list_sessions_admin(&self) -> anyhow::Result<Vec<Session>> {
-        let mut list = self.list_sessions()?;
-        for s in list.iter_mut() {
-            s.message_count = Some(self.store.message_count(&s.id));
-        }
-        self.attach_session_origins(&mut list);
-        Ok(list)
-    }
 
     /// 会话来源派生补齐（session-management）：title 约定解析 + flow 表 join。
     /// 通道会话 origin = `channel:{id}:{key}`、origin_label = `流显示名·标签`；
@@ -1919,26 +1605,8 @@ impl Core {
         Ok((targets.len(), skipped))
     }
 
-    pub fn create_session(&self, title: &str) -> anyhow::Result<Session> {
-        let gid = self.registry.active_scope();
-        self.store.create_session(title, &gid)
-    }
 
-    pub fn list_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        let mut list = self.store.list_sessions()?;
-        // 末条消息预览（chat-ergonomics）：会话量级 ≤200，末行微读成本可控
-        for s in list.iter_mut() {
-            s.last_message_preview = self.store.last_message_preview(&s.id, 80);
-            s.last_active_at = Some(s.updated_at.clone());
-        }
-        Ok(list)
-    }
 
-    /// 会话内容检索（标题 + 最近 200 条消息）：REST / 速查共用，
-    /// 范围与消息读取窗口一致（命中片段可被聊天页加载并定位）。
-    pub fn search_sessions(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SessionSearchHit>> {
-        self.store.search_sessions(query, limit)
-    }
 
     pub fn agents(&self) -> Vec<AgentDefinition> {
         self.registry.list()
@@ -2117,280 +1785,10 @@ impl Core {
         self.registry.remove_skill(id)
     }
 
-    pub fn approval_list(
-        &self,
-        status: Option<&str>,
-        limit: usize,
-    ) -> anyhow::Result<Vec<ApprovalRequest>> {
-        self.store.list_approvals(status, limit)
-    }
 
-    pub fn approval_get(&self, id: &str) -> anyhow::Result<Option<ApprovalRequest>> {
-        self.store.get_approval(id)
-    }
 
-    /// 审批决定：批准即由系统代执行并记录输出；拒绝即关闭审批单
-    pub async fn approval_decide(
-        &self,
-        id: &str,
-        approve: bool,
-    ) -> anyhow::Result<ApprovalRequest> {
-        self.approval_decide_scoped(id, ApprovalScope::Once { approve }).await
-    }
 
-    /// 审批决定（approval-ergonomics 三档粒度）：
-    /// - Once：本次执行（旧行为，缺省档）
-    /// - Session：本次执行 + 同命令前缀本会话后续自动放行（内存态）
-    /// - Allowlist：本次执行 + 前缀写入 security.execAllowlist（持久）
-    ///
-    /// 红线：[root] 等特殊前缀单与破坏性命令不支持 Session/Allowlist 档——
-    /// 越权档位自动降级 Once。
-    pub async fn approval_decide_scoped(
-        &self,
-        id: &str,
-        decision: ApprovalScope,
-    ) -> anyhow::Result<ApprovalRequest> {
-        // 决定互斥（竞态 P1-1）：双击批准/WebUI+通道并发时，同一审批单只有一个
-        // 决定流能走下去——否则双执行命令（执行窗口可达数分钟）。占不到锁 =
-        // 另一个决定在途：等它收束后返回最新单据（语义：「你的点击已生效，
-        // 由先到者代执行」而非报错）。
-        let lock = {
-            let mut locks = self.approval_locks.lock();
-            locks
-                .entry(id.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        let Ok(_guard) = lock.try_lock() else {
-            // 另一个决定在途：轮询等最终态（上限 60s，防永挂）
-            for _ in 0..120 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                if let Some(req) = self.store.get_approval(id)? {
-                    if req.status != "pending" {
-                        return Ok(req);
-                    }
-                }
-            }
-            anyhow::bail!("审批决定超时：另一决定长时间未收束");
-        };
-        let mut req = self
-            .store
-            .get_approval(id)?
-            .ok_or_else(|| anyhow::anyhow!("审批单不存在: {id}"))?;
-        if req.status != "pending" {
-            anyhow::bail!("审批单已处理: {}", req.status);
-        }
-        // 红线校验：特殊前缀单与破坏性命令不允许升档（拒绝类决定不受限）
-        let effective = if decision.is_approve() {
-            let special = req.command.starts_with('[');
-            let destructive =
-                crate::tools::is_destructive_command(&req.command.to_lowercase());
-            if matches!(
-                decision,
-                ApprovalScope::Session | ApprovalScope::Allowlist
-            ) && (special || destructive)
-            {
-                ApprovalScope::Once { approve: true }
-            } else {
-                decision
-            }
-        } else {
-            ApprovalScope::Once { approve: false }
-        };
-        let approve = effective.is_approve();
-        // 视频动作审批单（[video] 前缀）：批准 = 回调代发执行器，拒绝 = 记录跳过
-        if req.command.starts_with("[video]") {
-            let payload = req.command.trim_start_matches("[video]").trim().to_string();
-            req.decided_at = Some(now_iso());
-            if !approve {
-                req.status = "denied".into();
-                req.result = Some("视频互动被拒绝（未发送）".into());
-                self.store.update_approval(&req)?;
-                self.emit_approval_resolved(&req);
-                return Ok(req);
-            }
-            match self.execute_video_act_approval(&payload).await {
-                Ok(out) => {
-                    req.status = "executed".into();
-                    req.result = Some(out.chars().take(4000).collect());
-                }
-                Err(e) => {
-                    req.status = "failed".into();
-                    req.result = Some(e.to_string());
-                }
-            }
-            self.store.update_approval(&req)?;
-            self.emit_approval_resolved(&req);
-            return Ok(req);
-        }
-        // 计划审批单（[plan] 前缀）：转发计划通道——批准 = 回放清单，拒绝 = 保留清单
-        if req.command.starts_with("[plan]") {
-            let sid = req.session_id.clone();
-            if approve {
-                let results = self.plan_approve(&sid).await;
-                req.status = match results {
-                    Ok(rs) if rs.iter().all(|(_, r)| r.ok) => "executed".into(),
-                    Ok(_) => "failed".into(),
-                    Err(e) => {
-                        req.status = "failed".into();
-                        req.result = Some(e.to_string());
-                        self.store.update_approval(&req)?;
-                        self.emit_approval_resolved(&req);
-                        return Ok(req);
-                    }
-                };
-                req.result = Some("计划已回放执行".into());
-            } else {
-                self.plan_reject(&sid);
-                req.status = "denied".into();
-                req.result = Some("计划被拒绝（清单保留可继续修改）".into());
-            }
-            req.decided_at = Some(now_iso());
-            self.store.update_approval(&req)?;
-            self.emit_approval_resolved(&req);
-            return Ok(req);
-        }
-        // 元智能体提议单（[meta] 前缀，meta-agent）：批准 = 按 kind 代为应用
-        // （prompt 补段/adaptation 版本化/roster 两阶段/build 注册）;拒绝 = 受阻回流。
-        // 内置组保护与主智能体校验沿 agent_manage 同路径,提议不绕过任何闸门。
-        if req.command.starts_with("[meta]") {
-            req.decided_at = Some(now_iso());
-            if !approve {
-                req.status = "denied".into();
-                req.result = Some("元智能体提议被拒绝".into());
-                self.store.update_approval(&req)?;
-                self.emit_approval_resolved(&req);
-                return Ok(req);
-            }
-            let outcome = self.apply_meta_proposal(&req).await;
-            let (status, text) = match outcome {
-                Ok(msg) => ("executed".to_string(), msg),
-                Err(e) => ("failed".to_string(), e.to_string()),
-            };
-            req.status = status;
-            req.result = Some(text.chars().take(4000).collect());
-            self.store.update_approval(&req)?;
-            self.emit_approval_resolved(&req);
-            let _ = self.events.send(CoreEvent {
-                kind: "meta.applied".into(),
-                session_id: req.session_id.clone(),
-                payload: serde_json::json!({
-                    "approvalId": req.id,
-                    "ok": req.status == "executed",
-                    "command": req.command,
-                }),
-            });
-            return Ok(req);
-        }
-        // root 提权审批单（[root] 前缀，agent-exec-confinement）：批准 = 以 root 身份
-        // 代执行（剥冗余 sudo 壳、保留 su 切换语义、不走 execUser 降权）；拒绝 = 受阻回流
-        if req.command.starts_with("[root]") {
-            let raw_cmd = req.command.trim_start_matches("[root]").trim().to_string();
-            req.decided_at = Some(now_iso());
-            if !approve {
-                req.status = "denied".into();
-                req.result = Some("root 提权被拒绝".into());
-                self.store.update_approval(&req)?;
-                self.emit_approval_resolved(&req);
-                return Ok(req);
-            }
-            // 剥离 sudo/doas/run0 冗余壳（root 下多余）；su/sudo -u/runuser 保留语义
-            let eff_cmd = crate::tools::strip_redundant_elevation(&raw_cmd);
-            let workspace = self.config().workspace_root.clone();
-            // root 代执行：ShellOpts::plain（不降权——审批的就是提权本身）
-            let opts = crate::tools::ShellOpts::plain();
-            let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
-            req.status = if out.ok { "executed".into() } else { "failed".into() };
-            let text = if out.ok { out.output } else { out.error.unwrap_or_default() };
-            // 红线降级注明（approval-ergonomics）：[root] 提权单不允许升档,
-            // 越权档位自动降级 once——审批结果注明让裁决者知情
-            let downgrade_note = if matches!(
-                decision,
-                ApprovalScope::Session | ApprovalScope::Allowlist
-            ) {
-                "\n[红线] 提权单不支持会话授权/白名单档，已按本次执行"
-            } else {
-                ""
-            };
-            req.result = Some(
-                format!("[root 执行] {eff_cmd}\n{}{downgrade_note}", text)
-                    .chars()
-                    .take(4000)
-                    .collect(),
-            );
-            self.store.update_approval(&req)?;
-            self.emit_approval_resolved(&req);
-            return Ok(req);
-        }
-        req.decided_at = Some(now_iso());
-        if !approve {
-            req.status = "denied".into();
-            self.store.update_approval(&req)?;
-            self.emit_approval_resolved(&req);
-            return Ok(req);
-        }
-        // 普通审批单代执行收口（agent-exec-confinement）：与直通执行同一加固路径——
-        // 审批放行的是命令内容,不是特权;execUser 降权/沙箱净化照常生效。
-        // [红线] 前缀（agent-budget-audit 3.3 分档闸门标记）不是 shell 语法，
-        // 代执行前剥掉——审批的是命令本身，标记只用于档位溯源
-        let eff_cmd = req
-            .command
-            .strip_prefix("[红线]")
-            .map(|c| c.trim().to_string())
-            .unwrap_or_else(|| req.command.clone());
-        let workspace = self.config().workspace_root.clone();
-        let opts = self.orchestrator().tools.shell_opts(&eff_cmd);
-        let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
-        req.status = if out.ok {
-            "executed".into()
-        } else {
-            "failed".into()
-        };
-        let text = if out.ok {
-            out.output
-        } else {
-            out.error.unwrap_or_default()
-        };
-        req.result = Some(text.chars().take(4000).collect());
-        // 档位副作用（仅普通命令单走到这里;特殊前缀单已在上方分流 return）。
-        // 执行失败也建授权/白名单?不——失败说明命令本身有问题,放行同类无意义,
-        // 且用户批的是「这类命令可以跑」的意图以成功执行为前提更符合直觉。
-        if out.ok {
-            match effective {
-                ApprovalScope::Session => {
-                    let prefix = crate::tools::command_head(&req.command);
-                    self.grant_session(&req.session_id, &prefix);
-                    req.result = Some(format!(
-                        "{}\n[会话授权] 同前缀命令「{prefix}」本会话内自动放行",
-                        req.result.as_deref().unwrap_or("")
-                    ));
-                }
-                ApprovalScope::Allowlist => {
-                    let prefix = crate::tools::command_head(&req.command);
-                    if !prefix.is_empty() {
-                        let mut cfg = self.config().as_ref().clone();
-                        if !cfg.security.exec_allowlist.iter().any(|p| p == &prefix) {
-                            cfg.security.exec_allowlist.push(prefix.clone());
-                            self.apply_config(cfg)?;
-                        }
-                        req.result = Some(format!(
-                            "{}\n[白名单] 前缀「{prefix}」已写入全局白名单",
-                            req.result.as_deref().unwrap_or("")
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.store.update_approval(&req)?;
-        self.emit_approval_resolved(&req);
-        Ok(req)
-    }
 
-    /// 登记会话的外部来源（闸门放行时由适配器调用；审批单创建时据此打升级标）
-    pub fn stamp_session_origin(&self, session_id: &str, external_id: &str, role: &str) {
-        let _ = self.store.put_session_origin(session_id, external_id, role);
-    }
 
     // ---------------- 视频互动审批（video__act 批准代发） ----------------
 
@@ -2527,36 +1925,7 @@ impl Core {
         Ok(out)
     }
 
-    pub fn session_origin(&self, session_id: &str) -> Option<(String, String)> {
-        self.store.get_session_origin(session_id).ok().flatten()
-    }
 
-    /// 创建 WebUI 发起的 git 破坏性操作审批单：command 为精确 git 命令，
-    /// 批准后由 approval_decide 代执行（与工具审批同一执行与审计路径）
-    pub async fn request_git_approval(&self, command: &str) -> anyhow::Result<ApprovalRequest> {
-        let req = ApprovalRequest {
-            id: crate::types::new_id(),
-            session_id: String::new(),
-            node_id: None,
-            agent_id: "webui".into(),
-            command: command.to_string(),
-            status: "pending".into(),
-            result: None,
-            created_at: now_iso(),
-            decided_at: None,
-            origin_user: None,
-            origin_role: None,
-        
-            meta_json: None,
-        };
-        self.store.add_approval(&req)?;
-        let _ = self.events.send(CoreEvent {
-            kind: "approval.required".into(),
-            session_id: String::new(),
-            payload: serde_json::json!({ "approvalId": req.id, "agentId": "webui", "command": command }),
-        });
-        Ok(req)
-    }
 
     fn emit_approval_resolved(&self, req: &ApprovalRequest) {
         let _ = self.events.send(CoreEvent {
@@ -3369,7 +2738,5 @@ async fn register_new_agent(
     ))
 }
 
-// 原 lib.rs 内联测试整体迁出（纯搬移）→ core/tests.rs（Core 领域拆分第一批前置）
-#[cfg(test)]
-#[path = "core/tests.rs"]
-mod core_tests;
+// 原 lib.rs 内联测试整体迁出（纯搬移）→ core/tests.rs（Core 领域拆分第一批前置）；
+// 拆分后经 core/mod.rs 挂载（tests 在 core/ 内部声明），此处不再重复挂载

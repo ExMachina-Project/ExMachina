@@ -3,7 +3,7 @@
 //! session_grant/meta_approval/session_origin/flow_archive/once_flag）。
 
 // 原 lib.rs 测试块经 `use super::*` 取得的符号，迁出后在此显式引入（纯搬移不改断言）
-use super::Core;
+use super::super::Core;
 use crate::config::ExmConfig;
 use crate::types::*;
 use parking_lot::Mutex;
