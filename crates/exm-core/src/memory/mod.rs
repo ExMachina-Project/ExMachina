@@ -260,9 +260,7 @@ mod crud;
 mod recall;
 mod render;
 
-pub(crate) use crud::*;
-pub(crate) use recall::*;
-pub(crate) use render::*;
+use render::*;
 
 #[cfg(test)]
 mod tests;

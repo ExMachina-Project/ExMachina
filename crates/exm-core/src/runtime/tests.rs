@@ -1,6 +1,6 @@
 //! runtime 域测试（自 runtime.rs 迁出，纯搬移；各测试 mod 原样保留）。
 
-use crate::provider::{ChatMessage, ChatRequest, ChatResponse, FailoverState, LlmProvider, StreamDelta, ToolCall};
+use crate::provider::{ChatRequest, LlmProvider, StreamDelta};
 use crate::runtime::{resolve_max_steps, AgentRuntime};
 use crate::registry::LocalRegistry;
 use crate::tools::ToolGateway;
