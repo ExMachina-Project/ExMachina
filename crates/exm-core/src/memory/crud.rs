@@ -1,6 +1,7 @@
 //! memory 域分文件（自 memory.rs 按域拆出，纯搬移零行为变更）。
 
 use super::*;
+use super::render::{cap_chars, content_hash, decayed_importance, age_days};
 
 impl MemoryStore {
     /// `data_dir` 为工作区数据根目录（与 Store 共用，但各自分集合）
