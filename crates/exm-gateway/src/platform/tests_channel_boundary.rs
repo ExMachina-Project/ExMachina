@@ -183,6 +183,7 @@ mod channel_boundary_tests {
             origin: None,
             external_id: None,
             flow: None,
+            round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         // 已含【报告】：原样透传
         let evt = exm_core::types::CoreEvent {
@@ -232,6 +233,7 @@ mod channel_boundary_tests {
             origin: None,
             external_id: None,
             flow: None,
+            round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let evt = |text: &str| exm_core::types::CoreEvent {
             kind: "run.finished".into(),
@@ -288,6 +290,7 @@ mod channel_boundary_tests {
             origin: None,
             external_id: None,
             flow: None,
+            round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let text = run.take_reply(&evt, 650).expect("应有文本回复");
         assert!(

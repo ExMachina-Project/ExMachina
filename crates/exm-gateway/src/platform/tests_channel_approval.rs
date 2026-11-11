@@ -277,7 +277,11 @@ mod channel_approval_tests {
                 }),
             })
             .unwrap();
-        core.events
+        // 新回帖契约（重复回复根治）：收束事件只对本轮有效 = run() 已返回
+    //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
+    run.round_done
+        .store(true, std::sync::atomic::Ordering::Release);
+    core.events
             .send(CoreEvent {
                 kind: "run.finished".into(),
                 session_id: sid.clone(),
@@ -345,7 +349,11 @@ mod channel_approval_tests {
                 }),
             })
             .unwrap();
-        core.events
+        // 新回帖契约（重复回复根治）：收束事件只对本轮有效 = run() 已返回
+    //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
+    run.round_done
+        .store(true, std::sync::atomic::Ordering::Release);
+    core.events
             .send(CoreEvent {
                 kind: "run.finished".into(),
                 session_id: sid.clone(),
@@ -369,6 +377,122 @@ mod channel_approval_tests {
             sent.iter().any(|t| t.contains("已完成")),
             "钩子命中后仍应送达收束答复: {sent:?}"
         );
+        drop(sent);
+        let ws = core.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}
+
+// ---------------- 回帖发言权（latest-wins）：重复回复根治 ----------------
+
+mod reply_speaker_tests {
+    use crate::platform::channel_runtime::spawn_reply;
+    use crate::platform::channels::Channel;
+    use exm_core::types::CoreEvent;
+    use std::sync::Arc;
+
+    fn core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-rsp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        exm_core::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn ch() -> Channel {
+        Channel {
+            id: "c-rsp".into(),
+            kind: "webhook".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            admins: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: None,
+            proactive_reply: None,
+            proactive_rate: None,
+            capability: "tools".into(),
+            memory_isolation: false,
+            created_at: String::new(),
+        }
+    }
+
+    /// 同会话并发两个回帖任务（长轮次期间用户追问的生产形态）：
+    /// 前一轮的收束回复只能被发送一次——旧任务被新任务取代后不得再发言。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 并发回帖_前轮收束只发一遍() {
+        let core = Arc::new(core());
+        let c = ch();
+        // 任务①：订阅先建立（模拟上一轮的回帖任务）
+        let (run1, rx1) = crate::platform::channel_runtime::ChannelRun::begin(&core, &c, "chat-dup")
+            .await
+            .unwrap();
+        let sid = run1.session_id.clone();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        let mk_send = |sent: Arc<std::sync::Mutex<Vec<String>>>| {
+            move |text: String| {
+                let sent = sent.clone();
+                async move {
+                    sent.lock().unwrap().push(text);
+                }
+            }
+        };
+        let reply1 = spawn_reply(&run1, rx1, 500, mk_send(sent.clone()), |_i| async { false });
+
+        // 任务②：新消息到达（run2 round_done 置位前先挂任务，模拟 handle_message 顺序）
+        let (run2, rx2) = crate::platform::channel_runtime::ChannelRun::begin(&core, &c, "chat-dup")
+            .await
+            .unwrap();
+        // 同一流 → 同一会话
+        assert_eq!(run2.session_id, sid);
+        let reply2 = spawn_reply(&run2, rx2, 500, mk_send(sent.clone()), |_i| async { false });
+
+        // 前一轮（任务①的轮次）收束：事件广播，两个任务都收得到
+        run1
+            .round_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({ "statements": [{ "text": "第一轮答复" }] }),
+            })
+            .unwrap();
+
+        // 第二轮随后收束
+        run2
+            .round_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({ "statements": [{ "text": "第二轮答复" }] }),
+            })
+            .unwrap();
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let (_, _) = tokio::join!(reply1, reply2);
+        })
+        .await;
+
+        let sent = sent.lock().unwrap();
+        let count_first = sent
+            .iter()
+            .filter(|t| t.contains("第一轮答复"))
+            .count();
+        let count_second = sent
+            .iter()
+            .filter(|t| t.contains("第二轮答复"))
+            .count();
+        assert_eq!(count_first, 1, "前一轮答复只发一遍（重复回复根治）: {sent:?}");
+        assert_eq!(count_second, 1, "第二轮答复不丢失: {sent:?}");
         drop(sent);
         let ws = core.config().workspace_root.clone();
         let _ = std::fs::remove_dir_all(&ws);
