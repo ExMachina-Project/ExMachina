@@ -43,6 +43,7 @@ mod identity_gate_tests {
             mentioned: true,
             chat_key: "g100",
                     flow_name: None,
+                    media: &[],
         }
     }
 
@@ -55,6 +56,7 @@ mod identity_gate_tests {
             mentioned,
             chat_key: "test",
                     flow_name: None,
+                    media: &[],
         }
     }
 
@@ -267,6 +269,7 @@ mod identity_gate_tests {
             mentioned: true,
             chat_key: "g100",
                     flow_name: None,
+                    media: &[],
         };
         let r = admit(&core, &ch, &g_ctx).await;
         match r {
@@ -312,6 +315,7 @@ mod identity_gate_tests {
             mentioned: true,
             chat_key: "g200",
             flow_name: Some("重置测试群"),
+            media: &[],
         };
         let r = admit(&core, &ch, &ctx).await;
         match r {
@@ -348,6 +352,7 @@ mod identity_gate_tests {
             mentioned: true,
             chat_key: "g300",
             flow_name: None,
+            media: &[],
         };
         let r = admit(&core, &ch, &ctx).await;
         match r {
@@ -525,6 +530,7 @@ mod ambient_context_tests {
             mentioned,
             chat_key: key,
                     flow_name: None,
+                    media: &[],
         }
     }
 
@@ -600,6 +606,7 @@ mod ambient_context_tests {
             mentioned: false,
             chat_key: "p1",
                     flow_name: None,
+                    media: &[],
         };
         match admit(&core, &ch, &ctx).await {
             GateDecision::Allow(_) => {}

@@ -8,10 +8,17 @@ use super::*;
 /// 安全边界：拒绝绝对路径与 `..`；规范化后必须落在工作区内；扩展名白名单；8MB 上限。
 pub(crate) async fn get_asset(State(st): State<AppState>, Query(q): Query<AssetQuery>) -> impl IntoResponse {
     use axum::response::AppendHeaders;
-    // 鉴权：中间件已校验请求头；此处补 <img> 标签场景的查询参数通道（与 /ws 同款）
+    // 鉴权纵深（中间件已校验请求头或 /api/asset 的查询参数密钥）：
+    // <img> 标签只带查询参数不带头，此处保留查询参数通道校验（与 /ws 同款）；
+    // 经头部认证的请求（无 ?key=）不再要求查询参数——曾写成「必须带 ?key=」，
+    // 把带头认证的合法请求也拒成 401。
     let auth = st.core.config().security.auth_key.clone();
-    if !auth.is_empty() && q.key.as_deref() != Some(auth.as_str()) {
-        return (StatusCode::UNAUTHORIZED, "需要访问密钥").into_response();
+    if !auth.is_empty() {
+        if let Some(k) = q.key.as_deref() {
+            if k != auth {
+                return (StatusCode::UNAUTHORIZED, "需要访问密钥").into_response();
+            }
+        }
     }
     let raw = q.path.trim();
     if raw.is_empty() {
@@ -72,7 +79,8 @@ pub(crate) struct AssetQuery {
 /// · 扩展名不限（任意类型可发——xlsx/pdf/zip…；MIME 缺省 application/octet-stream）
 /// · 上限 200MB（与 filesystem send_file 登记护栏同口径）
 /// · Content-Disposition: attachment（浏览器落盘而非内联打开）
-/// · 仅鉴权头（不是 <img> 场景，无需查询参数密钥通道）
+/// · 鉴权在全局中间件：请求头或查询参数密钥（<a target="_blank"> 导航
+///   同样无法携带请求头，中间件对 GET /api/asset* 开放查询参数通道）
 pub(crate) async fn download_asset(
     State(st): State<AppState>,
     Query(q): Query<AssetQuery>,

@@ -337,6 +337,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                     mentioned,
                     chat_key: &chat_key,
                     flow_name: None,
+                    media: &[],
                 },
             )
             .await

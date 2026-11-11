@@ -291,6 +291,7 @@ mod tests {
             mentioned: false,
             chat_key: "12345",
             flow_name: None,
+            media: &[],
         };
         // ① 回复率 0：概率闸门在最前，不该触达任何后续判定
         assert!(!should_proactively_reply(&core, &ch, &ctx).await);

@@ -510,18 +510,20 @@ async fn on_text(
         .map(|g| g.to_string())
         .or(user_id.map(|u| u.to_string()));
     // 旁听媒体预下载（ambient-media-attach）：**未被 @** 的群媒体在闸门**前**
-    // 下载入窗——record_ambient 落占位消息时要能从窗口快照回填附件展示元数据，
-    // 窗口得先于闸门就绪（旧序：gate 内 record_ambient 先落库、gate 后 push 窗口，
-    // 旁听图片永远拿不到附件）。仅未提及消息预下载：@ 轮次走主链自行下载注入，
-    // 预下载会造成同图双份（take 取走 + 主链再下）。take 语义不变（取走即清）。
+    // 下载入窗——@ 轮次 take 注入模型的窗口先于闸门就绪（旧序曾致旁听图片
+    // 丢窗）。仅未提及消息预下载：@ 轮次走主链自行下载注入，预下载会造成
+    // 同图双份（take 取走 + 主链再下）。take 语义不变（取走即清）。
+    // 下载结果同时随任务带入闸门（InboundCtx.media）——旁听占位消息的附件
+    // 回填只挂本条消息自带的媒体，不再读窗口快照（曾致每条旁听消息复读
+    // 窗口内全部近期图片）。
     let will_be_ambient = group_id.is_some()
         && !media.is_empty()
         && !is_mentioned(
             v.get("message").unwrap_or(&serde_json::Value::Null),
             v_self_id(&v),
         );
+    let mut prewindowed: Vec<(String, String, String)> = Vec::new();
     if will_be_ambient {
-        let mut prewindowed = Vec::new();
         for (kind, src) in &media {
             if kind != "image" {
                 continue;
@@ -538,7 +540,7 @@ async fn on_text(
                 }
             }
         }
-        ambient_media::push(&ch.id, peer.as_deref().unwrap_or(""), prewindowed);
+        ambient_media::push(&ch.id, peer.as_deref().unwrap_or(""), prewindowed.clone());
     }
     if !ch.allowed_chats.is_empty() {
         let ok = peer
@@ -554,6 +556,7 @@ async fn on_text(
     let ch = ch.clone();
     let tx = tx.clone();
     let raw = v.clone();
+    let prewindowed = prewindowed; // 闸门前已下载的旁听媒体（随 ctx 带给 record_ambient 回填附件）
     tokio::spawn(async move {
         // 流展示名（会话管理可用性修复）：群聊取事件自带 group_name，私聊取
         // 对端昵称——流列表显示「萝莉领主二群」而非裸群号。解析不到则 None
@@ -570,11 +573,11 @@ async fn on_text(
                     .filter(|s| !s.is_empty() && group_id.is_none())
             });
         let Some((external_id, text, sender_mark)) =
-            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
+            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text, &prewindowed).await
         else {
-            // 闸门拦截（忽略 / 已回复）：旁听媒体已在闸门前预下载入窗
-            // （ambient-media-attach），占位消息的附件回填由 record_ambient
-            // 从窗口快照完成；这里无需再下载。
+            // 闸门拦截（忽略 / 已回复）：旁听媒体已在闸门前预下载，且已随
+            // InboundCtx.media 带入闸门——record_ambient 落占位消息时用它回填
+            // 本条消息的附件元数据；这里无需再下载。
             return;
         };
         // 入站媒体（组 6.4）：下载或本地 file:// 复制 → 注入（段清单已在闸门前盘好）；
@@ -730,6 +733,7 @@ async fn napcat_gate(
     user_id: Option<i64>,
     raw: &serde_json::Value,
     text: &str,
+    media: &[(String, String, String)],
 ) -> Option<(String, String, Option<String>)> {
     let is_group = group_id.is_some();
     // 提及归一化：@ 机器人本体才算提及（群内 @ 机器人是主语义）。
@@ -763,6 +767,8 @@ async fn napcat_gate(
         is_group,
         mentioned,
         chat_key: &peer,
+        // 本条消息自带的已落盘媒体（闸门前预下载）：旁听路径附件回填用
+        media,
         // 流展示名：群名（事件自带）优先；私聊用发送者昵称（对端即流主体）
         flow_name: raw
             .pointer("/group_name")
