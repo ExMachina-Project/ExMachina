@@ -914,7 +914,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
 // ---------------------------------------------------------------- 记忆系统
 
 pub(crate) async fn get_config_schema() -> impl IntoResponse {
-    Json(exm_core::config::config_schema())
+    Json(exm_core::config_schema::config_schema())
 }
 
 /// 消毒命中统计（inbound-sanitization 设置页可见性）：模式 → 计数（进程级）

@@ -1091,3 +1091,50 @@ mod tier_tests {
         assert!(ok5, "Controlled+risky/always 返回放行，由审批闸门按模式处理");
     }
 }
+
+
+use super::gateway::ToolGateway;
+use super::ToolName;
+use crate::types::{AgentDefinition, Tier};
+
+impl ToolGateway {
+    /// 派发时的运行时工具白名单（8.2 口径）：
+    /// - 个体 = 编成 JSON 的 tools 清单（未授权工具不在其工具面，不可见亦不可调用）
+    /// - 组主智能体 = 额外获得组内个体管理工具（自定义组）与记忆三工具（默认授权）
+    /// - 智能体（tier=orchestrator 且不在组内）按编成清单，可经 tools 显式授权记忆工具
+    pub fn runtime_allowlist(
+        def: &AgentDefinition,
+        group_meta: Option<&crate::types::GroupMeta>,
+    ) -> Vec<ToolName> {
+        let mut allowlist = def.tools.clone();
+        let is_primary = group_meta
+            .map(|m| m.primary.as_deref() == Some(def.identifier.as_str()))
+            .unwrap_or(false);
+        if is_primary {
+            if !group_meta.map(|m| m.builtin).unwrap_or(true)
+                && !allowlist.contains(&ToolName::AgentManage)
+            {
+                allowlist.push(ToolName::AgentManage);
+            }
+            for t in [
+                ToolName::MemoryRead,
+                ToolName::MemoryWrite,
+                ToolName::MemoryLink,
+            ] {
+                if !allowlist.contains(&t) {
+                    allowlist.push(t);
+                }
+            }
+        }
+        // 技能自管理 + 跨会话互通：组主智能体与独立指挥体默认获得。
+        // 技能是全局作业知识；sessions 只在本组作用域内可见/可投递（工具层强制）。
+        if is_primary || matches!(def.tier, Tier::Orchestrator) {
+            for t in [ToolName::SkillManage, ToolName::Sessions] {
+                if !allowlist.contains(&t) {
+                    allowlist.push(t);
+                }
+            }
+        }
+        allowlist
+    }
+}
