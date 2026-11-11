@@ -53,7 +53,7 @@ const SkillsView = lazy(() => import("./views/SkillsView").then((m) => ({ defaul
 const PluginsView = lazy(() => import("./views/PluginsView").then((m) => ({ default: m.PluginsView })));
 const AutomationsView = lazy(() => import("./views/AutomationsView").then((m) => ({ default: m.AutomationsView })));
 const ApprovalsView = lazy(() => import("./views/ApprovalsView").then((m) => ({ default: m.ApprovalsView })));
-const ChannelsView = lazy(() => import("./views/ChannelsView").then((m) => ({ default: m.ChannelsView })));
+const ChannelsView = lazy(() => import("./views/channels/ChannelsView").then((m) => ({ default: m.ChannelsView })));
 const ActivityView = lazy(() => import("./views/ActivityView").then((m) => ({ default: m.ActivityView })));
 
 /** 懒加载 chunk 未就绪时的兜底：品牌徽记 + 等宽字状态行（替代裸 Spin） */
