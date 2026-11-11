@@ -662,8 +662,8 @@ async fn post_message(creds: &BotCreds, base: &str, path: &str, body: &Value) ->
 }
 
 /// 被动回复（群/单聊/频道端点各异）。群/单聊正文含 markdown 语法时优先
-/// msg_type=2 原生渲染（2026-04 起开放到所有机器人，无需开关；对齐
-/// hermes 等框架的默认行为），被平台拒收（内容审核/权限）时换新 msg_seq
+/// msg_type=2 原生渲染（2026-04 起开放到所有机器人，无需开关；与主流
+/// 框架的默认行为一致），被平台拒收（内容审核/权限）时换新 msg_seq
 /// 回落 msg_type=0 文本——失败请求未送达不占被动回复额度。
 /// 频道（Guild）markdown 仍需内邀，恒走文本。
 async fn send_passive(

@@ -337,6 +337,29 @@ export function SessionsView(): React.ReactElement {
     }
   };
 
+  /** 训练轨迹导出（按轮次切分、默认剥离思维链；JSONL 每轮一行） */
+  const exportTrajectory = async (s: Session) => {
+    try {
+      const base = (window as unknown as { __EXM_API_BASE__?: string }).__EXM_API_BASE__ ?? "";
+      const key = localStorage.getItem("exm.key") ?? "";
+      const resp = await fetch(`${base}/api/sessions/${s.id}/trajectory?format=jsonl`, {
+        headers: { "X-Auth-Key": key },
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const day = new Date().toISOString().slice(0, 10);
+      a.download = `${s.title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-trajectory-${day}.jsonl`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toastOk(t("sessions.trajectoryDone"));
+    } catch (e) {
+      toastErr(e, t("chat.exportFailed", { err: "" }));
+    }
+  };
+
   const rowMenu = (s: Session) => ({
     items: [
       { key: "open", icon: <EditOutlined />, label: t("sessions.open") },
@@ -344,6 +367,7 @@ export function SessionsView(): React.ReactElement {
       view === "main" ? { key: "pin", icon: <PushpinOutlined />, label: s.pinned ? t("chat.unpin") : t("chat.pin") } : null,
       { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
       { key: "exportJson", icon: <ExportOutlined />, label: `${t("chat.export")} (JSON)` },
+      { key: "exportTrajectory", icon: <ExportOutlined />, label: t("sessions.exportTrajectory") },
       { key: "history", icon: <HistoryOutlined />, label: t("sessions.history") },
       { type: "divider" as const },
       view === "main"
@@ -357,6 +381,7 @@ export function SessionsView(): React.ReactElement {
       else if (key === "pin") void pinOne(s, !s.pinned);
       else if (key === "export") void exportOne(s, "markdown");
       else if (key === "exportJson") void exportOne(s, "json");
+      else if (key === "exportTrajectory") void exportTrajectory(s);
       else if (key === "history") setHistoryFor(s);
       else if (key === "archive") void archiveOne(s, true);
       else if (key === "unarchive") void archiveOne(s, false);
