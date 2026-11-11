@@ -301,7 +301,7 @@ mod channel_boundary_tests {
         assert!(text.ends_with("正文细节。"), "结尾内容不得丢失");
         // 分段切分后内容完整（段数 > 1 才证明分段机制真正参与）；
         // 硬切片自带「（续 N/M）」标注，允许尾段带标注，但正文不得丢
-        let segments = super::super::channel_runtime::split_reply(&text, 650);
+        let segments = super::super::channel::split_reply(&text, 650);
         assert!(segments.len() > 3, "应切出多段: {}", segments.len());
         let last = segments.last().unwrap();
         assert!(

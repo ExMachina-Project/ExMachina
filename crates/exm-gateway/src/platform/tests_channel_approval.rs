@@ -2,7 +2,7 @@
 //! take_reply 推送摘要 / ok:no 裁决权限 / 无关方裁决被拒 / 非 flow 会话天然隔离。
 #[cfg(test)]
 mod channel_approval_tests {
-    use crate::platform::channel_runtime::{ChannelRun, parse_approval_directive};
+    use crate::platform::channel::{ChannelRun, parse_approval_directive};
     use exm_core::types::{now_iso, ApprovalRequest, CoreEvent};
 
     fn core() -> exm_core::Core {
@@ -256,7 +256,7 @@ mod channel_approval_tests {
         let sid = run.session_id.clone();
         let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let sent2 = sent.clone();
-        let reply = crate::platform::channel_runtime::spawn_reply(
+        let reply = crate::platform::channel::spawn_reply(
             &run,
             rx,
             500,
@@ -318,7 +318,7 @@ mod channel_approval_tests {
         let hooked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let sent2 = sent.clone();
         let hooked2 = hooked.clone();
-        let hook: crate::platform::channel_runtime::ApprovalHook = Box::new(
+        let hook: crate::platform::channel::ApprovalHook = Box::new(
             move |prompt: crate::platform::ApprovalPrompt| -> HookFuture {
                 let hooked = hooked2.clone();
                 Box::pin(async move {
@@ -327,7 +327,7 @@ mod channel_approval_tests {
                 })
             },
         );
-        let reply = crate::platform::channel_runtime::spawn_reply_with_approval(
+        let reply = crate::platform::channel::spawn_reply_with_approval(
             &run,
             rx,
             500,
@@ -386,7 +386,7 @@ mod channel_approval_tests {
 // ---------------- 回帖发言权（latest-wins）：重复回复根治 ----------------
 
 mod reply_speaker_tests {
-    use crate::platform::channel_runtime::spawn_reply;
+    use crate::platform::channel::spawn_reply;
     use crate::platform::channels::Channel;
     use exm_core::types::CoreEvent;
     use std::sync::Arc;
@@ -429,7 +429,7 @@ mod reply_speaker_tests {
         let core = Arc::new(core());
         let c = ch();
         // 任务①：订阅先建立（模拟上一轮的回帖任务）
-        let (run1, rx1) = crate::platform::channel_runtime::ChannelRun::begin(&core, &c, "chat-dup")
+        let (run1, rx1) = crate::platform::channel::ChannelRun::begin(&core, &c, "chat-dup")
             .await
             .unwrap();
         let sid = run1.session_id.clone();
@@ -446,7 +446,7 @@ mod reply_speaker_tests {
         let reply1 = spawn_reply(&run1, rx1, 500, mk_send(sent.clone()), |_i| async { false });
 
         // 任务②：新消息到达（run2 round_done 置位前先挂任务，模拟 handle_message 顺序）
-        let (run2, rx2) = crate::platform::channel_runtime::ChannelRun::begin(&core, &c, "chat-dup")
+        let (run2, rx2) = crate::platform::channel::ChannelRun::begin(&core, &c, "chat-dup")
             .await
             .unwrap();
         // 同一流 → 同一会话
