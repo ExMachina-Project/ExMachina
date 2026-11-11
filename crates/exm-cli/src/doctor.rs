@@ -1,7 +1,8 @@
 //! `exm doctor` —— 体检：配置 / 编成 / 记忆 / 通道 / WebUI
 
 use crate::render::*;
-use exm_core::config::{config_schema, ExmConfig, CONFIG_VERSION};
+use exm_core::config::{ExmConfig, CONFIG_VERSION};
+use exm_core::config_schema::config_schema;
 use exm_core::Core;
 use owo_colors::OwoColorize;
 use std::path::Path;
