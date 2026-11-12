@@ -57,6 +57,13 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "apiKey": if cfg.search.api_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "maxResults": cfg.search.max_results,
             "proactive": cfg.search.proactive,
+            "backends": cfg.search.effective_backends().iter().map(|b| serde_json::json!({
+                "provider": b.provider,
+                "endpoint": b.endpoint,
+                "apiKey": if b.api_key.is_empty() { String::new() } else { "***已配置***".to_string() },
+                "weight": b.weight,
+            })).collect::<Vec<_>>(),
+            "contentFetchN": cfg.search.content_fetch_n,
         },
         "hooks": {
             "preTool": cfg.hooks.pre_tool,
@@ -542,19 +549,41 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
     // 搜索 API Key 三态语义（与 auth_key 一致）：掩码/缺省 = 沿用旧值；显式空串 = 清除；明文 = 新值
+    // 多后端（search-aggregation）：backends 透传（缺省 = 沿用旧值）；旧平铺字段仍可写入（backends 为空时生效）
     let search = match sec_search {
         None => current.search.clone(),
-        Some(s) => exm_core::config::SearchConfig {
-            provider: s.provider.trim().to_string(),
-            endpoint: s.endpoint.trim().to_string(),
-            api_key: match s.api_key.trim() {
-                "" => String::new(),
-                "***已配置***" => current.search.api_key.clone(),
-                other => other.to_string(),
-            },
-            max_results: s.max_results.clamp(1, 20),
-            proactive: s.proactive,
-        },
+        Some(s) => {
+            let backends = if s.backends.is_empty() {
+                current.search.backends.clone()
+            } else {
+                s.backends
+                    .into_iter()
+                    .map(|mut b| {
+                        b.api_key = match b.api_key.trim() {
+                            "" => String::new(),
+                            "***已配置***" => String::new(), // 后端级掩码无法回查旧值：置空待用户重填
+                            other => other.to_string(),
+                        };
+                        b.provider = b.provider.trim().to_string();
+                        b.endpoint = b.endpoint.trim().to_string();
+                        b
+                    })
+                    .collect()
+            };
+            exm_core::config::SearchConfig {
+                backends,
+                provider: s.provider.trim().to_string(),
+                endpoint: s.endpoint.trim().to_string(),
+                api_key: match s.api_key.trim() {
+                    "" => String::new(),
+                    "***已配置***" => current.search.api_key.clone(),
+                    other => other.to_string(),
+                },
+                max_results: s.max_results.clamp(1, 20),
+                content_fetch_n: s.content_fetch_n.clamp(0, 5),
+                proactive: s.proactive,
+            }
+        }
     };
     let hooks = match sec_hooks {
         None => current.hooks.clone(),

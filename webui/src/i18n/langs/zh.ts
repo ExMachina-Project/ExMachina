@@ -610,6 +610,8 @@ export const zh = {
   "cfg.searchApiKey.help": "tavily / brave 需要；searxng 与自建通常留空。提示「已配置」时留空保存 = 沿用旧密钥",
   "cfg.searchMax": "返回条数上限",
   "cfg.searchMax.help": "单次搜索注入上下文的结果条数",
+  "cfg.searchContentFetchN": "正文抓取条数",
+  "cfg.searchContentFetchN.help": "includeContent 开启时对排名前 N 条并发抓取正文关键段（0 = 关闭）；多后端聚合在配置 JSON 的 search.backends 配置",
   "cfg.sandboxMode": "沙箱级别",
   "cfg.sandboxMode.help": "off = 仅白名单 + 审批；workspace = 子进程环境净化（敏感环境变量不外泄，HOME/TMP 重定向）；strict = 净化 + 联网命令走审批 + 有 bwrap 时系统级隔离",
   "cfg.sandbox.off": "关闭（仅白名单与审批）",

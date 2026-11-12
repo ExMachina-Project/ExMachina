@@ -610,6 +610,8 @@ export const en: Partial<Dict> = {
   "cfg.searchApiKey.help": "Required by tavily / brave. When the hint shows Configured, saving empty keeps the old key",
   "cfg.searchMax": "Max results",
   "cfg.searchMax.help": "Number of results injected per search",
+  "cfg.searchContentFetchN": "Content fetch N",
+  "cfg.searchContentFetchN.help": "Fetch content windows for top N results when includeContent is on (0 = off); multi-backend aggregation is configured via search.backends in config JSON",
   "cfg.sandboxMode": "Sandbox level",
   "cfg.sandboxMode.help": "off = allowlist + approval only; workspace = sanitized subprocess env (no secrets leak, HOME/TMP redirected); strict = sanitized + network commands need approval + filesystem isolation via bwrap when available",
   "cfg.sandbox.off": "Off (allowlist + approval only)",

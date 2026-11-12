@@ -124,7 +124,8 @@ impl ToolGateway {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "maxResults": { "type": "integer", "description": "返回条数（默认取配置值）" }
+                    "maxResults": { "type": "integer", "description": "返回条数（默认取配置值）" },
+                    "includeContent": { "type": "boolean", "description": "true = 对排名前几的结果并发抓取正文关键段（含查询词定位；较慢，仅在摘要不足以回答时开启）" }
                 },
                 "required": ["query"]
             }),
