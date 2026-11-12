@@ -21,6 +21,7 @@ path = "src/bin/exmachina.rs"
 [dependencies]
 exm-core = { path = "../exm-core" }
 exm-gateway = { path = "../exm-gateway" }
+uuid.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true

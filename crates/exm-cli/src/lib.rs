@@ -5,6 +5,7 @@
 pub mod chat;
 pub mod config_cmd;
 pub mod doctor;
+pub mod headless;
 pub mod group_cmd;
 pub mod install;
 pub mod memory_cmd;
@@ -34,6 +35,27 @@ struct Cli {
     /// 工作区根目录（默认当前目录）
     #[arg(long, global = true, default_value = ".")]
     workspace: PathBuf,
+
+    /// 无头单轮调用：执行完即退出（脚本 / CI 入口）；缺文本参数时读 stdin 管道。
+    /// 仅裸命令位置生效（`exm -p "任务"`），不下渗子命令（避让 gateway -p 等既有短旗标）
+    #[arg(short = 'p', long = "print")]
+    print: Option<Option<String>>,
+
+    /// 无头输出格式：text（缺省纯正文）| json（单行结构化）| stream-json（JSONL 过程事件）
+    #[arg(long, default_value = "text")]
+    output_format: String,
+
+    /// 指定会话 id（无头路径用；与 -c/-r 同时给出时优先级最高）
+    #[arg(long)]
+    session: Option<String>,
+
+    /// 接续最近活跃会话（session-resume；无历史会话即新建）
+    #[arg(short = 'c', long = "continue")]
+    continue_last: bool,
+
+    /// 按名称模糊匹配接续会话（session-resume；多命中取最近）
+    #[arg(short = 'r', long = "resume")]
+    resume: Option<String>,
 
     /// 子命令可省略：`exm` / `exmachina` 裸命令即进入终端交互面板
     #[command(subcommand)]
@@ -498,6 +520,97 @@ fn build_core(workspace: &Path) -> anyhow::Result<Arc<Core>> {
     Ok(core)
 }
 
+/// 无头分派：参数校验 → 文本获取（参数/stdin/TTY 防护）→ 会话定位 → run_headless。
+/// 返回值直接作为进程退出码（0/1/2）；使用错误信息走 stderr（text 模式契约）。
+async fn run_headless_dispatch(cli: &Cli, workspace: &Path) -> i32 {
+    let format = match headless::OutputFormat::parse(&cli.output_format) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    // 文本来源：显式参数 > stdin 管道；TTY 无参数 = 误用（不能挂起等输入）
+    let text = match cli.print.clone().flatten() {
+        Some(t) => t.trim().to_string(),
+        None => {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                eprintln!("错误：-p 需要文本参数或管道输入（例：exm -p \"任务\" 或 echo 任务 | exm -p）");
+                return 2;
+            }
+            let mut buf = String::new();
+            match std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
+                Ok(_) => buf.trim().to_string(),
+                Err(e) => {
+                    eprintln!("错误：读取 stdin 失败：{e}");
+                    return 2;
+                }
+            }
+        }
+    };
+    if text.is_empty() {
+        eprintln!("错误：空输入——-p 需要非空文本（参数或 stdin）");
+        return 2;
+    }
+
+    let core = match build_core(workspace) {
+        Ok(c) => c,
+        Err(e) => {
+            // 工作区/配置不可用归使用侧错误（未 init 的目录跑 -p 是调用方问题）
+            eprintln!("错误：{e}");
+            return 2;
+        }
+    };
+
+    // 会话定位：--session 显式 > -r 匹配 > -c 最近 > 新建（spec 优先序）
+    let session = match resolve_resume_session(&core, cli.session.as_deref(), cli.resume.as_deref(), cli.continue_last) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误：{e}");
+            return 2;
+        }
+    };
+    let opts = headless::HeadlessOptions { text, session, format };
+    let outcome = headless::run_headless(&core, opts).await;
+    if let Some(err) = outcome.error {
+        // text 模式的执行失败信息走 stderr；json/stream-json 已并入终态 stdout 行
+        eprintln!("错误：{err}");
+    }
+    outcome.code
+}
+
+/// 会话定位（无头 / 交互续接共用）：--session > -r 模糊 > -c 最近 > None（新建）。
+/// 定位失败返回 Err（消息），调用方按使用错误（退出码 2）处理。
+fn resolve_resume_session(
+    core: &Arc<Core>,
+    explicit: Option<&str>,
+    resume_match: Option<&str>,
+    continue_last: bool,
+) -> anyhow::Result<Option<String>> {
+    if let Some(id) = explicit {
+        return Ok(Some(id.to_string()));
+    }
+    if let Some(pattern) = resume_match {
+        // -r：标题/ID 模糊匹配，多命中取最近活跃（list_sessions 已按活跃排序口径附加预览）
+        let sessions = core.list_sessions()?;
+        let hits: Vec<&exm_core::types::Session> = sessions
+            .iter()
+            .filter(|s| s.title.contains(pattern) || s.id.contains(pattern))
+            .collect();
+        if hits.is_empty() {
+            anyhow::bail!("-r 未匹配到会话：{pattern}");
+        }
+        return Ok(Some(hits[0].id.clone()));
+    }
+    if continue_last {
+        if let Some(first) = core.list_sessions()?.first() {
+            return Ok(Some(first.id.clone()));
+        }
+    }
+    Ok(None)
+}
+
 pub fn run() -> anyhow::Result<()> {
     // --version 由 clap 自动生成（CARGO_PKG_VERSION，随发布 bump）——审计补面：
     // 此前 exm-gateway/exm 无版本参数，--version 会直接拉起实例
@@ -508,6 +621,12 @@ pub fn run() -> anyhow::Result<()> {
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let workspace = cli.workspace.clone();
+    // 无头单轮（-p）：顶层前置分派——不进任何交互 UI，执行完按退出码契约退出。
+    // 使用错误（2）不能走 anyhow::Err（那是 1 的语义），直接 process::exit 落码
+    if cli.print.is_some() {
+        let code = run_headless_dispatch(&cli, &workspace).await;
+        std::process::exit(code);
+    }
     // 裸命令 `exm` / `exmachina`：进全屏 TUI（消息流/输入/状态栏三段版式）。
     // `exm chat` 保留 readline 面板（ BREAKING：裸命令旧版进 readline 面板）
     let command = cli.command.unwrap_or(Commands::Tui);
