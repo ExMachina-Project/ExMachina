@@ -656,9 +656,19 @@ impl Orchestrator {
     /// 返回 (滚动摘要, 最近窗口消息原文文本)——共享实现见 compaction.rs（单智能体循环同口径复用）
     async fn ensure_compacted(&self, session_id: &str) -> (Option<String>, String) {
         let (provider, model) = self.resolve_orch_model();
-        let sliding = self.config_snapshot.read().experiments.sliding_context_window;
+        let cfg = self.config_snapshot.read().clone();
+        let sliding = cfg.experiments.sliding_context_window;
+        // token 占比判据（compaction-tuning）：规划路径以指挥体生效模型窗口为基数
+        let budget_ratio = self.tools.context_budget_ratio();
+        let budget_chars = self
+            .orch_candidates()
+            .first()
+            .and_then(|(pid, _, model)| self.model_pool.context_window(pid, model))
+            .map(|w| (w as f64 * budget_ratio).floor() as usize * crate::budget::CHARS_PER_TOKEN);
         let params = crate::compaction::CompactParams {
             sliding,
+            trigger_ratio: cfg.compaction.trigger_ratio,
+            budget_chars,
             ..Default::default()
         };
         let c =
@@ -1035,11 +1045,19 @@ impl Orchestrator {
         // 窗口外更早历史接入共享滚动压缩(compaction.rs,与组调度同口径):
         // 压缩摘要注入系统提示,窗口内保持原文
         let rows = self.store.list_messages(session_id, 40)?;
-        let sliding = self
-            .config_snapshot
-            .read()
-            .experiments
-            .sliding_context_window;
+        let cfg_now = self.config_snapshot.read().clone();
+        let sliding = cfg_now.experiments.sliding_context_window;
+        // token 占比判据基数（compaction-tuning）：模型窗口 × contextBudgetRatio（字符当量）
+        let budget_ratio_for_compact = self.tools.context_budget_ratio();
+        let window_for_compact = self
+            .unit_chain_for(&def)
+            .candidates
+            .first()
+            .and_then(|(pid, _, model)| self.model_pool.context_window(pid, model));
+        let budget_chars_for_compact = window_for_compact.map(|w| {
+            (w as f64 * budget_ratio_for_compact).floor() as usize
+                * crate::budget::CHARS_PER_TOKEN
+        });
         let compacted = crate::compaction::ensure_compacted(
             &self.store,
             &self.orch_provider,
@@ -1048,6 +1066,8 @@ impl Orchestrator {
             crate::compaction::CompactParams {
                 trigger: 40,
                 keep: 20,
+                trigger_ratio: cfg_now.compaction.trigger_ratio,
+                budget_chars: budget_chars_for_compact,
                 sliding,
             },
         )

@@ -31,7 +31,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "调度器同时执行的最大子个体数量" },
                     { "key": "maxSessionTokens", "label": "会话 token 预算", "kind": "number",
                       "default": "0", "required": false, "min": 0, "max": 100000000,
-                      "help": "估算口径（字符/4）；超出后该会话拒绝新轮次；0 = 不限" }
+                      "help": "估算口径（字符/4）；超出后该会话拒绝新轮次；0 = 不限" },
+                    { "key": "compaction.triggerRatio", "label": "上下文压缩触发占比", "kind": "number",
+                      "default": "0.6", "required": false, "min": 0, "max": 0.95,
+                      "help": "会话历史估算 token 超过 模型窗口 × 上下文预算占比 × 该占比 即触发滚动压缩（早于预算硬顶截断介入）；0 = 关闭占比判据，仅按条数阈值（40 条）兜底" }
                 ]
             },
             {
