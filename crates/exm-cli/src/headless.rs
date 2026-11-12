@@ -246,40 +246,34 @@ impl EventCollector {
             })));
         }
         match evt.kind.as_str() {
-            "orchestrator.token" => {
-                if self.stream() {
-                    let delta = evt.payload.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-                    self.token_buf.push_str(delta);
-                    if self.token_window.elapsed().as_millis() as u64 >= TOKEN_AGG_MS {
-                        if let Some(l) = self.take_token_line() {
-                            lines.push(l);
-                        }
+            "orchestrator.token" if self.stream() => {
+                let delta = evt.payload.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                self.token_buf.push_str(delta);
+                if self.token_window.elapsed().as_millis() as u64 >= TOKEN_AGG_MS {
+                    if let Some(l) = self.take_token_line() {
+                        lines.push(l);
                     }
                 }
             }
-            "tool.call" => {
-                if self.stream() {
-                    self.flush_tokens_into(&mut lines);
-                    lines.push(Self::line(&serde_json::json!({
-                        "type": "tool.call",
-                        "tool": evt.payload.get("tool").cloned().unwrap_or_default(),
-                        "args": evt.payload.get("args").cloned().unwrap_or_default(),
-                    })));
-                }
+            "tool.call" if self.stream() => {
+                self.flush_tokens_into(&mut lines);
+                lines.push(Self::line(&serde_json::json!({
+                    "type": "tool.call",
+                    "tool": evt.payload.get("tool").cloned().unwrap_or_default(),
+                    "args": evt.payload.get("args").cloned().unwrap_or_default(),
+                })));
             }
-            "tool.result" => {
-                if self.stream() {
-                    self.flush_tokens_into(&mut lines);
-                    lines.push(Self::line(&serde_json::json!({
-                        "type": "tool.result",
-                        "ok": evt.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
-                        "durationMs": evt
-                            .payload
-                            .get("durationMs")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                    })));
-                }
+            "tool.result" if self.stream() => {
+                self.flush_tokens_into(&mut lines);
+                lines.push(Self::line(&serde_json::json!({
+                    "type": "tool.result",
+                    "ok": evt.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "durationMs": evt
+                        .payload
+                        .get("durationMs")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                })));
             }
             "run.finished" => {
                 self.finished = true;
