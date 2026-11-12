@@ -118,6 +118,36 @@ pub fn run_memory_pin(core: &Core, id: &str, pinned: bool) -> anyhow::Result<()>
     Ok(())
 }
 
+/// 编辑条目（assistant-parity T3）：缺省字段不改动；条目不存在报错
+pub fn run_memory_edit(
+    core: &Core,
+    id: &str,
+    title: Option<String>,
+    body: Option<String>,
+    tags: Option<Vec<String>>,
+    kind: Option<String>,
+) -> anyhow::Result<()> {
+    // 空串视为「未提供」，与 REST 面板语义一致（删除走 forget）
+    let title = title.filter(|s| !s.trim().is_empty());
+    let body = body.filter(|s| !s.trim().is_empty());
+    if title.is_none() && body.is_none() && tags.is_none() && kind.is_none() {
+        anyhow::bail!("至少提供 --title / --body / --tags / --kind 之一");
+    }
+    match core.memory_update(
+        id,
+        title.as_deref(),
+        body.as_deref(),
+        tags,
+        kind.as_deref(),
+    )? {
+        Some(e) => {
+            println!("{} {}（{}）", ok("已更新"), e.id, e.title);
+            Ok(())
+        }
+        None => anyhow::bail!("记忆条目不存在：{id}"),
+    }
+}
+
 pub fn run_memory_forget(core: &Core, id: &str) -> anyhow::Result<()> {
     core.memory_forget(id)?;
     println!("{} {}", ok("已遗忘"), id);

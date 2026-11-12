@@ -12,6 +12,7 @@ import {
   Input,
   List,
   message,
+  Modal,
   Popconfirm,
   Row,
   Select,
@@ -22,7 +23,13 @@ import {
   Tooltip,
 } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
-import { DeleteOutlined, PushpinOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import {
+  DeleteOutlined,
+  EditOutlined,
+  PushpinOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+} from "@ant-design/icons";
 import { api, type LlmProfile, type MemoryEntry, type MemoryStats, type RecallHit } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { useExm } from "../store";
@@ -129,6 +136,11 @@ export function MemoryView(): React.ReactElement {
   const activeGroup = useExm((s) => s.activeGroup);
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
+  // 编辑弹窗（T3）：仅提交用户改过的字段，空标题/正文视为未提供
+  const [editing, setEditing] = useState<MemoryEntry | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editBody, setEditBody] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<RecallHit[] | null>(null);
   // 检索调试视图（8.4）：显示命中词项明细与语义分数
@@ -173,6 +185,34 @@ export function MemoryView(): React.ReactElement {
     setEntries(list);
     setStats(st);
   }, [kindFilter, agentFilter]);
+
+  const openEdit = (e: MemoryEntry) => {
+    setEditing(e);
+    setEditTitle(e.title);
+    setEditBody(e.body);
+  };
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    const patch: { title?: string; body?: string } = {};
+    if (editTitle.trim() && editTitle !== editing.title) patch.title = editTitle.trim();
+    if (editBody.trim() && editBody !== editing.body) patch.body = editBody;
+    if (Object.keys(patch).length === 0) {
+      setEditing(null);
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      await api.updateMemory(editing.id, patch);
+      message.success(t("memory.updated", { id: editing.id }));
+      setEditing(null);
+      void reload();
+    } catch (err) {
+      message.error(t("common.saveFailed", { err: String(err) }));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
 
   useEffect(() => {
     void reload();
@@ -444,9 +484,17 @@ export function MemoryView(): React.ReactElement {
             {
               title: t("memory.colOps"),
               key: "ops",
-              width: 120,
+              width: 140,
               render: (_, e) => (
                 <Space>
+                  <Tooltip title={t("memory.editTip")}>
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<EditOutlined />}
+                      onClick={() => openEdit(e)}
+                    />
+                  </Tooltip>
                   <Tooltip title={e.pinned ? t("memory.unpin") : t("memory.pinTip")}>
                     <Button
                       size="small"
@@ -501,6 +549,36 @@ export function MemoryView(): React.ReactElement {
           ]}
         />
       </Card>
+
+      <Modal
+        title={t("memory.editTitle")}
+        open={editing !== null}
+        onCancel={() => setEditing(null)}
+        onOk={() => void saveEdit()}
+        confirmLoading={savingEdit}
+        okText={t("common.save")}
+        cancelText={t("common.cancel")}
+        destroyOnHidden
+      >
+        <Space orientation="vertical" style={{ width: "100%" }}>
+          <div>
+            <div className="dim">{t("memory.fieldTitle")}</div>
+            <Input
+              value={editTitle}
+              onChange={(e) => setEditTitle(e.target.value)}
+              maxLength={200}
+            />
+          </div>
+          <div>
+            <div className="dim">{t("memory.fieldBody")}</div>
+            <Input.TextArea
+              value={editBody}
+              onChange={(e) => setEditBody(e.target.value)}
+              rows={8}
+            />
+          </div>
+        </Space>
+      </Modal>
     </div>
   );
 }

@@ -54,7 +54,7 @@ use playbooks::list_playbooks;
 use mcp_admin::{mcp_servers, mcp_refresh, mcp_mount};
 use voice::{voice_transcribe, voice_speak};
 use checkpoints::{list_checkpoints, restore_checkpoint};
-use memory_admin::{list_memory, add_memory, search_memory, memory_stats, memory_reindex, memory_decay, get_memory_md, put_memory_md, memory_render, forget_memory, pin_memory};
+use memory_admin::{list_memory, add_memory, search_memory, memory_stats, memory_reindex, memory_decay, get_memory_md, put_memory_md, memory_render, forget_memory, pin_memory, update_memory};
 use ws::{ws_handler, ws_auth_guard};
 
 pub mod assets;
@@ -316,7 +316,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/memory/reindex", post(memory_reindex))
         .route("/api/memory/decay", post(memory_decay))
         .route("/api/memory/render", post(memory_render))
-        .route("/api/memory/:id", axum::routing::delete(forget_memory))
+        .route("/api/memory/:id", axum::routing::delete(forget_memory).put(update_memory))
         .route("/api/memory/:id/pin", post(pin_memory))
         .route("/api/memory/md", get(get_memory_md).put(put_memory_md))
         .route(

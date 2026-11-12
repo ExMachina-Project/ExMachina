@@ -162,6 +162,7 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("post", "/api/memory/decay", "触发记忆衰减"),
         Endpoint::new("post", "/api/memory/render", "渲染浅层快照"),
         Endpoint::new("delete", "/api/memory/:id", "删除记忆"),
+        Endpoint::new("put", "/api/memory/:id", "编辑记忆条目"),
         Endpoint::new("post", "/api/memory/:id/pin", "记忆置顶切换"),
         Endpoint::new("get", "/api/memory/md", "浅层快照查看"),
         Endpoint::new("put", "/api/memory/md", "浅层快照编辑"),

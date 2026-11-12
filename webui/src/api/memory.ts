@@ -34,6 +34,9 @@ export const apiMemory = {
 
   forgetMemory: (id: string) => req<{ ok: boolean }>(`/memory/${id}`, { method: "DELETE" }),
 
+  updateMemory: (id: string, body: { title?: string; body?: string; tags?: string[]; kind?: string }) =>
+    req<MemoryEntry>(`/memory/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+
   reindexMemory: () => req<{ ok: boolean }>("/memory/reindex", { method: "POST" }),
 
   decayMemory: () => req<{ ok: boolean }>("/memory/decay", { method: "POST" }),
