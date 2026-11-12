@@ -291,7 +291,7 @@ pub(crate) async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &In
             })
             .collect();
         if !rels.is_empty() {
-            let _ = core.store.attach_inbound(&sid, &m.id, rels);
+            core.store.attach_inbound(&sid, &m.id, rels);
         }
     }
     // 流预览跟随最新群消息（控制台流列表展示「群里刚说了什么」）

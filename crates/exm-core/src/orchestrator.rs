@@ -848,7 +848,7 @@ impl Orchestrator {
         // 轮次快照（9.1）：每轮收束原子落一条（消息游标 + 检查点链 + 用量），undo / 编辑重发 / fork 基座
         self.record_turn_snapshot(session_id, if result.is_ok() { "done" } else { "failed" });
         // 任务队列收束钩子（task-queue）：本轮结束后出队下一条排队任务继续跑。
-        if !result.is_err() && !self.queue_draining.lock().contains(session_id) {
+        if result.is_ok() && !self.queue_draining.lock().contains(session_id) {
             self.drain_task_queue(session_id, scope).await;
         }
         result

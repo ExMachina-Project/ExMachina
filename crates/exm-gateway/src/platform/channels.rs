@@ -1172,7 +1172,7 @@ mod qqbot_bind_tests {
             .unwrap();
         let mut sealed = nonce.to_vec();
         sealed.extend_from_slice(&ct);
-        let key_b64 = base64::engine::general_purpose::STANDARD.encode(&key);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(key);
         let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(sealed);
         assert_eq!(
             decrypt_bind_secret(&sealed_b64, &key_b64).unwrap(),

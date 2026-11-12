@@ -4,6 +4,7 @@ use super::*;
 
 
 #[cfg(test)]
+#[allow(clippy::module_inception)] // 文件名即 tests.rs，内层 mod 保持搬移前结构
 mod tests {
     use super::*;
 

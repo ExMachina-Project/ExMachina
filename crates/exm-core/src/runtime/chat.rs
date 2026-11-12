@@ -115,9 +115,9 @@ impl AgentRuntime {
             let remain = max_steps - _step;
             if remain == 2 && !budget_warned {
                 budget_warned = true;
-                messages.push(ChatMessage::user(format!(
-                    "【预算警告】剩余 2 轮。不要再发起新的探索或工具调用（除非是收束必需的最后一步验证）：立即汇总已有信息，下一轮输出 SyncReport JSON。已有的部分成果在报告中如实陈述即可，未完成项列入 blockers。"
-                )));
+                messages.push(ChatMessage::user(
+                    "【预算警告】剩余 2 轮。不要再发起新的探索或工具调用（除非是收束必需的最后一步验证）：立即汇总已有信息，下一轮输出 SyncReport JSON。已有的部分成果在报告中如实陈述即可，未完成项列入 blockers。".to_string(),
+                ));
             }
             // 时限检查点：派发预算耗尽即快速失败（把并发槽还给调度器），而非等 LLM 挂到天荒地老
             if let Some(dl) = deadline {

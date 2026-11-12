@@ -376,7 +376,7 @@ mod tests {
 
     /// 时区化匹配：「每天 8 点」在 Asia/Shanghai 的 8 点 = UTC 0 点命中
     #[test]
-    fn 时区匹配_上海八点即UTC零点() {
+    fn 时区匹配_上海八点即utc零点() {
         let utc_0 = at(2026, 11, 12, 0, 0); // 北京时间 08:00
         // UTC 语义下不命中（8 点才命中）
         assert!(!cron_matches("0 8 * * *", utc_0));
@@ -390,7 +390,7 @@ mod tests {
 
     /// 空/非法时区名回落 UTC（既有行为零回归）
     #[test]
-    fn 时区解析_空与非法回落UTC() {
+    fn 时区解析_空与非法回落utc() {
         assert!(parse_tz("").is_none());
         assert!(parse_tz("  ").is_none());
         assert!(parse_tz("Not/AZone").is_none());

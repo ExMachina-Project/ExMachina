@@ -5,7 +5,7 @@
 //! ③ 队列状态机：queued → running → done
 //! ④ 防递归：出队轮次不再触发钩子（不会连环出队）
 
-use axum::{routing::post, Json};
+use axum::Json;
 use exm_core::config::ExmConfig;
 use exm_core::Core;
 use parking_lot::Mutex;
