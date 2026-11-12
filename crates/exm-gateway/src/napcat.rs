@@ -535,7 +535,7 @@ async fn on_text(
                 crate::platform::download_bytes(src).await
             };
             if let Some(b) = bytes {
-                if let Some(p) = crate::platform::save_inbound_media(&core, &ch, &name, b).await {
+                if let Some(p) = crate::platform::save_inbound_media(core, ch, &name, b).await {
                     prewindowed.push((kind.clone(), p, name));
                 }
             }
@@ -725,6 +725,7 @@ fn collect_media(m: &serde_json::Value) -> Vec<(String, String)> {
 
 /// OneBot 消息的入站闸门（群聊唤醒 + 身份管控）：在 spawn 的任务内执行
 /// 闸门放行时返回 (external_id, 消毒后文本)——消毒后文本替代原始 text 进入会话执行
+#[allow(clippy::too_many_arguments)] // 平台入站上下文天然多参数，拆结构体收益低
 async fn napcat_gate(
     core: &Core,
     ch: &Channel,
