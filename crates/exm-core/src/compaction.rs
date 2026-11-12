@@ -86,10 +86,15 @@ pub struct Compacted {
 /// 压缩参数（阈值/窗口可由调用方覆盖；默认取模块常量）
 #[derive(Debug, Clone, Copy)]
 pub struct CompactParams {
-    /// 超过该条数才压缩
+    /// 超过该条数才压缩（兜底判据：防估算器系统性低估）
     pub trigger: usize,
     /// 保留最近 N 条原文
     pub keep: usize,
+    /// token 占比触发阈值（compaction.triggerRatio；0 = 关闭 token 判据仅条数兜底）。
+    /// 与 trigger 为「或」关系：估算 token > 模型窗口 × contextBudgetRatio × triggerRatio 即压缩
+    pub trigger_ratio: f32,
+    /// token 预算基数（模型窗口 × contextBudgetRatio 的字符当量；None = 无 token 判据）
+    pub budget_chars: Option<usize>,
     /// 滑动窗口模式（实验性，experiments.slidingContextWindow）：
     /// 不做新压缩调用——已压过的沿用旧摘要，窗口外未压的历史直接不进上下文。
     /// 模型持续持有最近 keep 条完整原文；早期细节由模型经 context_compact
@@ -102,6 +107,8 @@ impl Default for CompactParams {
         Self {
             trigger: COMPACT_TRIGGER,
             keep: COMPACT_KEEP,
+            trigger_ratio: 0.0,
+            budget_chars: None,
             sliding: false,
         }
     }
@@ -120,7 +127,9 @@ pub async fn ensure_compacted(
     params: CompactParams,
 ) -> Compacted {
     let msgs: Vec<ChatMessage> = store.list_messages(session_id, 500).unwrap_or_default();
-    if msgs.len() <= params.trigger {
+    // 双判据（或关系，compaction-tuning）：token 占比先到（token-ratio）或条数先到（count-fallback）
+    let (should_compact, trigger_reason) = compact_trigger(&msgs, &params);
+    if !should_compact {
         return Compacted {
             summary: None,
             recent: render_recent(&msgs),
@@ -181,6 +190,28 @@ pub async fn ensure_compacted(
     let recent_text = render_recent(&recent.into_iter().cloned().collect::<Vec<_>>());
     if !summary.trim().is_empty() {
         let _ = store.update_compaction(session_id, &summary, upto);
+        // 压缩留痕（compaction-tuning）：触发原因 + 前后估算用量
+        let before_tokens = crate::budget::est_tokens(history_chars_of(&msgs));
+        let after_tokens =
+            crate::budget::est_tokens(summary.chars().count() + recent_text.chars().count());
+        let env = crate::types::Envelope {
+            id: crate::types::new_id(),
+            topic: "context".into(),
+            from: "system".into(),
+            to: "session".into(),
+            kind: "context.compact".into(),
+            session_id: session_id.to_string(),
+            task_node_id: None,
+            payload: serde_json::json!({
+                "trigger": trigger_reason,
+                "beforeTokens": before_tokens,
+                "afterTokens": after_tokens,
+                "compactedMessages": upto,
+            }),
+            trace_id: crate::types::new_id(),
+            created_at: crate::types::now_iso(),
+        };
+        let _ = store.append_event(&env);
         Compacted {
             summary: Some(summary),
             recent: recent_text,
@@ -191,6 +222,34 @@ pub async fn ensure_compacted(
             recent: recent_text,
         }
     }
+}
+
+/// 双判据触发判定（纯函数，单测口径）：
+/// token 占比（估算字符 > budget_chars × trigger_ratio）先到 → token-ratio；
+/// 条数超 trigger 兜底 → count-fallback；都不满足 → 不压缩。
+fn compact_trigger(msgs: &[ChatMessage], params: &CompactParams) -> (bool, &'static str) {
+    // token 判据（0 或无预算基数 = 关闭）
+    if let Some(budget) = params.budget_chars {
+        if params.trigger_ratio > 0.0 {
+            let threshold = (budget as f32 * params.trigger_ratio) as usize;
+            let total = history_chars_of(msgs);
+            if total > threshold {
+                return (true, "token-ratio");
+            }
+        }
+    }
+    // 条数兜底
+    if msgs.len() > params.trigger {
+        return (true, "count-fallback");
+    }
+    (false, "")
+}
+
+/// 消息正文总字符数（statements 拼接，与 budget.rs 估算口径一致）
+fn history_chars_of(msgs: &[ChatMessage]) -> usize {
+    msgs.iter()
+        .map(|m| m.statements.iter().map(|s| s.text.chars().count()).sum::<usize>())
+        .sum()
 }
 
 /// 模型主动压缩（实验性，experiments.dynamicCompaction）：context_compact 工具的执行体。
@@ -380,6 +439,7 @@ mod tests {
                 trigger: 10,
                 sliding: false,
                 keep: 5,
+                ..Default::default()
             },
         )
         .await;
@@ -401,6 +461,7 @@ mod tests {
                 trigger: 10,
                 sliding: false,
                 keep: 5,
+                ..Default::default()
             },
         )
         .await;
@@ -429,6 +490,7 @@ mod tests {
                 trigger: 10,
                 sliding: false,
                 keep: 5,
+                ..Default::default()
             },
         )
         .await;
@@ -451,6 +513,7 @@ mod tests {
                 trigger: 10,
                 sliding: false,
                 keep: 5,
+                ..Default::default()
             },
         )
         .await;
@@ -485,6 +548,7 @@ mod tests {
                 trigger: 10,
                 keep: 5,
                 sliding: true,
+                ..Default::default()
             },
         )
         .await;
@@ -514,6 +578,7 @@ mod tests {
                 trigger: 10,
                 keep: 5,
                 sliding: false,
+                ..Default::default()
             },
         )
         .await;
@@ -536,6 +601,7 @@ mod tests {
                 trigger: 10,
                 keep: 5,
                 sliding: true,
+                ..Default::default()
             },
         )
         .await;
@@ -548,5 +614,179 @@ mod tests {
         // summary_upto 不变（未追压）
         let s = store.get_session(&sid).unwrap().unwrap();
         assert_eq!(s.summary_upto, Some(25));
+    }
+
+    // ---------------- 双判据触发（compaction-tuning） ----------------
+
+    /// token 占比触发：条数未到条数阈值，但估算字符已超预算占比线 → token-ratio
+    #[test]
+    fn 触发判定_token占比先到() {
+        // 5 条短消息（条数不超 10），但预算占比线压得很低：必超
+        let msgs: Vec<ChatMessage> = (0..5)
+            .map(|i| mk_msg(MessageRole::User, &format!("消息{i}")))
+            .collect();
+        let (hit, reason) = compact_trigger(
+            &msgs,
+            &CompactParams {
+                trigger: 10,
+                trigger_ratio: 0.6,
+                budget_chars: Some(4), // 占比线 = 4 × 0.6 = 2 字符，5 条必超
+                ..Default::default()
+            },
+        );
+        assert!(hit);
+        assert_eq!(reason, "token-ratio");
+    }
+
+    /// 未达不触发：占比线与条数线都没到 → 不压缩（返回全量原文）
+    #[test]
+    fn 触发判定_未达不触发() {
+        let msgs: Vec<ChatMessage> = (0..5)
+            .map(|i| mk_msg(MessageRole::User, &format!("消息{i}")))
+            .collect();
+        let (hit, reason) = compact_trigger(
+            &msgs,
+            &CompactParams {
+                trigger: 10,
+                trigger_ratio: 0.6,
+                budget_chars: Some(10_000), // 占比线 6000 字符，远未到
+                ..Default::default()
+            },
+        );
+        assert!(!hit);
+        assert_eq!(reason, "");
+    }
+
+    /// 条数兜底：token 判据关闭（trigger_ratio=0 或无预算基数），
+    /// 条数超阈值仍触发 → count-fallback（= 旧行为）
+    #[test]
+    fn 触发判定_条数兜底() {
+        let msgs: Vec<ChatMessage> = (0..30)
+            .map(|i| mk_msg(MessageRole::User, &format!("消息{i}")))
+            .collect();
+        // ratio=0：token 判据关闭，仅条数
+        let (hit, reason) = compact_trigger(
+            &msgs,
+            &CompactParams {
+                trigger: 10,
+                trigger_ratio: 0.0,
+                budget_chars: Some(10_000),
+                ..Default::default()
+            },
+        );
+        assert!(hit);
+        assert_eq!(reason, "count-fallback");
+        // 无预算基数：同样只剩条数
+        let (hit2, reason2) = compact_trigger(
+            &msgs,
+            &CompactParams {
+                trigger: 10,
+                budget_chars: None,
+                ..Default::default()
+            },
+        );
+        assert!(hit2);
+        assert_eq!(reason2, "count-fallback");
+    }
+
+    /// 关闭回退现状：ratio=0 + 无基数 = 既有条数判据，条数也没到 → 不压缩
+    #[test]
+    fn 触发判定_关闭回退现状() {
+        let msgs: Vec<ChatMessage> = (0..5)
+            .map(|i| mk_msg(MessageRole::User, &format!("消息{i}")))
+            .collect();
+        let (hit, reason) = compact_trigger(
+            &msgs,
+            &CompactParams {
+                trigger: 10,
+                trigger_ratio: 0.0,
+                budget_chars: None,
+                ..Default::default()
+            },
+        );
+        assert!(!hit);
+        assert_eq!(reason, "");
+    }
+
+    /// 端到端：token 占比先到 → 真压缩 + context.compact 事件落库
+    /// （trigger/beforeTokens/afterTokens/compactedMessages 新载荷）
+    #[tokio::test]
+    async fn token占比触发_压缩留痕事件() {
+        // 本地构造长消息（每条 60 字符）：保证压缩后净缩量可断言
+        let dir = std::env::temp_dir().join(format!("exm-compact-{}", uuid::Uuid::new_v4()));
+        let store = Store::open(&dir).expect("打开测试存储失败");
+        let sid = store.create_session("压缩测试", "g1").unwrap().id;
+        for i in 0..5 {
+            store
+                .add_message(
+                    &sid,
+                    MessageRole::User,
+                    None,
+                    vec![Statement::new(
+                        SpeechTag::报告,
+                        format!("消息{i}：{}", "背景细节".repeat(12)),
+                    )],
+                )
+                .unwrap();
+        }
+        let store = Arc::new(store);
+        let provider: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
+        let c = ensure_compacted(
+            &store,
+            &provider,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 100, // 条数判据关死，只走 token
+                trigger_ratio: 0.6,
+                budget_chars: Some(4),
+                keep: 2,
+                ..Default::default()
+            },
+        )
+        .await;
+        // 压缩发生：摘要来自替身
+        assert_eq!(c.summary.as_deref(), Some("合并摘要：目标与结论"));
+        // 事件落库：kind=context.compact（序列化为 "type"），含新载荷
+        let events = store.list_events(&sid).unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e["type"] == "context.compact")
+            .expect("context.compact 事件应落库");
+        assert_eq!(ev["payload"]["trigger"], "token-ratio");
+        assert_eq!(ev["payload"]["compactedMessages"], 3, "5 条压 3 留 2");
+        let before = ev["payload"]["beforeTokens"].as_u64().unwrap();
+        let after = ev["payload"]["afterTokens"].as_u64().unwrap();
+        assert!(
+            after < before,
+            "压缩后估算用量应小于压缩前：before={before} after={after}"
+        );
+    }
+
+    /// 条数触发的事件 trigger=count-fallback（新载荷在两条路径都留痕）
+    #[tokio::test]
+    async fn 条数触发_事件trigger为count_fallback() {
+        let (store, sid) = test_store_with(30);
+        let provider: Arc<dyn LlmProvider> = Arc::new(OkCompacter);
+        let _ = ensure_compacted(
+            &store,
+            &provider,
+            "m",
+            &sid,
+            CompactParams {
+                trigger: 10,
+                keep: 5,
+                trigger_ratio: 0.0,
+                budget_chars: Some(10_000),
+                sliding: false,
+            },
+        )
+        .await;
+        let events = store.list_events(&sid).unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e["type"] == "context.compact")
+            .expect("context.compact 事件应落库");
+        assert_eq!(ev["payload"]["trigger"], "count-fallback");
     }
 }

@@ -34,6 +34,7 @@ export const SECTIONS: Record<string, { icon: React.ReactNode; titleKey: TKey; d
 export const FIELD_I18N: Record<string, { label: TKey; help?: TKey }> = {
   "maxConcurrency": { label: "cfg.maxConcurrency", help: "cfg.maxConcurrency.help" },
   "maxSessionTokens": { label: "cfg.maxSessionTokens", help: "cfg.maxSessionTokens.help" },
+  "compaction.triggerRatio": { label: "cfg.compaction.triggerRatio", help: "cfg.compaction.triggerRatio.help" },
   "memory.enabled": { label: "cfg.memoryEnabled", help: "cfg.memoryEnabled.help" },
   "memory.mdMaxChars": { label: "cfg.mdMaxChars", help: "cfg.mdMaxChars.help" },
   "memory.recallLimit": { label: "cfg.recallLimit", help: "cfg.recallLimit.help" },

@@ -151,6 +151,8 @@ pub struct ExmConfig {
     pub nexus: NexusConfig,
     /// 实验性功能开关（动态压缩 / 组共享上下文等；默认全关）
     pub experiments: ExperimentsConfig,
+    /// 会话上下文压缩调优（token 占比触发；默认 0.6）
+    pub compaction: CompactionConfig,
     /// 插件系统（plugins/ 目录装载；state 持久化启停覆盖）
     pub plugins: PluginsConfig,
 }
@@ -210,6 +212,7 @@ struct ConfigFile {
     nexus: Option<NexusConfig>,
     #[serde(default)]
     experiments: Option<ExperimentsConfig>,
+    compaction: Option<CompactionConfig>,
     #[serde(default)]
     plugins: Option<PluginsConfig>,
 }
@@ -697,6 +700,7 @@ impl ExmConfig {
             notify: file.notify.clone().unwrap_or_default(),
             nexus: file.nexus.clone().unwrap_or_default(),
             experiments: file.experiments.clone().unwrap_or_default(),
+            compaction: file.compaction.clone().unwrap_or_default(),
             plugins: file.plugins.clone().unwrap_or_default(),
         }
     }
@@ -790,6 +794,7 @@ impl ExmConfig {
             nexus: Some(self.nexus.clone()),
             experiments: Some(self.experiments.clone()),
             plugins: Some(self.plugins.clone()),
+            compaction: Some(self.compaction.clone()),
         };
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;

@@ -557,6 +557,8 @@ export const zh = {
   "cfg.maxConcurrency.help": "调度器同时执行的最大子个体数量",
   "cfg.maxSessionTokens": "会话 token 预算",
   "cfg.maxSessionTokens.help": "优先用 provider 上报的真实用量；无记录时按字符/4 估算。超出后该会话拒绝新轮次；0 = 不限",
+  "cfg.compaction.triggerRatio": "上下文压缩触发占比",
+  "cfg.compaction.triggerRatio.help": "会话历史估算 token 超过 模型窗口 × 上下文预算占比 × 该占比 即触发滚动压缩（早于预算硬顶截断介入）；0 = 关闭占比判据，仅按条数阈值（40 条）兜底",
   "cfg.memoryEnabled": "深层记忆（数据库检索 + 自动写入）",
   "cfg.memoryEnabled.help": "关闭后仅使用 memory.md 文件记忆（文件记忆模式）：规划时注入该文件内容，可在记忆面板直接编辑；不写数据库、不做语义检索",
   "cfg.mdMaxChars": "memory.md 字数上限",
