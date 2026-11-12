@@ -837,10 +837,12 @@ mod search_discipline_tests {
 
     fn tavily(proactive: bool) -> SearchConfig {
         SearchConfig {
+            backends: Vec::new(),
             provider: "tavily".into(),
             endpoint: String::new(),
             api_key: "k".into(),
             max_results: 5,
+            content_fetch_n: 3,
             proactive,
         }
     }

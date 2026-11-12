@@ -2440,10 +2440,12 @@ mod search_discipline_tests {
 
     fn search_cfg(provider: &str, key: &str, proactive: bool) -> crate::config::SearchConfig {
         crate::config::SearchConfig {
+            backends: Vec::new(),
             provider: provider.into(),
             endpoint: String::new(),
             api_key: key.into(),
             max_results: 5,
+            content_fetch_n: 3,
             proactive,
         }
     }

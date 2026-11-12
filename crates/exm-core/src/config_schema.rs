@@ -159,6 +159,9 @@ pub fn config_schema() -> serde_json::Value {
                     { "key": "search.maxResults", "label": "返回条数上限", "kind": "number",
                       "default": "5", "required": false, "min": 1, "max": 20,
                       "help": "单次搜索注入上下文的结果条数" },
+                    { "key": "search.contentFetchN", "label": "正文抓取条数", "kind": "number",
+                      "default": "3", "required": false, "min": 0, "max": 5,
+                      "help": "includeContent 开启时对排名前 N 条并发抓取正文关键段（0 = 关闭抓取）；多后端聚合经 search.backends 配置（JSON 数组形态，REST /api/config 透传）" },
                     { "key": "search.proactive", "label": "主动搜索纪律", "kind": "boolean",
                       "default": "true", "required": false,
                       "help": "开启后系统提示注入「何时该主动搜」行为准则（时效/核验/未知概念先搜再答）；关闭 = 模型仅被动响应用户的搜索请求" }

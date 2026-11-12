@@ -115,7 +115,7 @@ export interface GatewayConfig {
     memoryDigestMinTurns?: number;
   };
   /** 联网搜索后端（web_search 工具；未配置则不下发该工具） */
-  search?: { provider: string; endpoint: string; apiKey: string; maxResults: number };
+  search?: { provider: string; endpoint: string; apiKey: string; maxResults: number; contentFetchN?: number; backends?: { provider: string; endpoint: string; apiKey: string; weight: number }[] };
   /** 沙箱执行（环境净化 / bwrap / strict 闸门） */
   sandbox?: { mode: string; allowNetwork: boolean; useBwrap: boolean; memoryMb: number; maxProcesses: number };
   /** 浏览器自动化（browser 工具） */

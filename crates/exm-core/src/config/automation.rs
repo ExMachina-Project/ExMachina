@@ -3,38 +3,27 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
-/// 联网搜索配置（web_search 工具的真实后端）。
-/// **未配置时不向模型下发该工具** —— 不承诺不存在的能力。
+/// 联网搜索单后端声明（search-aggregation：多后端并发聚合）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchConfig {
-    /// 后端：tavily | brave | searxng | custom；空 = 未配置
+pub struct SearchBackend {
+    /// tavily | brave | searxng | custom
     pub provider: String,
     /// 端点（brave/custom 必填；tavily 留空用官方端点）
+    #[serde(default)]
     pub endpoint: String,
+    #[serde(default)]
     pub api_key: String,
-    /// 返回条数上限
-    pub max_results: usize,
-    /// 主动搜索纪律（proactive-search）：true = 系统提示注入「何时该主动搜」
-    /// 行为准则（时效性问题/事实核验/未知概念先搜再答）。仅提示层——
-    /// 工具下发面由 ready() 决定，与本开关无关。
-    #[serde(default = "default_true")]
-    pub proactive: bool,
+    /// 合排权重（≥0；同 URL 多源时来源并列、位置取权重高者）
+    #[serde(default = "default_backend_weight")]
+    pub weight: f32,
 }
 
-impl Default for SearchConfig {
-    fn default() -> Self {
-        SearchConfig {
-            provider: String::new(),
-            endpoint: String::new(),
-            api_key: String::new(),
-            max_results: 5,
-            proactive: true,
-        }
-    }
+fn default_backend_weight() -> f32 {
+    1.0
 }
 
-impl SearchConfig {
+impl SearchBackend {
     /// 是否已具备可用配置（provider 与所需凭据齐全）
     pub fn ready(&self) -> bool {
         match self.provider.trim().to_lowercase().as_str() {
@@ -44,6 +33,91 @@ impl SearchConfig {
             "custom" => !self.endpoint.trim().is_empty(),
             _ => false,
         }
+    }
+}
+
+/// 联网搜索配置（web_search 工具的真实后端）。
+/// **未配置时不向模型下发该工具** —— 不承诺不存在的能力。
+///
+/// 多后端（search-aggregation）：`backends[]` 数组形态；旧单后端平铺字段
+/// （provider/apiKey/endpoint）保留 serde 兼容——反序列化时 backends 为空且
+/// 旧字段非空则自动包装为单元素数组（内存态归一，落盘走新形态）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchConfig {
+    /// 后端清单（多后端并发聚合；单后端 = 旧形态等价）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<SearchBackend>,
+    /// —— 旧单后端平铺字段（迁移源；读取兼容，写入走 backends）——
+    /// 后端：tavily | brave | searxng | custom；空 = 未配置
+    #[serde(default = "default_legacy_provider")]
+    pub provider: String,
+    /// 端点（brave/custom 必填；tavily 留空用官方端点）
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub api_key: String,
+    /// 返回条数上限
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+    /// includeContent 抓取正文的结果条数上限（前 N 条并发抓；上限 5）
+    #[serde(default = "default_content_fetch_n")]
+    pub content_fetch_n: usize,
+    /// 主动搜索纪律（proactive-search）：true = 系统提示注入「何时该主动搜」
+    /// 行为准则（时效性问题/事实核验/未知概念先搜再答）。仅提示层——
+    /// 工具下发面由 ready() 决定，与本开关无关。
+    #[serde(default = "default_true")]
+    pub proactive: bool,
+}
+
+fn default_legacy_provider() -> String {
+    String::new()
+}
+
+fn default_max_results() -> usize {
+    5
+}
+
+fn default_content_fetch_n() -> usize {
+    3
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            backends: Vec::new(),
+            provider: String::new(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            max_results: 5,
+            content_fetch_n: 3,
+            proactive: true,
+        }
+    }
+}
+
+impl SearchConfig {
+    /// 归一化的后端清单（迁移语义：backends 空 + 旧平铺字段有效 → 单元素数组）
+    pub fn effective_backends(&self) -> Vec<SearchBackend> {
+        if !self.backends.is_empty() {
+            return self.backends.clone();
+        }
+        let legacy = SearchBackend {
+            provider: self.provider.clone(),
+            endpoint: self.endpoint.clone(),
+            api_key: self.api_key.clone(),
+            weight: 1.0,
+        };
+        if !legacy.provider.trim().is_empty() {
+            vec![legacy]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// 是否已具备可用配置（任一后端凭据齐全即下发工具）
+    pub fn ready(&self) -> bool {
+        self.effective_backends().iter().any(|b| b.ready())
     }
 }
 
