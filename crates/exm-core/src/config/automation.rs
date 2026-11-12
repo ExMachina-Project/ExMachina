@@ -174,6 +174,11 @@ pub struct AutomationConfig {
     /// 会话消息数 ≥ 该值才进入低峰归纳。默认 20。
     #[serde(default = "default_memory_digest_min_turns")]
     pub memory_digest_min_turns: usize,
+    /// cron 调度时区（IANA 名，如 Asia/Shanghai）：cron 表达式按该时区解释——
+    /// 「每天 8 点」在配置时区的 8 点触发而非 UTC 8 点（偏 8 小时正确性缺口）。
+    /// 空 = UTC（既有行为）；at 一次性任务本就带偏移不受影响。
+    #[serde(default)]
+    pub timezone: String,
 }
 
 impl Default for AutomationConfig {
@@ -192,6 +197,7 @@ impl Default for AutomationConfig {
             meta_interval_min: 60,
             flow_idle_days: 0,
             memory_digest_min_turns: default_memory_digest_min_turns(),
+            timezone: String::new(),
         }
     }
 }

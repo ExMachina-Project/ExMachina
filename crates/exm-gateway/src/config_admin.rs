@@ -50,6 +50,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "metaIntervalMin": cfg.automation.meta_interval_min,
             "flowIdleDays": cfg.automation.flow_idle_days,
             "memoryDigestMinTurns": cfg.automation.memory_digest_min_turns,
+            "timezone": cfg.automation.timezone,
         },
         "search": {
             "provider": cfg.search.provider,
@@ -461,6 +462,8 @@ pub(crate) struct PartialAutomation {
     flow_idle_days: Option<u32>,
     #[serde(default)]
     memory_digest_min_turns: Option<usize>,
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -545,6 +548,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         meta_interval_min: None,
         flow_idle_days: None,
         memory_digest_min_turns: None,
+        timezone: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
@@ -756,6 +760,11 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             memory_digest_min_turns: auto
                 .memory_digest_min_turns
                 .unwrap_or(current.automation.memory_digest_min_turns),
+            // cron 时区：显式空串 = 回落 UTC；缺省 = 沿用现值
+            timezone: auto
+                .timezone
+                .clone()
+                .unwrap_or_else(|| current.automation.timezone.clone()),
         },
         search,
         hooks,

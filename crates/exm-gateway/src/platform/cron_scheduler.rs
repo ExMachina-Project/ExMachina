@@ -25,10 +25,13 @@ pub fn spawn_cron_scheduler(core: std::sync::Arc<exm_core::Core>) {
 
 pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
+    // cron 时区（automation.timezone）：五段表达式按配置时区的墙上时钟解释——
+    // 「每天 8 点」在配置时区 8 点触发；空/非法名 = UTC（既有行为）。at 不受影响。
+    let tz = core.config().automation.timezone.clone();
     let jobs = core.cron.list()?;
     let mut changed = false;
     for mut job in jobs {
-        if !exm_core::cron::job_due(&job, now) {
+        if !exm_core::cron::job_due_in(&job, now, &tz) {
             continue;
         }
         let _ = core.events.send(CoreEvent {

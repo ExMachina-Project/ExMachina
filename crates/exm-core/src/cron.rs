@@ -132,6 +132,29 @@ pub fn job_due(job: &CronJob, now: DateTime<Utc>) -> bool {
 
 /// 五段 cron 匹配：分(0-59) 时(0-23) 日(1-31) 月(1-12) 周(0-6，0=周日)
 pub fn cron_matches(expr: &str, now: DateTime<Utc>) -> bool {
+    cron_matches_local(expr, &now.with_timezone(&chrono_tz_shim::UTC))
+}
+
+/// 五段 cron 匹配（本地时区语义）：表达式按给定时区的墙上时钟解释。
+/// 时区为 None/非法名 = UTC（既有行为）。返回 (是否命中, 是否按非 UTC 解释)。
+pub fn cron_matches_in(expr: &str, now: DateTime<Utc>, tz_name: &str) -> bool {
+    match parse_tz(tz_name) {
+        Some(tz) => cron_matches_local(expr, &now.with_timezone(&tz)),
+        None => cron_matches_local(expr, &now.with_timezone(&chrono_tz_shim::UTC)),
+    }
+}
+
+/// 解析 IANA 时区名（空/非法 = None → 调用方回落 UTC）
+pub fn parse_tz(tz_name: &str) -> Option<chrono_tz::Tz> {
+    tz_name
+        .trim()
+        .parse::<chrono_tz::Tz>()
+        .ok()
+        .filter(|_| !tz_name.trim().is_empty())
+}
+
+/// 内部统一实现：对任意时区 DateTime 做五段匹配（cron.rs 既有字段匹配复用）
+fn cron_matches_local<Tz: chrono::TimeZone>(expr: &str, now: &chrono::DateTime<Tz>) -> bool {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     if fields.len() != 5 {
         return false;
@@ -141,6 +164,53 @@ pub fn cron_matches(expr: &str, now: DateTime<Utc>) -> bool {
         && field_matches(fields[2], now.day(), 1, 31)
         && field_matches(fields[3], now.month(), 1, 12)
         && field_matches(fields[4], now.weekday().num_days_from_sunday(), 0, 7)
+}
+
+/// 任务是否到期（时区变体）：cron 按 `tz_name` 的墙上时钟解释；
+/// at 一次性不受影响（ISO8601 自带偏移）。空/非法时区名 = UTC（既有行为）。
+pub fn job_due_in(job: &CronJob, now: DateTime<Utc>, tz_name: &str) -> bool {
+    if !job.enabled {
+        return false;
+    }
+    if job.last_run_minute.as_deref() == Some(&minute_key(now)) {
+        return false;
+    }
+    if let Some(expr) = &job.cron {
+        return cron_matches_in(expr, now, tz_name);
+    }
+    if let Some(at) = &job.at {
+        return DateTime::parse_from_rfc3339(at)
+            .map(|t| now >= t.with_timezone(&Utc))
+            .unwrap_or(false);
+    }
+    false
+}
+
+/// 下次执行时间（时区变体）：从 from 的下一分钟起在本地墙上时钟语义下扫描。
+/// 返回 UTC 时刻（调用方按需转本地展示）。
+pub fn next_run_in(
+    expr: &str,
+    from: DateTime<Utc>,
+    tz_name: &str,
+    max_minutes: u32,
+) -> Option<DateTime<Utc>> {
+    if expr.split_whitespace().count() != 5 {
+        return None;
+    }
+    let tz = parse_tz(tz_name).unwrap_or(chrono_tz::Tz::UTC);
+    let mut t = from + chrono::Duration::minutes(1);
+    for _ in 0..max_minutes {
+        if cron_matches_local(expr, &t.with_timezone(&tz)) {
+            return Some(t);
+        }
+        t += chrono::Duration::minutes(1);
+    }
+    None
+}
+
+/// chrono_tz 的 UTC 常量便捷引用（避免每个调用点直接依赖 chrono_tz）
+mod chrono_tz_shim {
+    pub use chrono_tz::UTC;
 }
 
 /// 最近一次命中时间：从 from 的下一分钟起逐分钟扫描（上限 max_minutes）。
@@ -300,5 +370,86 @@ mod tests {
         assert!(!store.remove(&job.id).unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- cron 时区（assistant-parity T1） ----------------
+
+    /// 时区化匹配：「每天 8 点」在 Asia/Shanghai 的 8 点 = UTC 0 点命中
+    #[test]
+    fn 时区匹配_上海八点即UTC零点() {
+        let utc_0 = at(2026, 11, 12, 0, 0); // 北京时间 08:00
+        // UTC 语义下不命中（8 点才命中）
+        assert!(!cron_matches("0 8 * * *", utc_0));
+        // Shanghai 语义下命中
+        assert!(cron_matches_in("0 8 * * *", utc_0, "Asia/Shanghai"));
+        // UTC 语义下 8 点命中（旧行为不变）
+        let utc_8 = at(2026, 11, 12, 8, 0);
+        assert!(cron_matches("0 8 * * *", utc_8));
+        assert!(!cron_matches_in("0 8 * * *", utc_8, "Asia/Shanghai")); // 北京 16 点
+    }
+
+    /// 空/非法时区名回落 UTC（既有行为零回归）
+    #[test]
+    fn 时区解析_空与非法回落UTC() {
+        assert!(parse_tz("").is_none());
+        assert!(parse_tz("  ").is_none());
+        assert!(parse_tz("Not/AZone").is_none());
+        assert!(parse_tz("Asia/Shanghai").is_some());
+        // 回落语义：空名 = UTC 匹配
+        let utc_8 = at(2026, 11, 12, 8, 0);
+        assert!(cron_matches_in("0 8 * * *", utc_8, ""));
+        assert!(cron_matches_in("0 8 * * *", utc_8, "bad/tz"));
+    }
+
+    /// job_due_in：cron 按配置时区解释；at 不受时区影响（自带偏移）
+    #[test]
+    fn 到期判定_时区变体() {
+        let mut job = crate::types::CronJob {
+            id: "t1".into(),
+            name: "早报".into(),
+            prompt: "天气".into(),
+            cron: Some("0 8 * * *".into()),
+            at: None,
+            kind: None,
+            target_session: None,
+            steps: Vec::new(),
+            group: None,
+            session_title: None,
+            enabled: true,
+            last_run_at: None,
+            last_status: None,
+            last_run_minute: None,
+            notify_channels: Vec::new(),
+            created_at: String::new(),
+        };
+        // UTC 0 点 = 上海 8 点：时区配置下应到期
+        let now = at(2026, 11, 12, 0, 0);
+        assert!(!job_due(&job, now), "UTC 语义下不到点");
+        assert!(job_due_in(&job, now, "Asia/Shanghai"), "上海语义下到点");
+        // 停用/分钟去重语义与 job_due 同源
+        job.enabled = false;
+        assert!(!job_due_in(&job, now, "Asia/Shanghai"));
+        job.enabled = true;
+        job.last_run_minute = Some(minute_key(now));
+        assert!(!job_due_in(&job, now, "Asia/Shanghai"));
+        // at 一次性：ISO8601 带偏移，时区配置无影响
+        job.cron = None;
+        job.enabled = true;
+        job.last_run_minute = None;
+        job.at = Some("2026-11-11T23:00:00Z".into()); // 已过
+        assert!(job_due_in(&job, now, "Asia/Shanghai"));
+        assert!(job_due_in(&job, now, ""));
+    }
+
+    /// next_run_in：下次执行按本地语义扫描，返回 UTC 时刻
+    #[test]
+    fn 下次执行_时区变体() {
+        let from = at(2026, 10, 7, 10, 30); // UTC = 上海 18:30
+        // 每日上海 8:00 的任务：下一次 = UTC 次日 0:00
+        let next = next_run_in("0 8 * * *", from, "Asia/Shanghai", 527_040).unwrap();
+        assert_eq!(next, at(2026, 10, 8, 0, 0));
+        // 空 = 既有 UTC 语义（每日 8:00 UTC = 次日 UTC 8:00）
+        let next_utc = next_run_in("0 8 * * *", from, "", 527_040).unwrap();
+        assert_eq!(next_utc, at(2026, 10, 8, 8, 0));
     }
 }

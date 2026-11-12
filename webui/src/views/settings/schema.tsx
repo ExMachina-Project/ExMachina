@@ -53,6 +53,7 @@ export const FIELD_I18N: Record<string, { label: TKey; help?: TKey }> = {
   "automation.heartbeatPrompt": { label: "cfg.heartbeatPrompt", help: "cfg.heartbeatPrompt.help" },
   "automation.autoAdapt": { label: "cfg.autoAdapt", help: "cfg.autoAdapt.help" },
   "automation.unitMaxSteps": { label: "cfg.unitMaxSteps", help: "cfg.unitMaxSteps.help" },
+  "automation.timezone": { label: "cfg.automationTimezone", help: "cfg.automationTimezone.help" },
   "automation.heartbeatAgent": { label: "cfg.heartbeatAgent", help: "cfg.heartbeatAgent.help" },
   "security.terminalTimeoutSecs": { label: "cfg.terminalTimeout", help: "cfg.terminalTimeout.help" },
   "security.toolOutputSpillChars": { label: "cfg.spillChars", help: "cfg.spillChars.help" },

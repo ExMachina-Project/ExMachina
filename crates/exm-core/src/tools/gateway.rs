@@ -95,6 +95,8 @@ pub struct ToolGateway {
     pub(crate) hooks: crate::config::HooksConfig,
     /// 定时任务存储（schedule 工具：AI 自主排程）
     pub(crate) cron: Option<Arc<crate::cron::CronStore>>,
+    /// cron 调度时区（automation.timezone；空 = UTC）
+    pub(crate) cron_timezone: String,
     /// 子智能体派生执行器（spawn 工具；未注入 = spawn 返回未装配错误）。
     /// RwLock 槽：Core 装配后回接（tools 已 Arc 共享给 runtime，无法再拿可变引用）
     pub(crate) spawn_executor: parking_lot::RwLock<Option<SpawnExec>>,
@@ -190,6 +192,7 @@ impl ToolGateway {
             sandbox: SandboxConfig::default(),
             hooks: crate::config::HooksConfig::default(),
             cron: None,
+            cron_timezone: String::new(),
             spawn_executor: parking_lot::RwLock::new(None),
             session_send_executor: parking_lot::RwLock::new(None),
             session_grant_probe: parking_lot::RwLock::new(None),
@@ -628,6 +631,13 @@ impl ToolGateway {
     /// 注入定时任务存储（schedule 工具）
     pub fn with_cron(mut self, cron: Arc<crate::cron::CronStore>) -> Self {
         self.cron = Some(cron);
+        self
+    }
+
+    /// cron 调度时区（schedule 工具回显/创建说明按该时区解释 cron；
+    /// 空 = UTC 既有行为）。来源 automation.timezone。
+    pub fn with_cron_timezone(mut self, tz: String) -> Self {
+        self.cron_timezone = tz;
         self
     }
 

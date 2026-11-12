@@ -149,8 +149,10 @@ impl ToolGateway {
                 "id": { "type": "string", "description": "op=list 时可过滤；remove/enable/disable 必填" },
                 "name": { "type": "string", "description": "任务名（create 必填）" },
                 "prompt": { "type": "string", "description": "到期时注入的提示词（create 必填）" },
-                "cron": { "type": "string", "description": "五段 cron：分 时 日 月 周，如 0 9 * * *（与 at 二选一）" },
-                "at": { "type": "string", "description": "一次性触发时间（ISO8601，如 2026-09-20T18:00:00+08:00）" }
+                "cron": { "type": "string", "description": "五段 cron：分 时 日 月 周，如 0 9 * * *（与 at 二选一）。按本机配置时区解释；回显的下次执行时间即按该时区渲染" },
+                "at": { "type": "string", "description": "一次性触发时间（ISO8601，如 2026-09-20T18:00:00+08:00）" },
+                "notify_channels": { "type": "array", "items": { "type": "string" }, "description": "结果推送订阅的通道 id（如 qq:12345）；建任务时声明，完成后自动把结果摘要推到该通道" },
+                "session_title": { "type": "string", "description": "会话标题（复用同名会话；缺省 job-<id>）" }
             },
             "required": ["op"]
         }));
