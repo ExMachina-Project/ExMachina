@@ -103,6 +103,7 @@ impl McpServer {
             gateway.search_ready(),
             gateway.browser_ready(),
             gateway.computer_ready(),
+            gateway.speech_ready(),
         )
         .into_iter()
         .filter(|s| acl.allowed_tools.is_empty() || acl.allowed_tools.iter().any(|t| t == &s.name))

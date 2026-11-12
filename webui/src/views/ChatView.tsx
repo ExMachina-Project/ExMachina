@@ -106,6 +106,11 @@ export function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; tur
                 <img src={assetUrl(rel)} alt={a.caption || name} />
                 {a.caption && <span className="msg-artifact-caption">{a.caption}</span>}
               </a>
+            ) : a.kind === "voice" ? (
+              <div key={i} className="msg-artifact voice">
+                <div className="msg-artifact-caption">{a.caption || "语音回复"}</div>
+                <audio controls preload="none" src={assetUrl(rel)} />
+              </div>
             ) : (
               <a key={i} className="msg-artifact file" href={href} download={name}>
                 <PaperClipOutlined />

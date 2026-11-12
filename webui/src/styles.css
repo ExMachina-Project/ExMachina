@@ -2831,6 +2831,11 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   max-width: 100%;
 }
 .msg-artifact:hover { border-color: var(--accent); color: var(--accent); }
+/* 语音条产物（speech_reply）：caption + 原生 audio 播放器 */
+.msg-artifact.voice {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+}
+.msg-artifact.voice audio { width: 260px; height: 36px; }
 /* 入站附件（im-inbound-attach）：聊天流 user 消息里的缩略图网格（ChatView 产物条同款卡片） */
 .msg-artifacts.inbound { border-top: none; padding-top: 4px; margin-top: 6px; }
 .msg-artifacts.inbound .msg-artifact.image { padding: 0; border: none; background: none; }

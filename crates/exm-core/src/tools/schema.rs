@@ -15,6 +15,7 @@ impl ToolGateway {
         search_ready: bool,
         browser_ready: bool,
         computer_ready: bool,
+        speech_ready: bool,
     ) -> Vec<crate::provider::ToolSpec> {
         let mut specs: Vec<crate::provider::ToolSpec> = Vec::new();
         let mut push = |name: ToolName, description: &str, parameters: serde_json::Value| {
@@ -29,6 +30,9 @@ impl ToolGateway {
             }
             if name == ToolName::Computer && !computer_ready {
                 return; // Computer Use 未启用：不下发（整机输入权须显式交出）
+            }
+            if name == ToolName::Speech && !speech_ready {
+                return; // TTS 未装配（无能力模型/未回接）：不下发，避免承诺不存在的能力
             }
             specs.push(crate::provider::ToolSpec {
                 name: name.key().to_string(),
@@ -155,6 +159,13 @@ impl ToolGateway {
                 "session_title": { "type": "string", "description": "会话标题（复用同名会话；缺省 job-<id>）" }
             },
             "required": ["op"]
+        }));
+        push(ToolName::Speech, "语音回复：把一段文本合成为语音条发给用户（走 TTS，随本轮回复送达）。用户说「用语音回我」「念出来」「发语音」时使用；文本应精炼（≤600 字符），正式内容仍以文字回复为主", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "description": "要合成为语音的正文（≤600 字符）" }
+            },
+            "required": ["text"]
         }));
         push(ToolName::Browser, "浏览器自动化（Chrome + CDP）：搜索网页（无需搜索 API）、导航网页、取渲染后正文、执行 JS、截图。适合抓动态页面 / 走一遍网页流程 / 留存页面证据；搜索后端未配置时 op=search 是联网检索的主路径", serde_json::json!({
             "type": "object",
@@ -334,9 +345,11 @@ impl ToolGateway {
         search_ready: bool,
         browser_ready: bool,
         computer_ready: bool,
+        speech_ready: bool,
         memory_deep: bool,
     ) -> Vec<crate::provider::ToolSpec> {
-        let mut specs = Self::tool_specs(allowlist, search_ready, browser_ready, computer_ready);
+        let mut specs =
+            Self::tool_specs(allowlist, search_ready, browser_ready, computer_ready, speech_ready);
         if !memory_deep {
             let drop: Vec<&str> = [ToolName::MemoryWrite, ToolName::MemoryLink]
                 .iter()

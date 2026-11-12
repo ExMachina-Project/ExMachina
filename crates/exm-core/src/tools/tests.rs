@@ -245,7 +245,7 @@ mod memory_tool_tests {
     fn 工具面快照_schema按白名单下发() {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
-        let specs = ToolGateway::tool_specs(&allow, false, false, false);
+        let specs = ToolGateway::tool_specs(&allow, false, false, false, false);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"memory_read")
@@ -261,6 +261,7 @@ mod memory_tool_tests {
         let unit = def("unit-1", Tier::Unit, &[ToolName::Read]);
         let specs2 = ToolGateway::tool_specs(
             &ToolGateway::runtime_allowlist(&unit, None),
+            false,
             false,
             false,
             false,
@@ -588,11 +589,11 @@ mod memory_tool_tests {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
         // 深层开启：三工具照常下发（兼容口径不变）
-        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
         assert!(deep.iter().any(|s| s.name == "memory_write"));
         assert!(deep.iter().any(|s| s.name == "memory_link"));
         // 文件模式：write/link 不承诺（必然失败的工具不下发），read 保留（读 md 有意义）
-        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false);
+        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false);
         assert!(
             file.iter().any(|s| s.name == "memory_read"),
             "memory_read 保留"
@@ -1685,18 +1686,18 @@ mod terminal_gate_tests {
     #[test]
     fn 实验开关_动态压缩关闭时schema剔除context_compact() {
         let allow = [ToolName::Terminal, ToolName::ContextCompact];
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, false, false, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "开关关闭时 context_compact 不应下发"
         );
         // 开启时保留
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, false, false);
         assert!(specs.iter().any(|s| s.name == "context_compact"));
         // 滑动窗口互斥：dynamic=true + sliding=true 仍不下发
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, true, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
@@ -2672,5 +2673,146 @@ mod schedule_tool_tests {
         assert!(job.notify_channels.is_empty());
         assert!(job.session_title.is_none(), "缺省无会话标题");
         let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+}
+
+/// speech_reply 工具（assistant-parity T2）：TTS 合成 → 落盘 → outbox voice 登记
+mod speech_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::{AgentDefinition, Tier};
+    use std::sync::Arc;
+
+    struct SpeechRig {
+        gw: ToolGateway,
+        dir: std::path::PathBuf,
+    }
+
+    fn rig(synth: Option<&[u8]>) -> SpeechRig {
+        let dir = std::env::temp_dir().join(format!("exm-speech-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry.create_group(Some("t".into()), "测试组", "").unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        if let Some(bytes) = synth {
+            let b = bytes.to_vec();
+            gw.set_speech_synth(Arc::new(move |_text| {
+                let b = b.clone();
+                Box::pin(async move { Ok(b) })
+            }));
+        }
+        SpeechRig { gw, dir }
+    }
+
+    async fn exec(gw: &ToolGateway, args: serde_json::Value) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-speech",
+            &[ToolName::Speech],
+            ToolName::Speech,
+            &args,
+        )
+        .await
+    }
+
+    /// 合成成功：mp3 落盘 + outbox 登记 kind=voice（此前全仓库无 voice 生产者）
+    #[tokio::test]
+    async fn 语音合成_落盘并登记发件箱() {
+        let mp3: &[u8] = &[0x49, 0x44, 0x33, 1, 2, 3, 4]; // 假 ID3 头
+        let rig = rig(Some(mp3));
+        let r = exec(
+            &rig.gw,
+            serde_json::json!({ "text": "你好，这是语音回复测试" }),
+        )
+        .await;
+        assert!(r.ok, "合成应成功：{}", r.error.unwrap_or_default());
+        assert!(r.output.contains("语音已合成"), "{}", r.output);
+        // 落盘校验
+        let outbox = rig.dir.join(".exmachina/outbox");
+        let files: Vec<_> = std::fs::read_dir(&outbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(files.len(), 1, "应恰好一个音频文件");
+        let written = std::fs::read(files[0].path()).unwrap();
+        assert_eq!(written, mp3, "音频字节一致");
+        // outbox 登记：voice 类型 + 带预览 caption
+        let store = Store::open(rig.dir.join("data")).unwrap();
+        let drained = store.outbox_drain("s-speech").unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0]["kind"], "voice");
+        let caption = drained[0]["caption"].as_str().unwrap();
+        assert!(caption.contains("语音回复"), "{caption}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 未装配（无 TTS 能力）：明确错误而非静默失败
+    #[tokio::test]
+    async fn 未装配_明确报错() {
+        let rig = rig(None);
+        let r = exec(&rig.gw, serde_json::json!({ "text": "念一下" })).await;
+        assert!(!r.ok);
+        let e = r.error.unwrap_or_default();
+        assert!(e.contains("未装配"), "{e}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 长文本护栏：>600 字符拒绝并引导精炼
+    #[tokio::test]
+    async fn 长文本_护栏拒绝() {
+        let mp3: &[u8] = &[1, 2, 3];
+        let rig = rig(Some(mp3));
+        let long = "很".repeat(601);
+        let r = exec(&rig.gw, serde_json::json!({ "text": long })).await;
+        assert!(!r.ok);
+        let e = r.error.unwrap_or_default();
+        assert!(e.contains("过长"), "{e}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// schema 门控：speech_ready=false 不下发（能力未装配不承诺）
+    #[test]
+    fn schema门控_未装配不下发() {
+        let dir = std::env::temp_dir().join(format!("exm-speech-sch-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(8);
+        let store = Arc::new(Store::open(&dir).unwrap());
+        let registry = Arc::new(LocalRegistry::new(&dir).unwrap());
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        assert!(!gw.speech_ready(), "未注入合成器不算就绪");
+        let off = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, false);
+        assert!(off.is_empty(), "未装配不下发 speech_reply");
+        gw.set_speech_synth(Arc::new(|_t| Box::pin(async { Ok(vec![1u8]) })));
+        assert!(gw.speech_ready());
+        let on = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true);
+        assert_eq!(on.len(), 1);
+        assert_eq!(on[0].name, "speech_reply");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
