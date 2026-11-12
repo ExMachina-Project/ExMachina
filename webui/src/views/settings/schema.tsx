@@ -64,6 +64,7 @@ export const FIELD_I18N: Record<string, { label: TKey; help?: TKey }> = {
   "search.endpoint": { label: "cfg.searchEndpoint", help: "cfg.searchEndpoint.help" },
   "search.apiKey": { label: "cfg.searchApiKey", help: "cfg.searchApiKey.help" },
   "search.maxResults": { label: "cfg.searchMax", help: "cfg.searchMax.help" },
+  "search.contentFetchN": { label: "cfg.searchContentFetchN", help: "cfg.searchContentFetchN.help" },
   "sandbox.mode": { label: "cfg.sandboxMode", help: "cfg.sandboxMode.help" },
   "sandbox.allowNetwork": { label: "cfg.sandboxNet", help: "cfg.sandboxNet.help" },
   "sandbox.useBwrap": { label: "cfg.sandboxBwrap", help: "cfg.sandboxBwrap.help" },
@@ -190,6 +191,8 @@ export function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
       return cfg.search?.apiKey;
     case "search.maxResults":
       return cfg.search?.maxResults;
+    case "search.contentFetchN":
+      return cfg.search?.contentFetchN;
     case "sandbox.mode":
       return cfg.sandbox?.mode;
     case "sandbox.allowNetwork":
