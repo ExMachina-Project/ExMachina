@@ -27,6 +27,7 @@ pub mod matrix;
 pub mod napcat;
 pub mod napcat_tools;
 pub mod nexus_api;
+pub mod openapi;
 pub mod plan_mode_tools;
 pub mod platform;
 pub mod plugin_admin;
@@ -41,6 +42,7 @@ pub mod triggers;
 pub mod worker_hub;
 // 资源域 handlers（自本文件拆出；build_router 经此引入）
 use assets::{download_asset, get_asset, health};
+use openapi::serve_openapi;
 use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
 use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
 use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, export_trajectory, steer_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
@@ -145,6 +147,10 @@ async fn auth_middleware(
     // 守 /api/* 与 MCP 挂载；静态资源（壳/登录页）与 verify 豁免。
     // /ws 不在此守卫：浏览器 WebSocket 无法携带自定义头，改由路由级 ws_auth_guard
     // 前置校验查询参数密钥（缺失/错误同样 401，安全口径不降级）。MCP HTTP 挂载（10.3）启用时纳入守卫。
+    // OpenAPI 契约文档豁免：端点目录本身非敏感（路径/方法/摘要），机器可发现性优先。
+    if path == "/api/openapi.json" {
+        return next.run(req).await;
+    }
     let mcp_path = {
         let c = st.core.config();
         if c.mcp_serve.enabled {
@@ -242,6 +248,8 @@ pub fn build_router(core: Arc<Core>) -> Router {
     let state = AppState { core: core.clone() };
     let mut router = Router::new()
         .route("/api/health", get(health))
+        // OpenAPI 契约文档（2.3）：静态清单生成，公共面（发现性优先，鉴权豁免见 auth_middleware）
+        .route("/api/openapi.json", get(serve_openapi))
         .route("/api/selfcheck", get(selfcheck::selfcheck))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/search", get(search_sessions))

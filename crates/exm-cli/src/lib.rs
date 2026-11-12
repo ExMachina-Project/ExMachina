@@ -196,6 +196,12 @@ enum Commands {
         #[command(subcommand)]
         action: McpAction,
     },
+    /// 输出 OpenAPI 契约文档（离线生成：直接读网关路由清单，不依赖网关进程）
+    Openapi {
+        /// 输出文件（缺省打印到 stdout）
+        #[arg(long, default_value = "")]
+        out: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -881,6 +887,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     serde_json::to_writer(&mut stdout, &resp)?;
                     writeln!(stdout)?;
                 }
+            }
+            Ok(())
+        }
+        Commands::Openapi { out } => {
+            // 离线生成：不 build_core（契约与工作区状态无关），直接读网关清单
+            let doc = exm_gateway::openapi::generate();
+            let pretty = serde_json::to_string_pretty(&doc)?;
+            if out.is_empty() {
+                println!("{pretty}");
+            } else {
+                std::fs::write(&out, pretty)?;
+                println!("{}", crate::render::ok(format!("OpenAPI 契约已写入 {out}（{} 端点）", doc["paths"].as_object().map(|m| m.len()).unwrap_or(0))));
             }
             Ok(())
         }
