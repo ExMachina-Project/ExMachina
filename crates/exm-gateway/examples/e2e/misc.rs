@@ -52,6 +52,44 @@ pub(super) async fn stage_selfcheck(e: &Env, c: &mut Checker) -> anyhow::Result<
     c.check("自检：error 项必附指引", err_hint_ok);
 }
 
+// ---- OpenAPI 契约（openapi-contract 2.3）：文档可达 + 结构合法 + 路径覆盖 ----
+{
+    // 公共面：不带鉴权头也应可达（发现性优先）
+    let resp = client.get(format!("{base}/openapi.json")).send().await?;
+    c.check("OpenAPI：无鉴权可达（公共面）", resp.status().as_u16() == 200);
+    let doc: serde_json::Value = resp.json().await?;
+    c.check(
+        "OpenAPI：3.1 版本与标题",
+        doc["openapi"] == "3.1.0" && doc["info"]["title"].is_string(),
+    );
+    let path_count = doc["paths"].as_object().map(|m| m.len()).unwrap_or(0);
+    c.check("OpenAPI：路径数 ≥ 130（全量端点）", path_count >= 130);
+    // 每个操作有 summary 与 401 错误族（档 1 必填）
+    let ops_ok = doc["paths"]
+        .as_object()
+        .map(|m| {
+            m.values().all(|entry| {
+                entry
+                    .as_object()
+                    .map(|ops| {
+                        ops.iter()
+                            .filter(|(k, _)| k.as_str() != "parameters")
+                            .all(|(_, op)| op["summary"].is_string() && op["responses"]["401"].is_object())
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    c.check("OpenAPI：操作含 summary 与 401（档 1 必填）", ops_ok);
+    // 抽样：核心端点在册
+    c.check(
+        "OpenAPI：核心端点在册",
+        doc["paths"]["/api/sessions"].is_object()
+            && doc["paths"]["/api/sessions/:id/chat"].is_object()
+            && doc["paths"]["/api/agents"].is_object(),
+    );
+}
+
 
     Ok(())
 }
