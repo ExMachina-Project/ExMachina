@@ -167,6 +167,11 @@ pub enum ToolName {
     /// 元智能体构建（实验性 experiments.metaAgent）：新智能体/组定义草稿落 [meta] 审批单
     #[serde(rename = "meta_build")]
     MetaBuild,
+    /// 语音回复（assistant-parity T2）：文本 → TTS 合成 → 语音条产出（outbox voice
+    /// artifact），收束时经平台直发（telegram sendVoice / napcat record）或 WebUI 卡片。
+    /// 未配置 TTS 能力模型时返回未装配说明（不进工具面）。
+    #[serde(rename = "speech_reply")]
+    Speech,
 }
 
 impl ToolName {
@@ -197,6 +202,7 @@ impl ToolName {
             ToolName::MetaObserve => "meta_observe",
             ToolName::MetaPropose => "meta_propose",
             ToolName::MetaBuild => "meta_build",
+            ToolName::Speech => "speech_reply",
         }
     }
 
@@ -242,6 +248,7 @@ impl ToolName {
             "meta_propose" => Some(ToolName::MetaPropose),
             "meta_build" => Some(ToolName::MetaBuild),
             "todo" => Some(ToolName::Todo),
+            "speech_reply" => Some(ToolName::Speech),
             _ => None,
         }
     }
@@ -277,6 +284,7 @@ impl ToolName {
             ToolName::MetaObserve,
             ToolName::MetaPropose,
             ToolName::MetaBuild,
+            ToolName::Speech,
         ]
     }
 }

@@ -1504,7 +1504,7 @@ async fn web_fetch工具与图片暂存() {
 
     // 规格注册：白名单内含 web_fetch
     let specs =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebFetch], false, false, false);
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebFetch], false, false, false, false);
     assert!(
         specs.iter().any(|s| s.name == "web_fetch"),
         "web_fetch 应在规格中"
@@ -1522,6 +1522,7 @@ async fn web_fetch工具与图片暂存() {
         false,
         false,
         false,
+        false,
     );
     for name in ["read", "edit", "grep", "glob"] {
         assert!(full.iter().any(|s| s.name == name), "{name} 应下发");
@@ -1532,33 +1533,33 @@ async fn web_fetch工具与图片暂存() {
         "搜索未配置时不得下发 web_search（不承诺不存在的能力）"
     );
     let with_search =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebSearch], true, false, false);
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebSearch], true, false, false, false);
     assert!(
         with_search.iter().any(|s| s.name == "web_search"),
         "搜索就绪时应下发 web_search"
     );
     // 浏览器同理：探测不到浏览器可执行文件时不下发 browser
     let no_browser =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, false, false);
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, false, false, false);
     assert!(
         !no_browser.iter().any(|s| s.name == "browser"),
         "无浏览器时不得下发 browser"
     );
     let with_browser =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, true, false);
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, true, false, false);
     assert!(
         with_browser.iter().any(|s| s.name == "browser"),
         "浏览器就绪时应下发 browser"
     );
     // Computer Use 同理：总开关关闭时不下发 computer（整机输入权须显式交出）
     let no_computer =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, false);
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, false, false);
     assert!(
         !no_computer.iter().any(|s| s.name == "computer"),
         "未启用时不得下发 computer"
     );
     let with_computer =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, true);
+        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, true, false);
     assert!(
         with_computer.iter().any(|s| s.name == "computer"),
         "启用后应下发 computer"
@@ -2656,7 +2657,7 @@ async fn 工具面声明_白名单裁剪与未声明全量() {
     // schema 下发同样只含声明工具
     let specs = exm_core::tools::ToolGateway::tool_specs(
         &[ToolName::Read],
-        false, false, false,
+        false, false, false, false,
     );
     assert!(specs.iter().all(|s| s.name == "read"), "schema 只应含 read");
     assert_eq!(specs.len(), 1);
