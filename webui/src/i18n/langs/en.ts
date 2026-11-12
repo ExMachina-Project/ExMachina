@@ -600,6 +600,8 @@ export const en: Partial<Dict> = {
   "cfg.autoAdapt.help": "When a unit accumulates 3 new lessons, distill improvement points and inject them into its dispatches (no units created)",
   "cfg.unitMaxSteps": "Unit step budget",
   "cfg.unitMaxSteps.help": "Think-act-tool rounds allowed per dispatch; complex work (multi-file changes) needs a larger budget",
+  "cfg.automationTimezone": "Cron schedule timezone",
+  "cfg.automationTimezone.help": "Cron expressions of scheduled jobs are interpreted in this IANA timezone (e.g. Asia/Shanghai) wall clock — \"daily at 8\" fires at 8 in the configured zone; empty = UTC",
   "cfg.terminalTimeout": "Terminal timeout (seconds)",
   "cfg.terminalTimeout.help": "Longest runtime for foreground commands; the process tree is killed on timeout. Long jobs should run in background mode instead",
   "cfg.spillChars": "Tool output spill threshold (chars)",

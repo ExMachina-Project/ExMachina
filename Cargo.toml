@@ -19,6 +19,9 @@ futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "native-tls"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+# 时区支持（cron 调度本地时区，assistant-parity T1）：vendor 进 third_party/ ——
+# 离线开发与 rsproxy Docker 构建双兼容（版本与 crates.io 发布一致）。
+chrono-tz = { path = "third_party/chrono-tz" }
 clap = { version = "4", features = ["derive"] }
 owo-colors = "4"
 axum = { version = "0.7", features = ["ws", "json", "multipart"] }

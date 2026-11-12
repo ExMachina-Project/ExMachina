@@ -412,6 +412,8 @@ struct AutomationFile {
     flow_idle_days: Option<u32>,
     #[serde(default)]
     memory_digest_min_turns: Option<usize>,
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -557,6 +559,10 @@ impl ExmConfig {
             memory_digest_min_turns: file_auto
                 .memory_digest_min_turns
                 .unwrap_or_else(|| AutomationConfig::default().memory_digest_min_turns),
+            timezone: file_auto
+                .timezone
+                .clone()
+                .unwrap_or_else(|| AutomationConfig::default().timezone),
         };
 
         let mut llm = LlmConfig {
@@ -779,6 +785,7 @@ impl ExmConfig {
                 meta_interval_min: Some(self.automation.meta_interval_min),
                 flow_idle_days: Some(self.automation.flow_idle_days),
                 memory_digest_min_turns: Some(self.automation.memory_digest_min_turns),
+                timezone: Some(self.automation.timezone.clone()),
             }),
             search: Some(self.search.clone()),
             hooks: Some(self.hooks.clone()),

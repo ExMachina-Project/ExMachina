@@ -17,6 +17,7 @@ rusqlite = { workspace = true }
 reqwest.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 parking_lot = "0.12"
 tokio-tungstenite.workspace = true
 # 仓库检索工具（grep/glob）：ignore 尊重 .gitignore，regex 提供正则匹配

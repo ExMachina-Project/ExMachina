@@ -48,12 +48,19 @@ pub async fn list_cron(State(st): State<AppState>) -> impl IntoResponse {
         .filter(|j| j.id != "__heartbeat__")
         .map(|j| {
             // 下次执行时间（integration-ux）：启用且 cron 命中的任务向前扫描最近命中
+            // （按 automation.timezone 解释；回显带偏移的 RFC3339，前端按本地渲染）
             let mut v = serde_json::to_value(&j).unwrap_or(Value::Null);
             if j.enabled {
                 if let Some(expr) = &j.cron {
-                    if let Some(t) = exm_core::cron::next_run(expr, now, 527_040) {
+                    let tz = st.core.config().automation.timezone.clone();
+                    let next = exm_core::cron::next_run_in(expr, now, &tz, 527_040);
+                    if let Some(t) = next {
+                        let shown = match exm_core::cron::parse_tz(&tz) {
+                            Some(tzp) => t.with_timezone(&tzp).to_rfc3339(),
+                            None => t.to_rfc3339(),
+                        };
                         if let Some(obj) = v.as_object_mut() {
-                            obj.insert("nextRunAt".into(), json!(t.to_rfc3339()));
+                            obj.insert("nextRunAt".into(), json!(shown));
                         }
                     }
                 }

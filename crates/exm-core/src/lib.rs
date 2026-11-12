@@ -1261,6 +1261,8 @@ pub fn build_orchestrator(
     if let Some(c) = &cron {
         gateway = gateway.with_cron(c.clone());
     }
+    // cron 时区（automation.timezone）：schedule 工具回显/下次执行按本地墙上时钟解释
+    gateway = gateway.with_cron_timezone(cfg.automation.timezone.clone());
     // 记忆工具（memory_read/write/link）的受控入口：组隔离在工具层强制
     gateway = gateway.with_memory(memory.clone());
     // 记忆模式对齐（深层记忆关闭 = 文件记忆模式）：工具面读 md、拒写库，与规划注入同源

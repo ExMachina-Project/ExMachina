@@ -2536,3 +2536,141 @@ mod browser_search_tests {
         }
     }
 }
+
+/// schedule 工具（assistant-parity T1）：notify_channels/session_title 透传 + 时区回显
+mod schedule_tool_tests {
+    use super::*;
+    use crate::cron::CronStore;
+    use crate::store::Store;
+    use crate::types::{AgentDefinition, Tier};
+    use std::sync::Arc;
+
+    struct SchedRig {
+        gw: ToolGateway,
+        cron: Arc<CronStore>,
+        dir: std::path::PathBuf,
+    }
+
+    fn rig(tz: &str) -> SchedRig {
+        let dir = std::env::temp_dir().join(format!("exm-sched-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry.create_group(Some("t".into()), "测试组", "").unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let cron = Arc::new(CronStore::open(dir.join("data")).unwrap());
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default())
+            .with_cron(cron.clone())
+            .with_cron_timezone(tz.to_string());
+        SchedRig { gw, cron, dir }
+    }
+
+    async fn exec(gw: &ToolGateway, args: serde_json::Value) -> String {
+        let r = gw
+            .execute(
+                "t",
+                "s-sched",
+                &[ToolName::Schedule],
+                ToolName::Schedule,
+                &args,
+            )
+            .await;
+        if r.ok {
+            r.output
+        } else {
+            r.error.unwrap_or_default()
+        }
+    }
+
+    /// 通道订阅透传：模型建的任务带 notify_channels（此前硬编码空清单断链）
+    #[tokio::test]
+    async fn 建任务_通道订阅透传() {
+        let rig = rig("");
+        let out = exec(
+            &rig.gw,
+            serde_json::json!({
+                "op": "create",
+                "name": "每日天气",
+                "prompt": "查天气并汇报",
+                "cron": "0 8 * * *",
+                "notify_channels": ["qq:12345", "tg:77"],
+            }),
+        )
+        .await;
+        assert!(out.contains("已排程"), "{out}");
+        assert!(out.contains("推送通道=qq:12345,tg:77"), "{out}");
+        // 落库校验
+        let job = rig.cron.list().unwrap().into_iter().next().unwrap();
+        assert_eq!(job.notify_channels, vec!["qq:12345".to_string(), "tg:77".to_string()]);
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 时区回显：配置 Asia/Shanghai 时「每天 8 点」的下次执行渲染为本地 08:00 +08
+    #[tokio::test]
+    async fn 建任务_时区回显下次执行() {
+        let rig = rig("Asia/Shanghai");
+        let out = exec(
+            &rig.gw,
+            serde_json::json!({
+                "op": "create",
+                "name": "早报",
+                "prompt": "早报",
+                "cron": "0 8 * * *",
+            }),
+        )
+        .await;
+        assert!(out.contains("已排程"), "{out}");
+        assert!(out.contains("下次执行="), "回显缺下次执行：{out}");
+        assert!(out.contains("08:00"), "上海 8 点任务应渲染本地 08:00：{out}");
+        assert!(!out.contains("T08:00"), "不应是 UTC RFC3339 形态：{out}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 不带新参数的调用 = 旧行为（无推送注记、默认组激活）
+    #[tokio::test]
+    async fn 建任务_缺省参数保持旧行为() {
+        let rig = rig("");
+        let out = exec(
+            &rig.gw,
+            serde_json::json!({
+                "op": "create",
+                "name": "巡检",
+                "prompt": "巡检",
+                "cron": "0 9 * * *",
+            }),
+        )
+        .await;
+        assert!(out.contains("已排程"), "{out}");
+        assert!(!out.contains("推送通道="), "缺省无推送注记：{out}");
+        // UTC 语义（空时区）：下次执行回显 RFC3339 Z 结尾
+        assert!(out.contains("下次执行="), "{out}");
+        let job = rig.cron.list().unwrap().into_iter().next().unwrap();
+        assert!(job.notify_channels.is_empty());
+        assert!(job.session_title.is_none(), "缺省无会话标题");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+}
