@@ -491,4 +491,60 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn 条目编辑_哈希迁移与索引重建() {
+        let dir = std::env::temp_dir().join(format!("exm-mem-edit-{}", uuid::Uuid::new_v4()));
+        let store = MemoryStore::open(&dir).unwrap();
+
+        let e = store
+            .remember(
+                &MemoryDraft::new(MemoryKind::Fact, "旧标题", "旧正文 alpha").importance(0.4),
+            )
+            .unwrap();
+        let created = e.created_at.clone();
+
+        // 改正文 + 改类型：检索命中新内容，created_at 不变
+        let updated = store
+            .update(&e.id, None, Some("新正文 beta 检索词"), None, Some("lesson"))
+            .unwrap()
+            .expect("条目应存在");
+        assert_eq!(updated.kind, MemoryKind::Lesson);
+        assert_eq!(updated.created_at, created, "编辑不应改变创建时间");
+        assert_eq!(updated.body, "新正文 beta 检索词");
+        let hits = store.recall("beta 检索词", 5, None, None, None).unwrap();
+        assert!(
+            hits.iter().any(|h| h.entry.id == e.id),
+            "检索应命中编辑后的正文"
+        );
+
+        // 哈希迁移：同新内容再写命中去重（同 id、不新增）
+        let dup = store
+            .remember(&MemoryDraft::new(
+                MemoryKind::Fact,
+                "旧标题",
+                "新正文 beta 检索词",
+            ))
+            .unwrap();
+        assert_eq!(dup.id, e.id, "同内容二次写入应命中编辑后的条目");
+        assert_eq!(store.list(None, 10).unwrap().len(), 1);
+
+        // 旧哈希已删除：旧内容不再与编辑后的条目去重，可重新成条
+        store
+            .remember(&MemoryDraft::new(MemoryKind::Fact, "旧标题", "旧正文 alpha"))
+            .unwrap();
+        assert_eq!(store.list(None, 10).unwrap().len(), 2);
+
+        // 非法 kind 拒绝；不存在的 id 返回 None
+        assert!(
+            store.update(&e.id, None, None, None, Some("bogus")).is_err(),
+            "未知类型应报错"
+        );
+        assert!(store
+            .update("missing-id", Some("x"), None, None, None)
+            .unwrap()
+            .is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

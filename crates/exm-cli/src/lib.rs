@@ -488,6 +488,18 @@ enum MemoryAction {
         #[arg(long)]
         off: bool,
     },
+    /// 编辑条目（--title/--body/--tags/--kind 缺省字段不改动）
+    Edit {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
+        #[arg(long)]
+        kind: Option<String>,
+    },
     /// 遗忘指定记忆
     Forget { id: String },
     /// 重建倒排索引
@@ -936,6 +948,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     memory_cmd::run_memory_add(&core, &kind, &title, &body, pin, agent.as_deref(), tags, importance, global)
                 }
                 MemoryAction::Pin { id, off } => memory_cmd::run_memory_pin(&core, &id, !off),
+                MemoryAction::Edit { id, title, body, tags, kind } => {
+                    memory_cmd::run_memory_edit(&core, &id, title, body, tags, kind)
+                }
                 MemoryAction::Forget { id } => memory_cmd::run_memory_forget(&core, &id),
                 MemoryAction::Reindex => memory_cmd::run_memory_reindex(&core),
                 MemoryAction::Decay { floor } => memory_cmd::run_memory_decay(&core, floor),
