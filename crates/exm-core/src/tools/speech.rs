@@ -46,7 +46,7 @@ impl ToolGateway {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return ToolResult::err(format!("创建发件箱目录失败：{e}"));
         }
-        let fname = format!("voice-{}.mp3", crate::types::new_id()[..8].to_string());
+        let fname = format!("voice-{}.mp3", &crate::types::new_id()[..8]);
         let abs = dir.join(&fname);
         if let Err(e) = std::fs::write(&abs, &mp3) {
             return ToolResult::err(format!("音频落盘失败：{e}"));

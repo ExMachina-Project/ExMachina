@@ -39,8 +39,8 @@ pub(super) async fn stage_approval_allowlist(e: &Env, c: &mut Checker) -> anyhow
     };
     let mk_session = |core: &Core| core.create_session("档位测试").unwrap().id;
     // once：不建授权
-    let sid = mk_session(&core);
-    let once_id = mk_ap(&core, &sid, "echo once-scope");
+    let sid = mk_session(core);
+    let once_id = mk_ap(core, &sid, "echo once-scope");
     let r: serde_json::Value = client
         .post(format!("{base}/approvals/{once_id}/approve"))
         .json(&serde_json::json!({ "scope": "once" }))
@@ -54,7 +54,7 @@ pub(super) async fn stage_approval_allowlist(e: &Env, c: &mut Checker) -> anyhow
         !r["result"].as_str().unwrap_or("").contains("会话授权"),
     );
     // session：建授权,同前缀第二次免审批直通
-    let ap2 = mk_ap(&core, &sid, "echo session-scope");
+    let ap2 = mk_ap(core, &sid, "echo session-scope");
     let r2: serde_json::Value = client
         .post(format!("{base}/approvals/{ap2}/approve"))
         .json(&serde_json::json!({ "scope": "session" }))
@@ -72,8 +72,8 @@ pub(super) async fn stage_approval_allowlist(e: &Env, c: &mut Checker) -> anyhow
         core.session_granted(&sid, "echo session-scope again").is_some(),
     );
     // allowlist：前缀写入配置可读回
-    let sid3 = mk_session(&core);
-    let ap3 = mk_ap(&core, &sid3, "echo allowlist-scope");
+    let sid3 = mk_session(core);
+    let ap3 = mk_ap(core, &sid3, "echo allowlist-scope");
     let r3: serde_json::Value = client
         .post(format!("{base}/approvals/{ap3}/approve"))
         .json(&serde_json::json!({ "scope": "allowlist" }))
@@ -93,8 +93,8 @@ pub(super) async fn stage_approval_allowlist(e: &Env, c: &mut Checker) -> anyhow
     );
     drop(cfg_now);
     // 未知档位 → 400
-    let sid4 = mk_session(&core);
-    let ap4 = mk_ap(&core, &sid4, "echo bad-scope");
+    let sid4 = mk_session(core);
+    let ap4 = mk_ap(core, &sid4, "echo bad-scope");
     let bad: reqwest::Response = client
         .post(format!("{base}/approvals/{ap4}/approve"))
         .json(&serde_json::json!({ "scope": "forever" }))

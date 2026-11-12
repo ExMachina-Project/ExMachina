@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/exm-core", "crates/exm-gateway", "crates/exm-cli"]
+# vendor 的时区依赖不参与 workspace 检查（clippy -D warnings / 测试只针对本项目代码）
+exclude = [
+    "third_party/chrono-tz",
+    "third_party/chrono-tz-build",
+    "third_party/parse-zoneinfo",
+]
 
 [workspace.package]
 version = "0.6.3"
