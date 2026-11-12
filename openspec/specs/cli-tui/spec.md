@@ -24,8 +24,33 @@ CLI 全屏终端界面：`exm` 裸命令升级为 ratatui 全屏 TUI，对齐终
 - **THEN** 可查看命令全文并批准或拒绝，结果同步到所有端
 
 ### Requirement: 斜杠命令保留
-既有 readline 面板的斜杠命令集（/status /model /approval 等）MUST 在 TUI 输入区可用，语义与原实现一致。
+
+TUI 与 panel 的斜杠命令族（/flows、/copy、/caps 等）SHALL 保持既有清单与语义；不移除、不改名任何既有命令。新增能力经顶层 CLI 参数（-p/-c/-r/--output-format）进入，不占用斜杠命令面。
 
 #### Scenario: TUI 内切换模型
-- **WHEN** 用户在 TUI 输入 /model 命令
-- **THEN** 模型切换交互在 TUI 内完成，效果与 readline 形态一致
+
+- **WHEN** TUI 内执行既有模型切换命令
+- **THEN** 行为与现状一致（命令族零回归锚点）
+
+#### Scenario: 既有命令零回归
+
+- **WHEN** 升级后在 TUI/panel 输入任一既有斜杠命令
+- **THEN** 行为与升级前一致
+
+### Requirement: 会话参数面扩展
+
+CLI 顶层 SHALL 支持 `-c/--continue`（接续最近会话）与 `-r/--resume <匹配>`（按标题/ID 匹配恢复）：对 TUI、panel、`-p` 无头三形态一致生效；与 `--session <id>` 组合时按显式 ID > `-r` > `-c` 优先序取一（匹配与恢复语义详见 session-resume capability）。
+
+#### Scenario: 三形态一致
+
+- **WHEN** 分别以 `exm -c`、`exm chat -c`（panel）、`exm -p "..." -c` 运行且存在历史会话
+- **THEN** 三者都打开同一最近活跃会话接续
+
+### Requirement: 无头参数面
+
+CLI 顶层 SHALL 支持 `-p/--print [text]` 与 `--output-format text|json|stream-json`（缺省 text）：`-p` 不进入交互 UI、单轮执行即退（输出格式与退出码契约详见 headless-print capability）；无 `-p` 时 `--output-format` 被忽略且不报错。
+
+#### Scenario: 无 -p 时格式参数无效
+
+- **WHEN** 运行 `exm --output-format json`（无 -p）
+- **THEN** 按无该参数的既有行为启动（TUI/panel），不报错
