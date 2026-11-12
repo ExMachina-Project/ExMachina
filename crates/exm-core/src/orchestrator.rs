@@ -945,7 +945,7 @@ impl Orchestrator {
                 "agentId": self.orch_id(),
                 "statements": [ { "tag": "警告", "text": "本轮已被用户停止。" } ],
                 "stopped": true,
-                "artifacts": self.store.outbox_drain(session_id).unwrap_or_default()
+                "artifacts": self.store.outbox_drain_with_children(session_id).unwrap_or_default()
             }),
         );
         Ok(())
@@ -1238,7 +1238,7 @@ impl Orchestrator {
                 "routeLevel": "direct",
                 "agentId": def.identifier,
                 "statements": statements,
-                "artifacts": self.store.outbox_drain(session_id).unwrap_or_default(),
+                "artifacts": self.store.outbox_drain_with_children(session_id).unwrap_or_default(),
             }),
         );
         Ok(())
@@ -1477,7 +1477,7 @@ impl Orchestrator {
             self.emit(
                 session_id,
                 "run.finished",
-                serde_json::json!({ "routeLevel": "L0", "agentId": self.orch_id(), "statements": statements, "artifacts": self.store.outbox_drain(session_id).unwrap_or_default() }),
+                serde_json::json!({ "routeLevel": "L0", "agentId": self.orch_id(), "statements": statements, "artifacts": self.store.outbox_drain_with_children(session_id).unwrap_or_default() }),
             );
             return Ok(());
         }
@@ -1609,7 +1609,7 @@ impl Orchestrator {
                 "agentId": self.orch_id(),
                 "graph": graph.to_graph(),
                 "statements": statements,
-                "artifacts": self.store.outbox_drain(session_id).unwrap_or_default()
+                "artifacts": self.store.outbox_drain_with_children(session_id).unwrap_or_default()
             }),
         );
         Ok(())
