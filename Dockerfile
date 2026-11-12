@@ -24,6 +24,8 @@ RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debi
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libxdo-dev && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+# vendor 的时区依赖（chrono-tz 等，路径依赖，必须随源码进构建上下文）
+COPY third_party ./third_party
 # cargo 源也切到 rsproxy（crates.io 代理）
 RUN mkdir -p /usr/local/cargo/ && printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n' > /usr/local/cargo/config.toml
 # 依赖缓存层（无 lockfile 变更时命中）
