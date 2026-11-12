@@ -557,6 +557,8 @@ export const en: Partial<Dict> = {
   "cfg.maxConcurrency.help": "Maximum number of units the scheduler runs simultaneously",
   "cfg.maxSessionTokens": "Session token budget",
   "cfg.maxSessionTokens.help": "Real usage reported by the provider is preferred; falls back to chars/4 when unavailable. Once exceeded the session rejects new turns; 0 = unlimited",
+  "cfg.compaction.triggerRatio": "Context compaction trigger ratio",
+  "cfg.compaction.triggerRatio.help": "Rolling compaction kicks in when estimated session tokens exceed model window x context budget ratio x this ratio (earlier than hard truncation); 0 = disable the ratio criterion and fall back to the message-count threshold (40)",
   "cfg.memoryEnabled": "Deep memory (DB recall + auto write)",
   "cfg.memoryEnabled.help": "When off, only the memory.md file is used (file-memory mode): its content is injected at planning time and editable in the Memory panel; no database, no semantic recall",
   "cfg.mdMaxChars": "memory.md char limit",

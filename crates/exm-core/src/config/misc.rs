@@ -204,6 +204,29 @@ impl Default for TrashConfig {
     }
 }
 
+/// 会话上下文压缩调优（compaction-tuning）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionConfig {
+    /// token 占比触发阈值（默认 0.6；0 = 关闭 token 判据仅条数兜底）。
+    /// 会话历史估算 token > 模型窗口 × contextBudgetRatio × triggerRatio 即压缩——
+    /// 早于预算硬顶（截断）介入，让压缩先于截断发生。
+    #[serde(default = "default_trigger_ratio")]
+    pub trigger_ratio: f32,
+}
+
+fn default_trigger_ratio() -> f32 {
+    0.6
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        CompactionConfig {
+            trigger_ratio: default_trigger_ratio(),
+        }
+    }
+}
+
 /// 实验性功能开关（未稳定的行为面；默认全关，开启即自担体验波动）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
