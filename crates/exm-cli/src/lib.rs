@@ -581,6 +581,8 @@ async fn run_headless_dispatch(cli: &Cli, workspace: &Path) -> i32 {
 }
 
 /// 会话定位（无头 / 交互续接共用）：--session > -r 模糊 > -c 最近 > None（新建）。
+/// -r 匹配：标题/ID 前缀子串、大小写不敏感、排除归档（list_sessions 已过滤）；
+/// 唯一命中返回；多命中报错并列候选（≤10 条：标题 + ID 前 8 位 + 相对时间）；零命中报错。
 /// 定位失败返回 Err（消息），调用方按使用错误（退出码 2）处理。
 fn resolve_resume_session(
     core: &Arc<Core>,
@@ -591,24 +593,90 @@ fn resolve_resume_session(
     if let Some(id) = explicit {
         return Ok(Some(id.to_string()));
     }
+    // 匹配范围：当前交互目标（组）内未归档会话，按活跃时间倒序（与 /resume 同口径）。
+    // 子会话（parent_session 有值 = 派发运行台账）不是用户交互对象，排除
+    let scoped: Vec<exm_core::types::Session> = core
+        .list_sessions_in_scope()?
+        .into_iter()
+        .filter(|s| s.parent_session.is_none())
+        .collect();
     if let Some(pattern) = resume_match {
-        // -r：标题/ID 模糊匹配，多命中取最近活跃（list_sessions 已按活跃排序口径附加预览）
-        let sessions = core.list_sessions()?;
+        let sessions = &scoped;
+        let needle = pattern.to_lowercase();
         let hits: Vec<&exm_core::types::Session> = sessions
             .iter()
-            .filter(|s| s.title.contains(pattern) || s.id.contains(pattern))
+            .filter(|s| {
+                s.title.to_lowercase().contains(&needle)
+                    || s.id.to_lowercase().contains(&needle)
+            })
             .collect();
-        if hits.is_empty() {
-            anyhow::bail!("-r 未匹配到会话：{pattern}");
-        }
-        return Ok(Some(hits[0].id.clone()));
+        return match hits.len() {
+            0 => Err(anyhow::anyhow!("-r 无匹配会话：{pattern}")),
+            1 => Ok(Some(hits[0].id.clone())),
+            _ => {
+                let mut msg = format!("-r 命中 {} 个会话，请改用更精确匹配或 --session <id>：", hits.len());
+                for s in hits.iter().take(10) {
+                    let short = &s.id[..s.id.len().min(8)];
+                    msg.push_str(&format!("\n  {short}  {}（{}）", s.title, relative_time(&s.updated_at)));
+                }
+                Err(anyhow::anyhow!(msg))
+            }
+        };
     }
     if continue_last {
-        if let Some(first) = core.list_sessions()?.first() {
+        if let Some(first) = scoped.first() {
             return Ok(Some(first.id.clone()));
         }
+        // 无历史会话：与不带 -c 一致（新建），由调用方提示
     }
     Ok(None)
+}
+
+/// ISO 时间 → 相对时间描述（候选清单用；解析失败原样返回）
+fn relative_time(iso: &str) -> String {
+    let Ok(ts) = chrono_time_iso(iso) else {
+        return iso.to_string();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let diff = now - ts;
+    if diff < 0 {
+        return "刚刚".to_string();
+    }
+    let mins = diff / 60;
+    match mins {
+        0 => "刚刚".to_string(),
+        1..=59 => format!("{mins} 分钟前"),
+        60..=1439 => format!("{} 小时前", mins / 60),
+        1440..=43199 => format!("{} 天前", mins / 1440),
+        _ => format!("{} 个月前", mins / 43200),
+    }
+}
+
+/// ISO 8601（含毫秒/Z 形态）→ Unix 秒（无 chrono 依赖的手工解析）
+fn chrono_time_iso(iso: &str) -> anyhow::Result<i64> {
+    // 形如 2026-11-12T02:47:57.590Z / 2026-11-12T02:47:57Z
+    let bytes = iso.as_bytes();
+    if bytes.len() < 19 {
+        anyhow::bail!("过短");
+    }
+    let s = iso;
+    let year: i64 = s.get(0..4).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("年"))?;
+    let month: i64 = s.get(5..7).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("月"))?;
+    let day: i64 = s.get(8..10).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("日"))?;
+    let hour: i64 = s.get(11..13).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("时"))?;
+    let min: i64 = s.get(14..16).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("分"))?;
+    let sec: i64 = s.get(17..19).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("秒"))?;
+    // 简化儒略日算法（days_from_civil）：UTC 视角
+    let (y, m) = if month <= 2 { (year - 1, month + 12) } else { (year, month) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m - 3) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Ok(days * 86400 + hour * 3600 + min * 60 + sec)
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -629,6 +697,29 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     }
     // 裸命令 `exm` / `exmachina`：进全屏 TUI（消息流/输入/状态栏三段版式）。
     // `exm chat` 保留 readline 面板（ BREAKING：裸命令旧版进 readline 面板）
+    // 会话参数（-c/-r/--session）在交互形态同样生效：定位到会话作为初始会话载入。
+    // 会话定位放在 match 之前（TUI/panel/chat 三分支共用），command 只 move 一次
+    let has_session_args =
+        cli.session.is_some() || cli.resume.is_some() || cli.continue_last;
+    let initial_session: Option<exm_core::types::Session> = if has_session_args {
+        let core = build_core(&workspace)?;
+        let located = resolve_resume_session(
+            &core,
+            cli.session.as_deref(),
+            cli.resume.as_deref(),
+            cli.continue_last,
+        )?;
+        match located {
+            Some(id) => match core.store.get_session(&id)? {
+                Some(s) => Some(s),
+                None => anyhow::bail!("会话不存在: {id}"),
+            },
+            // -c 无历史：回落新建（spec：与不带 -c 一致）
+            None => None,
+        }
+    } else {
+        None
+    };
     let command = cli.command.unwrap_or(Commands::Tui);
     match command {
         Commands::Tui => {
@@ -636,7 +727,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             // TTY 校验：非终端（管道/重定向）退回行交互，避免控制序列污染
             use std::io::IsTerminal;
             if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                tui::run_tui(core, false).await
+                tui::run_tui_with_session(core, initial_session, false).await
             } else {
                 chat::run_interactive(core, false).await
             }
@@ -663,7 +754,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     // 非 TTY（管道 / 重定向）：退回逐行交互，避免控制字符污染日志
                     use std::io::IsTerminal;
                     if std::io::stdin().is_terminal() {
-                        panel::run_panel(core, quiet).await
+                        panel::run_panel_with_session(core, initial_session, quiet).await
                     } else {
                         chat::run_interactive(core, quiet).await
                     }
@@ -968,6 +1059,87 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------- 会话定位（session-resume：-c/-r/--session 优先序与匹配三态）
+
+    fn resume_core() -> Arc<Core> {
+        let dir = std::env::temp_dir().join(format!("exm-resume-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = exm_core::config::ExmConfig::load(&dir);
+        Arc::new(Core::with_config(cfg).expect("创建 Core 失败"))
+    }
+
+    /// 优先序：--session 显式 > -r 匹配 > -c 最近
+    #[test]
+    fn 会话定位_优先序() {
+        let core = resume_core();
+        let a = core.create_session("调试会话A").unwrap();
+        let b = core.create_session("普通会话B").unwrap();
+        // 同毫秒创建的会话 updated_at 相同会让「最近」排序不稳定：b 先 touch 定序
+        core.store
+            .set_session_active_at(&b.id, "2999-01-01T00:00:00.000Z")
+            .unwrap();
+        // --session 最高（即使 -r/-c 同时给出）
+        let got = resolve_resume_session(&core, Some(&b.id), Some("调试"), false).unwrap();
+        assert_eq!(got.as_deref(), Some(b.id.as_str()), "显式 --session 必须最优先");
+        // -r 次之（-c 被忽略）
+        let got = resolve_resume_session(&core, None, Some("调试"), true).unwrap();
+        assert_eq!(got.as_deref(), Some(a.id.as_str()), "-r 优先于 -c");
+        // -c 兜底：最近活跃的（b 已 touch 为最晚）
+        let got = resolve_resume_session(&core, None, None, true).unwrap();
+        assert_eq!(got.as_deref(), Some(b.id.as_str()), "-c 取最近活跃");
+    }
+
+    /// -r 匹配三态：唯一命中 / 多命中列候选报错 / 零命中报错
+    #[test]
+    fn 会话定位_匹配三态() {
+        let core = resume_core();
+        core.create_session("调试前端问题").unwrap();
+        core.create_session("调试后端问题").unwrap();
+        core.create_session("无关会话").unwrap();
+        // 唯一命中
+        let got = resolve_resume_session(&core, None, Some("前端"), false).unwrap();
+        assert!(got.is_some(), "唯一命中返回会话 id");
+        // 多命中：报错并列候选（错误信息含两个标题）
+        let err = resolve_resume_session(&core, None, Some("调试"), false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2 个会话"), "多命中应报数量：{msg}");
+        assert!(msg.contains("调试前端问题") && msg.contains("调试后端问题"), "候选清单：{msg}");
+        // 零命中
+        let err = resolve_resume_session(&core, None, Some("不存在的名字"), false).unwrap_err();
+        assert!(err.to_string().contains("无匹配"), "零命中报错");
+    }
+
+    /// -r 大小写不敏感（ID 十六进制大小写 / 标题 ASCII 大小写）
+    #[test]
+    fn 会话定位_大小写不敏感() {
+        let core = resume_core();
+        let s = core.create_session("Debug Session").unwrap();
+        let got = resolve_resume_session(&core, None, Some("debug session"), false).unwrap();
+        assert_eq!(got.as_deref(), Some(s.id.as_str()), "小写应命中大写标题");
+        // ID 大写也应命中
+        let upper = s.id.to_uppercase();
+        let got = resolve_resume_session(&core, None, Some(&upper), false).unwrap();
+        assert!(got.is_some(), "ID 大写形态应命中");
+    }
+
+    /// 无历史会话：-c 回落 None（= 新建），不报错
+    #[test]
+    fn 会话定位_无历史回落() {
+        let core = resume_core();
+        let got = resolve_resume_session(&core, None, None, true).unwrap();
+        assert!(got.is_none(), "无历史会话 -c 应回落新建（None）");
+    }
+
+    /// 相对时间：ISO 解析与分档描述
+    #[test]
+    fn 相对时间_分档() {
+        // 非法/过短输入原样返回
+        assert_eq!(relative_time("bad"), "bad");
+        // 合法 ISO：2000-01-01 距今多年
+        let ts = chrono_time_iso("2000-01-01T00:00:00Z").unwrap();
+        assert_eq!(ts, 946684800, "Unix 秒换算");
+    }
 
     /// Windows canonicalize 会带 `\\?\` 前缀，若漏剥会一路渗进 config.json 与 doctor 输出
     #[test]

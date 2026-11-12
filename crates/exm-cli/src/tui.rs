@@ -411,7 +411,19 @@ impl Drop for RestoreGuard {
 
 /// TUI 主循环
 pub async fn run_tui(core: Arc<exm_core::Core>, quiet: bool) -> anyhow::Result<()> {
-    let session = core.create_session("CLI 终端工作台")?;
+    run_tui_with_session(core, None, quiet).await
+}
+
+/// 带初始会话启动（-c/-r/--session 定位结果；None = 新建「CLI 终端工作台」）
+pub async fn run_tui_with_session(
+    core: Arc<exm_core::Core>,
+    initial: Option<exm_core::types::Session>,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let session = match initial {
+        Some(s) => s,
+        None => core.create_session("CLI 终端工作台")?,
+    };
     let mut tui = Tui::new(session.id.clone(), session.title.clone(), quiet);
     refresh_approvals(&core, &mut tui).await;
 
