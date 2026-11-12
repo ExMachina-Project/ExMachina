@@ -148,6 +148,58 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// 条目编辑（assistant-parity T3）：title/body/tags/kind 可改——
+    /// 读改写同款串行；内容变更时重算哈希（删旧-index 新）并重建倒排索引，
+    /// 保持「同内容二次写入命中去重」与检索所见即所得。
+    pub fn update(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        tags: Option<Vec<String>>,
+        kind: Option<&str>,
+    ) -> Result<Option<MemoryEntry>> {
+        let _guard = self.write_lock.lock();
+        let Some(mut e) = self.get_entry(id)? else {
+            return Ok(None);
+        };
+        let old_hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
+        if let Some(t) = title {
+            e.title = cap_chars(t.trim(), Self::TITLE_CAP_CHARS);
+        }
+        if let Some(b) = body {
+            e.body = cap_chars(b.trim(), Self::BODY_CAP_CHARS);
+        }
+        if let Some(t) = tags {
+            e.tags = t;
+        }
+        if let Some(k) = kind {
+            e.kind = crate::memory::MemoryKind::parse(k)
+                .ok_or_else(|| anyhow::anyhow!("未知记忆类型：{k}"))?;
+        }
+        e.updated_at = now_iso();
+        // 内容变更：哈希迁移 + 倒排重索引（先删后建，与 forget+remember 同口径）
+        let new_hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
+        if new_hash != old_hash {
+            // 与其它条目撞内容哈希时拒绝：覆盖会让对方失去去重索引，remember 语义随之漂移
+            if let Some(other) = self.hash_lookup(&new_hash)? {
+                if other != id {
+                    anyhow::bail!("已存在相同内容的记忆条目：{other}");
+                }
+            }
+            self.unindex_entry(&e)?;
+            self.db.delete(HASH_INDEX, &old_hash)?;
+            self.db.put(HASH_INDEX, &new_hash, &serde_json::json!(e.id))?;
+            self.index_entry(&e)?;
+        } else {
+            // 内容未变也可能只改了 tags/kind——统一重建索引保一致
+            self.unindex_entry(&e)?;
+            self.index_entry(&e)?;
+        }
+        self.save_entry(&e)?;
+        Ok(Some(e))
+    }
+
     pub fn forget(&self, id: &str) -> Result<()> {
         // 与 remember 互斥：防止「forget 删哈希 → remember 按同哈希新建 → forget 删旧条目」
         // 交错后留下孤儿哈希/悬空索引

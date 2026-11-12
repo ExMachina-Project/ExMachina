@@ -136,6 +136,21 @@ impl Core {
         self.render_memory_md()?;
         Ok(())
     }
+    /// 条目编辑（assistant-parity T3）：改后同步刷 memory.md（面板与文件记忆同源）
+    pub fn memory_update(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        tags: Option<Vec<String>>,
+        kind: Option<&str>,
+    ) -> anyhow::Result<Option<crate::memory::MemoryEntry>> {
+        let entry = self.memory.update(id, title, body, tags, kind)?;
+        if entry.is_some() {
+            self.render_memory_md()?;
+        }
+        Ok(entry)
+    }
     pub fn memory_reindex(&self) -> anyhow::Result<usize> {
         self.memory.reindex()
     }

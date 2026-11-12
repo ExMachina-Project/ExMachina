@@ -260,3 +260,43 @@ pub(crate) async fn pin_memory(
             .into_response(),
     }
 }
+
+/// 条目编辑（assistant-parity T3）：title/body/tags/kind 可选字段——
+/// 缺省字段不改动；id 不存在 404；非法 kind 400。
+#[derive(Deserialize)]
+pub(crate) struct MemoryUpdateBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+pub(crate) async fn update_memory(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<MemoryUpdateBody>,
+) -> impl IntoResponse {
+    // 空串视为「未提供」：面板清空编辑框不等于清空正文（删除走 forget）
+    let title = b.title.filter(|s| !s.trim().is_empty());
+    let body = b.body.filter(|s| !s.trim().is_empty());
+    match st
+        .core
+        .memory_update(&id, title.as_deref(), body.as_deref(), b.tags, b.kind.as_deref())
+    {
+        Ok(Some(e)) => Json(serde_json::to_value(e).unwrap_or_default()).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("记忆条目不存在：{id}") })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
