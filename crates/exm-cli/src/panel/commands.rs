@@ -1,4 +1,4 @@
-//! panel 域分文件：命令表 + 流排序 + 命令建议 + run_preview/prefs_root/run_panel 入口。
+//! panel 域分文件：命令表 + 流排序 + 命令建议 + run_preview/prefs_root/run_panel_with_session 入口。
 
 use super::*;
 
@@ -126,13 +126,21 @@ pub fn prefs_root(core: &Arc<Core>) -> PathBuf {
 }
 
 /// 进入终端交互面板（TTY 场景；非 TTY 由 `chat::run_interactive` 兜底）
-pub async fn run_panel(core: Arc<Core>, quiet: bool) -> anyhow::Result<()> {
+/// 带初始会话启动（-c/-r/--session 定位结果；None = 新建「CLI 面板会话」）
+pub async fn run_panel_with_session(
+    core: Arc<Core>,
+    initial: Option<exm_core::types::Session>,
+    quiet: bool,
+) -> anyhow::Result<()> {
     let workspace = core.config().workspace_root.clone();
     let mut panel = Panel::new(workspace, prefs_root(&core), quiet);
     panel.clear();
     panel.print_banner();
 
-    let session = core.create_session("CLI 面板会话")?;
+    let session = match initial {
+        Some(s) => s,
+        None => core.create_session("CLI 面板会话")?,
+    };
     let mut state = PanelState {
         session_id: session.id.clone(),
         session_title: session.title.clone(),
