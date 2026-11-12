@@ -600,6 +600,8 @@ export const zh = {
   "cfg.autoAdapt.help": "子个体新教训累计达 3 条时自动提炼经验改进要点并注入其派发（不创建个体）",
   "cfg.unitMaxSteps": "子个体步数上限",
   "cfg.unitMaxSteps.help": "一次派发内允许的「思考-调工具」轮次；复杂任务（多文件改动）需要更大的步数预算",
+  "cfg.automationTimezone": "cron 调度时区",
+  "cfg.automationTimezone.help": "定时任务的 cron 表达式按该 IANA 时区（如 Asia/Shanghai）的墙上时钟解释——「每天 8 点」在配置时区的 8 点触发；留空 = UTC",
   "cfg.terminalTimeout": "终端命令超时（秒）",
   "cfg.terminalTimeout.help": "前台命令最长执行时间；超时强杀进程树。长任务请让 AI 用后台模式（不受此限）",
   "cfg.spillChars": "工具结果落盘阈值（字符）",

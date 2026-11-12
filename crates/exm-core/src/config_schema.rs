@@ -141,7 +141,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "个体 identifier（per-agent 粒度）：以其所属组身份巡检，产出进其组记忆；留空 = 全局巡检（激活组）" },
                     { "key": "automation.unitMaxSteps", "label": "子个体单次派发步数上限", "kind": "number",
                       "default": "16", "required": false, "min": 3, "max": 60,
-                      "help": "一次派发内允许的「思考-调工具」轮次；复杂任务（多文件改动）需要更大的步数预算" }
+                      "help": "一次派发内允许的「思考-调工具」轮次；复杂任务（多文件改动）需要更大的步数预算" },
+                    { "key": "automation.timezone", "label": "cron 调度时区", "kind": "string",
+                      "default": "", "required": false,
+                      "help": "定时任务的 cron 表达式按该 IANA 时区（如 Asia/Shanghai）的墙上时钟解释——「每天 8 点」在配置时区的 8 点触发；留空 = UTC" }
                 ]
             },
             {
