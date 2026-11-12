@@ -214,6 +214,21 @@ impl Core {
             None,
             Some(cron.clone()),
         )?);
+        // 语音合成回接（assistant-parity T2）：speech_reply 工具 → orchestrator
+        // speak_audio（能力槽位链：组覆盖 → 全局 → tts-1 兜底）。Weak 防环
+        // （tools 常驻 orchestrator）；orchestrator 重建时在 rebuild 处同款回接。
+        {
+            let weak = Arc::downgrade(&orchestrator);
+            orchestrator.tools.set_speech_synth(Arc::new(move |text| {
+                let weak = weak.clone();
+                Box::pin(async move {
+                    let orch = weak
+                        .upgrade()
+                        .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
+                    orch.speak_audio(&text).await
+                })
+            }));
+        }
         // 回接：插件声明式工具并入工具网关（custom 执行链全套复用）。
         // ToolGateway 构建在 build_orchestrator 内，此处经 orchestrator.tools 追加。
         {
@@ -778,7 +793,22 @@ impl Core {
             Some(self.cron.clone()),
         )?;
         self.rebind_plugin_tools(&orch);
-        *self.orchestrator.write() = Arc::new(orch);
+        // 语音合成回接（T2，与 Core::new 同款）：orchestrator 重建后槽位复位
+        {
+            let orch_arc = Arc::new(orch);
+            let weak = Arc::downgrade(&orch_arc);
+            let tools = orch_arc.tools.clone();
+            tools.set_speech_synth(Arc::new(move |text| {
+                let weak = weak.clone();
+                Box::pin(async move {
+                    let o = weak
+                        .upgrade()
+                        .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
+                    o.speak_audio(&text).await
+                })
+            }));
+            *self.orchestrator.write() = orch_arc;
+        }
         Ok(())
     }
 
@@ -1371,7 +1401,7 @@ pub fn build_orchestrator(
         );
         tools.set_spawn_executor(spawn_exec);
     }
-    Ok(Orchestrator {
+    let orch = Orchestrator {
         registry: registry.clone(),
         orch_provider: provider,
         model_pool: pool,
@@ -1396,7 +1426,12 @@ pub fn build_orchestrator(
         queue_draining: parking_lot::Mutex::new(std::collections::HashSet::new()),
         auto_adapt: cfg.automation.auto_adapt,
         config_snapshot: Arc::new(parking_lot::RwLock::new(cfg.clone())),
-    })
+    };
+    // 语音合成回接（assistant-parity T2）：speech_reply 工具 → orchestrator
+    // speak_audio（能力槽位链：组覆盖 speech → 全局 speech → tts-1 兜底）。
+    // build_orchestrator 无 Arc 环境无法拿 Weak——回接在 Core::new 装配处完成
+    // （orchestrator 进 Arc 之后）；这里只负责把 tools 交出去。
+    Ok(orch)
 }
 
 // ---------------------------------------------------------------- [meta] 提议应用辅助（meta-agent）

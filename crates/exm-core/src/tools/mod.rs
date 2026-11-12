@@ -72,6 +72,7 @@ mod redact;
 mod web;
 mod browser;
 mod schedule;
+mod speech;
 
 #[cfg(test)]
 mod tests;
