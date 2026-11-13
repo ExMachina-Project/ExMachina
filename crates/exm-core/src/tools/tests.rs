@@ -1,6 +1,203 @@
 //! tools/tests.rs —— 原 tools.rs 内联测试随拆分整体迁出（纯搬移）
 
 use super::*;
+mod knowledge_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::{AgentDefinition, GroupMeta, Tier};
+    use std::sync::Arc;
+
+    struct TestRig {
+        gw: ToolGateway,
+        no_knowledge_gw: ToolGateway,
+        dir: std::path::PathBuf,
+    }
+
+    fn rig() -> TestRig {
+        let dir = std::env::temp_dir().join(format!("exm-ktool-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let knowledge = Arc::new(crate::knowledge::KnowledgeStore::open(dir.join("data")).unwrap());
+        let gw = ToolGateway::new(&dir, store.clone(), registry.clone(), events.clone(), SecurityConfig::default())
+            .with_knowledge(knowledge);
+        // 未装配对照组：恒下发但知识库未注入时应明确报错而非静默失败
+        let no_knowledge_gw = ToolGateway::new(
+            &dir,
+            store,
+            registry,
+            events,
+            SecurityConfig::default(),
+        );
+        TestRig { gw, no_knowledge_gw, dir }
+    }
+
+    async fn k_write(gw: &ToolGateway, title: &str, body: &str, tags: &[&str]) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-k",
+            &[ToolName::KnowledgeWrite, ToolName::KnowledgeRead],
+            ToolName::KnowledgeWrite,
+            &serde_json::json!({ "title": title, "body": body, "tags": tags }),
+        )
+        .await
+    }
+
+    async fn k_read(gw: &ToolGateway, args: serde_json::Value) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-k",
+            &[ToolName::KnowledgeWrite, ToolName::KnowledgeRead],
+            ToolName::KnowledgeRead,
+            &args,
+        )
+        .await
+    }
+
+    /// 三 op 全链路：write 回显状态与 id → search 命中并累加 hits → get 取全文 → list 列示
+    #[tokio::test]
+    async fn 知识工具_三op全链路() {
+        let rig = rig();
+        // 新建
+        let w = k_write(
+            &rig.gw,
+            "napcat 图片直发约束",
+            "QQ 官方机器人 files 上行仅支持 png/jpg，file_data 为 base64，≤20MB",
+            &["qq", "media"],
+        )
+        .await;
+        assert!(w.ok, "写入应成功：{}", w.error.unwrap_or_default());
+        assert!(w.output.contains("新建"), "首写回显新建：{}", w.output);
+        let id = w
+            .output
+            .lines()
+            .find(|l| l.starts_with("id: "))
+            .unwrap()
+            .trim_start_matches("id: ")
+            .to_string();
+        assert!(!id.is_empty(), "回显条目 id");
+
+        // search：命中且 hits 累加
+        let s = k_read(
+            &rig.gw,
+            serde_json::json!({ "op": "search", "query": "napcat 直发", "limit": 5 }),
+        )
+        .await;
+        assert!(s.ok);
+        assert!(s.output.contains(&id), "检索应命中：{}", s.output);
+        assert!(s.output.contains("hits: 1"), "命中累加 hits：{}", s.output);
+
+        // get：取全文
+        let g = k_read(&rig.gw, serde_json::json!({ "op": "get", "id": id })).await;
+        assert!(g.ok);
+        assert!(g.output.contains("file_data 为 base64"), "get 应含全文");
+
+        // list：最近条目列示
+        let l = k_read(&rig.gw, serde_json::json!({ "op": "list", "limit": 5 })).await;
+        assert!(l.ok);
+        assert!(l.output.contains(&id), "list 应列示：{}", l.output);
+
+        // 重复写入：去重提升（回显既有 id 而非新建）
+        let w2 = k_write(
+            &rig.gw,
+            "napcat 图片直发约束",
+            "QQ 官方机器人 files 上行仅支持 png/jpg，file_data 为 base64，≤20MB",
+            &[],
+        )
+        .await;
+        assert!(w2.ok);
+        assert!(
+            w2.output.contains("去重提升"),
+            "重复写入回显去重提升：{}",
+            w2.output
+        );
+        assert!(
+            w2.output.contains(&id),
+            "去重回显原条目 id：{}",
+            w2.output
+        );
+        // 来源标注：写入个体与会话
+        let g2 = k_read(&rig.gw, serde_json::json!({ "op": "get", "id": id })).await;
+        assert!(g2.output.contains("来源: t"), "来源标注写入个体");
+        assert!(g2.output.contains("会话: s-k"), "来源标注会话");
+    }
+
+    /// body 超限拒绝（8000 字符护栏）：拒绝并引导拆分，不落库
+    #[tokio::test]
+    async fn 知识工具_正文超限拒绝() {
+        let rig = rig();
+        let long = "知".repeat(crate::knowledge::KNOWLEDGE_BODY_CAP_CHARS + 1);
+        let w = k_write(&rig.gw, "超长", &long, &[]).await;
+        assert!(!w.ok, "超限应拒绝");
+        let err = w.error.unwrap_or_default();
+        assert!(err.contains("拆分"), "拒绝信息引导拆分：{err}");
+        // 库里没有残留
+        let l = k_read(&rig.gw, serde_json::json!({ "op": "list" })).await;
+        assert!(l.output.contains("知识库为空"), "拒绝不落库：{}", l.output);
+    }
+
+    /// 必填护栏：title/body 空拒绝；未知 op 拒绝
+    #[tokio::test]
+    async fn 知识工具_入参护栏() {
+        let rig = rig();
+        let w = k_write(&rig.gw, "", "有正文无标题", &[]).await;
+        assert!(!w.ok && w.error.unwrap().contains("title"));
+        let w = k_write(&rig.gw, "标题", "", &[]).await;
+        assert!(!w.ok && w.error.unwrap().contains("body"));
+        let r = k_read(&rig.gw, serde_json::json!({ "op": "wat" })).await;
+        assert!(!r.ok && r.error.unwrap().contains("未知 op"));
+        let r = k_read(&rig.gw, serde_json::json!({ "op": "search", "query": "" })).await;
+        assert!(!r.ok && r.error.unwrap().contains("query"));
+        let r = k_read(&rig.gw, serde_json::json!({ "op": "get", "id": "nope" })).await;
+        assert!(!r.ok && r.error.unwrap().contains("不存在"));
+    }
+
+    /// 未装配对照：明确报错（不静默失败）
+    #[tokio::test]
+    async fn 知识工具_未装配明确报错() {
+        let rig = rig();
+        let w = rig
+            .no_knowledge_gw
+            .execute(
+                "t",
+                "s-k",
+                &[ToolName::KnowledgeWrite],
+                ToolName::KnowledgeWrite,
+                &serde_json::json!({ "title": "t", "body": "b" }),
+            )
+            .await;
+        assert!(!w.ok);
+        assert!(w.error.unwrap().contains("未装配"));
+    }
+}
 mod memory_tool_tests {
     use super::*;
     use std::sync::Arc;

@@ -167,6 +167,25 @@ impl ToolGateway {
             },
             "required": ["text"]
         }));
+        push(ToolName::KnowledgeWrite, "写入共享知识库：沉淀对全体智能体通用的客观知识（部署约束、平台特性、方法论、踩坑经验）。内容哈希去重——重复写入会提升既有条目热度而非新建。沉淀纪律：只存跨会话可复用的通用结论，不存会话私有细节、用户个人信息或一次性流水；与记忆的分工——记忆存本组经历，知识存实例级通用事实。正文超 8000 字符会被拒绝，超长内容请拆分为多条聚焦知识", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "一句话标题（概括这条知识）" },
+                "body": { "type": "string", "description": "知识正文（精炼、可独立理解，≤8000 字符）" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "标签（可选，辅助检索）" }
+            },
+            "required": ["title", "body"]
+        }));
+        push(ToolName::KnowledgeRead, "检索共享知识库（全体智能体通用知识层，与记忆互补）：先查已有结论再探索能省大量重复工作。op=search 按关键词检索 top-k；op=get 按 id 取全文；op=list 列最近条目（含 hits 热度参考）。遇到部署/平台/环境类问题或可复用方法论时，先检索这里", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["search", "get", "list"], "description": "默认 search" },
+                "query": { "type": "string", "description": "op=search：检索关键词" },
+                "id": { "type": "string", "description": "op=get：条目 id" },
+                "limit": { "type": "integer", "description": "返回条数（默认 5，上限 20）" }
+            },
+            "required": []
+        }));
         push(ToolName::Browser, "浏览器自动化（Chrome + CDP）：搜索网页（无需搜索 API）、导航网页、取渲染后正文、执行 JS、截图。适合抓动态页面 / 走一遍网页流程 / 留存页面证据；搜索后端未配置时 op=search 是联网检索的主路径", serde_json::json!({
             "type": "object",
             "properties": {

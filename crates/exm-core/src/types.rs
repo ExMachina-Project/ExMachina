@@ -172,6 +172,13 @@ pub enum ToolName {
     /// 未配置 TTS 能力模型时返回未装配说明（不进工具面）。
     #[serde(rename = "speech_reply")]
     Speech,
+    /// 知识写入（knowledge-base）：通用知识沉淀进全智能体共享知识库
+    /// （内容哈希去重，重复写入去重提升）；与记忆分离——知识不分区
+    #[serde(rename = "knowledge_write")]
+    KnowledgeWrite,
+    /// 知识读取（knowledge-base）：op=search 检索 / get 取全文 / list 最近
+    #[serde(rename = "knowledge_read")]
+    KnowledgeRead,
 }
 
 impl ToolName {
@@ -203,6 +210,8 @@ impl ToolName {
             ToolName::MetaPropose => "meta_propose",
             ToolName::MetaBuild => "meta_build",
             ToolName::Speech => "speech_reply",
+            ToolName::KnowledgeWrite => "knowledge_write",
+            ToolName::KnowledgeRead => "knowledge_read",
         }
     }
 
@@ -218,6 +227,7 @@ impl ToolName {
                 | ToolName::MemoryRead
                 | ToolName::Todo
                 | ToolName::MetaObserve
+                | ToolName::KnowledgeRead
         )
     }
 
@@ -249,6 +259,8 @@ impl ToolName {
             "meta_build" => Some(ToolName::MetaBuild),
             "todo" => Some(ToolName::Todo),
             "speech_reply" => Some(ToolName::Speech),
+            "knowledge_write" => Some(ToolName::KnowledgeWrite),
+            "knowledge_read" => Some(ToolName::KnowledgeRead),
             _ => None,
         }
     }
@@ -285,6 +297,8 @@ impl ToolName {
             ToolName::MetaPropose,
             ToolName::MetaBuild,
             ToolName::Speech,
+            ToolName::KnowledgeWrite,
+            ToolName::KnowledgeRead,
         ]
     }
 }

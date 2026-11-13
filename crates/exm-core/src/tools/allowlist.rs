@@ -1135,6 +1135,15 @@ impl ToolGateway {
                 }
             }
         }
+        // 知识库全局共享（spec: knowledge-base）：两工具对全部智能体恒下发——
+        // 不进任何「主智能体/编排体才默认授权」分支，也不受个体编成 tools 声明
+        // 缺省的影响（编成未列 = 沿用全量的口径之外，知识工具是实例级公共面）。
+        // 通道能力档（chat/tools/computer）仍照常收窄：仅聊天通道不下发任何工具。
+        for t in [ToolName::KnowledgeWrite, ToolName::KnowledgeRead] {
+            if !allowlist.contains(&t) {
+                allowlist.push(t);
+            }
+        }
         allowlist
     }
 }

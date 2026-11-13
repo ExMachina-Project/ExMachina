@@ -213,6 +213,7 @@ impl Core {
             &registry,
             &events,
             &memory,
+            &knowledge,
             Some(mcp_handle.clone()),
             None,
             Some(cron.clone()),
@@ -344,6 +345,7 @@ impl Core {
             &self.registry,
             &self.events,
             &self.memory,
+            &self.knowledge,
             Some(self.mcp.clone()),
             self.remote(),
             Some(self.cron.clone()),
@@ -792,6 +794,7 @@ impl Core {
             &self.registry,
             &self.events,
             &self.memory,
+            &self.knowledge,
             Some(self.mcp.clone()),
             self.remote(),
             Some(self.cron.clone()),
@@ -1238,6 +1241,7 @@ pub fn build_orchestrator(
     registry: &Arc<LocalRegistry>,
     events: &broadcast::Sender<CoreEvent>,
     memory: &Arc<MemoryStore>,
+    knowledge: &Arc<crate::knowledge::KnowledgeStore>,
     mcp: Option<Arc<crate::mcp::McpRegistry>>,
     remote: Option<Arc<dyn crate::remote::RemoteExecutor>>,
     cron: Option<Arc<CronStore>>,
@@ -1301,6 +1305,8 @@ pub fn build_orchestrator(
     gateway = gateway.with_memory(memory.clone());
     // 记忆模式对齐（深层记忆关闭 = 文件记忆模式）：工具面读 md、拒写库，与规划注入同源
     gateway = gateway.with_memory_mode(cfg.memory_enabled, cfg.memory_md_path.clone());
+    // 知识工具（knowledge_write/read）的受控入口：全局共享不分区，装配即全量语义
+    gateway = gateway.with_knowledge(knowledge.clone());
     let tools = Arc::new(gateway);
     let unit_runtime = Arc::new(
         AgentRuntime::new(
