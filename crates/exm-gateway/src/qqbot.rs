@@ -592,6 +592,110 @@ async fn handle_message(
     let ap_peer = peer.clone();
     let ap_msg_id = msg_id.clone();
     let ap_seq = seq.clone();
+    // 富媒体直发（qqbot-media-files）：官方 files 上行支持 file_data（二进制
+    // base64）——先 POST /files 换 file_info，再 msg_type=7 携带发送。全程
+    // 出站请求，无需公网入站可达（URL 上传要 QQ 服务器来拉文件，NAT 后不可行）。
+    // 官方仅图片（png/jpg）支持充分；视频/语音/文件不走此路（仍降级注记）。
+    let md_creds = creds.clone();
+    let md_base = base.clone();
+    let md_peer = peer.clone();
+    let md_msg_id = msg_id.clone();
+    let md_seq = seq.clone();
+    let media_send: crate::platform::channel::MediaHook = Box::new(
+        move |item: MediaItem| {
+            let creds = md_creds.clone();
+            let base = md_base.clone();
+            let peer = md_peer.clone();
+            let msg_id = md_msg_id.clone();
+            let seq = md_seq.clone();
+            Box::pin(async move {
+                if item.kind != "image" {
+                    return false;
+                }
+                let Some(token) = creds.token().await else {
+                    eprintln!("[qqbot] 媒体发送失败：access_token 获取失败");
+                    return false;
+                };
+                let Ok(bytes) = tokio::fs::read(&item.path).await else {
+                    return false;
+                };
+                // 图片格式护栏：官方 png/jpg；其它扩展名（svg/webp…）直接拒——
+                // 上传后平台侧展示失败，不如在此诚实回落
+                let ext = item
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                    eprintln!("[qqbot] 媒体降级：仅 png/jpg 可直发（收到 .{ext}）");
+                    return false;
+                }
+                use base64::Engine as _;
+                let file_data =
+                    base64::engine::general_purpose::STANDARD.encode(&bytes);
+                // 20MB 软限制（官方文档）：超限回落注记
+                if bytes.len() > 20 * 1024 * 1024 {
+                    eprintln!("[qqbot] 媒体降级：图片超 20MB（{}）", bytes.len());
+                    return false;
+                }
+                let (files_path, msg_path) = match &peer {
+                    Peer::Group(g) => (
+                        format!("/v2/groups/{g}/files"),
+                        format!("/v2/groups/{g}/messages"),
+                    ),
+                    Peer::C2C(u) => (
+                        format!("/v2/users/{u}/files"),
+                        format!("/v2/users/{u}/messages"),
+                    ),
+                    Peer::Guild(_) => return false,
+                };
+                // 第一步：上传换 file_info（srv_send_msg=false 不直接发）
+                let up_body = json!({
+                    "file_type": 1,
+                    "file_data": file_data,
+                    "srv_send_msg": false,
+                });
+                let file_info = match creds
+                    .client
+                    .post(format!("{base}{files_path}"))
+                    .header("Authorization", format!("QQBot {token}"))
+                    .json(&up_body)
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        let v: Value = r.json().await.unwrap_or(Value::Null);
+                        v.get("file_info")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string())
+                    }
+                    Ok(r) => {
+                        let status = r.status();
+                        let body = r.text().await.unwrap_or_default();
+                        eprintln!("[qqbot] 媒体上传失败：HTTP {status} {body}");
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("[qqbot] 媒体上传网络错误：{e}");
+                        None
+                    }
+                };
+                let Some(file_info) = file_info else {
+                    return false;
+                };
+                // 第二步：msg_type=7 携带 file_info 发送（被动回复带 msg_id）
+                let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
+                let msg_body = json!({
+                    "msg_type": 7,
+                    "msg_id": msg_id,
+                    "msg_seq": next,
+                    "media": { "file_info": file_info },
+                });
+                post_message(&creds, &base, &msg_path, &msg_body).await
+            })
+        },
+    );
     let approval_send: crate::platform::channel::ApprovalHook = Box::new(
         move |prompt: ApprovalPrompt| -> std::pin::Pin<
             Box<dyn std::future::Future<Output = bool> + Send>,
@@ -620,7 +724,7 @@ async fn handle_message(
                 send_passive(&creds, &base, &peer, &msg_id, seq.as_ref(), &text).await;
             }
         },
-        move |_item: MediaItem| async { false },
+        media_send,
         Some(approval_send),
     );
     // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）

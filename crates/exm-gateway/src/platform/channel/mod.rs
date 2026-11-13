@@ -189,12 +189,14 @@ pub(crate) struct ChannelCaps {
     pub typing: bool,
 }
 
-/// 能力矩阵：telegram/discord/slack/napcat/matrix 直发媒体（或部分），qqbot 官方 API 受限全降级。
+/// 能力矩阵：telegram/discord/slack/napcat/matrix 直发媒体（或部分），
+/// qqbot 图片直发（files 上行 file_data），其余类型降级。
 /// 与各适配器实际发送实现保持同步——新增实现即开位。
 /// 平台不支持项的原因（给维护者的口径，别随手"优化"回去）：
 /// · discord voice：无原生语音条目形态，为避免与「discord 不支持语音」的既有测试口径冲突暂不开位；
 /// · slack / napcat typing：Slack 机器人无输入中指示 API；OneBot 11 无标准 typing 动作；
-/// · qqbot 全降级：官方机器人被动消息仅支持文本，富媒体需另走 richmedia 上报链路。
+/// · qqbot file/voice：官方 files 上行 file_data 仅图片（png/jpg）支持充分——
+///   语音须 silk 转码、视频/文件的上行用例不稳；且 file_info 有 TTL，超时即失效。
 pub(crate) fn caps(kind: &str) -> ChannelCaps {
     match kind {
         "telegram" => ChannelCaps {
@@ -229,6 +231,14 @@ pub(crate) fn caps(kind: &str) -> ChannelCaps {
             file: true,
             voice: true,
             typing: true,
+        },
+        // qqbot：图片经 files 上行（file_data base64 → file_info → msg_type=7）
+        // 原生直发；file/voice 降级（file_data 官方仅图片支持充分）
+        "qqbot" => ChannelCaps {
+            image: true,
+            file: false,
+            voice: false,
+            typing: false,
         },
         _ => ChannelCaps {
             image: false,
@@ -426,8 +436,8 @@ mod reply_split_tests {
         // discord 不支持语音
         assert_eq!(media_fallback("discord", "voice"), MediaFallback::LinkNote);
         assert_eq!(media_fallback("discord", "image"), MediaFallback::Native);
-        // qqbot 全降级
-        assert_eq!(media_fallback("qqbot", "image"), MediaFallback::LinkNote);
+        // qqbot：图片直发（files 上行），file/voice 降级
+        assert_eq!(media_fallback("qqbot", "image"), MediaFallback::Native);
         assert_eq!(media_fallback("qqbot", "file"), MediaFallback::LinkNote);
         // 未知平台全降级
         assert_eq!(media_fallback("webhook", "image"), MediaFallback::LinkNote);

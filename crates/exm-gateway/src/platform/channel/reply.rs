@@ -150,10 +150,15 @@ where
                         .unwrap_or("")
                         .to_string();
                     let abs = run.core.config().workspace_root.join(&rel);
+                    let size = tokio::fs::metadata(&abs)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     let item = MediaItem {
                         kind: kind.clone(),
                         path: abs,
-                        caption,
+                        caption: caption.clone(),
+                        size,
                     };
                     match media_fallback(&run.kind, &kind) {
                         MediaFallback::Native => {
@@ -165,7 +170,17 @@ where
                             }
                         }
                         MediaFallback::LinkNote => {
-                            media_notes.push(format!("📎 {}：{rel}（工作区内）", item.caption));
+                            // NAT/内网部署下无公网可达的下载地址：如实说明文件
+                            // 在工作区（WebUI 可取），不编造点不开的路径链接
+                            let name = item
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| rel.clone());
+                            media_notes.push(format!(
+                                "📎 {name}（{} KB）：{caption}——文件已生成在工作区，可在 WebUI 会话中获取；本聊天平台暂不支持直接发送此类文件",
+                                std::cmp::max(1, item.size / 1024),
+                            ));
                         }
                     }
                 }

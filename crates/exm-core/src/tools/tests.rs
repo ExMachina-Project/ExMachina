@@ -76,6 +76,36 @@ mod memory_tool_tests {
         assert_eq!(items[0]["kind"], "file");
         assert_eq!(items[0]["path"], "report.md", "登记必须为工作区相对路径");
         assert_eq!(items[0]["caption"], "周报");
+        // 图片扩展名 → kind=image（IM 平台原生内嵌展示走直发）
+        std::fs::write(rig.dir.join("chart.png"), "fake-png").unwrap();
+        let rp = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "chart.png" }),
+            )
+            .await;
+        assert!(rp.ok, "send_file png 应成功: {:?}", rp.error);
+        let items_p = rig.gw.store.outbox_drain("s-send").unwrap();
+        assert_eq!(items_p[0]["kind"], "image", "png 应登记为 image");
+        // svg 保持 file（QQ 无法内嵌渲染 web 图片格式）
+        std::fs::write(rig.dir.join("figure.svg"), "<svg/>").unwrap();
+        let rs = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "figure.svg" }),
+            )
+            .await;
+        assert!(rs.ok, "send_file svg 应成功: {:?}", rs.error);
+        let items_s = rig.gw.store.outbox_drain("s-send").unwrap();
+        assert_eq!(items_s[0]["kind"], "file", "svg 应保持 file");
         // 目录 → 拒绝
         let r2 = rig
             .gw

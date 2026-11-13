@@ -874,9 +874,19 @@ impl ToolGateway {
                     .strip_prefix(&self.workspace_root)
                     .map(|p| p.display().to_string().replace('\\', "/"))
                     .unwrap_or_else(|_| target.display().to_string());
-                let _ = self
-                    .store
-                    .outbox_push(session_id, "file", &rel, &caption);
+                // kind 按扩展名分类：IM 平台对图片有原生内嵌展示（qqbot files
+                // 上行、napcat image 段），png/jpg/jpeg/gif/webp 登记为 image
+                // 走直发；svg 等 web 格式 QQ 无法内嵌渲染，保持 file（附件语义）
+                let ext = target
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let kind = match ext.as_str() {
+                    "png" | "jpg" | "jpeg" | "gif" | "webp" => "image",
+                    _ => "file",
+                };
+                let _ = self.store.outbox_push(session_id, kind, &rel, &caption);
                 ToolResult::ok(format!(
                     "已登记投递：{name}（{} KB）——本轮收束时发送给用户",
                     size / 1024
