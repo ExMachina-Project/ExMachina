@@ -18,6 +18,7 @@ pub mod cron;
 pub mod fsdb;
 pub mod image_stash;
 pub mod inbox_stash;
+pub mod knowledge;
 pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
@@ -109,6 +110,7 @@ pub struct Core {
     pub registry: Arc<LocalRegistry>,
     pub store: Arc<Store>,
     pub memory: Arc<MemoryStore>,
+    pub knowledge: Arc<crate::knowledge::KnowledgeStore>,
     pub events: broadcast::Sender<CoreEvent>,
     pub cron: Arc<CronStore>,
     /// Auto Agent 运行态（实验性 experiments.autoAgent）：空转计数 + 上次 tick 分钟
@@ -186,6 +188,7 @@ impl Core {
     pub fn with_config(cfg: ExmConfig) -> anyhow::Result<Self> {
         let store = Arc::new(Store::open(&cfg.data_dir)?);
         let memory = Arc::new(MemoryStore::open(&cfg.data_dir)?);
+        let knowledge = Arc::new(crate::knowledge::KnowledgeStore::open(&cfg.data_dir)?);
         let cron = Arc::new(CronStore::open(&cfg.data_dir)?);
         let auto_state = parking_lot::RwLock::new(AutoAgentState::default());
         let registry = Arc::new(LocalRegistry::new(&cfg.agents_dir)?);
@@ -268,6 +271,7 @@ impl Core {
             registry,
             store,
             memory,
+            knowledge,
             events,
             cron,
             auto_state,
