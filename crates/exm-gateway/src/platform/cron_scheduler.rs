@@ -182,14 +182,14 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
                 }
                 // 实验可观测（assistant-parity）：摘要执行事件——归纳会话数与
                 // 产出条数（前后差值），全局事件流可检索
-                let _ = core.events.send(exm_core::types::CoreEvent {
-                    kind: "memory.digest".into(),
-                    session_id: String::new(),
-                    payload: json!({
+                core.emit_session_event(
+                    "",
+                    "memory.digest",
+                    json!({
                         "sessions": digested,
                         "entriesProduced": after_entries.saturating_sub(before_entries),
                     }),
-                });
+                );
                 let marker = exm_core::types::CronJob {
                     id: DIGEST_MARKER.into(),
                     name: "自主记忆摘要标记".into(),
@@ -229,12 +229,13 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
                 .unwrap_or_default();
             if last != minute_key {
                 let changed = core.memory_decay(0.05).unwrap_or(0);
-                // 可观测：执行条数落全局事件流（memory.decay.ran）
-                let _ = core.events.send(exm_core::types::CoreEvent {
-                    kind: "memory.decay.ran".into(),
-                    session_id: String::new(),
-                    payload: json!({ "changed": changed, "floor": 0.05 }),
-                });
+                // 可观测：执行条数落全局事件流（memory.decay.ran；广播 +
+                // 落事件库，事件页/实验卡片可检索——与 emit_and_persist 同口径）
+                core.emit_session_event(
+                    "",
+                    "memory.decay.ran",
+                    json!({ "changed": changed, "floor": 0.05 }),
+                );
                 eprintln!("[memory-decay] 低峰衰减完成：{changed} 条 importance 更新");
                 let marker = exm_core::types::CronJob {
                     id: DECAY_MARKER.into(),
@@ -430,5 +431,21 @@ mod auto_decay_tests {
         let k1 = exm_core::cron::minute_key(now);
         let k2 = exm_core::cron::minute_key(now);
         assert_eq!(k1, k2, "同分钟同 key（当日同窗口去重的基础）");
+    }
+
+    /// 事件口径锚定：decay/digest 事件走 emit_session_event（广播 + 落库），
+    /// 全局事件文件可检索（7.2 实验卡片的数据源）。events.send 只广播不落库，
+    /// 用它事件永远进不了事件页——这里锚定修复后的落库行为。
+    #[tokio::test]
+    async fn 事件_衰减执行后落全局事件库() {
+        let core = test_core();
+        assert!(core.config().memory_auto_decay, "缺省开启");
+        core.emit_session_event("", "memory.decay.ran", serde_json::json!({ "changed": 3, "floor": 0.05 }));
+        let evts = core.store.list_events("").unwrap();
+        let hit = evts.iter().any(|env| {
+            env["payload"]["type"].as_str() == Some("memory.decay.ran")
+                && env["payload"]["payload"]["changed"].as_u64() == Some(3)
+        });
+        assert!(hit, "memory.decay.ran 应广播并落全局事件库（空 session_id 文件）");
     }
 }
