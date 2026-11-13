@@ -187,6 +187,10 @@ pub enum ToolName {
     /// 产物经 outbox 随本轮回复直发。chart.endpoint 空串时不下发。
     #[serde(rename = "render_chart")]
     RenderChart,
+    /// 深度研究（deep-research）：topic → 计划 → 并行检索 → 引用聚合 →
+    /// 结构化 Markdown 报告（四节 + 内联引用 + 来源清单）。
+    #[serde(rename = "research_report")]
+    ResearchReport,
 }
 
 impl ToolName {
@@ -222,6 +226,7 @@ impl ToolName {
             ToolName::KnowledgeRead => "knowledge_read",
             ToolName::ImageGen => "image_gen",
             ToolName::RenderChart => "render_chart",
+            ToolName::ResearchReport => "research_report",
         }
     }
 
@@ -273,6 +278,7 @@ impl ToolName {
             "knowledge_read" => Some(ToolName::KnowledgeRead),
             "image_gen" => Some(ToolName::ImageGen),
             "render_chart" => Some(ToolName::RenderChart),
+            "research_report" => Some(ToolName::ResearchReport),
             _ => None,
         }
     }
@@ -313,6 +319,7 @@ impl ToolName {
             ToolName::KnowledgeRead,
             ToolName::ImageGen,
             ToolName::RenderChart,
+            ToolName::ResearchReport,
         ]
     }
 }

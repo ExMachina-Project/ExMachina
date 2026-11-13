@@ -76,6 +76,7 @@ mod speech;
 mod knowledge;
 mod image_gen;
 mod chart;
+mod research;
 
 #[cfg(test)]
 mod tests;

@@ -1337,6 +1337,8 @@ pub fn build_orchestrator(
     gateway = gateway.with_knowledge(knowledge.clone());
     // 图表渲染端点（render_chart 工具）：chart.endpoint 空 = 关闭
     gateway.set_chart_endpoint(&cfg.chart_endpoint);
+    // 深度研究通道（research_report 计划与聚合两阶段）
+    gateway.set_research_llm(provider.clone(), cfg.llm.model.clone());
     let tools = Arc::new(gateway);
     let unit_runtime = Arc::new(
         AgentRuntime::new(
