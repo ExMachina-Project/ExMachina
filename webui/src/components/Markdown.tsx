@@ -53,13 +53,14 @@ const FOLD_LINES = 14;
 function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>): React.ReactElement {
   const [copied, setCopied] = useState(false);
   const { text, lang } = codeInfo(props.children);
-  // mermaid 围栏分流：代码块管线交给图表渲染（动态 import、错误回落原码）
-  if (lang === "mermaid") {
-    return <MermaidBlock code={text.replace(/\n$/, "")} />;
-  }
   const lineCount = text ? text.replace(/\n$/, "").split("\n").length : 0;
   const long = lineCount > FOLD_LINES;
   const [expanded, setExpanded] = useState(false);
+  // mermaid 围栏分流：代码块管线交给图表渲染（动态 import、错误回落原码）。
+  // Hooks 全部前置（rules-of-hooks）——mermaid 分支 return 在所有 Hook 调用后
+  if (lang === "mermaid") {
+    return <MermaidBlock code={text.replace(/\n$/, "")} />;
+  }
   const showFolded = long && !expanded;
   return (
     <div className={`code-block-wrap${long ? " code-block-long" : ""}`}>

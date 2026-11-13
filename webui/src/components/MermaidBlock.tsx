@@ -12,10 +12,10 @@ type MermaidState =
   | { phase: "ok"; svg: string }
   | { phase: "error"; message: string };
 
-/** mermaid 单例初始化（幂等）：主题按当前预设切换深浅 */
-let mermaidReady: Promise<{
+/** mermaid 渲染器类型（动态 import 的最小面） */
+type MermaidRenderer = {
   render: (id: string, text: string) => Promise<{ svg: string }>;
-}> | null = null;
+};
 
 async function getMermaid(dark: boolean) {
   const mermaid = await import("mermaid");
