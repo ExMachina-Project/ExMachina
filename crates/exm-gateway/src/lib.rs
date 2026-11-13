@@ -54,7 +54,7 @@ use playbooks::list_playbooks;
 use mcp_admin::{mcp_servers, mcp_refresh, mcp_mount};
 use voice::{voice_transcribe, voice_speak};
 use checkpoints::{list_checkpoints, restore_checkpoint};
-use memory_admin::{list_memory, add_memory, search_memory, memory_stats, memory_reindex, memory_decay, get_memory_md, put_memory_md, memory_render, forget_memory, pin_memory, update_memory};
+use memory_admin::{list_memory, add_memory, search_memory, memory_stats, memory_reindex, memory_decay, get_memory_md, put_memory_md, memory_render, forget_memory, pin_memory, update_memory, export_memory};
 use ws::{ws_handler, ws_auth_guard};
 
 pub mod assets;
@@ -312,6 +312,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/checkpoints/restore", post(restore_checkpoint))
         // 记忆系统（docs/08 §6）
         .route("/api/memory", get(list_memory).post(add_memory))
+        .route("/api/memory/export", get(export_memory))
         .route("/api/memory/search", post(search_memory))
         .route("/api/memory/stats", get(memory_stats))
         .route("/api/memory/reindex", post(memory_reindex))

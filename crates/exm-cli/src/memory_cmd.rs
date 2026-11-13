@@ -206,3 +206,27 @@ pub fn run_memory_render(core: &Core) -> anyhow::Result<()> {
     println!("{} memory.md 已重渲染（固定记忆 {n} 条）", ok("完成"));
     Ok(())
 }
+
+/// 全量导出为 JSONL（memory-lifecycle 6.3）：每行一条完整条目 JSON，
+/// 字段与 list 单条一致；--agent 过滤同口径；不含派生索引数据。
+/// file 缺省打印 stdout（管道友好）；传 file 落盘并回显路径。
+pub fn run_memory_export(core: &Core, file: Option<&str>, agent: Option<&str>) -> anyhow::Result<()> {
+    let entries = core.memory_list_filtered(None, agent, usize::MAX)?;
+    let jsonl: String = entries
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    match file {
+        Some(path) => {
+            std::fs::write(path, format!("{jsonl}\n"))?;
+            println!(
+                "{} 已导出 {} 条到 {path}（JSONL，每行一条）",
+                ok("完成"),
+                entries.len()
+            );
+        }
+        None => println!("{jsonl}"),
+    }
+    Ok(())
+}

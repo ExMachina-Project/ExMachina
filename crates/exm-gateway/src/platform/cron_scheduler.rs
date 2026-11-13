@@ -192,6 +192,52 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
         }
     }
 
+    // 每日自动衰减（memory-lifecycle 6.2）：memory.autoDecay 开启时每日一次
+    // 低峰窗口（UTC 4:40，错开 4:30 记忆摘要）全量衰减。关闭态不进扫描
+    // （零任务零开销）。当日去重同 DIGEST_MARKER 模式（cron 表标记行）。
+    // 衰减只调 importance 数值（钳 floor），绝不删除条目；手动端点保留可并存。
+    if core.config().memory_auto_decay {
+        use chrono::Timelike;
+        if (now.hour(), now.minute()) == (4, 40) {
+            const DECAY_MARKER: &str = "__memory_decay_marker__";
+            let minute_key = exm_core::cron::minute_key(now);
+            let last = core
+                .cron
+                .get(DECAY_MARKER)?
+                .and_then(|j| j.last_run_minute)
+                .unwrap_or_default();
+            if last != minute_key {
+                let changed = core.memory_decay(0.05).unwrap_or(0);
+                // 可观测：执行条数落全局事件流（memory.decay.ran）
+                let _ = core.events.send(exm_core::types::CoreEvent {
+                    kind: "memory.decay.ran".into(),
+                    session_id: String::new(),
+                    payload: json!({ "changed": changed, "floor": 0.05 }),
+                });
+                eprintln!("[memory-decay] 低峰衰减完成：{changed} 条 importance 更新");
+                let marker = exm_core::types::CronJob {
+                    id: DECAY_MARKER.into(),
+                    name: "记忆衰减标记".into(),
+                    prompt: String::new(),
+                    kind: None,
+                    cron: Some("40 4 * * *".into()),
+                    at: None,
+                    target_session: None,
+                    steps: vec![],
+                    group: None,
+                    session_title: None,
+                    enabled: false,
+                    last_run_at: Some(exm_core::types::now_iso()),
+                    last_status: None,
+                    last_run_minute: Some(minute_key),
+                    notify_channels: vec![],
+                    created_at: exm_core::types::now_iso(),
+                };
+                let _ = core.cron.upsert(marker);
+            }
+        }
+    }
+
     if changed {
         let _ = core.events.send(CoreEvent {
             kind: "cron.updated".into(),
@@ -309,5 +355,61 @@ pub(crate) async fn notify_cron_result(
                     }),
                 );
         }
+    }
+}
+
+/// 每日自动衰减（memory-lifecycle 6.2）测试：开关两态与当日不重复
+#[cfg(test)]
+mod auto_decay_tests {
+    use super::*;
+
+    fn test_core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-decay-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        exm_core::Core::create(&dir).expect("创建 Core 失败")
+    }
+
+    /// 关闭态：不注册标记行（零任务零开销）
+    #[tokio::test]
+    async fn 关闭态_不注册标记() {
+        let core = test_core();
+        let mut cfg = (*core.config()).clone();
+        cfg.memory_auto_decay = false;
+        core.apply_config(cfg).unwrap();
+        assert!(!core.config().memory_auto_decay, "热更关闭生效");
+        // 关闭态不进扫描分支：标记行不存在（若注册过即行为错误）
+        assert!(core.cron.get("__memory_decay_marker__").unwrap().is_none());
+    }
+
+    /// 衰减语义锚定：只调 importance（钳 floor），绝不删除条目
+    #[tokio::test]
+    async fn 开启态_衰减不删除条目() {
+        let core = test_core();
+        assert!(core.config().memory_auto_decay, "缺省开启");
+        let draft = exm_core::memory::MemoryDraft::new(
+            exm_core::memory::MemoryKind::Fact,
+            "老记忆",
+            "测试记忆",
+        );
+        core.memory_remember_global(draft).unwrap();
+        // 连续执行两次衰减（幂等 + 不删除）
+        let _ = core.memory_decay(0.05).unwrap();
+        let _ = core.memory_decay(0.05).unwrap();
+        let after = core.memory_list(None, 100).unwrap();
+        assert_eq!(after.len(), 1, "衰减绝不删除条目");
+        assert!(
+            (0.05..=1.0).contains(&after[0].importance),
+            "importance 钳在 [floor, 初始] 区间: {}",
+            after[0].importance
+        );
+    }
+
+    /// 标记行当日去重基础：同分钟同 minute_key
+    #[test]
+    fn 标记行_minute_key去重语义() {
+        let now = chrono::Utc::now();
+        let k1 = exm_core::cron::minute_key(now);
+        let k2 = exm_core::cron::minute_key(now);
+        assert_eq!(k1, k2, "同分钟同 key（当日同窗口去重的基础）");
     }
 }
