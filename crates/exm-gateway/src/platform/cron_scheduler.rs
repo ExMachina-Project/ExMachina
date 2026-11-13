@@ -382,8 +382,6 @@ pub(crate) async fn notify_cron_result(
 /// 每日自动衰减（memory-lifecycle 6.2）测试：开关两态与当日不重复
 #[cfg(test)]
 mod auto_decay_tests {
-    use super::*;
-
     fn test_core() -> exm_core::Core {
         let dir = std::env::temp_dir().join(format!("exm-decay-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("agents")).unwrap();

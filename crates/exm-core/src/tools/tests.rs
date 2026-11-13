@@ -391,7 +391,7 @@ mod chart_tool_tests {
         let app = axum::Router::new().route(
             "/mermaid/svg",
             axum::routing::post(move || {
-                let fail = fail.clone();
+                let fail = fail;
                 async move {
                     if fail {
                         (

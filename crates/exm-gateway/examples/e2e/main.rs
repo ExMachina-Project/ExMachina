@@ -1192,7 +1192,6 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- 深度研究（deep-research 4.3）：mock 全链路 + 无后端报错 ----
     {
-        use exm_core::tools::ToolGateway;
         use exm_core::types::ToolName;
         // 前置说明：无后端报错路径由单测「研究工具_无后端明确报错」覆盖
         // （e2e 主流程前段已配 tavily 后端，此处起始即有后端）。

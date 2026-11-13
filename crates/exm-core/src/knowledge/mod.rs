@@ -443,7 +443,7 @@ mod tests {
         let store = test_store();
         let e = store.write(&draft("时区配置", "automation.timezone 接受 IANA 时区名")).unwrap();
         assert!(store.delete(&e.entry().id).unwrap(), "删除应成功");
-        assert!(store.delete(&e.entry().id).unwrap() == false, "二次删除返回 false");
+        assert!(!store.delete(&e.entry().id).unwrap(), "二次删除返回 false");
         assert!(store.get(&e.entry().id).unwrap().is_none());
         assert!(store.search("时区", 5).unwrap().is_empty(), "删除后不应命中");
     }

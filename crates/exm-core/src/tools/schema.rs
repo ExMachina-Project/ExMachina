@@ -390,6 +390,7 @@ impl ToolGateway {
     /// memory_write / memory_link 必然失败，不下发（与 web_search/browser 的
     /// 「后端未就绪不承诺」同一口径）；memory_read 保留——读 memory.md 仍有意义。
     /// 记忆模式门控下发：memory_deep=false（文件记忆模式）时记忆写类工具不下发
+    #[allow(clippy::too_many_arguments)]
     pub fn tool_specs_gated(
         allowlist: &[ToolName],
         search_ready: bool,

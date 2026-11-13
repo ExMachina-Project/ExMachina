@@ -324,7 +324,7 @@ mod image_generation_tests {
         let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG 魔数
         let b64 = base64::engine::general_purpose::STANDARD.encode(png);
         let (base, _hits) = spawn_server(vec![(
-            "/images/generations".into(),
+            "/images/generations",
             serde_json::json!({ "data": [{ "b64_json": b64 }] }),
         )])
         .await;
@@ -369,7 +369,7 @@ mod image_generation_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 生图_错误形态明确报错() {
         let (base, _hits) = spawn_server(vec![(
-            "/images/generations".into(),
+            "/images/generations",
             serde_json::json!({ "data": [] }),
         )])
         .await;

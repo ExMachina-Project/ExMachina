@@ -317,10 +317,10 @@ fn extract_urls(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for tok in text.split_whitespace() {
         let tok = tok.trim_matches(|c: char| c == '[' || c == ']' || c == '`' || c == '(' || c == ')');
-        if tok.starts_with("http://") || tok.starts_with("https://") {
-            if !out.contains(&tok.to_string()) {
-                out.push(tok.to_string());
-            }
+        if (tok.starts_with("http://") || tok.starts_with("https://"))
+            && !out.contains(&tok.to_string())
+        {
+            out.push(tok.to_string());
         }
     }
     out
@@ -545,9 +545,7 @@ mod research_tool_tests {
                     "spawn 白名单必须是只读检索面"
                 );
                 let _ = task;
-                Ok(format!(
-                    "要点：相关数据 [来源: https://example.com/market]"
-                ))
+                Ok("要点：相关数据 [来源: https://example.com/market]".to_string())
             })
         }));
         let r = rig

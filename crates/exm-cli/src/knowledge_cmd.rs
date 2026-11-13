@@ -83,6 +83,6 @@ pub fn run_knowledge_delete(core: &Core, id: &str) -> anyhow::Result<()> {
             Ok(())
         }
         Ok(false) => anyhow::bail!("知识条目不存在：{id}"),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(e),
     }
 }
