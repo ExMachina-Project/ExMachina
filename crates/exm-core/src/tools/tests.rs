@@ -325,6 +325,161 @@ mod image_gen_tool_tests {
         assert!(!r.ok && r.error.unwrap().contains("size"));
     }
 }
+
+mod chart_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::Tier;
+    use std::sync::Arc;
+
+    struct TestRig {
+        gw: ToolGateway,
+        store: Arc<Store>,
+    }
+
+    fn rig() -> TestRig {
+        let dir = std::env::temp_dir().join(format!("exm-charttool-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            crate::types::AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        TestRig { gw, store }
+    }
+
+    async fn render(gw: &ToolGateway, mermaid: &str) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-chart",
+            &[ToolName::RenderChart],
+            ToolName::RenderChart,
+            &serde_json::json!({ "mermaid": mermaid }),
+        )
+        .await
+    }
+
+    /// 最小 Kroki 兼容服务器：POST /mermaid/svg 回固定 SVG；?fail=1 回 400 错误体
+    async fn spawn_kroki(fail: bool) -> String {
+        use axum::response::IntoResponse;
+        let app = axum::Router::new().route(
+            "/mermaid/svg",
+            axum::routing::post(move || {
+                let fail = fail.clone();
+                async move {
+                    if fail {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "Syntax Error (line 1): unknown diagram type",
+                        )
+                            .into_response()
+                    } else {
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>",
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// 成功：SVG 落盘并登记 outbox（kind=file、.svg 扩展名）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 图表工具_成功登记() {
+        let rig = rig();
+        rig.gw.set_chart_endpoint(&spawn_kroki(false).await);
+        let r = render(&rig.gw, "flowchart TD\n  A --> B").await;
+        assert!(r.ok, "成功态：{}", r.error.unwrap_or_default());
+        assert!(r.output.contains("SVG"), "回显 SVG：{}", r.output);
+        let outbox = rig.store.outbox_drain("s-chart").unwrap();
+        assert_eq!(outbox.len(), 1, "登记一条产物");
+        assert_eq!(outbox[0]["kind"], "file");
+        assert!(
+            outbox[0]["path"].as_str().unwrap_or("").ends_with(".svg"),
+            "扩展名 .svg：{}",
+            outbox[0]["path"]
+        );
+    }
+
+    /// 语法错误：400 带回服务端错误摘要，不登记产物（模型可修正重试）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 图表工具_语法错误带回摘要() {
+        let rig = rig();
+        rig.gw.set_chart_endpoint(&spawn_kroki(true).await);
+        let r = render(&rig.gw, "not valid mermaid").await;
+        assert!(!r.ok);
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("400"), "状态码带回：{err}");
+        assert!(err.contains("Syntax Error"), "服务端摘要带回：{err}");
+        let outbox = rig.store.outbox_drain("s-chart").unwrap();
+        assert!(outbox.is_empty(), "失败不登记产物");
+    }
+
+    /// 空 endpoint：明确报错；且 chart_ready=false 时工具不在 spec 清单（不下发）
+    #[tokio::test]
+    async fn 图表工具_空endpoint不下发() {
+        let rig = rig();
+        assert!(!rig.gw.chart_ready(), "默认空 = 未启用");
+        let specs = ToolGateway::tool_specs(
+            &[ToolName::RenderChart],
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(
+            specs.iter().all(|s| s.name != "render_chart"),
+            "空 endpoint 不下发"
+        );
+        let r = render(&rig.gw, "flowchart TD\n A-->B").await;
+        assert!(!r.ok && r.error.unwrap().contains("未启用"));
+    }
+
+    /// 超长拒绝（20000 字符护栏）；非 SVG 响应拒绝
+    #[tokio::test]
+    async fn 图表工具_超长拒绝() {
+        let rig = rig();
+        rig.gw.set_chart_endpoint("http://127.0.0.1:1"); // 不可达也行——超长在请求前拒绝
+        let long = format!("flowchart TD\n  {}", "A-->B".repeat(6000));
+        let r = render(&rig.gw, &long).await;
+        assert!(!r.ok);
+        assert!(r.error.unwrap().contains("过长"), "超长拒绝并引导精简");
+    }
+}
 mod memory_tool_tests {
     use super::*;
     use std::sync::Arc;
@@ -599,7 +754,7 @@ mod memory_tool_tests {
     fn 工具面快照_schema按白名单下发() {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
-        let specs = ToolGateway::tool_specs(&allow, false, false, false, false, false);
+        let specs = ToolGateway::tool_specs(&allow, false, false, false, false, false, false);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"memory_read")
@@ -615,6 +770,7 @@ mod memory_tool_tests {
         let unit = def("unit-1", Tier::Unit, &[ToolName::Read]);
         let specs2 = ToolGateway::tool_specs(
             &ToolGateway::runtime_allowlist(&unit, None),
+            false,
             false,
             false,
             false,
@@ -944,11 +1100,11 @@ mod memory_tool_tests {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
         // 深层开启：三工具照常下发（兼容口径不变）
-        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
+        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         assert!(deep.iter().any(|s| s.name == "memory_write"));
         assert!(deep.iter().any(|s| s.name == "memory_link"));
         // 文件模式：write/link 不承诺（必然失败的工具不下发），read 保留（读 md 有意义）
-        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false);
+        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, false);
         assert!(
             file.iter().any(|s| s.name == "memory_read"),
             "memory_read 保留"
@@ -2041,18 +2197,18 @@ mod terminal_gate_tests {
     #[test]
     fn 实验开关_动态压缩关闭时schema剔除context_compact() {
         let allow = [ToolName::Terminal, ToolName::ContextCompact];
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, false, false, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "开关关闭时 context_compact 不应下发"
         );
         // 开启时保留
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, false, false);
         assert!(specs.iter().any(|s| s.name == "context_compact"));
         // 滑动窗口互斥：dynamic=true + sliding=true 仍不下发
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, true, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
@@ -3161,11 +3317,11 @@ mod speech_tool_tests {
         let registry = Arc::new(LocalRegistry::new(&dir).unwrap());
         let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
         assert!(!gw.speech_ready(), "未注入合成器不算就绪");
-        let off = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, false, false);
+        let off = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, false, false, false);
         assert!(off.is_empty(), "未装配不下发 speech_reply");
         gw.set_speech_synth(Arc::new(|_t| Box::pin(async { Ok(vec![1u8]) })));
         assert!(gw.speech_ready());
-        let on = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true, false);
+        let on = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true, false, false);
         assert_eq!(on.len(), 1);
         assert_eq!(on[0].name, "speech_reply");
         let _ = std::fs::remove_dir_all(&dir);

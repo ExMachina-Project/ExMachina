@@ -130,6 +130,9 @@ pub struct ToolGateway {
     pub(crate) speech_synth: parking_lot::RwLock<Option<SpeechSynth>>,
     /// 图像生成执行器（image_gen 工具；未装配时工具不下发、不执行）
     pub(crate) image_gen: parking_lot::RwLock<Option<ImageGen>>,
+    /// 图表渲染端点（render_chart 工具；空串 = 关闭不下发）。
+    /// RwLock 而非字段直存：config 热更新（apply_config）可改端点
+    pub(crate) chart_endpoint: parking_lot::RwLock<String>,
     /// spawn 并发闸（实例级信号量；ToolGateway 装配时按上限创建）
     pub(crate) spawn_semaphore: Arc<tokio::sync::Semaphore>,
     /// spawn 子任务超时（秒；默认 300）
@@ -225,6 +228,7 @@ impl ToolGateway {
             compactor: parking_lot::RwLock::new(None),
             speech_synth: parking_lot::RwLock::new(None),
             image_gen: parking_lot::RwLock::new(None),
+            chart_endpoint: parking_lot::RwLock::new(String::new()),
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
             background: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
@@ -300,6 +304,17 @@ impl ToolGateway {
     /// 图像生成是否装配（决定 image_gen 是否下发：能力未回接不承诺）
     pub fn image_gen_ready(&self) -> bool {
         self.image_gen.read().is_some()
+    }
+
+    /// 注入图表渲染端点（render_chart 工具；Core 装配与配置热更新时设置）。
+    /// 空串 = 关闭（工具不下发）
+    pub fn set_chart_endpoint(&self, endpoint: &str) {
+        *self.chart_endpoint.write() = endpoint.trim().to_string();
+    }
+
+    /// 图表渲染是否启用（决定 render_chart 是否下发）
+    pub fn chart_ready(&self) -> bool {
+        !self.chart_endpoint.read().is_empty()
     }
 
     /// 注入记忆模式（config.memory.enabled + memory_md_path）。
@@ -1315,6 +1330,7 @@ impl ToolGateway {
             ToolName::Todo => self.tool_todo(session_id, args),
             ToolName::Speech => self.tool_speech(session_id, args).await,
             ToolName::ImageGen => self.tool_image_gen(session_id, args).await,
+            ToolName::RenderChart => self.tool_render_chart(session_id, args).await,
             ToolName::KnowledgeWrite => {
                 self.tool_knowledge_write(agent_id, session_id, args).await
             }
