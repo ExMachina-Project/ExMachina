@@ -174,6 +174,10 @@ pub struct ToolGateway {
         parking_lot::RwLock<std::collections::HashMap<String, crate::types::ToolScope>>,
     /// 记忆库（memory_read/write/link 三工具的受控入口；组隔离在工具层强制）
     pub(crate) memory: Option<Arc<crate::memory::MemoryStore>>,
+    /// 知识库（knowledge_write/read 两工具的受控入口）。与记忆不同：全局共享
+    /// 不分区，恒下发（不受记忆模式/分区排除影响）；None = 未装配，两工具
+    /// 执行返回明确错误（Core 装配后必有值）
+    pub(crate) knowledge: Option<Arc<crate::knowledge::KnowledgeStore>>,
     /// 深层记忆开关（config.memory.enabled）。false = 文件记忆模式：
     /// memory_read 改读 memory.md（与规划注入同源），memory_write/link 拒绝并引导。
     /// 为什么写工具要拒绝而非照写数据库：文件记忆模式下规划面只注入 memory.md，
@@ -229,6 +233,7 @@ impl ToolGateway {
             tool_call_counters: parking_lot::Mutex::new(std::collections::HashMap::new()),
             session_scopes: parking_lot::RwLock::new(std::collections::HashMap::new()),
             memory: None,
+            knowledge: None,
             // 默认深层记忆开启 = 历史行为（未接线 memory 模式的调用方零感知）
             memory_deep: true,
             memory_md_path: None,
@@ -238,6 +243,13 @@ impl ToolGateway {
     /// 注入记忆库（memory_read/write/link 三工具；未注入时三工具执行返回明确错误）
     pub fn with_memory(mut self, memory: Arc<crate::memory::MemoryStore>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    /// 注入知识库（knowledge_write/read 两工具；未注入时两工具执行返回明确错误）。
+    /// 知识全局共享不分区——不需要记忆那类模式开关，装配即全量语义。
+    pub fn with_knowledge(mut self, knowledge: Arc<crate::knowledge::KnowledgeStore>) -> Self {
+        self.knowledge = Some(knowledge);
         self
     }
 
@@ -1281,6 +1293,12 @@ impl ToolGateway {
             ToolName::SkillManage => self.tool_skill_manage(args),
             ToolName::Todo => self.tool_todo(session_id, args),
             ToolName::Speech => self.tool_speech(session_id, args).await,
+            ToolName::KnowledgeWrite => {
+                self.tool_knowledge_write(agent_id, session_id, args).await
+            }
+            ToolName::KnowledgeRead => {
+                self.tool_knowledge_read(agent_id, session_id, args).await
+            }
             ToolName::MetaObserve | ToolName::MetaPropose | ToolName::MetaBuild => {
                 self.tool_meta(agent_id, session_id, tool, args).await
             }

@@ -73,6 +73,7 @@ mod web;
 mod browser;
 mod schedule;
 mod speech;
+mod knowledge;
 
 #[cfg(test)]
 mod tests;
