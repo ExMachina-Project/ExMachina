@@ -74,6 +74,7 @@ mod browser;
 mod schedule;
 mod speech;
 mod knowledge;
+mod image_gen;
 
 #[cfg(test)]
 mod tests;

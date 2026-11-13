@@ -16,6 +16,7 @@ impl ToolGateway {
         browser_ready: bool,
         computer_ready: bool,
         speech_ready: bool,
+        image_gen_ready: bool,
     ) -> Vec<crate::provider::ToolSpec> {
         let mut specs: Vec<crate::provider::ToolSpec> = Vec::new();
         let mut push = |name: ToolName, description: &str, parameters: serde_json::Value| {
@@ -33,6 +34,9 @@ impl ToolGateway {
             }
             if name == ToolName::Speech && !speech_ready {
                 return; // TTS 未装配（无能力模型/未回接）：不下发，避免承诺不存在的能力
+            }
+            if name == ToolName::ImageGen && !image_gen_ready {
+                return; // 生图槽位未配置：不下发（不承诺不存在的能力）
             }
             specs.push(crate::provider::ToolSpec {
                 name: name.key().to_string(),
@@ -166,6 +170,14 @@ impl ToolGateway {
                 "text": { "type": "string", "description": "要合成为语音的正文（≤600 字符）" }
             },
             "required": ["text"]
+        }));
+        push(ToolName::ImageGen, "生成一张图片并发给用户（文生图，随本轮回复送达）。用户明确想要图片时使用（插画/示意图/表情包风格化图等）；prompt 用英文效果通常更好、需完整描述画面主体与风格；生成耗时较长（最长 120 秒）不要连环重试", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "画面描述（主体、风格、构图；英文效果通常更好）" },
+                "size": { "type": "string", "enum": ["1024x1024", "1024x1536", "1536x1024"], "description": "尺寸：方形/竖版/横版（默认 1024x1024）" }
+            },
+            "required": ["prompt"]
         }));
         push(ToolName::KnowledgeWrite, "写入共享知识库：沉淀对全体智能体通用的客观知识（部署约束、平台特性、方法论、踩坑经验）。内容哈希去重——重复写入会提升既有条目热度而非新建。沉淀纪律：只存跨会话可复用的通用结论，不存会话私有细节、用户个人信息或一次性流水；与记忆的分工——记忆存本组经历，知识存实例级通用事实。正文超 8000 字符会被拒绝，超长内容请拆分为多条聚焦知识", serde_json::json!({
             "type": "object",
@@ -365,10 +377,17 @@ impl ToolGateway {
         browser_ready: bool,
         computer_ready: bool,
         speech_ready: bool,
+        image_gen_ready: bool,
         memory_deep: bool,
     ) -> Vec<crate::provider::ToolSpec> {
-        let mut specs =
-            Self::tool_specs(allowlist, search_ready, browser_ready, computer_ready, speech_ready);
+        let mut specs = Self::tool_specs(
+            allowlist,
+            search_ready,
+            browser_ready,
+            computer_ready,
+            speech_ready,
+            image_gen_ready,
+        );
         if !memory_deep {
             let drop: Vec<&str> = [ToolName::MemoryWrite, ToolName::MemoryLink]
                 .iter()
