@@ -56,6 +56,18 @@ pub fn config_schema() -> serde_json::Value {
                 ]
             },
             {
+                "key": "knowledge",
+                "label": "知识库",
+                "fields": [
+                    { "key": "knowledge.injectTopK", "label": "系统提示注入条数", "kind": "number",
+                      "default": "0", "required": false, "min": 0, "max": 10,
+                      "help": "构建派发/直答系统提示时按任务目标检索并注入的共享知识条数；0 = 不注入（默认，零行为变化）；检索失败静默跳过" },
+                    { "key": "knowledge.injectMaxChars", "label": "每条注入摘录截断（字符）", "kind": "number",
+                      "default": "500", "required": false, "min": 100, "max": 2000,
+                      "help": "注入摘录的单条字符上限（超出截断标注）" }
+                ]
+            },
+            {
                 "key": "security",
                 "label": "安全与审批",
                 "fields": [

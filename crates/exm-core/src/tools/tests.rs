@@ -4,13 +4,12 @@ use super::*;
 mod knowledge_tool_tests {
     use super::*;
     use crate::store::Store;
-    use crate::types::{AgentDefinition, GroupMeta, Tier};
+    use crate::types::{AgentDefinition, Tier};
     use std::sync::Arc;
 
     struct TestRig {
         gw: ToolGateway,
         no_knowledge_gw: ToolGateway,
-        dir: std::path::PathBuf,
     }
 
     fn rig() -> TestRig {
@@ -57,7 +56,7 @@ mod knowledge_tool_tests {
             events,
             SecurityConfig::default(),
         );
-        TestRig { gw, no_knowledge_gw, dir }
+        TestRig { gw, no_knowledge_gw }
     }
 
     async fn k_write(gw: &ToolGateway, title: &str, body: &str, tags: &[&str]) -> ToolResult {
