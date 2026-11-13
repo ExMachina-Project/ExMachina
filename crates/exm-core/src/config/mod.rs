@@ -114,6 +114,8 @@ pub struct ExmConfig {
     pub stt_model: String,
     /// 视觉转述：生效模型未标记视觉能力时，用它把图片转成文字描述；空 = 不转述
     pub vision_relay_model: String,
+    /// 图像生成（image-gen）："档案ID" 或 "档案ID/模型名"；空 = 不装配（image_gen 工具不下发）
+    pub image_gen_model: String,
     /// 测试替身通道（仅 `EXM_LLM_MOCK=1` 或测试代码置位；产品运行时不生效）
     pub use_mock: bool,
     /// 执行审批（安全闸门）
@@ -234,6 +236,8 @@ struct CapabilitiesFile {
     transcribe: Option<String>,
     #[serde(default)]
     vision_relay: Option<String>,
+    #[serde(default)]
+    image_gen: Option<String>,
 }
 
 /// 档案的读取形态：兼容历史上区分「指挥体模型 / 子个体模型」的旧配置。
@@ -690,6 +694,7 @@ impl ExmConfig {
             speech_model: file_cap.speech.unwrap_or_default(),
             stt_model: file_cap.transcribe.unwrap_or_default(),
             vision_relay_model: file_cap.vision_relay.unwrap_or_default(),
+            image_gen_model: file_cap.image_gen.unwrap_or_default(),
             use_mock,
             security,
             computer: {
@@ -779,6 +784,7 @@ impl ExmConfig {
                 speech: Some(self.speech_model.clone()),
                 transcribe: Some(self.stt_model.clone()),
                 vision_relay: Some(self.vision_relay_model.clone()),
+                image_gen: Some(self.image_gen_model.clone()),
             }),
             mcp_servers: Some(self.mcp_servers.clone()),
             security: Some(SecurityFile {

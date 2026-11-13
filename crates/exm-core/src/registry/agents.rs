@@ -770,6 +770,7 @@ impl LocalRegistry {
             transcribe: norm(caps.transcribe),
             vision_relay: norm(caps.vision_relay),
             embedding: norm(caps.embedding),
+            image_gen: norm(caps.image_gen),
         };
         let mut groups = self.groups.write();
         let g = groups.get_mut(gid).context("组不存在")?;
