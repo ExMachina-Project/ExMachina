@@ -972,6 +972,50 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(false),
     );
 
+    // 记忆导出（memory-lifecycle 6.3）：JSONL 全量回读字段一致 + agent 过滤
+    {
+        let exp = client.get(format!("{base}/memory/export")).send().await?;
+        c.check(
+            "导出 Content-Disposition 带文件名",
+            exp.headers()
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.contains("memory-export-") && v.contains(".jsonl"))
+                .unwrap_or(false),
+        );
+        let body = exp.text().await?;
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        let parse_ok = lines.iter().all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok());
+        c.check(
+            "导出 JSONL 每行可解析",
+            parse_ok && !lines.is_empty(),
+        );
+        // 回读字段一致性：导出行数 ≥ 列表非空（全量），且每行含条目本体字段
+        let has_fields = lines.iter().all(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap_or_default();
+            v.get("id").is_some() && v.get("title").is_some() && v.get("kind").is_some()
+        });
+        c.check("导出条目字段完整（id/title/kind）", has_fields);
+        // 不含索引数据：行内无倒排/哈希派生字段（embedding 是条目本体字段，可存在）
+        let no_index = lines.iter().all(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap_or_default();
+            v.get("index").is_none() && v.get("hashIndex").is_none()
+        });
+        c.check("导出不含派生索引数据", no_index);
+        // agent 过滤：scout-agent 视角 = 私有 + 共享；过滤行数 ≤ 全量
+        let exp_agent = client
+            .get(format!("{base}/memory/export?agent=scout-agent"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        let agent_lines = exp_agent.lines().filter(|l| !l.trim().is_empty()).count();
+        c.check(
+            "导出 agent 过滤有效",
+            agent_lines > 0 && agent_lines <= lines.len(),
+        );
+    }
+
     // ---- 知识库（knowledge-base）：REST 全链路 + CLI/REST 同源去重 ----
     // REST 新增 → 检索命中（source 标注 manual）→ 同题再写去重提升 → 删除
     let kadd: serde_json::Value = client

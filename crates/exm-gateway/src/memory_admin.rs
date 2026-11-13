@@ -34,6 +34,43 @@ pub(crate) struct MemoryQuery {
     limit: Option<usize>,
 }
 
+/// 记忆全量导出（memory-lifecycle 6.3）：JSONL 流式返回全量条目，
+/// 字段与 REST list 单条一致；?agent= 过滤同 list 口径。
+/// 不含派生索引数据（倒排/哈希索引）——仅条目本体。
+/// Content-Disposition 带日期文件名（memory-export-<日期>.jsonl）。
+pub(crate) async fn export_memory(
+    State(st): State<AppState>,
+    Query(q): Query<MemoryQuery>,
+) -> impl IntoResponse {
+    match st.core.memory_list_filtered(None, q.agent.as_deref(), usize::MAX) {
+        Ok(items) => {
+            let body = items
+                .iter()
+                .map(|e| serde_json::to_string(e).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let date = chrono::Local::now().format("%Y%m%d");
+            let mut resp = axum::response::Response::new(body);
+            let h = resp.headers_mut();
+            h.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/x-ndjson; charset=utf-8"),
+            );
+            if let Ok(v) = axum::http::HeaderValue::from_str(&format!(
+                "attachment; filename=\"memory-export-{date}.jsonl\""
+            )) {
+                h.insert(axum::http::header::CONTENT_DISPOSITION, v);
+            }
+            resp.into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MemoryBody {

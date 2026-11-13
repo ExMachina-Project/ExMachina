@@ -101,6 +101,8 @@ pub struct ExmConfig {
     pub memory_enabled: bool,
     pub memory_recall_limit: usize,
     pub memory_half_life_days: f64,
+    /// 每日自动衰减（memory-lifecycle）：调度器低峰窗口每日一次
+    pub memory_auto_decay: bool,
     /// 语义检索目标："档案ID" 或 "档案ID/模型名"；空 = 仅词项召回
     pub memory_semantic_model: String,
     /// 知识库注入条数（knowledge-base）：0 = 不注入（默认零行为变化）
@@ -442,6 +444,11 @@ struct MemoryConfigFile {
     /// 语义检索目标："档案ID" 或 "档案ID/模型名"；空 = 仅词项召回
     #[serde(default)]
     semantic_model: Option<String>,
+    /// 每日自动衰减（memory-lifecycle）：true = 调度器每日低峰窗口执行一次
+    /// 全量衰减（复用 decay 语义与半衰期配置）；false = 不注册任务。
+    /// 缺省 true（与既有手动端点并存，语义一致）
+    #[serde(default)]
+    auto_decay: Option<bool>,
 }
 
 /// 知识库配置（knowledge-base）：inject_top_k 默认 0 = 零注入零行为变化。
@@ -703,6 +710,7 @@ impl ExmConfig {
             memory_enabled: file_mem.enabled.unwrap_or(true),
             memory_recall_limit: file_mem.recall_limit.unwrap_or(5),
             memory_half_life_days: sanitize_half_life_days(file_mem.half_life_days),
+            memory_auto_decay: file_mem.auto_decay.unwrap_or(true),
             memory_semantic_model: file_mem.semantic_model.clone().unwrap_or_default(),
             knowledge_inject_top_k: file_knowledge.inject_top_k.unwrap_or(0),
             knowledge_inject_max_chars: file_knowledge.inject_max_chars.unwrap_or(500),
@@ -771,6 +779,7 @@ impl ExmConfig {
                 recall_limit: Some(self.memory_recall_limit),
                 half_life_days: Some(self.memory_half_life_days),
                 semantic_model: Some(self.memory_semantic_model.clone()),
+                auto_decay: Some(self.memory_auto_decay),
             }),
             knowledge: Some(KnowledgeConfigFile {
                 inject_top_k: Some(self.knowledge_inject_top_k),
@@ -898,6 +907,7 @@ fn migrate_file(mut file: ConfigFile, path: &Path) -> ConfigFile {
             recall_limit: Some(5),
             half_life_days: Some(30.0),
             semantic_model: None,
+            auto_decay: Some(true),
         });
     }
     // 知识库缺省：零注入（与未引入知识库前行为完全一致——新配置项缺省安全）

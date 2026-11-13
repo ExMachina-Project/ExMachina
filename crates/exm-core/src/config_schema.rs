@@ -52,7 +52,10 @@ pub fn config_schema() -> serde_json::Value {
                       "help": "注入指挥体上下文的历史记忆条数" },
                     { "key": "memory.halfLifeDays", "label": "记忆衰减半衰期（天）", "kind": "number",
                       "default": "30", "required": false, "min": 1, "max": 365,
-                      "help": "未被使用的记忆重要性按该半衰期衰减" }
+                      "help": "未被使用的记忆重要性按该半衰期衰减" },
+                    { "key": "memory.autoDecay", "label": "每日自动衰减", "kind": "boolean",
+                      "default": "true", "required": false,
+                      "help": "开启后调度器每日低峰窗口（UTC 4:40）自动执行一次全量记忆衰减（只调重要性数值，不删除条目）；关闭后仍可手动触发" }
                 ]
             },
             {

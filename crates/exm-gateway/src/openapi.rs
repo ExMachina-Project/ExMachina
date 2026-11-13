@@ -156,6 +156,7 @@ pub fn endpoints() -> Vec<Endpoint> {
         // ---------------- 记忆
         Endpoint::new("get", "/api/memory", "记忆列表"),
         Endpoint::new("post", "/api/memory", "新增记忆"),
+        Endpoint::new("get", "/api/memory/export", "记忆全量导出（JSONL；?agent= 过滤）"),
         Endpoint::new("post", "/api/memory/search", "记忆检索"),
         Endpoint::new("get", "/api/memory/stats", "记忆统计"),
         Endpoint::new("post", "/api/memory/reindex", "重建记忆索引"),
