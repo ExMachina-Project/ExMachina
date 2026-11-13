@@ -190,6 +190,14 @@ impl ToolGateway {
             },
             "required": ["mermaid"]
         }));
+        push(ToolName::ResearchReport, "深度研究：把「规划 → 并行检索 → 引用聚合 → 带引用报告」封装为单工具长任务。适合需要多来源交叉验证的开放性研究问题（市场调研/技术选型/事实核查）。产出四节 Markdown 报告（结论摘要/分主题详述/来源清单/研究方法）并作为文件投递，结论摘要随回复返回。depth 控制扇出：quick（2 子问题）/standard（4）/deep（6）；全流程最长约 10 分钟，调用后耐心等待结果，不要重复调用", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "topic": { "type": "string", "description": "研究主题（一句话，聚焦）" },
+                "depth": { "type": "string", "enum": ["quick", "standard", "deep"], "description": "研究深度（默认 standard：4 个并行子问题）" }
+            },
+            "required": ["topic"]
+        }));
         push(ToolName::KnowledgeWrite, "写入共享知识库：沉淀对全体智能体通用的客观知识（部署约束、平台特性、方法论、踩坑经验）。内容哈希去重——重复写入会提升既有条目热度而非新建。沉淀纪律：只存跨会话可复用的通用结论，不存会话私有细节、用户个人信息或一次性流水；与记忆的分工——记忆存本组经历，知识存实例级通用事实。正文超 8000 字符会被拒绝，超长内容请拆分为多条聚焦知识", serde_json::json!({
             "type": "object",
             "properties": {
