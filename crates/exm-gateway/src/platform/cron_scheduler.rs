@@ -148,6 +148,7 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
     // 自主记忆摘要（实验性 experiments.autoMemoryDigest，9.1）：每日一次低峰期
     // （UTC 4:30，避开 4:00 归档窗口）。关闭态不进扫描（零任务零 token）。
     // 当日去重：同 IDLE_ARCHIVE_MARKER 模式复用 cron 表标记行。
+    // 执行后落 memory.digest 事件（实验可观测：归纳会话数与产出条数）。
     if core.config().experiments.auto_memory_digest {
         use chrono::Timelike;
         if (now.hour(), now.minute()) == (4, 30) {
@@ -161,14 +162,34 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
             if last != minute_key {
                 let sessions = core.list_sessions_admin().unwrap_or_default();
                 let mut digested = 0usize;
+                let before_entries = core
+                    .memory_stats()
+                    .ok()
+                    .and_then(|s| s["memory"]["total"].as_u64())
+                    .unwrap_or(0);
                 for s in &sessions {
                     if core.memory_digest_session(&s.id).await.is_some() {
                         digested += 1;
                     }
                 }
+                let after_entries = core
+                    .memory_stats()
+                    .ok()
+                    .and_then(|s| s["memory"]["total"].as_u64())
+                    .unwrap_or(0);
                 if digested > 0 {
                     eprintln!("[memory-digest] 低峰归纳完成：{digested} 个会话产出记忆条目");
                 }
+                // 实验可观测（assistant-parity）：摘要执行事件——归纳会话数与
+                // 产出条数（前后差值），全局事件流可检索
+                let _ = core.events.send(exm_core::types::CoreEvent {
+                    kind: "memory.digest".into(),
+                    session_id: String::new(),
+                    payload: json!({
+                        "sessions": digested,
+                        "entriesProduced": after_entries.saturating_sub(before_entries),
+                    }),
+                });
                 let marker = exm_core::types::CronJob {
                     id: DIGEST_MARKER.into(),
                     name: "自主记忆摘要标记".into(),
