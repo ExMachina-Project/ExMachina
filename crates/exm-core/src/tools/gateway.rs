@@ -42,6 +42,14 @@ pub type SpeechSynth = Arc<
         + Sync,
 >;
 
+/// 图像生成执行器（image_gen 工具）：(prompt, size) → 图片字节。
+/// Core 装配后回接 orchestrator image_gen_bytes（能力槽位链）。
+pub type ImageGen = Arc<
+    dyn Fn(String, String) -> futures_util::future::BoxFuture<'static, anyhow::Result<Vec<u8>>>
+        + Send
+        + Sync,
+>;
+
 /// 会话工具调用计数器（agent-budget-audit 三值预算）
 #[derive(Debug, Default, Clone)]
 pub struct ToolCallCounter {
@@ -120,6 +128,8 @@ pub struct ToolGateway {
     /// 槽位语义同 spawn_executor：Core 装配后回接 orchestrator speak_audio
     /// （能力槽位链：组覆盖 → 全局 speech 模型 → tts-1 兜底）。
     pub(crate) speech_synth: parking_lot::RwLock<Option<SpeechSynth>>,
+    /// 图像生成执行器（image_gen 工具；未装配时工具不下发、不执行）
+    pub(crate) image_gen: parking_lot::RwLock<Option<ImageGen>>,
     /// spawn 并发闸（实例级信号量；ToolGateway 装配时按上限创建）
     pub(crate) spawn_semaphore: Arc<tokio::sync::Semaphore>,
     /// spawn 子任务超时（秒；默认 300）
@@ -214,6 +224,7 @@ impl ToolGateway {
             session_grant_probe: parking_lot::RwLock::new(None),
             compactor: parking_lot::RwLock::new(None),
             speech_synth: parking_lot::RwLock::new(None),
+            image_gen: parking_lot::RwLock::new(None),
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
             background: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
@@ -279,6 +290,16 @@ impl ToolGateway {
     /// 注入语音合成执行器（speech_reply 工具）：Core 装配后回接。
     pub fn set_speech_synth(&self, synth: SpeechSynth) {
         *self.speech_synth.write() = Some(synth);
+    }
+
+    /// 注入图像生成执行器（image_gen 工具）：Core 装配后回接。
+    pub fn set_image_gen(&self, gen: ImageGen) {
+        *self.image_gen.write() = Some(gen);
+    }
+
+    /// 图像生成是否装配（决定 image_gen 是否下发：能力未回接不承诺）
+    pub fn image_gen_ready(&self) -> bool {
+        self.image_gen.read().is_some()
     }
 
     /// 注入记忆模式（config.memory.enabled + memory_md_path）。
@@ -1293,6 +1314,7 @@ impl ToolGateway {
             ToolName::SkillManage => self.tool_skill_manage(args),
             ToolName::Todo => self.tool_todo(session_id, args),
             ToolName::Speech => self.tool_speech(session_id, args).await,
+            ToolName::ImageGen => self.tool_image_gen(session_id, args).await,
             ToolName::KnowledgeWrite => {
                 self.tool_knowledge_write(agent_id, session_id, args).await
             }

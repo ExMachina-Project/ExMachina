@@ -197,6 +197,134 @@ mod knowledge_tool_tests {
         assert!(w.error.unwrap().contains("未装配"));
     }
 }
+
+mod image_gen_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::Tier;
+    use std::sync::Arc;
+
+    struct TestRig {
+        gw: ToolGateway,
+        store: Arc<Store>,
+    }
+
+    fn rig() -> TestRig {
+        let dir = std::env::temp_dir().join(format!("exm-imgtool-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            crate::types::AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        TestRig { gw, store }
+    }
+
+    async fn gen(gw: &ToolGateway, prompt: &str, size: &str) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-img",
+            &[ToolName::ImageGen],
+            ToolName::ImageGen,
+            &serde_json::json!({ "prompt": prompt, "size": size }),
+        )
+        .await
+    }
+
+    /// 三态之成功：PNG 字节 → 魔数嗅探过 → outbox 登记 image 条目（kind/文件/尺寸/字节回显）
+    #[tokio::test]
+    async fn 生图工具_成功登记() {
+        let rig = rig();
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async {
+                Ok(vec![
+                    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4,
+                ])
+            })
+        }));
+        let r = gen(&rig.gw, "a red cat", "1024x1024").await;
+        assert!(r.ok, "成功态：{}", r.error.unwrap_or_default());
+        assert!(r.output.contains("png"), "回显格式：{}", r.output);
+        assert!(r.output.contains("1024"), "回显尺寸：{}", r.output);
+        let outbox = rig.store.outbox_drain("s-img").unwrap();
+        assert_eq!(outbox.len(), 1, "登记一条产物");
+        assert_eq!(outbox[0]["kind"], "image");
+        assert!(
+            outbox[0]["path"].as_str().unwrap_or("").ends_with(".png"),
+            "扩展名按魔数：{}",
+            outbox[0]["path"]
+        );
+    }
+
+    /// 三态之超时：120s 硬超时（测试里闭包睡 >120s 太慢——用极小超时不可行，
+    /// 改验证「上游报错透传」与超时同一错误面；超时路径由 tokio timeout 保证）
+    #[tokio::test]
+    async fn 生图工具_上游错误透传() {
+        let rig = rig();
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async { Err(anyhow::anyhow!("上游生图端点 429: 额度耗尽")) })
+        }));
+        let r = gen(&rig.gw, "x", "1024x1024").await;
+        assert!(!r.ok);
+        assert!(r.error.unwrap().contains("429"), "上游错误透传");
+    }
+
+    /// 三态之非法字节：HTML 错误页字节 → 魔数嗅探拒绝，不登记不落盘
+    #[tokio::test]
+    async fn 生图工具_非法字节拒绝() {
+        let rig = rig();
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async { Ok(b"<html>error page</html>".to_vec()) })
+        }));
+        let r = gen(&rig.gw, "x", "1024x1024").await;
+        assert!(!r.ok, "非图片字节应拒绝");
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("不是有效图片"), "拒绝话术：{err}");
+        let outbox = rig.store.outbox_drain("s-img").unwrap();
+        assert!(outbox.is_empty(), "拒绝不登记产物");
+    }
+
+    /// 未装配：明确报错；入参护栏：空 prompt / 非法 size 拒绝
+    #[tokio::test]
+    async fn 生图工具_未装配与入参护栏() {
+        let rig = rig();
+        let r = gen(&rig.gw, "x", "1024x1024").await;
+        assert!(!r.ok && r.error.unwrap().contains("未装配"));
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async { Ok(vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) })
+        }));
+        let r = gen(&rig.gw, "  ", "1024x1024").await;
+        assert!(!r.ok && r.error.unwrap().contains("prompt"));
+        let r = gen(&rig.gw, "x", "800x600").await;
+        assert!(!r.ok && r.error.unwrap().contains("size"));
+    }
+}
 mod memory_tool_tests {
     use super::*;
     use std::sync::Arc;
@@ -471,7 +599,7 @@ mod memory_tool_tests {
     fn 工具面快照_schema按白名单下发() {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
-        let specs = ToolGateway::tool_specs(&allow, false, false, false, false);
+        let specs = ToolGateway::tool_specs(&allow, false, false, false, false, false);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"memory_read")
@@ -487,6 +615,7 @@ mod memory_tool_tests {
         let unit = def("unit-1", Tier::Unit, &[ToolName::Read]);
         let specs2 = ToolGateway::tool_specs(
             &ToolGateway::runtime_allowlist(&unit, None),
+            false,
             false,
             false,
             false,
@@ -815,11 +944,11 @@ mod memory_tool_tests {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
         // 深层开启：三工具照常下发（兼容口径不变）
-        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
+        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
         assert!(deep.iter().any(|s| s.name == "memory_write"));
         assert!(deep.iter().any(|s| s.name == "memory_link"));
         // 文件模式：write/link 不承诺（必然失败的工具不下发），read 保留（读 md 有意义）
-        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false);
+        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false);
         assert!(
             file.iter().any(|s| s.name == "memory_read"),
             "memory_read 保留"
@@ -1912,18 +2041,18 @@ mod terminal_gate_tests {
     #[test]
     fn 实验开关_动态压缩关闭时schema剔除context_compact() {
         let allow = [ToolName::Terminal, ToolName::ContextCompact];
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, false, false, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "开关关闭时 context_compact 不应下发"
         );
         // 开启时保留
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, false, false);
         assert!(specs.iter().any(|s| s.name == "context_compact"));
         // 滑动窗口互斥：dynamic=true + sliding=true 仍不下发
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, true, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
@@ -3032,11 +3161,11 @@ mod speech_tool_tests {
         let registry = Arc::new(LocalRegistry::new(&dir).unwrap());
         let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
         assert!(!gw.speech_ready(), "未注入合成器不算就绪");
-        let off = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, false);
+        let off = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, false, false);
         assert!(off.is_empty(), "未装配不下发 speech_reply");
         gw.set_speech_synth(Arc::new(|_t| Box::pin(async { Ok(vec![1u8]) })));
         assert!(gw.speech_ready());
-        let on = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true);
+        let on = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true, false);
         assert_eq!(on.len(), 1);
         assert_eq!(on[0].name, "speech_reply");
         let _ = std::fs::remove_dir_all(&dir);

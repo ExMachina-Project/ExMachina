@@ -233,6 +233,21 @@ impl Core {
                 })
             }));
         }
+        // 图像生成回接（image-gen）：image_gen 工具 → orchestrator
+        // image_gen_bytes（能力槽位链：组覆盖 → 全局；无兜底模型，未配置即 Err）。
+        // Weak 防环同 speech；重建时在 rebuild 处同款回接。
+        {
+            let weak = Arc::downgrade(&orchestrator);
+            orchestrator.tools.set_image_gen(Arc::new(move |prompt, size| {
+                let weak = weak.clone();
+                Box::pin(async move {
+                    let orch = weak
+                        .upgrade()
+                        .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
+                    orch.image_gen_bytes(&prompt, &size).await
+                })
+            }));
+        }
         // 回接：插件声明式工具并入工具网关（custom 执行链全套复用）。
         // ToolGateway 构建在 build_orchestrator 内，此处经 orchestrator.tools 追加。
         {
@@ -814,6 +829,19 @@ impl Core {
                     o.speak_audio(&text).await
                 })
             }));
+            // 图像生成回接（与 Core::new 同款）：重建后槽位复位
+            {
+                let weak2 = Arc::downgrade(&orch_arc);
+                tools.set_image_gen(Arc::new(move |prompt, size| {
+                    let weak = weak2.clone();
+                    Box::pin(async move {
+                        let o = weak
+                            .upgrade()
+                            .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
+                        o.image_gen_bytes(&prompt, &size).await
+                    })
+                }));
+            }
             *self.orchestrator.write() = orch_arc;
         }
         Ok(())
@@ -1434,6 +1462,7 @@ pub fn build_orchestrator(
         speech_target: cfg.speech_model.clone(),
         stt_target: cfg.stt_model.clone(),
         vision_relay_target: cfg.vision_relay_model.clone(),
+        image_gen_target: cfg.image_gen_model.clone(),
         max_concurrency: cfg.max_concurrency,
         max_unit_steps: cfg.automation.unit_max_steps,
         queue_draining: parking_lot::Mutex::new(std::collections::HashSet::new()),

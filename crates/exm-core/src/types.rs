@@ -179,6 +179,10 @@ pub enum ToolName {
     /// 知识读取（knowledge-base）：op=search 检索 / get 取全文 / list 最近
     #[serde(rename = "knowledge_read")]
     KnowledgeRead,
+    /// 图像生成（image-gen）：prompt → 图片（PNG/JPEG/WebP），产物经 outbox
+    /// 随本轮回复直发。未配置生图槽位时不下发（不承诺不存在的能力）。
+    #[serde(rename = "image_gen")]
+    ImageGen,
 }
 
 impl ToolName {
@@ -212,6 +216,7 @@ impl ToolName {
             ToolName::Speech => "speech_reply",
             ToolName::KnowledgeWrite => "knowledge_write",
             ToolName::KnowledgeRead => "knowledge_read",
+            ToolName::ImageGen => "image_gen",
         }
     }
 
@@ -261,6 +266,7 @@ impl ToolName {
             "speech_reply" => Some(ToolName::Speech),
             "knowledge_write" => Some(ToolName::KnowledgeWrite),
             "knowledge_read" => Some(ToolName::KnowledgeRead),
+            "image_gen" => Some(ToolName::ImageGen),
             _ => None,
         }
     }
@@ -299,6 +305,7 @@ impl ToolName {
             ToolName::Speech,
             ToolName::KnowledgeWrite,
             ToolName::KnowledgeRead,
+            ToolName::ImageGen,
         ]
     }
 }
@@ -543,6 +550,9 @@ pub struct GroupCapabilities {
     /// 嵌入（组记忆语义检索）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<String>,
+    /// 图像生成（image-gen）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_gen: Option<String>,
 }
 
 // ---------------------------------------------------------------- 编成模板

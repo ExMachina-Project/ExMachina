@@ -230,6 +230,8 @@ pub struct Orchestrator {
     pub speech_target: String,
     pub stt_target: String,
     pub vision_relay_target: String,
+    /// 图像生成槽位（"档案ID" 或 "档案ID/模型名"；空 = 未装配）
+    pub image_gen_target: String,
     pub max_concurrency: usize,
     /// 子个体单次派发的最大工具步数（配置分档：L0 直答 3 / 一般 8 / 编码类 20）
     pub max_unit_steps: usize,
@@ -259,6 +261,7 @@ impl Orchestrator {
                 "transcribe" => c.transcribe,
                 "vision_relay" => c.vision_relay,
                 "embedding" => c.embedding,
+                "image_gen" => c.image_gen,
                 _ => None,
             });
         let target = from_group.or_else(|| match slot {
@@ -266,6 +269,7 @@ impl Orchestrator {
             "transcribe" => Some(self.stt_target.clone()),
             "vision_relay" => Some(self.vision_relay_target.clone()),
             "embedding" => Some(self.memory_semantic_model.clone()),
+            "image_gen" => Some(self.image_gen_target.clone()),
             _ => None,
         });
         target
@@ -298,6 +302,26 @@ impl Orchestrator {
             Some((provider, model)) => provider.speak(&model, text).await,
             None => self.orch_provider.speak("tts-1", text).await,
         }
+    }
+
+    /// 图像生成（image-gen）：能力槽位链（组覆盖 → 全局）。
+    /// 与 speak 的「tts-1 兜底」不同：无兜底模型——未配置即 Err（工具面
+    /// 按装配状态门控下发，能进到这里说明槽位配置过但解析失败，明确报错）
+    pub async fn image_gen_bytes(&self, prompt: &str, size: &str) -> anyhow::Result<Vec<u8>> {
+        let target = self
+            .capability_target("image_gen")
+            .ok_or_else(|| anyhow::anyhow!("图像生成槽位未配置（capabilities.imageGen）"))?;
+        let (provider, model) = self
+            .resolve_capability(&target)
+            .ok_or_else(|| anyhow::anyhow!("图像生成槽位无法解析：{target}"))?;
+        provider.image_generate(&model, prompt, size).await
+    }
+
+    /// 图像生成是否装配（image_gen 工具下发门控：未配置不承诺）
+    pub fn image_gen_ready(&self) -> bool {
+        self.capability_target("image_gen")
+            .and_then(|t| self.resolve_capability(&t))
+            .is_some()
     }
 
     /// 视觉转述：生效模型未标记支持视觉（清单里明确 vision=false）且配置了转述模型时，
@@ -1155,7 +1179,7 @@ impl Orchestrator {
         };
         // 知识库注入（knowledge-base，默认关）：按本轮输入检索 top-k 共享知识，
         // 与压缩摘要同层注入系统提示尾部；检索失败静默跳过
-        let mut system_prompt = {
+        let system_prompt = {
             let cfg_k = self.config_snapshot.read().clone();
             let section = crate::knowledge::inject_prompt_section(
                 &self.knowledge,
