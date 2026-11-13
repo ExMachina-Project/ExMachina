@@ -1089,6 +1089,63 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // ---- 图表渲染（chart-rendering）：mock Kroki 端点 → SVG 产物登记 ----
+    {
+        use exm_core::tools::ToolGateway;
+        use exm_core::types::ToolName;
+        // 未配置 chart.endpoint（e2e 起始态空串）：render_chart 不在工具清单
+        {
+            let specs = ToolGateway::tool_specs(
+                &ToolName::full_set(),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            );
+            c.check(
+                "图表未启用：render_chart 不在工具清单",
+                specs.iter().all(|s| s.name != "render_chart"),
+            );
+        }
+        // 起 mock Kroki：POST /mermaid/svg 回固定 SVG
+        let kroki_app = axum::Router::new().route(
+            "/mermaid/svg",
+            axum::routing::post(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"8\" height=\"8\"/></svg>",
+                )
+            }),
+        );
+        let kroki_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let kroki_addr = kroki_listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(kroki_listener, kroki_app).await.unwrap() });
+        let orch = core.orchestrator();
+        orch.tools.set_chart_endpoint(&format!("http://{kroki_addr}"));
+        let r = orch
+            .tools
+            .execute(
+                "orchestrator",
+                "s-e2e-chart",
+                &[ToolName::RenderChart],
+                ToolName::RenderChart,
+                &serde_json::json!({ "mermaid": "flowchart TD\n  A[入站] --> B[回复]" }),
+            )
+            .await;
+        c.check("图表渲染执行成功", r.ok);
+        let outbox = core.store.outbox_drain("s-e2e-chart").unwrap_or_default();
+        c.check(
+            "图表产物登记（kind=file / .svg）",
+            outbox.len() == 1
+                && outbox[0]["kind"] == "file"
+                && outbox[0]["path"].as_str().unwrap_or("").ends_with(".svg"),
+        );
+        // 复位（后续段不依赖该端点）
+        orch.tools.set_chart_endpoint("");
+    }
+
     // 人设：默认 → 修改 → 热生效 → 重置
     // 对象口径：SOUL 仅「用户面智能体」持有（组主智能体 / 独立智能体），子个体无人格层。
     // 往返用测试自建单体做（避免抹掉出厂 SOUL：内置组出厂人格受保护、machina 随项目内容交付）。
