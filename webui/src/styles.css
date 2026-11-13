@@ -2792,6 +2792,18 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 
 /* 代码块复制按钮 */
 .code-block-wrap { position: relative; }
+
+/* mermaid 图表块（chart-rendering）：SVG 居中 + 横向滚动防溢出 */
+.mermaid-block {
+  overflow-x: auto;
+  padding: 12px 8px;
+  text-align: center;
+  border: 1px solid var(--line);
+  background: var(--bg-1, transparent);
+}
+.mermaid-block svg { max-width: 100%; height: auto; }
+.mermaid-err { color: var(--warn, #fbbf24); font-size: 11px; }
+
 .code-block-wrap .code-copy-btn {
   position: absolute;
   top: 6px; right: 8px;

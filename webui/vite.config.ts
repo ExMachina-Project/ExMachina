@@ -66,6 +66,9 @@ const MARKDOWN_PKG_PREFIXES = [
 ];
 const MARKDOWN_PKGS = new Set(["react-markdown", "remark-gfm", "extend", "escape-string-regexp", "dequal", "inline-style-parser"]);
 
+/** mermaid 图表渲染（动态 import 按需加载）：独立 chunk，不进主 bundle */
+const MERMAID_PKGS = new Set(["mermaid"]);
+
 /** 从模块路径提取包名（兼容 npm 扁平布局与 pnpm 的 .pnpm 嵌套布局） */
 function packageNameOf(id: string): string {
   const afterLastNm = id.split("node_modules/").pop() ?? "";
@@ -80,6 +83,7 @@ function manualChunks(id: string): string | undefined {
   if (REACT_PKGS.has(pkg)) return "vendor-react";
   if (ANTD_PKGS.has(pkg) || ANTD_PKG_PREFIXES.some((p) => pkg.startsWith(p))) return "vendor-antd";
   if (MARKDOWN_PKGS.has(pkg) || MARKDOWN_PKG_PREFIXES.some((p) => pkg.startsWith(p))) return "vendor-markdown";
+  if (MERMAID_PKGS.has(pkg) || pkg.startsWith("@mermaid-js/")) return "vendor-mermaid";
   // 其余未知三方兜底到独立 chunk，不与业务代码混包
   return "vendor";
 }
