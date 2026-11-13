@@ -276,6 +276,44 @@ fn now_iso() -> String {
     crate::types::now_iso()
 }
 
+// ---------------------------------------------------------------- 提示词注入
+
+/// 系统提示尾部注入 top-k 知识（knowledge.injectTopK）：
+/// - top_k = 0：不注入（零行为变化，默认）
+/// - 检索失败静默跳过（不得阻塞会话——注入是增益不是依赖）
+/// - 每条截断 inject_max_chars 并标注「知识库参考」与来源
+pub fn inject_prompt_section(
+    store: &KnowledgeStore,
+    query: &str,
+    top_k: usize,
+    max_chars: usize,
+) -> String {
+    if top_k == 0 || query.trim().is_empty() {
+        return String::new();
+    }
+    let hits = match store.search(query, top_k) {
+        Ok(h) => h,
+        Err(_) => return String::new(), // 静默跳过：注入失败不阻塞会话
+    };
+    if hits.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\n## 知识库参考（按当前任务检索的共享知识）\n");
+    for e in hits {
+        let body: String = e.body.chars().take(max_chars).collect();
+        let ellipsis = if e.body.chars().count() > max_chars {
+            "…（截断）"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "- [{}] {}（来源: {}）\n  {}{ellipsis}\n",
+            e.id, e.title, e.source_agent, body
+        ));
+    }
+    out
+}
+
 // ---------------------------------------------------------------- 分词
 
 /// 词项分词：ASCII 词（≥2 字符）+ CJK 双字 bigram。与 memory::render::tokens
@@ -408,5 +446,51 @@ mod tests {
         assert!(store.delete(&e.entry().id).unwrap() == false, "二次删除返回 false");
         assert!(store.get(&e.entry().id).unwrap().is_none());
         assert!(store.search("时区", 5).unwrap().is_empty(), "删除后不应命中");
+    }
+
+    // ---------------- 提示词注入（inject_prompt_section） ----------------
+
+    /// 默认零注入（spec 场景）：inject_top_k=0 时无论库中有多少内容都返回空串
+    #[test]
+    fn 知识注入_默认零注入() {
+        let store = test_store();
+        store.write(&draft("部署约束", "构建环境无 C 编译器，依赖必须纯 Rust")).unwrap();
+        let out = inject_prompt_section(&store, "部署 Rust 依赖", 0, 500);
+        assert!(out.is_empty(), "top_k=0 必须零注入（默认零行为变化）");
+    }
+
+    /// 开启后注入：命中条目带标注与来源；每条截断到 max_chars 并标注截断
+    #[test]
+    fn 知识注入_开启后注入与截断() {
+        let store = test_store();
+        let e = store
+            .write(&draft(
+                "napcat 约束",
+                "QQ 官方机器人 files 上行仅支持 png/jpg 且 ≤20MB",
+            ))
+            .unwrap();
+        let out = inject_prompt_section(&store, "napcat 上行格式", 3, 20);
+        assert!(out.contains("知识库参考"), "标注知识库参考：{out}");
+        assert!(out.contains(e.entry().id.as_str()), "含条目 id");
+        assert!(out.contains("来源: test-agent"), "标注来源");
+        assert!(out.contains("…（截断）"), "超限截断标注");
+        // 每条正文不超过截断上限（+截断标注）
+        let body_line = out
+            .lines()
+            .find(|l| l.starts_with("  "))
+            .unwrap_or_default();
+        assert!(body_line.chars().count() <= 20 + "…（截断）".chars().count() + 2);
+    }
+
+    /// 空查询不注入；无命中不注入（不产生空节）
+    #[test]
+    fn 知识注入_空查询与无命中() {
+        let store = test_store();
+        store.write(&draft("主题A", "内容甲")).unwrap();
+        assert!(inject_prompt_section(&store, "  ", 3, 500).is_empty(), "空查询不注入");
+        assert!(
+            inject_prompt_section(&store, "完全无关的词项", 3, 500).is_empty(),
+            "无命中不注入"
+        );
     }
 }

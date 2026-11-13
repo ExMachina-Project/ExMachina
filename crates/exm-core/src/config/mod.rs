@@ -103,6 +103,10 @@ pub struct ExmConfig {
     pub memory_half_life_days: f64,
     /// 语义检索目标："档案ID" 或 "档案ID/模型名"；空 = 仅词项召回
     pub memory_semantic_model: String,
+    /// 知识库注入条数（knowledge-base）：0 = 不注入（默认零行为变化）
+    pub knowledge_inject_top_k: usize,
+    /// 知识注入每条摘录字符截断上限
+    pub knowledge_inject_max_chars: usize,
     /// 能力模型槽位（"档案ID" 或 "档案ID/模型名"）：
     /// 语音合成（TTS）；空 = 全局档案默认 tts-1
     pub speech_model: String,
@@ -172,6 +176,8 @@ struct ConfigFile {
     memory_md_max_chars: Option<usize>,
     #[serde(default)]
     memory: Option<MemoryConfigFile>,
+    #[serde(default)]
+    knowledge: Option<KnowledgeConfigFile>,
     #[serde(default)]
     security: Option<SecurityFile>,
     #[serde(default)]
@@ -430,6 +436,18 @@ struct MemoryConfigFile {
     semantic_model: Option<String>,
 }
 
+/// 知识库配置（knowledge-base）：inject_top_k 默认 0 = 零注入零行为变化。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct KnowledgeConfigFile {
+    /// 系统提示注入条数：0 = 不注入（默认，与未引入知识库前完全一致）
+    #[serde(default)]
+    inject_top_k: Option<usize>,
+    /// 每条注入摘录的字符截断上限（默认 500）
+    #[serde(default)]
+    inject_max_chars: Option<usize>,
+}
+
 /// 半衰期清洗：必须为有限正数（天），非法值（0 / 负数 / NaN / ∞）回落默认 30 天。
 /// 为什么在配置层清洗而不只靠 decay() 内部兜底：设置页与 /api/config 回显的是配置值，
 /// decay 内部会把非法半衰期按 1 天处理——「显示 0 天、实际按 1 天衰减」属于所见非所跑，
@@ -483,6 +501,7 @@ impl ExmConfig {
 
         let file_llm = file.llm.clone().unwrap_or_default().into_config();
         let file_mem = file.memory.clone().unwrap_or_default();
+        let file_knowledge = file.knowledge.clone().unwrap_or_default();
         let file_sec = file.security.clone().unwrap_or_default();
         let file_auto = file.automation.clone().unwrap_or_default();
         let security = SecurityConfig {
@@ -666,6 +685,8 @@ impl ExmConfig {
             memory_recall_limit: file_mem.recall_limit.unwrap_or(5),
             memory_half_life_days: sanitize_half_life_days(file_mem.half_life_days),
             memory_semantic_model: file_mem.semantic_model.clone().unwrap_or_default(),
+            knowledge_inject_top_k: file_knowledge.inject_top_k.unwrap_or(0),
+            knowledge_inject_max_chars: file_knowledge.inject_max_chars.unwrap_or(500),
             speech_model: file_cap.speech.unwrap_or_default(),
             stt_model: file_cap.transcribe.unwrap_or_default(),
             vision_relay_model: file_cap.vision_relay.unwrap_or_default(),
@@ -729,6 +750,10 @@ impl ExmConfig {
                 recall_limit: Some(self.memory_recall_limit),
                 half_life_days: Some(self.memory_half_life_days),
                 semantic_model: Some(self.memory_semantic_model.clone()),
+            }),
+            knowledge: Some(KnowledgeConfigFile {
+                inject_top_k: Some(self.knowledge_inject_top_k),
+                inject_max_chars: Some(self.knowledge_inject_max_chars),
             }),
             llm_profiles: Some(
                 self.llm_profiles
@@ -848,6 +873,13 @@ fn migrate_file(mut file: ConfigFile, path: &Path) -> ConfigFile {
             recall_limit: Some(5),
             half_life_days: Some(30.0),
             semantic_model: None,
+        });
+    }
+    // 知识库缺省：零注入（与未引入知识库前行为完全一致——新配置项缺省安全）
+    if file.knowledge.is_none() {
+        file.knowledge = Some(KnowledgeConfigFile {
+            inject_top_k: Some(0),
+            inject_max_chars: Some(500),
         });
     }
     if file.max_concurrency.is_none() {

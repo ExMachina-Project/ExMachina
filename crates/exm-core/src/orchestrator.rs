@@ -213,9 +213,15 @@ pub struct Orchestrator {
     pub tools: Arc<crate::tools::ToolGateway>,
     pub store: Arc<Store>,
     pub memory: Arc<MemoryStore>,
+    /// 共享知识库（knowledge-base）：工具入口在 ToolGateway；此处仅供
+    /// 系统提示注入（inject_prompt_section）——两条路径都需要，避免再经 tools 转借
+    pub knowledge: Arc<crate::knowledge::KnowledgeStore>,
     pub memory_enabled: bool,
     pub memory_recall_limit: usize,
     pub memory_md_path: PathBuf,
+    /// 知识库注入配置（knowledge-base）：top_k = 0 不注入（默认零行为）
+    pub knowledge_inject_top_k: usize,
+    pub knowledge_inject_max_chars: usize,
     pub events: broadcast::Sender<CoreEvent>,
     pub orch_model: String,
     /// 语义检索目标："档案ID" 或 "档案ID/模型名"；空 = 仅词项召回（由记忆设置指定）
@@ -1147,6 +1153,20 @@ impl Orchestrator {
         } else {
             system_prompt
         };
+        // 知识库注入（knowledge-base，默认关）：按本轮输入检索 top-k 共享知识，
+        // 与压缩摘要同层注入系统提示尾部；检索失败静默跳过
+        let mut system_prompt = {
+            let cfg_k = self.config_snapshot.read().clone();
+            let section = crate::knowledge::inject_prompt_section(
+                &self.knowledge,
+                text,
+                cfg_k.knowledge_inject_top_k,
+                cfg_k.knowledge_inject_max_chars,
+            );
+            let mut sp = system_prompt;
+            sp.push_str(&section);
+            sp
+        };
         let mut history: Vec<ChatMessage> = history_with_ambient(&rows);
         if history.last().map(|m| m.role != "user").unwrap_or(true) {
             history.push(ChatMessage::user(text.to_string()));
@@ -1956,6 +1976,24 @@ impl ExecCtx {
                     let (summary, recent) = o.ensure_compacted(&self.session_id).await;
                     if let Some(ctx) = shared_context_input(summary, recent) {
                         inputs.push(ctx);
+                    }
+                }
+                // 知识库注入（knowledge-base，默认关）：按任务目标检索 top-k 共享知识，
+                // 作为派发输入与组共享上下文同层；检索失败静默跳过
+                {
+                    let cfg_k = o.config_snapshot.read().clone();
+                    let section = crate::knowledge::inject_prompt_section(
+                        &o.knowledge,
+                        &self.plan.goal,
+                        cfg_k.knowledge_inject_top_k,
+                        cfg_k.knowledge_inject_max_chars,
+                    );
+                    if !section.is_empty() {
+                        inputs.push(DispatchInput {
+                            ref_id: "knowledge:topk".into(),
+                            kind: "knowledge".into(),
+                            summary: section.trim().to_string(),
+                        });
                     }
                 }
                 inputs
