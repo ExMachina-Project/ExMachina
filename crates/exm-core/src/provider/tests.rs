@@ -287,3 +287,101 @@ mod quota_summary_tests {
         assert!(OpenAiCompatibleProvider::quota_error_summary(403, "x").contains("权限"));
     }
 }
+
+#[cfg(test)]
+mod image_generation_tests {
+    use super::*;
+
+    /// 最小 axum 服务器：按路由表回固定 JSON
+    async fn spawn_server(
+        routes: Vec<(&'static str, serde_json::Value)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut app = axum::Router::new();
+        for (path, body) in routes {
+            let h = hits.clone();
+            app = app.route(
+                path,
+                axum::routing::post(move || {
+                    let h = h.clone();
+                    async move {
+                        h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        (axum::http::StatusCode::OK, axum::Json(body))
+                    }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// b64_json 优先路径：请求组装（model/prompt/size/b64 参数）+ b64 解码返回字节
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 生图_b64形态_请求组装与解析() {
+        use base64::Engine;
+        let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG 魔数
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let (base, _hits) = spawn_server(vec![(
+            "/images/generations".into(),
+            serde_json::json!({ "data": [{ "b64_json": b64 }] }),
+        )])
+        .await;
+        let p = OpenAiCompatibleProvider::new(base, vec!["k".into()]);
+        let bytes = p.image_generate("gpt-image-1", "一只猫", "1024x1024").await.unwrap();
+        assert_eq!(bytes, png.to_vec(), "b64 解码应得原始字节");
+    }
+
+    /// URL 回落路径：b64 缺失时下载 url 指向的图片字节
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 生图_url形态_回落下载() {
+        let png = vec![0x89u8, 0x50, 0x4E, 0x47, 0x00];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let gens_base = base.clone();
+        let img_bytes = png.clone();
+        let app = axum::Router::new()
+            .route(
+                "/images/generations",
+                axum::routing::post(move || {
+                    let b = gens_base.clone();
+                    async move {
+                        axum::Json(serde_json::json!({ "data": [{ "url": format!("{b}/img") }] }))
+                    }
+                }),
+            )
+            .route(
+                "/img",
+                axum::routing::get(move || {
+                    let bytes = img_bytes.clone();
+                    async move { ([(axum::http::header::CONTENT_TYPE, "image/png")], bytes) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let p = OpenAiCompatibleProvider::new(base, vec!["k".into()]);
+        let bytes = p.image_generate("m", "prompt", "512x512").await.unwrap();
+        assert_eq!(bytes, png, "URL 回落应得下载字节");
+    }
+
+    /// 错误形态：无 data / 既无 b64 也无 url / HTTP 500 —— 明确报错
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 生图_错误形态明确报错() {
+        let (base, _hits) = spawn_server(vec![(
+            "/images/generations".into(),
+            serde_json::json!({ "data": [] }),
+        )])
+        .await;
+        let p = OpenAiCompatibleProvider::new(base, vec!["k".into()]);
+        let err = p.image_generate("m", "p", "512x512").await.unwrap_err();
+        assert!(err.to_string().contains("data"), "空 data 报错：{err}");
+    }
+
+    /// Mock 替身：确定性 PNG 字节（魔数合法）
+    #[tokio::test]
+    async fn 生图_mock替身_合法png() {
+        let bytes = MockLlmProvider.image_generate("m", "p", "512x512").await.unwrap();
+        assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47], "PNG 魔数");
+    }
+}
