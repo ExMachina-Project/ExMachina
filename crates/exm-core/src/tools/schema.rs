@@ -97,7 +97,7 @@ impl ToolGateway {
         );
         push(
             ToolName::Filesystem,
-            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）、send_file（把工作区内文件发送给用户——任意类型含二进制，本轮收束时经通道直发；要给用户交付文件时优先用这个）",
+            "文件系统操作：write（整文件写入/新建）、mkdir、list（条目清单）、delete（移入回收站可恢复，不裸删）、rename（重命名/移动，不覆盖已存在目标）、send_file（把工作区内文件发送给用户——任意类型含二进制，本轮收束时经通道直发；要给用户交付文件时优先用这个。禁止在回复文本里编造下载链接或 sandbox:/file:// 之类的伪 URL——交付文件只走 send_file，链接由系统按通道能力生成）",
             serde_json::json!({
                 "type": "object",
                 "properties": {
