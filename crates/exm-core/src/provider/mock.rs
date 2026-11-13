@@ -217,6 +217,12 @@ fn respond(req: &ChatRequest) -> String {
         r#"{"tool": "terminal", "args": {"command": "echo exm-tool-loop-ok"}}"#.to_string()
     } else if user.starts_with("【收束请求】") {
         converge_text(&user)
+    } else if user.contains("你是研究规划师") {
+        // 深度研究 e2e（deep-research 4.3）：计划阶段 → 确定性子问题数组
+        r#"["研究主题的市场规模","研究主题的竞争格局"]"#.to_string()
+    } else if user.contains("你是研究综合分析师") {
+        // 深度研究 e2e：聚合阶段 → 四节报告（含表内引用 + 一个伪造编号供拦截断言）
+        "## 结论摘要\n市场快速增长。\n\n## 分主题详述\n市场规模达百亿[1]。竞争高度集中[9]。\n\n## 来源清单\n[1] https://example.com/market\n\n## 研究方法\n并行检索后聚合。".to_string()
     } else if system.contains("OrchestratorPlan") {
         // 指挥体规划请求（内置组与自定义组共用该契约标记）
         plan_json(&system, &user)

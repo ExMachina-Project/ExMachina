@@ -1146,6 +1146,70 @@ async fn main() -> anyhow::Result<()> {
         orch.tools.set_chart_endpoint("");
     }
 
+    // ---- 深度研究（deep-research 4.3）：mock 全链路 + 无后端报错 ----
+    {
+        use exm_core::tools::ToolGateway;
+        use exm_core::types::ToolName;
+        // 前置说明：无后端报错路径由单测「研究工具_无后端明确报错」覆盖
+        // （e2e 主流程前段已配 tavily 后端，此处起始即有后端）。
+        // 配 tavily 后端（ready 门控通过；检索走 spawn —— e2e mock 环境的
+        // spawn 执行器走子个体链路，这里注入替身闭包保证确定性回流）
+        let put_rs = client
+            .put(format!("{base}/config"))
+            .json(&serde_json::json!({
+                "search": { "provider": "tavily", "endpoint": "", "apiKey": "e2e-k", "maxResults": 5, "proactive": false }
+            }))
+            .send()
+            .await?;
+        c.check("研究前置：search 后端 PUT 200", put_rs.status().is_success());
+        let orch = core.orchestrator();
+        orch.tools.set_spawn_executor(std::sync::Arc::new(|_a, _s, _task, _tools| {
+            Box::pin(async {
+                Ok("要点：市场年增 40% [来源: https://example.com/market]".to_string())
+            })
+        }));
+        let r = orch
+            .tools
+            .execute(
+                "orchestrator",
+                "s-e2e-rs",
+                &[ToolName::ResearchReport],
+                ToolName::ResearchReport,
+                &serde_json::json!({ "topic": "AI 智能体市场", "depth": "quick" }),
+            )
+            .await;
+        c.check(
+            "研究 mock 全链路成功",
+            r.ok && r.output.contains("结论摘要") && r.output.contains("research-"),
+        );
+        let outbox = core.store.outbox_drain("s-e2e-rs").unwrap_or_default();
+        c.check(
+            "研究报告产物登记（kind=file / .md）",
+            outbox.len() == 1
+                && outbox[0]["kind"] == "file"
+                && outbox[0]["path"].as_str().unwrap_or("").ends_with(".md"),
+        );
+        // 报告落盘：伪造 [9] 拦截为综合推断（mock 聚合响应含 [9]，表仅 1 条）
+        if let Some(p) = outbox.first().and_then(|o| o["path"].as_str()) {
+            let report = std::fs::read_to_string(root.join(p)).unwrap_or_default();
+            c.check(
+                "研究伪造引用拦截",
+                report.contains("（综合推断）") && report.contains("[1] https://example.com/market"),
+            );
+        }
+        // 事件：四阶段可观测
+        let events = core.store.list_events("s-e2e-rs").unwrap_or_default();
+        let stages: Vec<String> = events
+            .iter()
+            .filter(|env| env["payload"]["type"] == "research.stage")
+            .filter_map(|env| env["payload"]["payload"]["stage"].as_str().map(String::from))
+            .collect();
+        c.check(
+            "研究四阶段事件",
+            stages == vec!["planning", "searching", "synthesizing", "writing"],
+        );
+    }
+
     // 人设：默认 → 修改 → 热生效 → 重置
     // 对象口径：SOUL 仅「用户面智能体」持有（组主智能体 / 独立智能体），子个体无人格层。
     // 往返用测试自建单体做（避免抹掉出厂 SOUL：内置组出厂人格受保护、machina 随项目内容交付）。
