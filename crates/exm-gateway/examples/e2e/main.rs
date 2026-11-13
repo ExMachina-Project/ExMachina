@@ -1282,6 +1282,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // ---- 实验运行可见性（assistant-parity 7.2）：全局事件流查询面 ----
+    {
+        // id=global → 空 session_id 事件文件（auto.*/memory.digest 等全局事件）；
+        // 设置页实验区运行记录卡聚合用；无新端点（复用会话事件溯源路径）
+        let ge = client
+            .get(format!("{base}/sessions/global/events"))
+            .send()
+            .await?;
+        c.check("全局事件流查询 200", ge.status().is_success());
+        let gev: serde_json::Value = ge.json().await?;
+        c.check("全局事件流返回数组", gev.is_array());
+    }
+
     // 人设：默认 → 修改 → 热生效 → 重置
     // 对象口径：SOUL 仅「用户面智能体」持有（组主智能体 / 独立智能体），子个体无人格层。
     // 往返用测试自建单体做（避免抹掉出厂 SOUL：内置组出厂人格受保护、machina 随项目内容交付）。
