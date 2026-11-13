@@ -808,6 +808,80 @@ impl LlmProvider for OpenAiCompatibleProvider {
         Ok(bytes.to_vec())
     }
 
+    /// 图像生成：openai /images/generations（b64_json 优先，URL 回落下载）。
+    /// 返回图片原始字节（服务端产出什么格式就返回什么，工具层魔数嗅探校验）
+    async fn image_generate(&self, model: &str, prompt: &str, size: &str) -> anyhow::Result<Vec<u8>> {
+        if self.keys.is_empty() {
+            anyhow::bail!("未配置 API Key（生图不可用）");
+        }
+        let fmt = self.api_format.as_str();
+        if fmt != "openai" {
+            anyhow::bail!("协议 {fmt} 暂不支持图像生成");
+        }
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{base}/images/generations");
+        let key = self.key_hint_texts();
+        let (name, value) = self.auth_header(&key);
+        let resp = self
+            .client
+            .post(&url)
+            .header(name, value)
+            .json(&serde_json::json!({
+                "model": model, "prompt": prompt, "size": size,
+                // b64 优先：URL 形态还需二次下载（额外时延 + 外链可能过期）；
+                // 不支持该参数的端点多数会忽略未知字段
+                "response_format": "b64_json",
+            }))
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("生图请求失败: {e}"))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "生图失败 {status}: {}",
+                body.chars().take(200).collect::<String>()
+            );
+        }
+        let payload: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("生图响应解析失败: {e}"))?;
+        let item = payload["data"]
+            .as_array()
+            .and_then(|a| a.first())
+            .ok_or_else(|| anyhow::anyhow!("生图响应缺少 data 数组"))?;
+        // 形态一：b64_json（优先路径）
+        if let Some(b64) = item["b64_json"].as_str() {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| anyhow::anyhow!("b64_json 解码失败: {e}"))?;
+            return Ok(bytes);
+        }
+        // 形态二：URL 回落下载
+        if let Some(image_url) = item["url"].as_str() {
+            let img = self
+                .client
+                .get(image_url)
+                .timeout(std::time::Duration::from_secs(60))
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("图片下载失败: {e}"))?;
+            let status = img.status().as_u16();
+            if !(200..300).contains(&status) {
+                anyhow::bail!("图片下载失败 {status}");
+            }
+            let bytes = img
+                .bytes()
+                .await
+                .map_err(|e| anyhow::anyhow!("读取图片字节失败: {e}"))?;
+            return Ok(bytes.to_vec());
+        }
+        anyhow::bail!("生图响应既无 b64_json 也无 url")
+    }
+
     fn name(&self) -> &'static str {
         match self.api_format.as_str() {
             "anthropic" => "anthropic",

@@ -367,6 +367,11 @@ pub trait LlmProvider: Send + Sync {
     async fn speak(&self, _model: &str, _text: &str) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("该通道不支持语音合成")
     }
+    /// 图像生成（prompt → 图片字节）；默认不支持，openai 协议实现。
+    /// 返回 PNG/JPEG/WebP 任一格式的原始字节（b64_json 优先，URL 回落下载）
+    async fn image_generate(&self, _model: &str, _prompt: &str, _size: &str) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("该通道不支持图像生成")
+    }
     /// 流式：增量通过 tx 发出，最终返回完整响应
     async fn stream(
         &self,

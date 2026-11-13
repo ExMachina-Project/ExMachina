@@ -138,6 +138,16 @@ impl LlmProvider for MockLlmProvider {
             tool_calls: Vec::new(),
         })
     }
+
+    /// 图像生成替身：确定性 1×1 纯色 PNG（红）。
+    /// 生图链路（工具槽位回接 → 魔数嗅探 → outbox 登记）在 Mock 环境可全链验收。
+    async fn image_generate(&self, _model: &str, _prompt: &str, _size: &str) -> anyhow::Result<Vec<u8>> {
+        use base64::Engine;
+        const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+        Ok(base64::engine::general_purpose::STANDARD
+            .decode(TINY_PNG_B64)
+            .expect("内置测试 PNG 字节常量必须合法"))
+    }
 }
 
 /// 按**字符**边界把文本切成约 `max_bytes` 一块的流式增量。
