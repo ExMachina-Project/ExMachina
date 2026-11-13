@@ -124,6 +124,9 @@ pub struct ToolGateway {
     /// 上下文压缩执行器（context_compact 工具，实验性；未注入 = 工具返回未装配说明）。
     /// 槽位语义同 spawn_executor：Core 装配后回接 (provider, model)。
     pub(crate) compactor: parking_lot::RwLock<Option<(Arc<dyn LlmProvider>, String)>>,
+    /// 深度研究 LLM 通道（research_report 计划与聚合两阶段；未注入 = 工具返回未装配说明）。
+    /// 槽位语义同 compactor：Core 装配后回接 (provider, model)。
+    pub(crate) research_llm: parking_lot::RwLock<Option<(Arc<dyn LlmProvider>, String)>>,
     /// 语音合成执行器（speech_reply 工具，assistant-parity T2）：文本 → mp3 字节。
     /// 槽位语义同 spawn_executor：Core 装配后回接 orchestrator speak_audio
     /// （能力槽位链：组覆盖 → 全局 speech 模型 → tts-1 兜底）。
@@ -226,6 +229,7 @@ impl ToolGateway {
             session_send_executor: parking_lot::RwLock::new(None),
             session_grant_probe: parking_lot::RwLock::new(None),
             compactor: parking_lot::RwLock::new(None),
+            research_llm: parking_lot::RwLock::new(None),
             speech_synth: parking_lot::RwLock::new(None),
             image_gen: parking_lot::RwLock::new(None),
             chart_endpoint: parking_lot::RwLock::new(String::new()),
@@ -289,6 +293,11 @@ impl ToolGateway {
     /// 注入上下文压缩执行器（context_compact 工具，实验性开关开启时由 Core 装配后回接）
     pub fn set_compactor(&self, provider: Arc<dyn LlmProvider>, model: String) {
         *self.compactor.write() = Some((provider, model));
+    }
+
+    /// 注入深度研究 LLM 通道（research_report 计划与聚合两阶段）
+    pub fn set_research_llm(&self, provider: Arc<dyn LlmProvider>, model: String) {
+        *self.research_llm.write() = Some((provider, model));
     }
 
     /// 注入语音合成执行器（speech_reply 工具）：Core 装配后回接。
@@ -1331,6 +1340,9 @@ impl ToolGateway {
             ToolName::Speech => self.tool_speech(session_id, args).await,
             ToolName::ImageGen => self.tool_image_gen(session_id, args).await,
             ToolName::RenderChart => self.tool_render_chart(session_id, args).await,
+            ToolName::ResearchReport => {
+                self.tool_research_report(agent_id, session_id, args).await
+            }
             ToolName::KnowledgeWrite => {
                 self.tool_knowledge_write(agent_id, session_id, args).await
             }
