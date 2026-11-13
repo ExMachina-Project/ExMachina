@@ -131,6 +131,8 @@ pub struct GroupCapsBody {
     pub vision_relay: Option<String>,
     #[serde(default)]
     pub embedding: Option<String>,
+    #[serde(default)]
+    pub image_gen: Option<String>,
 }
 
 /// 设置组级能力模型覆盖（每组可用不同模型栈；空串 = 清除该项跟随全局）
@@ -144,6 +146,7 @@ pub async fn set_group_capabilities(
         transcribe: b.transcribe,
         vision_relay: b.vision_relay,
         embedding: b.embedding,
+        image_gen: b.image_gen,
     };
     match st.core.registry().set_group_capabilities(&id, caps) {
         Ok(_) => Json(json!({

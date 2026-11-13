@@ -1044,6 +1044,50 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(false),
     );
 
+    // ---- 图像生成（image-generation）：未配置不下发 + 替身生图产物登记 ----
+    // 未配置 imageGen 槽位（e2e 起始态）：工具不在 spec 清单（不承诺不存在的能力）
+    {
+        use exm_core::tools::ToolGateway;
+        use exm_core::types::ToolName;
+        let specs = ToolGateway::tool_specs(
+            &ToolName::full_set(),
+            false,
+            false,
+            false,
+            false,
+            core.orchestrator().tools.image_gen_ready(),
+        );
+        c.check(
+            "生图未配置：image_gen 不在工具清单",
+            specs.iter().all(|s| s.name != "image_gen"),
+        );
+        // 注入替身闭包（Mock 环境等价回接）：执行 → outbox 登记 image 产物
+        core.orchestrator().tools.set_image_gen(std::sync::Arc::new(|_p, _s| {
+            Box::pin(async {
+                Ok(vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4])
+            })
+        }));
+        let r = core
+            .orchestrator()
+            .tools
+            .execute(
+                "orchestrator",
+                "s-e2e-img",
+                &[ToolName::ImageGen],
+                ToolName::ImageGen,
+                &serde_json::json!({ "prompt": "e2e test image", "size": "1024x1024" }),
+            )
+            .await;
+        c.check("生图替身执行成功", r.ok);
+        let outbox = core.store.outbox_drain("s-e2e-img").unwrap_or_default();
+        c.check(
+            "生图产物登记（kind=image）",
+            outbox.len() == 1
+                && outbox[0]["kind"] == "image"
+                && outbox[0]["path"].as_str().unwrap_or("").ends_with(".png"),
+        );
+    }
+
     // 人设：默认 → 修改 → 热生效 → 重置
     // 对象口径：SOUL 仅「用户面智能体」持有（组主智能体 / 独立智能体），子个体无人格层。
     // 往返用测试自建单体做（避免抹掉出厂 SOUL：内置组出厂人格受保护、machina 随项目内容交付）。
