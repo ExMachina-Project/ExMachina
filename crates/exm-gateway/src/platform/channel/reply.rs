@@ -256,7 +256,20 @@ where
     })
 }
 
-/// 入站媒体：下载保存到 `.exmachina/inbox/{通道id}/`，返回（绝对路径, 文件名）
+/// 入站媒体内容指纹（SHA-256 截断 16 hex）：去重键。不依赖文件名——
+/// 平台重推常改名，字节相同才是真重复。
+pub(crate) fn media_fingerprint(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let digest = h.finalize();
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// 入站媒体：下载保存到 `.exmachina/inbox/{通道id}/`，返回（绝对路径, 文件名）。
+/// 文件名 = 内容指纹前 16 hex + 扩展名（inbound-media-dedup）：跨消息重推
+/// （同字节不同名）天然落同一路径——已存在且同字节直接复用（磁盘即真值，
+/// 重启幂等），不产生第二份文件。返回 None = 写失败。
 pub(crate) async fn save_inbound_media(
     core: &exm_core::Core,
     ch: &Channel,
@@ -270,17 +283,19 @@ pub(crate) async fn save_inbound_media(
         .join("inbox")
         .join(&ch.id);
     tokio::fs::create_dir_all(&dir).await.ok()?;
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || "._-".contains(c) {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let file = dir.join(format!("{}-{safe}", exm_core::types::now_ms()));
+    // 指纹文件名：原名仅留扩展名（展示名由调用方保留）
+    let ext = name.rsplit('.').next().unwrap_or("bin");
+    let ext = if ext.len() <= 5 && ext.chars().all(|c| c.is_alphanumeric()) {
+        ext.to_lowercase()
+    } else {
+        "bin".to_string()
+    };
+    let file = dir.join(format!("{}.{ext}", media_fingerprint(&bytes)));
+    // 已存在同指纹文件：字节必然一致（SHA-256 截断碰撞概率可忽略）——
+    // 直接复用路径（跨消息重推场景），磁盘只留一份
+    if tokio::fs::try_exists(&file).await.unwrap_or(false) {
+        return Some(file.display().to_string());
+    }
     tokio::fs::write(&file, &bytes).await.ok()?;
     Some(file.display().to_string())
 }

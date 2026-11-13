@@ -306,8 +306,12 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         if !first_seen(&format!("qqbot:{}", ch.id), &msg_id) {
                                             continue;
                                         }
-                                        // 入站媒体（组 6.4）：attachments 下载
+                                        // 入站媒体（组 6.4）：attachments 下载。
+                                        // 同轮指纹去重（inbound-media-dedup）：平台同消息
+                                        // 多附件重推致同字节重复——按 (channel, SHA-256[..16])
+                                        // 判重，同指纹只留首个
                                         let mut inbound: Vec<(String, String, String, Vec<u8>)> = Vec::new();
+                                        let mut seen_fp: std::collections::HashSet<String> = std::collections::HashSet::new();
                                         if let Some(atts) = d.get("attachments").and_then(|x| x.as_array()) {
                                             for att in atts {
                                                 let url = att.get("url").and_then(|x| x.as_str()).unwrap_or("");
@@ -318,6 +322,10 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                 let full = if url.starts_with("http") { url.to_string() } else { format!("https://multimedia.qq.com{url}") };
                                                 let kind = if is_image_name(name) { "image" } else { "file" };
                                                 if let Some(bytes) = crate::platform::download_bytes(&full).await {
+                                                    let fp = crate::platform::media_fingerprint(&bytes);
+                                                    if !seen_fp.insert(fp) {
+                                                        continue; // 同轮重复：静默丢弃（debug 级语义）
+                                                    }
                                                     inbound.push((kind.into(), name.into(), peer.key().to_string(), bytes));
                                                 }
                                             }

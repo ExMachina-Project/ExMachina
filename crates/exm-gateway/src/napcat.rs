@@ -590,6 +590,15 @@ async fn on_text(
             .unwrap_or_default();
         let mut saved: Vec<(String, String, String)> = ambient_media::take(&ch.id, &peer);
         let mut transcript_note = String::new();
+        // 同轮指纹去重（inbound-media-dedup）：同消息重复段/旁听窗口回灌的
+        // 同字节媒体按指纹只留首个；跨消息重推由指纹文件名天然复用（磁盘一份）
+        let mut seen_fp: std::collections::HashSet<String> =
+            saved.iter().map(|(_, p, _)| {
+                std::path::Path::new(p)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            }).collect();
         for (kind, src) in media {
             let name = format!(
                 "napcat-{}.{}",
@@ -608,6 +617,10 @@ async fn on_text(
                 crate::platform::download_bytes(&src).await
             };
             if let Some(b) = bytes {
+                let fp = crate::platform::media_fingerprint(&b);
+                if !seen_fp.insert(fp) {
+                    continue; // 同轮重复：静默丢弃
+                }
                 if let Some(p) =
                     crate::platform::save_inbound_media(&core, &ch, &name, b.clone()).await
                 {
