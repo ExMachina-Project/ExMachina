@@ -19,7 +19,7 @@ import { useIsNarrow } from "../../useIsNarrow";
 
 /** 分组元数据。ui 是本地偏好分区，不属于后端 config schema */
 import { SECTIONS, FIELD_I18N, ENUM_OVERRIDES, listToText, readCurrent } from "./schema";
-import { SanitizeStatsCard, LimitsStatsCard, NotifyPrefsCard, VersionPanel } from "./cards";
+import { SanitizeStatsCard, LimitsStatsCard, NotifyPrefsCard, VersionPanel, ExperimentRunsCard } from "./cards";
 
 export function SettingsView(): React.ReactElement {
   const { config, saveConfig } = useExm();
@@ -222,6 +222,7 @@ export function SettingsView(): React.ReactElement {
             </header>
             {current.key === "limits" && <LimitsStatsCard />}
             {current.key === "security" && <SanitizeStatsCard />}
+            {current.key === "experiments" && <ExperimentRunsCard />}
             <div className="cfg-list">
               {current.fields.filter((f) => {
                 // 条件显示（showIf）：依赖字段当前值不匹配则整行隐藏。

@@ -1504,4 +1504,13 @@ export const en: Partial<Dict> = {
   "cfg.notifyMaxChars.help": "推送至通道的结果摘要截断长度",
   "cfg.pairingTtl": "Pairing code TTL (s)",
   "cfg.pairingTtl.help": "控制台签发的配对码有效时长；单次有效",
+  "cfg.expRunsTitle": "Experiment runs (latest)",
+  "cfg.expRunsSwitch": "Experiment",
+  "cfg.expRunsLast": "Last fired",
+  "cfg.expRunsSummary": "Latest event summary",
+  "cfg.expRunsEmpty": "No runs recorded yet",
+  "cfg.expSuperAgent": "Super Agent deep delegation",
+  "cfg.expAutoAgent": "Auto Agent full autonomy",
+  "cfg.expMetaAgent": "Meta Agent self-improvement",
+  "cfg.expAutoMemoryDigest": "Auto memory digest",
 };
