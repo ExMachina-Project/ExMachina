@@ -631,7 +631,7 @@ fn first_failed_field(err: &str) -> String {
             return f.to_string();
         }
     }
-    err.split(|c: char| c == ' ' || c == '：' || c == ':')
+    err.split([' ', '：', ':'])
         .next()
         .unwrap_or("unknown")
         .to_string()

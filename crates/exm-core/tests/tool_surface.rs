@@ -88,7 +88,7 @@ fn specs_下发面_含全部开发工具() {
     .iter()
     .filter_map(|k| ToolName::parse(k))
     .collect();
-    let specs = ToolGateway::tool_specs(&allowlist, false, false, false, false);
+    let specs = ToolGateway::tool_specs(&allowlist, false, false, false, false, false, false);
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     for n in [
         "read",
