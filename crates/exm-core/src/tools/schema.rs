@@ -17,6 +17,7 @@ impl ToolGateway {
         computer_ready: bool,
         speech_ready: bool,
         image_gen_ready: bool,
+        chart_ready: bool,
     ) -> Vec<crate::provider::ToolSpec> {
         let mut specs: Vec<crate::provider::ToolSpec> = Vec::new();
         let mut push = |name: ToolName, description: &str, parameters: serde_json::Value| {
@@ -37,6 +38,9 @@ impl ToolGateway {
             }
             if name == ToolName::ImageGen && !image_gen_ready {
                 return; // 生图槽位未配置：不下发（不承诺不存在的能力）
+            }
+            if name == ToolName::RenderChart && !chart_ready {
+                return; // chart.endpoint 空 = 关闭：不下发
             }
             specs.push(crate::provider::ToolSpec {
                 name: name.key().to_string(),
@@ -178,6 +182,13 @@ impl ToolGateway {
                 "size": { "type": "string", "enum": ["1024x1024", "1024x1536", "1536x1024"], "description": "尺寸：方形/竖版/横版（默认 1024x1024）" }
             },
             "required": ["prompt"]
+        }));
+        push(ToolName::RenderChart, "把 mermaid 图表源码渲染成 SVG 图片（随本轮回复送达）。适合流程图/时序图/状态图等结构示意；mermaid 参数是完整图表源码（如 flowchart TD 开头，节点与连线语法见 mermaid 文档）；语法错误会带回服务端提示，修正后可重试", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "mermaid": { "type": "string", "description": "mermaid 图表源码（flowchart / sequenceDiagram / stateDiagram-v2 等，≤20000 字符）" }
+            },
+            "required": ["mermaid"]
         }));
         push(ToolName::KnowledgeWrite, "写入共享知识库：沉淀对全体智能体通用的客观知识（部署约束、平台特性、方法论、踩坑经验）。内容哈希去重——重复写入会提升既有条目热度而非新建。沉淀纪律：只存跨会话可复用的通用结论，不存会话私有细节、用户个人信息或一次性流水；与记忆的分工——记忆存本组经历，知识存实例级通用事实。正文超 8000 字符会被拒绝，超长内容请拆分为多条聚焦知识", serde_json::json!({
             "type": "object",
@@ -378,6 +389,7 @@ impl ToolGateway {
         computer_ready: bool,
         speech_ready: bool,
         image_gen_ready: bool,
+        chart_ready: bool,
         memory_deep: bool,
     ) -> Vec<crate::provider::ToolSpec> {
         let mut specs = Self::tool_specs(
@@ -387,6 +399,7 @@ impl ToolGateway {
             computer_ready,
             speech_ready,
             image_gen_ready,
+            chart_ready,
         );
         if !memory_deep {
             let drop: Vec<&str> = [ToolName::MemoryWrite, ToolName::MemoryLink]

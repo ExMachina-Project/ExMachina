@@ -75,6 +75,7 @@ mod schedule;
 mod speech;
 mod knowledge;
 mod image_gen;
+mod chart;
 
 #[cfg(test)]
 mod tests;

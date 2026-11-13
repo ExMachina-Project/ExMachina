@@ -66,6 +66,7 @@ impl AgentRuntime {
             self.tools.computer_ready(),
             self.tools.speech_ready(),
             self.tools.image_gen_ready(),
+            self.tools.chart_ready(),
             self.tools.memory_deep(),
         );
         specs = crate::tools::ToolGateway::tool_specs_experiments(
@@ -401,6 +402,7 @@ impl AgentRuntime {
             self.tools.computer_ready(),
             self.tools.speech_ready(),
             self.tools.image_gen_ready(),
+            self.tools.chart_ready(),
             self.tools.memory_deep(),
         );
         specs = crate::tools::ToolGateway::tool_specs_experiments(

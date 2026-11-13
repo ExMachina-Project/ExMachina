@@ -183,6 +183,10 @@ pub enum ToolName {
     /// 随本轮回复直发。未配置生图槽位时不下发（不承诺不存在的能力）。
     #[serde(rename = "image_gen")]
     ImageGen,
+    /// 图表渲染（chart-rendering）：mermaid 源码 → SVG（Kroki 兼容端点），
+    /// 产物经 outbox 随本轮回复直发。chart.endpoint 空串时不下发。
+    #[serde(rename = "render_chart")]
+    RenderChart,
 }
 
 impl ToolName {
@@ -217,6 +221,7 @@ impl ToolName {
             ToolName::KnowledgeWrite => "knowledge_write",
             ToolName::KnowledgeRead => "knowledge_read",
             ToolName::ImageGen => "image_gen",
+            ToolName::RenderChart => "render_chart",
         }
     }
 
@@ -267,6 +272,7 @@ impl ToolName {
             "knowledge_write" => Some(ToolName::KnowledgeWrite),
             "knowledge_read" => Some(ToolName::KnowledgeRead),
             "image_gen" => Some(ToolName::ImageGen),
+            "render_chart" => Some(ToolName::RenderChart),
             _ => None,
         }
     }
@@ -306,6 +312,7 @@ impl ToolName {
             ToolName::KnowledgeWrite,
             ToolName::KnowledgeRead,
             ToolName::ImageGen,
+            ToolName::RenderChart,
         ]
     }
 }
