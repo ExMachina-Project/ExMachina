@@ -9,7 +9,7 @@ import { api, type GroupMeta, type LlmProfile, type PersonaInfo } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { SkeletonList } from "../components/SkeletonList";
 import { GroupDetailPanel } from "./GroupsView";
-import { buildModelOptions, groupIdEn, modelLabel } from "../models";
+import { buildCapabilityOptions, buildModelOptions, groupIdEn, modelLabel } from "../models";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
 
@@ -189,6 +189,25 @@ export function SinglesView(): React.ReactElement {
       if (model !== (groupEditTarget.model ?? "")) {
         await api.setGroupModel(targetId, model);
       }
+      // 自我优化（group-self-optimize）：仅在实际变化时提交（与组详情设置弹窗同口径）
+      const selfOpt = v.selfOptimize ?? false;
+      if (selfOpt !== (groupEditTarget.selfOptimize ?? false)) {
+        await api.setGroupSelfOptimize(targetId, selfOpt);
+      }
+      // 能力覆盖（组级模型槽位）：逐项对比提交，空串 = 清除覆盖回落全局
+      const caps = (v.capabilities ?? {}) as Record<string, string>;
+      const prevCaps = groupEditTarget.capabilities ?? {};
+      const capsChanged = (["speech", "transcribe", "visionRelay", "embedding"] as const).some(
+        (k) => (caps[k] ?? "") !== (prevCaps[k] ?? ""),
+      );
+      if (capsChanged) {
+        await api.setGroupCapabilities(targetId, {
+          speech: caps.speech ?? "",
+          transcribe: caps.transcribe ?? "",
+          visionRelay: caps.visionRelay ?? "",
+          embedding: caps.embedding ?? "",
+        });
+      }
       message.success(t("groups.infoSaved", { name: meta.name }));
       setGroupEditTarget(null);
       if (enteredGroup === groupEditTarget.id) {
@@ -232,6 +251,13 @@ export function SinglesView(): React.ReactElement {
           identifier: g.id,
           workspace: g.workspace ?? "",
           model: g.model || undefined,
+          selfOptimize: g.selfOptimize ?? false,
+          capabilities: {
+            speech: g.capabilities?.speech || undefined,
+            transcribe: g.capabilities?.transcribe || undefined,
+            visionRelay: g.capabilities?.visionRelay || undefined,
+            embedding: g.capabilities?.embedding || undefined,
+          },
         });
       },
     },
@@ -673,6 +699,29 @@ export function SinglesView(): React.ReactElement {
           </Form.Item>
           <Form.Item name="model" label={t("groups.f.model")} extra={t("groups.f.modelHelp")}>
             <Select allowClear options={buildModelOptions(profiles)} placeholder={t("groups.capsFollow")} />
+          </Form.Item>
+          {/* 自我优化 + 能力覆盖：与组详情设置弹窗同款字段（统一页直接可改，不必进详情） */}
+          <Form.Item name="selfOptimize" label={t("groups.selfOptLabel")} help={t("groups.selfOptHint")} style={{ marginBottom: 8 }}>
+            <Switch
+              checkedChildren={t("common.on")}
+              unCheckedChildren={t("common.off")}
+            />
+          </Form.Item>
+          <Form.Item label={t("groups.capsTitle")} help={t("groups.capsHint")} style={{ marginBottom: 8 }}>
+            <div className="cap-grid" style={{ gap: "8px 14px" }}>
+              <Form.Item name={["capabilities", "speech"]} noStyle>
+                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capSpeech")} />
+              </Form.Item>
+              <Form.Item name={["capabilities", "transcribe"]} noStyle>
+                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capStt")} />
+              </Form.Item>
+              <Form.Item name={["capabilities", "visionRelay"]} noStyle>
+                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capVisionRelay")} />
+              </Form.Item>
+              <Form.Item name={["capabilities", "embedding"]} noStyle>
+                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capEmbed")} />
+              </Form.Item>
+            </div>
           </Form.Item>
           <Form.Item
             name="identifier"
