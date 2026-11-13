@@ -185,6 +185,19 @@ impl Core {
             req.result = Some(text.chars().take(4000).collect());
             self.store.update_approval(&req)?;
             self.emit_approval_resolved(&req);
+            // 提议载荷明细（kind/target）随应用结果事件透出——与
+            // meta.proposal(created) 对称，事件页可串起提议→应用轨迹
+            let (p_kind, p_target) = req
+                .meta_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .map(|v| {
+                    (
+                        v.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        v.get("target").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    )
+                })
+                .unwrap_or_default();
             let _ = self.events.send(CoreEvent {
                 kind: "meta.applied".into(),
                 session_id: req.session_id.clone(),
@@ -192,6 +205,8 @@ impl Core {
                     "approvalId": req.id,
                     "ok": req.status == "executed",
                     "command": req.command,
+                    "kind": p_kind,
+                    "target": p_target,
                 }),
             });
             return Ok(req);

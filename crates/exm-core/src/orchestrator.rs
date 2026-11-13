@@ -1264,7 +1264,27 @@ impl Orchestrator {
             )
             .await?;
 
+        // Super Agent 停机三态可观测（assistant-parity 实验可观测）：深度委托
+        // 会话的非空产出按停机类型标记落事件流——事件页可按 delivered/
+        // needs_decision/blocked 检索（非深度委托会话不发）
+        let super_on = self.config_snapshot.read().experiments.super_agent;
         let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
+        let halt_kind = if super_on {
+            let k = crate::autonomy::parse_halt_kind(&final_text);
+            let preview: String = final_text.chars().take(120).collect();
+            self.emit(
+                session_id,
+                "super.halt",
+                serde_json::json!({
+                    "haltKind": k.key(),
+                    "agentId": def.identifier,
+                    "preview": preview,
+                }),
+            );
+            Some(k.key())
+        } else {
+            None
+        };
         let statements = vec![Statement::report(final_text)];
         self.store.add_message_full(
             session_id,
@@ -1282,6 +1302,7 @@ impl Orchestrator {
                 "routeLevel": "direct",
                 "agentId": def.identifier,
                 "statements": statements,
+                "haltKind": halt_kind,
                 "artifacts": self.store.outbox_drain_with_children(session_id).unwrap_or_default(),
             }),
         );
