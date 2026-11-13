@@ -245,6 +245,21 @@ impl AgentRuntime {
                     return Ok(report);
                 }
                 Err(err) => {
+                    // 失败可观测（sync-report-resilience）：每次校验失败独立落
+                    // 事件流（report.rejected：首个失败字段 + 原文长度），
+                    // 既有连续失败计数语义不变；事件页可检索每次失败原因
+                    self.tools.emit_and_persist(crate::types::CoreEvent {
+                        kind: "report.rejected".into(),
+                        session_id: session_id.to_string(),
+                        payload: serde_json::json!({
+                            "agent": def.identifier,
+                            "taskNodeId": order.task_node_id,
+                            "field": first_failed_field(&err),
+                            "reason": err,
+                            "textLen": text.chars().count(),
+                            "attempt": rewrites + 1,
+                        }),
+                    });
                     rewrites += 1;
                     if rewrites > SYNC_REWRITE_LIMIT {
                         anyhow::bail!("SyncReport 契约连续校验失败（{rewrites} 次）：{err}");
@@ -300,6 +315,7 @@ impl AgentRuntime {
             conflicts: None,
             next_suggestion: crate::types::NextSuggestion::default(),
             confidence: 0.3,
+            repaired: None,
         })
     }
 
@@ -604,4 +620,19 @@ impl AgentRuntime {
         Some(format!("{hint}（{note}）"))
     }
 
+}
+
+/// 从校验错误串提取首个失败字段（report.rejected 事件的 field 值）：
+/// 「missing field \`title\` at line N」→ title；
+/// 业务约束错误（「summary 不能为空」）→ 首个中文词前的字段名
+fn first_failed_field(err: &str) -> String {
+    if let Some(rest) = err.split("missing field `").nth(1) {
+        if let Some(f) = rest.split('`').next() {
+            return f.to_string();
+        }
+    }
+    err.split(|c: char| c == ' ' || c == '：' || c == ':')
+        .next()
+        .unwrap_or("unknown")
+        .to_string()
 }
