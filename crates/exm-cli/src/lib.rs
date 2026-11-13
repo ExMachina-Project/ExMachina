@@ -9,6 +9,7 @@ pub mod headless;
 pub mod group_cmd;
 pub mod install;
 pub mod memory_cmd;
+pub mod knowledge_cmd;
 pub mod panel;
 pub mod tui;
 pub mod term_caps;
@@ -160,6 +161,11 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
+    },
+    /// 共享知识库：实例级通用知识的查看 / 检索 / 沉淀 / 治理（全智能体共享）
+    Knowledge {
+        #[command(subcommand)]
+        action: KnowledgeAction,
     },
     /// 技能包：派发时按触发词自动携带的指令包（数据化技能）
     Skill {
@@ -513,6 +519,30 @@ enum MemoryAction {
     Render,
     /// 记忆库统计与个体可靠性
     Stats,
+}
+
+#[derive(Subcommand)]
+enum KnowledgeAction {
+    /// 列出最近知识条目（createdAt 倒序）
+    List {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// 检索知识库（词项命中 + 热度合排）
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+    /// 写入一条知识（内容哈希去重；重复写入提升既有条目）
+    Add {
+        title: String,
+        body: String,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+    },
+    /// 删除指定知识条目
+    Delete { id: String },
 }
 
 /// 规范化工作区根目录：`canonicalize` 后去掉 Windows verbatim 前缀。
@@ -956,6 +986,19 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 MemoryAction::Decay { floor } => memory_cmd::run_memory_decay(&core, floor),
                 MemoryAction::Render => memory_cmd::run_memory_render(&core),
                 MemoryAction::Stats => memory_cmd::run_memory_stats(&core),
+            }
+        }
+        Commands::Knowledge { action } => {
+            let core = build_core(&workspace)?;
+            match action {
+                KnowledgeAction::List { limit } => knowledge_cmd::run_knowledge_list(&core, limit),
+                KnowledgeAction::Search { query, limit } => {
+                    knowledge_cmd::run_knowledge_search(&core, &query, limit)
+                }
+                KnowledgeAction::Add { title, body, tags } => {
+                    knowledge_cmd::run_knowledge_add(&core, &title, &body, tags)
+                }
+                KnowledgeAction::Delete { id } => knowledge_cmd::run_knowledge_delete(&core, &id),
             }
         }
         Commands::Skill { action } => {

@@ -212,6 +212,21 @@ export interface MemoryEntry {
   accessCount: number;
 }
 
+/** 共享知识条目（knowledge-base）：实例级通用知识，全智能体共享不分区 */
+export interface KnowledgeEntry {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  /** 产出来源：智能体标识（manual = 管理面手写） */
+  sourceAgent: string;
+  sourceSession?: string;
+  /** 检索命中计数（热度信号） */
+  hits: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PersonaInfo {
   identifier: string;
   persona: string;
