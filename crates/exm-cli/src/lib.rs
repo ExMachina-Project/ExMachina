@@ -519,6 +519,12 @@ enum MemoryAction {
     Render,
     /// 记忆库统计与个体可靠性
     Stats,
+    /// 全量导出为 JSONL（备份/迁移；--agent 过滤；缺省打印 stdout，传 file 落盘）
+    Export {
+        file: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -986,6 +992,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 MemoryAction::Decay { floor } => memory_cmd::run_memory_decay(&core, floor),
                 MemoryAction::Render => memory_cmd::run_memory_render(&core),
                 MemoryAction::Stats => memory_cmd::run_memory_stats(&core),
+                MemoryAction::Export { file, agent } => {
+                    memory_cmd::run_memory_export(&core, file.as_deref(), agent.as_deref())
+                }
             }
         }
         Commands::Knowledge { action } => {
