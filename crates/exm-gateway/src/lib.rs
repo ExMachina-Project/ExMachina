@@ -64,6 +64,7 @@ pub mod config_admin;
 pub mod groups_admin;
 pub mod mcp_admin;
 pub mod memory_admin;
+pub mod knowledge_admin;
 pub mod persona;
 pub mod playbooks;
 pub mod sessions;
@@ -318,6 +319,12 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/memory/render", post(memory_render))
         .route("/api/memory/:id", axum::routing::delete(forget_memory).put(update_memory))
         .route("/api/memory/:id/pin", post(pin_memory))
+        // 知识库（knowledge-base）：全局共享知识层管理面
+        .route(
+            "/api/knowledge",
+            get(knowledge_admin::list_knowledge).post(knowledge_admin::add_knowledge),
+        )
+        .route("/api/knowledge/:id", axum::routing::delete(knowledge_admin::delete_knowledge))
         .route("/api/memory/md", get(get_memory_md).put(put_memory_md))
         .route(
             "/ws",

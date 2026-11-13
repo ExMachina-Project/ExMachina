@@ -166,6 +166,10 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("post", "/api/memory/:id/pin", "记忆置顶切换"),
         Endpoint::new("get", "/api/memory/md", "浅层快照查看"),
         Endpoint::new("put", "/api/memory/md", "浅层快照编辑"),
+        // ---------------- 知识库
+        Endpoint::new("get", "/api/knowledge", "知识列表（q= 检索）"),
+        Endpoint::new("post", "/api/knowledge", "新增知识"),
+        Endpoint::new("delete", "/api/knowledge/:id", "删除知识"),
         // ---------------- 定时任务
         Endpoint::new("get", "/api/cron", "定时任务列表"),
         Endpoint::new("post", "/api/cron", "创建定时任务"),

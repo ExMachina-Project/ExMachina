@@ -8,6 +8,7 @@ import { apiChannels } from "./channels";
 import { apiConfig } from "./config";
 import { apiCron } from "./cron";
 import { apiGroups } from "./groups";
+import { apiKnowledge } from "./knowledge";
 import { apiMemory } from "./memory";
 import { apiModels } from "./models";
 import { apiNexus } from "./nexus";
@@ -28,6 +29,7 @@ export const api = {
   ...apiChannels,
   ...apiConfig,
   ...apiMemory,
+  ...apiKnowledge,
   ...apiSkills,
   ...apiPlugins,
   ...apiCron,
