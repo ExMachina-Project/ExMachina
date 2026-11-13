@@ -1056,6 +1056,7 @@ async fn main() -> anyhow::Result<()> {
             false,
             false,
             core.orchestrator().tools.image_gen_ready(),
+            core.orchestrator().tools.chart_ready(),
         );
         c.check(
             "生图未配置：image_gen 不在工具清单",

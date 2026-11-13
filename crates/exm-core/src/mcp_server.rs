@@ -105,6 +105,7 @@ impl McpServer {
             gateway.computer_ready(),
             gateway.speech_ready(),
             gateway.image_gen_ready(),
+            gateway.chart_ready(),
         )
         .into_iter()
         .filter(|s| acl.allowed_tools.is_empty() || acl.allowed_tools.iter().any(|t| t == &s.name))

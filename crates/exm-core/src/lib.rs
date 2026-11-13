@@ -1335,6 +1335,8 @@ pub fn build_orchestrator(
     gateway = gateway.with_memory_mode(cfg.memory_enabled, cfg.memory_md_path.clone());
     // 知识工具（knowledge_write/read）的受控入口：全局共享不分区，装配即全量语义
     gateway = gateway.with_knowledge(knowledge.clone());
+    // 图表渲染端点（render_chart 工具）：chart.endpoint 空 = 关闭
+    gateway.set_chart_endpoint(&cfg.chart_endpoint);
     let tools = Arc::new(gateway);
     let unit_runtime = Arc::new(
         AgentRuntime::new(

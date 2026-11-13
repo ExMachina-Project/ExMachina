@@ -107,6 +107,8 @@ pub struct ExmConfig {
     pub knowledge_inject_top_k: usize,
     /// 知识注入每条摘录字符截断上限
     pub knowledge_inject_max_chars: usize,
+    /// 图表渲染端点（chart-rendering）：Kroki 兼容；空串 = 关闭（render_chart 不下发）
+    pub chart_endpoint: String,
     /// 能力模型槽位（"档案ID" 或 "档案ID/模型名"）：
     /// 语音合成（TTS）；空 = 全局档案默认 tts-1
     pub speech_model: String,
@@ -180,6 +182,8 @@ struct ConfigFile {
     memory: Option<MemoryConfigFile>,
     #[serde(default)]
     knowledge: Option<KnowledgeConfigFile>,
+    #[serde(default)]
+    chart: Option<ChartConfigFile>,
     #[serde(default)]
     security: Option<SecurityFile>,
     #[serde(default)]
@@ -452,6 +456,16 @@ struct KnowledgeConfigFile {
     inject_max_chars: Option<usize>,
 }
 
+/// 图表渲染配置（chart-rendering）：Kroki 兼容端点。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ChartConfigFile {
+    /// Kroki 兼容服务地址（POST {endpoint}/mermaid/svg）；空串 = 关闭（工具不下发）；
+    /// 缺省公共 Kroki（国内网络不可达时可自建）
+    #[serde(default)]
+    endpoint: Option<String>,
+}
+
 /// 半衰期清洗：必须为有限正数（天），非法值（0 / 负数 / NaN / ∞）回落默认 30 天。
 /// 为什么在配置层清洗而不只靠 decay() 内部兜底：设置页与 /api/config 回显的是配置值，
 /// decay 内部会把非法半衰期按 1 天处理——「显示 0 天、实际按 1 天衰减」属于所见非所跑，
@@ -506,6 +520,7 @@ impl ExmConfig {
         let file_llm = file.llm.clone().unwrap_or_default().into_config();
         let file_mem = file.memory.clone().unwrap_or_default();
         let file_knowledge = file.knowledge.clone().unwrap_or_default();
+        let file_chart = file.chart.clone().unwrap_or_default();
         let file_sec = file.security.clone().unwrap_or_default();
         let file_auto = file.automation.clone().unwrap_or_default();
         let security = SecurityConfig {
@@ -691,6 +706,7 @@ impl ExmConfig {
             memory_semantic_model: file_mem.semantic_model.clone().unwrap_or_default(),
             knowledge_inject_top_k: file_knowledge.inject_top_k.unwrap_or(0),
             knowledge_inject_max_chars: file_knowledge.inject_max_chars.unwrap_or(500),
+            chart_endpoint: file_chart.endpoint.unwrap_or_else(|| "https://kroki.io".into()),
             speech_model: file_cap.speech.unwrap_or_default(),
             stt_model: file_cap.transcribe.unwrap_or_default(),
             vision_relay_model: file_cap.vision_relay.unwrap_or_default(),
@@ -759,6 +775,9 @@ impl ExmConfig {
             knowledge: Some(KnowledgeConfigFile {
                 inject_top_k: Some(self.knowledge_inject_top_k),
                 inject_max_chars: Some(self.knowledge_inject_max_chars),
+            }),
+            chart: Some(ChartConfigFile {
+                endpoint: Some(self.chart_endpoint.clone()),
             }),
             llm_profiles: Some(
                 self.llm_profiles
