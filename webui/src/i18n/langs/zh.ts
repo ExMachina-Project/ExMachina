@@ -1503,4 +1503,13 @@ export const zh = {
   "cfg.notifyMaxChars.help": "推送至通道的结果摘要截断长度",
   "cfg.pairingTtl": "配对码有效期（秒）",
   "cfg.pairingTtl.help": "控制台签发的配对码有效时长；单次有效",
+  "cfg.expRunsTitle": "实验运行记录（最近触发）",
+  "cfg.expRunsSwitch": "实验开关",
+  "cfg.expRunsLast": "最近触发",
+  "cfg.expRunsSummary": "最近事件摘要",
+  "cfg.expRunsEmpty": "尚无运行记录",
+  "cfg.expSuperAgent": "Super Agent 深度委托",
+  "cfg.expAutoAgent": "Auto Agent 完全自主",
+  "cfg.expMetaAgent": "Meta Agent 自我改进",
+  "cfg.expAutoMemoryDigest": "自主记忆摘要",
 } as const;

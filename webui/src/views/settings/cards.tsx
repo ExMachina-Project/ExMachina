@@ -74,6 +74,77 @@ export function LimitsStatsCard(): React.ReactElement {  const t = useT();
   );
 }
 
+/** 实验运行记录卡（assistant-parity 7.2 实验可观测）：全局事件流聚合，
+ *  实验区每开关的最近触发时间与事件摘要；无运行记录明示空态。
+ *  事件面复用会话事件溯源端点（id=global = 全局事件流，无新端点）。 */
+export function ExperimentRunsCard(): React.ReactElement {
+  const t = useT();
+  const [rows, setRows] = useState<{ label: string; at: string; summary: string }[] | null>(null);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const evts = await api.sessionEvents("global", 500);
+        // 实验事件 → 开关映射（与 7.1 落库事件对齐）
+        const MAP: Record<string, string> = {
+          "super.halt": "superAgent",
+          "auto.eval": "autoAgent",
+          "auto.act": "autoAgent",
+          "meta.proposal": "metaAgent",
+          "meta.applied": "metaAgent",
+          "memory.digest": "autoMemoryDigest",
+        };
+        const latest: Record<string, { at: string; summary: string }> = {};
+        for (const e of evts) {
+          const kind = e.payload && typeof e.payload === "object"
+            ? String((e.payload as { type?: string }).type ?? "")
+            : String(e.kind ?? "");
+          const sw = MAP[kind];
+          if (!sw || latest[sw]) continue;
+          const p = (e.payload as { payload?: Record<string, unknown> })?.payload ?? {};
+          const bits: string[] = [kind];
+          for (const k of ["haltKind", "act", "kind", "target", "sessions", "entriesProduced", "changed", "phase"]) {
+            if (p[k] !== undefined) bits.push(`${k}=${String(p[k])}`);
+          }
+          latest[sw] = { at: String(e.createdAt ?? ""), summary: bits.join(" · ").slice(0, 120) };
+        }
+        const LABEL: Record<string, string> = {
+          superAgent: t("cfg.expSuperAgent"),
+          autoAgent: t("cfg.expAutoAgent"),
+          metaAgent: t("cfg.expMetaAgent"),
+          autoMemoryDigest: t("cfg.expAutoMemoryDigest"),
+        };
+        setRows(
+          Object.keys(LABEL).map((sw) => ({
+            label: LABEL[sw],
+            at: latest[sw]?.at ?? "",
+            summary: latest[sw]?.summary ?? "",
+          }))
+        );
+      } catch {
+        setRows([]);
+      }
+    })();
+  }, [t]);
+  if (rows === null) return <></>;
+  return (
+    <Card size="small" className="hud" style={{ marginBottom: 12 }}>
+      <div className="dim" style={{ marginBottom: 6 }}>{t("cfg.expRunsTitle")}</div>
+      <table className="plain-table">
+        <thead><tr><th>{t("cfg.expRunsSwitch")}</th><th>{t("cfg.expRunsLast")}</th><th>{t("cfg.expRunsSummary")}</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td>{r.label}</td>
+              <td className="mono">{r.at ? new Date(r.at).toLocaleString() : "—"}</td>
+              <td className="mono">{r.summary || t("cfg.expRunsEmpty")}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
+  );
+}
+
 /** 浏览器通知偏好卡（web-notifications）：授权 + 类别开关，本地持久化 */
 export function NotifyPrefsCard(): React.ReactElement {
   const t = useT();

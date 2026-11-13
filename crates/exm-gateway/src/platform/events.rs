@@ -15,6 +15,10 @@ pub async fn session_events(
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> impl IntoResponse {
+    // id=global：全局事件流（session_id 为空的落库事件——auto.eval/auto.act/
+    // memory.digest/memory.decay.ran 等实验可观测事件的查询面；设置页
+    // 实验区聚合最近运行记录用）。无新端点——复用会话事件溯源路径。
+    let id = if id == "global" { String::new() } else { id };
     match st.core.store.list_events(&id) {
         Ok(mut events) => {
             let limit = q.limit.unwrap_or(200).min(1000);
