@@ -570,6 +570,8 @@ pub(crate) struct MediaItem {
     /// 绝对路径（spawn_reply 已从工作区相对路径解析）
     pub path: std::path::PathBuf,
     pub caption: String,
+    /// 字节大小（降级注记展示用；登记时未知则 0）
+    pub size: u64,
 }
 
 /// 审批推送的富消息钩子载荷（approval-ergonomics 平台交互）：文本摘要 + 审批单号。
@@ -584,5 +586,11 @@ pub(crate) struct ApprovalPrompt {
 pub(crate) type ApprovalHook = Box<
     dyn Fn(ApprovalPrompt) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
         + Send,
+>;
+
+/// 媒体发送钩子（Box 化便于适配器侧多处克隆捕获）：返回是否已成功送达
+///（false = 回落降级注记）。
+pub(crate) type MediaHook = Box<
+    dyn Fn(MediaItem) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send,
 >;
 
