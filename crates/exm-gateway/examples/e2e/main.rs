@@ -1210,6 +1210,34 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // ---- SyncReport 容错（sync-report-resilience 5.1/5.2）----
+    {
+        use exm_core::parse;
+        // 缺 summary 修复：首条 statement 截断补齐 + repaired 标记
+        let raw = r#"```json
+{"sourceAgent":"web-agent","taskNodeId":"T1","status":"done","statements":[{"tag":"报告","text":"调研完成，共 3 个来源支撑结论。"}],"confidence":0.8}
+```"#;
+        match parse::parse_sync_report(raw) {
+            Ok(r) => c.check(
+                "SyncReport 缺 summary 修复回流",
+                r.repaired == Some(true) && r.summary.starts_with("调研完成") && r.confidence == 0.8,
+            ),
+            Err(e) => {
+                c.check("SyncReport 缺 summary 修复回流", false);
+                let _ = e;
+            }
+        }
+        // 核心字段缺失不修复：维持原错误（连续失败计数语义不变）
+        let raw2 = r#"```json
+{"sourceAgent":"web-agent","status":"done","statements":[{"tag":"报告","text":"完成。"}],"summary":"done","confidence":0.8}
+```"#;
+        let r2 = parse::parse_sync_report(raw2);
+        c.check(
+            "SyncReport 核心字段缺失不修复",
+            r2.is_err() && r2.unwrap_err().contains("missing field `taskNodeId`"),
+        );
+    }
+
     // 人设：默认 → 修改 → 热生效 → 重置
     // 对象口径：SOUL 仅「用户面智能体」持有（组主智能体 / 独立智能体），子个体无人格层。
     // 往返用测试自建单体做（避免抹掉出厂 SOUL：内置组出厂人格受保护、machina 随项目内容交付）。

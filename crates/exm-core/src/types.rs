@@ -1038,6 +1038,12 @@ pub struct SyncReport {
     #[serde(default)]
     pub next_suggestion: NextSuggestion,
     pub confidence: f64,
+    /// 解析层受控修复标记（sync-report-resilience）：缺白名单字段
+    /// （summary/confidence/title/agentIdentifier）补齐重试成功时置 true。
+    /// 旁路标记——不是契约必填字段，仅事件与回流 JSON 可见，指挥体可识别
+    /// 低置信来源。正常解析产出 None（不序列化，旧契约不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repaired: Option<bool>,
 }
 
 // ---------------------------------------------------------------- 指挥体计划
