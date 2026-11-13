@@ -1861,6 +1861,7 @@ impl ExecCtx {
                 conflicts: None,
                 next_suggestion: Default::default(),
                 confidence,
+                repaired: None,
             };
             // 子个体回流与报告落库（P2-5 吞错收敛）：这是关键写路径——
             // 失败=用户看不到子个体产出，不能静默；留日志供事后核对

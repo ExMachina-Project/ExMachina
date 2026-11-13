@@ -244,6 +244,7 @@ mod fallback_converge_tests {
             conflicts: None,
             next_suggestion: Default::default(),
             confidence: 0.8,
+            repaired: None,
         }
     }
 

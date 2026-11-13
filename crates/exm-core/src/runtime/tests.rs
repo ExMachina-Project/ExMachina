@@ -900,3 +900,159 @@ mod search_discipline_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+// ---------------------------------------------------------------- SyncReport 失败可观测
+
+/// sync-report-resilience 5.2：契约失败每次独立落 report.rejected 事件
+/// （首个失败字段 + 原文长度），连续失败计数语义不变。
+#[cfg(test)]
+mod report_rejected_tests {
+    use crate::provider::{ChatRequest, ChatResponse, LlmProvider, StreamDelta};
+    use crate::runtime::AgentRuntime;
+    use crate::types::{DispatchBoundary, DispatchConstraints, DispatchInput, DispatchOrder, ToolScope};
+    use std::sync::Arc;
+
+    /// 恒产「缺 taskNodeId」报告的替身（核心字段缺失 → 不可修复 → 连续失败）
+    struct InvalidReportProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for InvalidReportProvider {
+        fn name(&self) -> &'static str {
+            "invalid-report"
+        }
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            Ok(ChatResponse {
+                content: r#"```json
+{"sourceAgent":"web-agent","status":"done","statements":[{"tag":"报告","text":"完成。"}],"summary":"done","confidence":0.8}
+```"#.into(),
+                reasoning: String::new(),
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                tool_calls: Vec::new(),
+            })
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            // 流式优先路径：与 chat 同响应（缺 taskNodeId 的报告）
+            let content = r#"```json
+{"sourceAgent":"web-agent","status":"done","statements":[{"tag":"报告","text":"完成。"}],"summary":"done","confidence":0.8}
+```"#;
+            let _ = tx.send(StreamDelta::Text(content.to_string()));
+            Ok(ChatResponse {
+                content: content.to_string(),
+                reasoning: String::new(),
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    fn rig() -> (AgentRuntime, Arc<crate::store::Store>, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("exm-rej-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let reg_dir = base.join("entities");
+        std::fs::create_dir_all(reg_dir.join("groups").join("exmachina").join("prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            capabilities: None,
+            self_optimize: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(
+            reg_dir.join("group.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            reg_dir.join("groups").join("exmachina").join("prompts").join("timeout-agent.md"),
+            "# 测试个体\n你是测试个体。",
+        )
+        .unwrap();
+        let registry = Arc::new(crate::registry::LocalRegistry::new(&reg_dir).unwrap());
+        let store = Arc::new(crate::store::Store::open(base.join("data")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
+        let tools = Arc::new(crate::tools::ToolGateway::new(
+            &base,
+            store.clone(),
+            registry.clone(),
+            events,
+            crate::config::SecurityConfig::default(),
+        ));
+        let rt = AgentRuntime::new(registry, Arc::new(InvalidReportProvider), tools, "test-model");
+        (rt, store, base)
+    }
+
+    fn order() -> DispatchOrder {
+        DispatchOrder {
+            task_node_id: "T9".into(),
+            objective: "失败可观测演练".into(),
+            acceptance: vec![],
+            boundary: DispatchBoundary { in_scope: vec![], forbidden: vec![] },
+            inputs: vec![DispatchInput { ref_id: "user".into(), kind: "userInput".into(), summary: "演练".into() }],
+            tool_allowlist: vec![],
+            constraints: DispatchConstraints { max_steps: 6, timeout_ms: 600_000 },
+            report_format: "SyncReport".into(),
+        }
+    }
+
+    /// 连续失败：每次失败一条独立 report.rejected（含失败字段与原文长度），
+    /// 判死错误串保持既有形态（连续失败计数语义不变）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 连续失败_独立事件落库() {
+        let (rt, store, base) = rig();
+        let def: crate::types::AgentDefinition = serde_json::from_value(serde_json::json!({
+            "name": "演练体", "identifier": "timeout-agent", "domain": "公共",
+            "tier": "unit", "description": "测试", "capabilities": ["测试"],
+            "promptFile": "timeout-agent.md"
+        }))
+        .unwrap();
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(
+                String::new(),
+                Arc::new(InvalidReportProvider) as Arc<dyn LlmProvider>,
+                "m".into(),
+            )],
+            failover: Arc::new(crate::provider::FailoverState::default()),
+        };
+        let r = rt
+            .execute(&def, &order(), chain, "ses-rej", "ses-rej", false, ToolScope::Tools, |_| {})
+            .await;
+        let err = r.expect_err("核心字段缺失应连续失败判死");
+        assert!(
+            err.to_string().contains("连续校验失败"),
+            "判死错误形态不变: {err}"
+        );
+        // 事件断言：SYNC_REWRITE_LIMIT=2 → attempts = 3（1 + 2 次重写），
+        // 每次一条独立明细事件
+        let events = store.list_events("ses-rej").unwrap_or_default();
+        let rejected: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|env| env["payload"]["type"] == "report.rejected")
+            .collect();
+        assert_eq!(rejected.len(), 3, "3 次失败 = 3 条独立事件: {events:?}");
+        for (i, evt) in rejected.iter().enumerate() {
+            let payload = &evt["payload"]["payload"];
+            assert_eq!(
+                payload["field"].as_str().unwrap_or(""),
+                "taskNodeId",
+                "首个失败字段在事件里: {payload}"
+            );
+            assert!(
+                payload["textLen"].as_u64().unwrap_or(0) > 0,
+                "原文长度在事件里: {payload}"
+            );
+            assert_eq!(payload["attempt"].as_u64().unwrap_or(0), (i + 1) as u64, "attempt 递增");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
