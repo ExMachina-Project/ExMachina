@@ -4,6 +4,7 @@ import { message, Menu, Tag } from "antd";
 import {
   ApartmentOutlined,
   BellOutlined,
+  BookOutlined,
   ClusterOutlined,
   CloseOutlined,
   DatabaseOutlined,
@@ -46,6 +47,7 @@ const ModelsView = lazy(() => import("./views/models/ModelsView").then((m) => ({
 const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default: m.GraphView })));
 const LedgerView = lazy(() => import("./views/LedgerView").then((m) => ({ default: m.LedgerView })));
 const MemoryView = lazy(() => import("./views/MemoryView").then((m) => ({ default: m.MemoryView })));
+const KnowledgeView = lazy(() => import("./views/KnowledgeView").then((m) => ({ default: m.KnowledgeView })));
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 const NexusView = lazy(() => import("./views/NexusView").then((m) => ({ default: m.NexusView })));
 const SinglesView = lazy(() => import("./views/SinglesView").then((m) => ({ default: m.SinglesView })));
@@ -88,13 +90,14 @@ type ViewKey =
   | "channels"
   | "ledger"
   | "memory"
+  | "knowledge"
   | "activity"
   | "settings";
 
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
   "chat", "flows", "tasks", "sessions", "agent", "nexus", "graph", "automations",
-  "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "activity", "settings",
+  "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "knowledge", "activity", "settings",
 ];
 
 /** 旧路由兼容（agent-groups-merge）：独立组页已并入「智能体」页，#/groups 落到 #/agent */
@@ -135,6 +138,7 @@ export const NAV_ITEMS: {
   { key: "channels", en: "CHANNELS", labelKey: "nav.channels", icon: <CloudUploadOutlined /> },
   { key: "ledger", en: "LEDGER", labelKey: "nav.ledger", icon: <FundOutlined /> },
   { key: "memory", en: "MEMORY", labelKey: "nav.memory", icon: <DatabaseOutlined /> },
+  { key: "knowledge", en: "KNOWLEDGE", labelKey: "nav.knowledge", icon: <BookOutlined /> },
   { key: "activity", en: "EVENTS", labelKey: "nav.events", icon: <FileTextOutlined /> },
   { key: "settings", en: "CONFIG", labelKey: "nav.settings", icon: <SettingOutlined /> },
 ];
@@ -502,6 +506,7 @@ export default function App(): React.ReactElement {
             {view === "channels" && <ChannelsView />}
             {view === "ledger" && <LedgerView />}
             {view === "memory" && <MemoryView />}
+            {view === "knowledge" && <KnowledgeView />}
             {view === "activity" && <ActivityView />}
             {view === "settings" && <SettingsView />}
           </div>

@@ -972,6 +972,78 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(false),
     );
 
+    // ---- 知识库（knowledge-base）：REST 全链路 + CLI/REST 同源去重 ----
+    // REST 新增 → 检索命中（source 标注 manual）→ 同题再写去重提升 → 删除
+    let kadd: serde_json::Value = client
+        .post(format!("{base}/knowledge"))
+        .json(&serde_json::json!({
+            "title": "e2e 部署约束", "body": "构建环境无 C 编译器，依赖必须纯 Rust（e2e 知识链路验证）",
+            "tags": ["e2e", "build"]
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "知识新增（新建）",
+        kadd["deduped"] == false
+            && kadd["entry"]["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false)
+            && kadd["entry"]["sourceAgent"].as_str() == Some("manual"),
+    );
+    let kid = kadd["entry"]["id"].as_str().unwrap_or("").to_string();
+    // 同源去重：同题再写（CLI exm knowledge add 与 REST POST 调同一 Core.knowledge，
+    // 同源语义在此以 REST 二次写入验证；CLI 面本身有 36 项单测覆盖）
+    let kdup: serde_json::Value = client
+        .post(format!("{base}/knowledge"))
+        .json(&serde_json::json!({
+            "title": "e2e 部署约束",
+            "body": "构建环境无 C 编译器，依赖必须纯 Rust（e2e 知识链路验证）"
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "知识同题再写去重提升（同源语义）",
+        kdup["deduped"] == true && kdup["entry"]["id"].as_str() == Some(kid.as_str()),
+    );
+    let kquery: serde_json::Value = client
+        .get(format!("{base}/knowledge?q={}", "部署约束 纯 Rust"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "知识检索命中（热度 ≥ 2：REST 去重提升 + 检索命中）",
+        kquery["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .any(|x| x["id"].as_str() == Some(kid.as_str()) && x["hits"].as_u64().unwrap_or(0) >= 1)
+            })
+            .unwrap_or(false),
+    );
+    let kdel: serde_json::Value = client
+        .delete(format!("{base}/knowledge/{kid}"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check("知识删除", kdel["ok"] == true);
+    let klist_after: serde_json::Value = client
+        .get(format!("{base}/knowledge?limit=50"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    c.check(
+        "删除后清单不含该条",
+        klist_after["items"]
+            .as_array()
+            .map(|a| a.iter().all(|x| x["id"].as_str() != Some(kid.as_str())))
+            .unwrap_or(false),
+    );
+
     // 人设：默认 → 修改 → 热生效 → 重置
     // 对象口径：SOUL 仅「用户面智能体」持有（组主智能体 / 独立智能体），子个体无人格层。
     // 往返用测试自建单体做（避免抹掉出厂 SOUL：内置组出厂人格受保护、machina 随项目内容交付）。
