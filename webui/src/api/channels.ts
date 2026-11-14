@@ -48,12 +48,13 @@ export const apiChannels = {
     groupGate?: boolean;
     proactiveReply?: boolean;
     proactiveRate?: number;
+    mentionReply?: boolean;
     capability?: "chat" | "tools" | "computer";
     memoryIsolation?: boolean;
     config?: Record<string, string>;
   }) => req<Channel>("/channels", { method: "POST", body: JSON.stringify(body) }),
 
-  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; proactiveReply?: boolean; proactiveRate?: number; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
+  updateChannel: (id: string, body: { enabled?: boolean; group?: string; token?: string; secret?: string; replyWebhook?: string; account?: string; allowedChats?: string[]; admins?: string[]; groupGate?: boolean; proactiveReply?: boolean; proactiveRate?: number; mentionReply?: boolean; capability?: "chat" | "tools" | "computer"; memoryIsolation?: boolean; config?: Record<string, string> }) =>
     req<Channel>(`/channels/${id}`, { method: "PUT", body: JSON.stringify(body) }),
 
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),

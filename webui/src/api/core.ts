@@ -503,8 +503,10 @@ export interface Channel {
   groupGate?: boolean;
   /** 主动回复（实验性）：群聊免 @ 时经决策模型判断是否回应；缺省/false = 关 */
   proactiveReply?: boolean;
-  /** 主动回复率 0~100（决策模型前的概率采样闸门；缺省 100 = 全量交决策模型） */
+  /** 主动回复率 0~100（决策口径软权重；缺省 100 = 全量标准口径） */
   proactiveRate?: number;
+  /** 提及必回（缺省 true）：@ / 引用回复机器人直接放行，不经主动回复漏斗 */
+  mentionReply?: boolean;
   /** 能力边界：chat = 仅聊天；tools = 可调工具；computer = 电脑操控（缺省） */
   capability?: "chat" | "tools" | "computer";
   /** 记忆隔离：true = 本通道独立记忆；false/缺省 = 同组跨平台共享 */
