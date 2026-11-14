@@ -496,9 +496,13 @@ async fn on_text(
     // 注记拼在正文头（【回复 某人：…】），尽力而为：回查失败不阻塞主链。
     let reply_ids = reply_para_ids(v.get("message").unwrap_or(&serde_json::Value::Null));
     let ch_id_for_reply = ch.id.clone();
+    // 引用回查（get_msg，单次）：注记拼正文头（【回复 某人：…】）+ 是否指向
+    // 机器人本体（判提及）一并提取——尽力而为，回查失败不阻塞主链。
+    let mut reply_hits = false;
     if !reply_ids.is_empty() {
-        let quote = reply_quote_note(&ch_id_for_reply, &reply_ids).await;
+        let (quote, hits) = reply_quote_note(&ch_id_for_reply, &reply_ids, v_self_id(&v)).await;
         text = format!("{quote}{text}");
+        reply_hits = hits;
     }
     // 入站媒体段（组 6.4）：先盘类型，纯媒体消息给占位正文——
     // 曾在文本为空时直接 return，「只发一张图」被整体丢弃
@@ -521,6 +525,12 @@ async fn on_text(
     // 下载结果同时随任务带入闸门（InboundCtx.media）——旁听占位消息的附件
     // 回填只挂本条消息自带的媒体，不再读窗口快照（曾致每条旁听消息复读
     // 窗口内全部近期图片）。
+    // 已知小瑕疵：此处提及判定只查 at 段（同步纯函数）——「引用回复机器人
+    // + 带图」的消息在闸门侧经 get_msg 回查判提及（mentioned=true 走完整
+    // 轮次），但预下载已先行入窗。主链 take 后同图再下载一次，由同轮指纹
+    // 去重（seen_fp）+ 指纹文件名落盘兜底：磁盘仍只一份、注入不重复。
+    // 不提前做引用回查：get_msg 是 8s 超时 API 调用，放预下载前会阻塞
+    // 纯旁听链路（高频路径），一次偶发冗余下载可接受。
     let will_be_ambient = group_id.is_some()
         && !media.is_empty()
         && !is_mentioned(
@@ -562,6 +572,7 @@ async fn on_text(
     let tx = tx.clone();
     let raw = v.clone();
     let prewindowed = prewindowed; // 闸门前已下载的旁听媒体（随 ctx 带给 record_ambient 回填附件）
+    let reply_hits = reply_hits; // 引用判提及（主链单次回查的结果，闸门复用）
     tokio::spawn(async move {
         // 流展示名（会话管理可用性修复）：群聊取事件自带 group_name，私聊取
         // 对端昵称——流列表显示「萝莉领主二群」而非裸群号。解析不到则 None
@@ -578,7 +589,7 @@ async fn on_text(
                     .filter(|s| !s.is_empty() && group_id.is_none())
             });
         let Some((external_id, text, sender_mark)) =
-            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text, &prewindowed).await
+            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text, &prewindowed, reply_hits).await
         else {
             // 闸门拦截（忽略 / 已回复）：旁听媒体已在闸门前预下载，且已随
             // InboundCtx.media 带入闸门——record_ambient 落占位消息时用它回填
@@ -753,6 +764,7 @@ async fn napcat_gate(
     raw: &serde_json::Value,
     text: &str,
     media: &[(String, String, String)],
+    reply_hits: bool,
 ) -> Option<(String, String, Option<String>)> {
     let is_group = group_id.is_some();
     // 提及归一化：@ 机器人本体才算提及（群内 @ 机器人是主语义）。
@@ -768,12 +780,9 @@ async fn napcat_gate(
     let mentioned = if at_hit {
         true
     } else {
-        let reply_ids = raw_message.map(reply_para_ids).unwrap_or_default();
-        if reply_ids.is_empty() {
-            false
-        } else {
-            reply_targets_self(&ch.id, &reply_ids, self_id).await
-        }
+        // 引用判提及复用主链已回查的结果（reply_quote_hits_self 经 reply_hits
+        // 传入，见 handle_ws_msg）——同一条消息不再二次 get_msg。
+        reply_hits
     };
     let external_id = user_id.map(|u| u.to_string()).unwrap_or_default();
     // 会话键（与 ChannelRun::begin 同口径）：群号优先，私聊为用户 id
@@ -1035,16 +1044,26 @@ fn reply_para_ids(m: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// 回查引用原文（get_msg）：返回 `【回复 <发送者>：<摘要>】` 注记前缀。
-/// 失败/超时返回空串（引用链路是尽力而为，不阻塞消息）——模型侧拿到
+/// 回查引用原文（get_msg）：返回 `（注记前缀, 是否指向机器人本体）`。
+/// 一次回查同时提取原文摘要（注记）与 sender.user_id（比对 self_id）——
+/// 引用判提及与原文注记共用结果，避免同 id 双查。
+/// 失败/超时返回空注记（引用链路是尽力而为，不阻塞消息）——模型侧拿到
 /// 「【回复 某人：…】正文」即知用户在回应哪条消息。
-async fn reply_quote_note(ch_id: &str, msg_ids: &[String]) -> String {
+async fn reply_quote_note(
+    ch_id: &str,
+    msg_ids: &[String],
+    self_id: Option<i64>,
+) -> (String, bool) {
     let mut notes = Vec::new();
+    let mut hits_self = false;
     for id in msg_ids.iter().take(3) {
         let Some(resp) = api_call(ch_id, "get_msg", serde_json::json!({ "message_id": id })).await
         else {
             continue;
         };
+        if resp.pointer("/data/sender/user_id").and_then(|x| x.as_i64()) == self_id {
+            hits_self = true;
+        }
         let sender = resp
             .pointer("/data/sender/card")
             .or_else(|| resp.pointer("/data/sender/nickname"))
@@ -1074,30 +1093,12 @@ async fn reply_quote_note(ch_id: &str, msg_ids: &[String]) -> String {
         let body = body.trim().chars().take(200).collect::<String>();
         notes.push(format!("【回复 {sender}：{body}】"));
     }
-    if notes.is_empty() {
+    let prefix = if notes.is_empty() {
         String::new()
     } else {
         format!("{}\n", notes.join(" "))
-    }
-}
-
-/// 引用回复是否指向机器人本体：逐条 get_msg 回查引用消息的 sender.user_id。
-/// 任一条命中即 true；回查失败/超时按 false（保守——漏比错好）。
-/// 上限 3 条与 reply_quote_note 同口径（引用链是尽力而为，不阻塞消息）。
-async fn reply_targets_self(ch_id: &str, msg_ids: &[String], self_id: Option<i64>) -> bool {
-    let Some(self_id) = self_id else {
-        return false;
     };
-    for id in msg_ids.iter().take(3) {
-        let Some(resp) = api_call(ch_id, "get_msg", serde_json::json!({ "message_id": id })).await
-        else {
-            continue;
-        };
-        if resp.pointer("/data/sender/user_id").and_then(|x| x.as_i64()) == Some(self_id) {
-            return true;
-        }
-    }
-    false
+    (prefix, hits_self)
 }
 
 /// 取上报事件里的机器人自身 QQ（self_id 字段；数组段提及判定的比对基准）
