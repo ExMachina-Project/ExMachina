@@ -246,6 +246,36 @@ fn fingerprint(ch: &Channel) -> String {
     )
 }
 
+/// 通道配置 TTL 缓存（channel-hot-reload）：channels.json 的解析结果 +
+/// 加载时刻。2 秒窗口内多条群消息共享一次磁盘读；窗口过期后首条消息重读。
+type ChannelCacheSlot = parking_lot::Mutex<Option<(u64, std::sync::Arc<Vec<Channel>>)>>;
+
+fn channel_cache() -> &'static ChannelCacheSlot {
+    static C: std::sync::OnceLock<ChannelCacheSlot> = std::sync::OnceLock::new();
+    C.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// 取本通道的最新配置（TTL 缓存兜底）；读不到回落连接克隆。
+/// 通道被删除/禁用不在此拦截——reconcile 5s 周期会摘连接，这里只管
+/// 「配置更新及时可见」。
+fn fresh_channel(core: &Arc<Core>, conn_clone: &Channel) -> Channel {
+    let now = exm_core::types::now_ms();
+    let mut slot = channel_cache().lock();
+    let need_load = match slot.as_ref() {
+        Some((at, _)) => now.saturating_sub(*at) > 2000,
+        None => true,
+    };
+    if need_load {
+        *slot = Some((now, std::sync::Arc::new(crate::platform::load_channels(core))));
+    }
+    if let Some((_, list)) = slot.as_ref() {
+        if let Some(hit) = list.iter().find(|c| c.id == conn_clone.id) {
+            return hit.clone();
+        }
+    }
+    conn_clone.clone()
+}
+
 pub fn spawn_supervisor(core: Arc<Core>) {
     tokio::spawn(async move {
         loop {
@@ -424,6 +454,13 @@ async fn on_text(
     let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
         return;
     };
+    // 通道配置热刷新（channel-hot-reload）：连接持有 spawn 时的通道克隆，凭据
+    // 之外的字段更新（proactiveReply/admins/allowedChats/groupGate/capability/
+    // memoryIsolation/mentionReply）不会重启连接（fingerprint 只含 url|token）——
+    // 旧克隆会让配置漂移存活数天（生产实测：proactiveReply 开启后主动回复
+    // 永不触发）。每条消息按 id 重读配置（2s TTL 缓存，群聊高峰不打磁盘），
+    // 找不到（已删除）回落连接克隆保持收尾兼容。
+    let ch = fresh_channel(core, ch);
     // API 回包（带 echo 的响应）：自检回包打日志；exm-api-* 投递给 api_call 等待方
     //（引用回查 / 群文件 URL 等）；其余忽略
     if let Some(echo) = v.get("echo").and_then(|x| x.as_str()) {
@@ -550,7 +587,7 @@ async fn on_text(
                 crate::platform::download_bytes(src).await
             };
             if let Some(b) = bytes {
-                if let Some(p) = crate::platform::save_inbound_media(core, ch, &name, b).await {
+                if let Some(p) = crate::platform::save_inbound_media(core, &ch, &name, b).await {
                     prewindowed.push((kind.clone(), p, name));
                 }
             }
@@ -1309,6 +1346,55 @@ async fn handle_message(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 通道配置热刷新（channel-hot-reload）：连接克隆是 spawn 时的快照，
+    /// fingerprint 只含凭据——凭据外的字段更新（proactiveReply/admins 等）
+    /// 不重启连接。fresh_channel 必须能看到磁盘上的最新配置。
+    ///（生产实测根因：proactiveReply 开启后连接仍持旧克隆，主动回复永不触发。）
+    #[test]
+    fn 通道热刷新_配置更新及时可见() {
+        let dir = std::env::temp_dir().join(format!("exm-hotreload-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let core = std::sync::Arc::new(exm_core::Core::create(&dir).expect("创建 Core 失败"));
+        let conn_clone = Channel {
+            id: "hot-ch".into(),
+            kind: "napcat".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            admins: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: None,
+            proactive_reply: None, // 连接建立时主动回复还是关的
+            proactive_rate: None,
+            mention_reply: None,
+            capability: "computer".into(),
+            memory_isolation: false,
+            created_at: exm_core::types::now_iso(),
+        };
+        // 首次：磁盘无配置文件 → 回落连接克隆
+        assert!(!fresh_channel(&core, &conn_clone).proactive_enabled());
+        // 磁盘写入新配置（proactiveReply=true + admins）
+        let updated = Channel {
+            proactive_reply: Some(true),
+            admins: vec!["boss".into()],
+            ..conn_clone.clone()
+        };
+        crate::platform::save_channels(&core, &[updated]).unwrap();
+        // TTL 缓存直读旁路：测试不等 2s 窗口，直接清缓存再取
+        *channel_cache().lock() = None;
+        let fresh = fresh_channel(&core, &conn_clone);
+        assert!(fresh.proactive_enabled(), "配置更新应及时可见（连接克隆不可吞噬）");
+        assert!(fresh.admins.iter().any(|a| a == "boss"));
+        // 通道删除（磁盘清空）：回落连接克隆，收尾兼容
+        crate::platform::save_channels(&core, &[]).unwrap();
+        *channel_cache().lock() = None;
+        assert_eq!(fresh_channel(&core, &conn_clone).id, "hot-ch");
+    }
 
     /// 登录态分流（5.4 误报修复）：超窗零事件但近期确认在线 → ok（等待登录轮换
     /// 文案，不降级不建议重启）；登录打点过期/从未确认 → 维持 degraded 原判。
