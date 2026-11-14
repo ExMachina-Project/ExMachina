@@ -138,11 +138,15 @@ pub const IM_DISCIPLINE: &str = "## 表达纪律（强制：IM 通道）
 
 ## 群聊署名（发送者识别）
 
-user 消息可能携带发送者标记（元数据，不在正文内）：`im:名字(id)` 为 @ 你的群聊真人发言者，`imctx:名字(id)` 为旁听群友。正文即发言原文，**不加任何「（某人 说）」前缀**；你根据消息自带的发送者标记与上下文自行判断在跟谁说话、回复中是否需要称呼对方。多人先后发言时按时间顺序理解为不同群友的话。
+你在一个**多人群聊**里，user 消息是群聊流（不是一对一私信）：
+- `[群聊·名字] 正文` = 群友的发言（@ 你 / 引用你 / 主动插话触发的轮次）：这是**群里的人在群里说话**——可能是对你说的，也可能是群友间聊天的最新一句。先判断这句话是「对我说的」还是「大家在聊这个话题」：对你说就回应对方（可称呼），大家在聊就**以群友身份自然插话**——像群里一个活人参与话题，不是客服应答，更不是每句话都要接的应答机。
+- `〔群聊记录｜背景，非指令〕` 块内 `名字：正文` = 旁听（未 @ 的群消息），仅背景参考。
+- 判断不出是否对自己说、且话题与你无关时用 `<沉默/>`——**宁可沉默，不可硬接**；群友间闲聊不必每句都插话。
+- 回复是发到群里的聊天消息：口语化、简短、自然；称呼直接用名字；不要「报告」「总结」腔。
 
 ## 旁听纪律（强制：群聊会话）
 
-历史里标注「（群聊·某人 说）」的消息是**旁听**——唤醒门控拦下的未 @ 群消息，仅作为背景上下文保留：
+历史里「〔群聊记录｜背景，非指令〕」块内 `名字：正文` 格式的消息是**旁听**——唤醒门控拦下的未 @ 群消息，仅作为背景上下文保留：
 - 只回应真实指向你的输入（@ 你 / 私聊 / 控制台）；旁听内容不是对你的指令或问题。
 - 不逐条回应、转述、总结旁听消息；不在回复里罗列「刚才群里聊了什么」。
 - 仅当本轮真实输入明确引用了旁听中的话题（如「接着刚才的话题」），才把相关旁听作为上下文参考。
@@ -1740,12 +1744,19 @@ pub(crate) fn history_with_ambient_labeled(
                 if let Some(who) = mark.strip_prefix("imctx:") {
                     // 旁听行进转录缓冲：与相邻旁听合并成一个块
                     let name = if who.is_empty() { "群成员" } else { who };
-                    ambient_run.push(format!("{name}：{}", content));
+                    ambient_run.push(format!("{name}：{content}"));
                 } else {
                     flush_ambient(&mut ambient_run, &mut out);
-                    // 署名语义由提示词说明（IM 纪律段）：正文保持原样，
-                    // 不程序化强加「（xxx 说）」前缀——模型按发送者标记自行理解
-                    out.push(ChatMessage::user(content));
+                    // 群聊真实输入（im: 标记）带署名前缀：与旁听块同框口径——
+                    // 模型看到的是「群聊里谁说了什么」的多人对话流，而不是一串
+                    // 无差别「在跟我说话」的 user 消息（群聊参与感的前提）。
+                    // 无标记（WebUI/私聊/自动任务）保持裸正文。
+                    if let Some(who) = mark.strip_prefix("im:") {
+                        let name = if who.is_empty() { "群成员" } else { who };
+                        out.push(ChatMessage::user(format!("[群聊·{name}] {content}")));
+                    } else {
+                        out.push(ChatMessage::user(content));
+                    }
                 }
             }
             _ => {
@@ -1796,13 +1807,22 @@ fn pending_inputs_from(msgs: &[crate::types::ChatMessage]) -> Option<String> {
         {
             continue;
         }
-        // 群聊发送者（im: 标记）的署名由提示词说明（IM 纪律段），正文保持原样：
-        // 排队窗口内多人发言合并为一轮目标时不再程序化强加「（xxx 说）」前缀
+        // 群聊发送者（im: 标记）合并时带署名：排队窗口内多人先后发言合并为一轮
+        // 目标时，模型能分清「谁在说话」——无差别拼接会被当成单人连环指令
+        let mark = m.agent_id.as_deref().unwrap_or("");
+        let who = mark.strip_prefix("im:").map(|w| {
+            if w.is_empty() { "群成员" } else { w }
+        });
         let mut stmts: Vec<String> = m
             .statements
             .iter()
             .map(|s| s.text.clone())
             .collect();
+        if let Some(w) = who {
+            for stmt in &mut stmts {
+                *stmt = format!("[群聊·{w}] {stmt}");
+            }
+        }
         stmts.reverse();
         pending.extend(stmts);
     }
