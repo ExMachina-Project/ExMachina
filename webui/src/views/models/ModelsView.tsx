@@ -14,7 +14,7 @@ import {
 import { BrandEmpty } from "../../components/BrandEmpty";
 import { MaskedPasswordInput } from "../../components/MaskedInput";
 import {
-  ApiOutlined, AudioOutlined, CheckCircleOutlined, ClusterOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
+  ApiOutlined, AudioOutlined, ClusterOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
 import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../../api";
@@ -48,8 +48,7 @@ export function ModelsView(): React.ReactElement {
   const [picker, setPicker] = useState<{ open: boolean; models: string[]; selected: string[] } | null>(null);
   const [pickerSaving, setPickerSaving] = useState(false);
   const [form] = Form.useForm();
-  /** 模型清单行（Form.useWatch 实时跟随表单）：默认模型与「获取清单」按钮的数据源 */
-  const modelWatch: ProfileModel[] = Form.useWatch("models", form) ?? [];
+  const profiles = info?.profiles ?? [];
 
   /** 拉取端点可用模型：编辑态按档案 id（沿用已存密钥）；新建态用表单当前端点 + 首行明文密钥。
    *  拉取成功后弹选择窗，勾选的模型才合入表单清单（保留既有行的能力标记，仅补缺）。 */
@@ -138,8 +137,6 @@ export function ModelsView(): React.ReactElement {
     void load();
   }, [load]);
 
-  const profiles = info?.profiles ?? [];
-
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
@@ -153,19 +150,13 @@ export function ModelsView(): React.ReactElement {
     // 密钥行合并为一行序列：主 Key 掩码行（keep: -1 = 主沿用，不入池）+ Key 池掩码行（keep = 旧池索引）
     const maskRows = p.apiKey ? [{ value: KEY_MASK, keep: -1 }] : [];
     const poolRows = (p.apiKeys ?? []).map((k, j) => (k ? { value: KEY_MASK, keep: j } : { value: "" }));
-    // 模型清单：空清单且默认模型存在时，先列出默认模型行（能力未标记，用户自行勾选）
-    const rows: ProfileModel[] = p.models.length
-      ? p.models.map((m) => ({ ...m }))
-      : p.model
-        ? [{ model: p.model, vision: false, audio: false }]
-        : [];
+    const rows: ProfileModel[] = p.models.map((m) => ({ ...m }));
     form.setFieldsValue({
       preset,
       id: p.id,
       name: p.name,
       baseUrl: p.baseUrl,
       apiFormat: p.apiFormat || "openai",
-      model: p.model,
       models: rows,
       fallback: p.fallback ?? undefined,
       keys: [...maskRows, ...poolRows],
@@ -173,7 +164,7 @@ export function ModelsView(): React.ReactElement {
     setModal(true);
   };
 
-  /** 选中预设：填「端点 / 协议 / 默认模型名」，密钥永远要自己贴 */
+  /** 选中预设：填「端点 / 协议」，密钥永远要自己贴 */
   const applyPreset = (key: string) => {
     const preset = PRESETS.find((p) => p.key === key);
     if (!preset) {
@@ -183,7 +174,6 @@ export function ModelsView(): React.ReactElement {
     form.setFieldsValue({
       baseUrl: preset.baseUrl,
       apiFormat: preset.apiFormat,
-      model: preset.model,
       name: form.getFieldValue("name") || preset.name,
     });
   };
@@ -258,7 +248,6 @@ export function ModelsView(): React.ReactElement {
         apiKey,
         apiKeys,
         clearKeys,
-        model: (v.model ?? "").trim(),
         models: ((v.models ?? []) as ProfileModel[])
           .filter((m) => m.model && m.model.trim())
           .map((m) => ({ model: m.model.trim(), vision: !!m.vision, audio: !!m.audio })),
@@ -271,16 +260,6 @@ export function ModelsView(): React.ReactElement {
       message.error(t("common.saveFailed", { err: String(e) }));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const activate = async (id: string) => {
-    try {
-      await api.activateLlmProfile(id);
-      message.success(t("models.activated", { id }));
-      await load();
-    } catch (e) {
-      message.error(t("models.switchFailed", { err: String(e) }));
     }
   };
 
@@ -437,14 +416,13 @@ export function ModelsView(): React.ReactElement {
       <Spin spinning={loading}>
         <div className="skill-grid">
           {profiles.map((p) => {
-            const active = info?.active === p.id;
             const keyCount = (p.apiKeys?.length ?? 0) + (p.apiKey ? 1 : 0);
             const hasKey = keyCount > 0;
             return (
               <Card
                 key={p.id}
                 size="small"
-                className={`hud model-card ${active ? "model-card-active" : ""}`}
+                className="hud model-card"
                 title={
                   <div className="model-head">
                     <span>{p.name}</span>
@@ -453,14 +431,6 @@ export function ModelsView(): React.ReactElement {
                 }
                 extra={
                   <Space size={4}>
-                    {active && <Tag className="tag-ok model-active-tag">{t("models.globalDefault")}</Tag>}
-                    {!active && (
-                      <Tooltip title={t("models.setDefaultTip")}>
-                        <Button size="small" icon={<CheckCircleOutlined />} onClick={() => void activate(p.id)}>
-                          {t("models.setDefault")}
-                        </Button>
-                      </Tooltip>
-                    )}
                     <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(p)} />
                     <Button size="small" loading={testing === p.id} onClick={() => void test(p.id)}>
                       {t("models.test")}
@@ -473,14 +443,8 @@ export function ModelsView(): React.ReactElement {
                   </Space>
                 }
               >
-                {/* 默认模型：卡内主角（大字 mono），一眼看清这家端点跑的是谁 */}
-                <div className="model-default">
-                  <span className="model-default-name mono">{p.model || <span className="dim">{t("models.noDefaultModel")}</span>}</span>
-                  {active ? (
-                    <Tag className="tag-ok">{t("models.inUse")}</Tag>
-                  ) : null}
-                </div>
-                {/* 档案状态行（model-settings-ux）：不进编辑表单即可见的关键状态 */}
+                {/* 模型清单主角行：provider 卡只管接入（端点/密钥/模型清单），
+                    用什么模型是智能体层面的选择（agent modelHint / 组默认） */}
                 <div className="model-status-row">
                   <span className="model-status-item">
                     <span className="k">{t("models.keyLabel")}</span>
@@ -520,16 +484,11 @@ export function ModelsView(): React.ReactElement {
                   <Tag>{t(FORMAT_LABEL_KEY[p.apiFormat || "openai"] ?? "models.fmtShort.openai")}</Tag>
                 </div>
                 <div className="model-kv">
-                  <span className="k">{t("models.modelName")}</span>
-                  <Tag>{p.model || t("models.unspecified")}</Tag>
-                </div>
-                <div className="model-kv">
                   <span className="k">{t("models.modelList")}</span>
                   <span className="model-caps">
                     {p.models.length ? (
                       p.models.map((m) => (
                         <Tag key={m.model}>
-                          {m.model === p.model ? <CheckCircleOutlined /> : null}
                           {m.model}
                           <CapabilityBadges items={badgesOfModel(m)} />
                         </Tag>
@@ -548,14 +507,6 @@ export function ModelsView(): React.ReactElement {
                     <Tag color="warning">{t("models.keyMissing")}</Tag>
                   )}
                   {p.fallback ? <Tag>{t("models.fallbackTo", { id: p.fallback })}</Tag> : null}
-                </div>
-                <div className="model-kv">
-                  <span className="k">{t("models.statusLabel")}</span>
-                  {active ? (
-                    <Tag className="tag-ok">{t("models.globalDefault")}</Tag>
-                  ) : (
-                    <span className="dim">{t("models.followGlobal")}</span>
-                  )}
                 </div>
               </Card>
             );
@@ -670,23 +621,7 @@ export function ModelsView(): React.ReactElement {
             }]}
           />
 
-          <Form.Item
-            name="model"
-            label={t("models.defaultModel")}
-            extra={t("models.defaultModelExtra")}
-            tooltip={modelWatch.length === 0 ? t("models.defaultModelEmptyTip") : undefined}
-          >
-            <Select
-              allowClear
-              showSearch
-              options={modelWatch.map((m) => ({ value: m.model, label: m.model }))}
-              filterOption={(input, opt) => String(opt?.value ?? "").toLowerCase().includes(input.toLowerCase())}
-              placeholder={modelWatch.length === 0 ? t("models.defaultModelEmptyPh") : t("models.defaultModelPh")}
-              notFoundContent={t("models.defaultModelEmptyPh")}
-            />
-          </Form.Item>
-
-          {/* 模型清单独立小节 */}
+          {/* 模型清单独立小节（provider 只管「有哪些模型」；用什么模型在智能体/组设置） */}
           <Collapse
             size="small"
             className="form-section"
