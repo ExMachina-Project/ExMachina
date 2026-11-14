@@ -31,6 +31,10 @@ pub(crate) struct ChannelRun {
     /// 发送者平台外部 ID（approval-ergonomics 通道裁决权限判定：
     /// origin 用户本人或跨通道 admins 才能裁 ok:/no:；非 flow 入口为 None）
     pub external_id: Option<String>,
+    /// 本轮是否主动回复放行（未 @、经漏斗判断插话）：true 时 run() 前把
+    /// scope 降为 Chat 档——插话是参与讨论不是接受任务，工具白名单清空
+    /// （im-proactive-scope）。@ 点名 / 私聊 / 系统触发不受影响。
+    pub(crate) proactive: bool,
     /// 聊天流定位（begin 时快照；run 落库后回写流预览用）
     pub(crate) flow: Option<(String, String)>,
     /// 本轮执行完成标记（`run()` 返回时置位）：回帖任务的退出判定输入之一。
@@ -192,6 +196,7 @@ impl ChannelRun {
                 scope: ch.tool_scope(),
                 origin: None,
                 external_id: None,
+                proactive: false,
                 flow: Some((ch.id.clone(), chat_key.to_string())),
                 round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
@@ -210,6 +215,15 @@ impl ChannelRun {
     /// 六适配器在 stamp_session_origin 同位调用（同一个人的两个标记）。
     pub(crate) fn with_external_id(mut self, external_id: impl Into<String>) -> Self {
         self.external_id = Some(external_id.into());
+        self
+    }
+
+    /// 标记本轮为主动回复放行（im-proactive-scope）：执行层把能力边界降为
+    /// Chat 档（工具白名单清空——提示与执行双保险）。主动插话是参与讨论，
+    /// 不是接受任务；需要干活的场景由 @ 点名触发完整能力。通道本身配
+    /// chat 档时无变化。
+    pub(crate) fn with_proactive(mut self, proactive: bool) -> Self {
+        self.proactive = proactive;
         self
     }
 
@@ -333,6 +347,14 @@ impl ChannelRun {
 
     /// 执行本轮；返回后交互上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
     pub(crate) async fn run(self, text: &str) {
+        // 主动回复降档（im-proactive-scope）：漏斗放行的插话轮次按 Chat 档执行
+        // （工具白名单清空，提示层同步注入「仅聊天」边界）。群友间闲聊经主动
+        // 插话进入轮次，不应被当作工作指令执行工具；需要干活由 @ 点名触发。
+        let scope = if self.proactive {
+            exm_core::types::ToolScope::Chat
+        } else {
+            self.scope
+        };
         // 聊天流预览回写（列表展示最新一条；失败不影响执行）
         if let Some((ch_id, chat_key)) = &self.flow {
             let _ = self
@@ -381,7 +403,7 @@ impl ChannelRun {
         let _ = limits;
         if let Err(e) = self
             .core
-            .chat_scoped_origin(&self.session_id, text, self.scope, self.origin.as_deref())
+            .chat_scoped_origin(&self.session_id, text, scope, self.origin.as_deref())
             .await
         {
             eprintln!("[channel:{}] 执行失败：{e}", self.session_id);
@@ -451,6 +473,10 @@ pub(crate) async fn quick_directive_reply(
 ) -> Option<String> {
     let trimmed = text.trim();
     // 计划快捷审批（spec plan-mode 跨端审批）：无待审清单时提示当前状态
+    // 权限（im-command-auth）：计划批准 = 回放整份写操作清单，与审批单裁决同级——
+    // 仅会话来源用户本人或跨通道 admins 可裁。群聊流是共享会话，任何成员
+    // plan:yes 都能触发执行 = 越权执行写操作。非授权者给拒绝回执（指令
+    // 显式可辨，不适用静默——用户知道自己在发指令）。
     if trimmed == "plan:yes" || trimmed == "plan:no" {
         let approve = trimmed == "plan:yes";
         let Some(session_id) = session_id else {
@@ -458,6 +484,20 @@ pub(crate) async fn quick_directive_reply(
         };
         if core.plan_list(session_id).is_empty() {
             return Some("【报告】当前无待审批计划（清单为空或已处理）。".into());
+        }
+        let caller = external_id.unwrap_or("");
+        let origin_user = core
+            .session_origin(session_id)
+            .map(|(ext, _)| ext)
+            .unwrap_or_default();
+        let is_admin = !caller.is_empty()
+            && super::channels::load_channels(core)
+                .iter()
+                .any(|c| c.admins.iter().any(|a| a.trim() == caller));
+        if !caller.is_empty() && origin_user != caller && !is_admin {
+            return Some(format!(
+                "【报告】计划裁决被拒绝：发送者无权批准/拒绝该会话的计划（仅发起用户或管理员）。"
+            ));
         }
         if approve {
             return Some(match core.plan_approve(session_id).await {
