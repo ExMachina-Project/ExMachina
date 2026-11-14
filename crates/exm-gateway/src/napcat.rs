@@ -1107,7 +1107,8 @@ fn v_self_id(raw: &serde_json::Value) -> Option<i64> {
 
 /// 消息是否 @ 了机器人本体（两种上报格式都认；群内 @ 他人不算）。
 /// CQ 码：`[CQ:at qq=2511705734]`；数组段：`{"type":"at","data":{"qq":"2511705734"}}`。
-fn is_mentioned(m: &serde_json::Value, self_id: Option<i64>) -> bool {    if let Some(arr) = m.as_array() {
+fn is_mentioned(m: &serde_json::Value, self_id: Option<i64>) -> bool {
+    if let Some(arr) = m.as_array() {
         arr.iter().any(|seg| {
             let qq = seg
                 .pointer("/data/qq")
