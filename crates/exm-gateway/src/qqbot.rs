@@ -367,7 +367,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                             media: &[],
                                         };
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
-                                            GateDecision::Allow(clean) => {
+                                            GateDecision::Allow(clean, _proactive) => {
                                                 text = clean;
                                             }
                                             GateDecision::Ignore => continue,

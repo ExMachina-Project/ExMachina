@@ -625,7 +625,7 @@ async fn on_text(
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty() && group_id.is_none())
             });
-        let Some((external_id, text, sender_mark)) =
+        let Some((external_id, text, sender_mark, proactive)) =
             napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text, &prewindowed, reply_hits).await
         else {
             // 闸门拦截（忽略 / 已回复）：旁听媒体已在闸门前预下载，且已随
@@ -747,6 +747,7 @@ async fn on_text(
             &text,
             sender_mark.as_deref(),
             flow_name.as_deref(),
+            proactive,
         )
         .await;
     });
@@ -802,7 +803,7 @@ async fn napcat_gate(
     text: &str,
     media: &[(String, String, String)],
     reply_hits: bool,
-) -> Option<(String, String, Option<String>)> {
+) -> Option<(String, String, Option<String>, bool)> {
     let is_group = group_id.is_some();
     // 提及归一化：@ 机器人本体才算提及（群内 @ 机器人是主语义）。
     // NapCat 上报两种格式：CQ 码字符串（[CQ:at qq=xxx]）与数组段
@@ -873,7 +874,7 @@ async fn napcat_gate(
         &external_id,
     );
     match admit(core, ch, &ctx).await {
-        GateDecision::Allow(clean) => Some((external_id, clean, sender_mark)),
+        GateDecision::Allow(clean, proactive) => Some((external_id, clean, sender_mark, proactive)),
         GateDecision::Ignore => None,
         GateDecision::Deny(reply) => {
             let action = match group_id {
@@ -1224,6 +1225,7 @@ async fn handle_message(
     text: &str,
     sender_mark: Option<&str>,
     flow_name: Option<&str>,
+    proactive: bool,
 ) {
     // 会话键：群聊优先，无群号走私聊
     let peer = group_id
@@ -1330,7 +1332,8 @@ async fn handle_message(
     } else {
         run
     }
-    .with_external_id(external_id);
+    .with_external_id(external_id)
+    .with_proactive(proactive);
     let session_id = run.session_id.clone();
     run.run(&text).await;
     let _ = reply.await;
