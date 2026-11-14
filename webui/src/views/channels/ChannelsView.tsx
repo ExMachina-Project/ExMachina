@@ -147,6 +147,7 @@ export function ChannelsView(): React.ReactElement {
       memoryIsolation: c.memoryIsolation ?? false,
       proactiveReply: c.proactiveReply ?? false,
       proactiveRate: c.proactiveRate ?? 100,
+      mentionReply: c.mentionReply ?? true,
       config: cfg,
       configJson: Object.keys(extra).length > 0 ? JSON.stringify(extra, null, 2) : "",
     });
@@ -219,6 +220,7 @@ export function ChannelsView(): React.ReactElement {
       memoryIsolation: Boolean(v.memoryIsolation),
       proactiveReply: Boolean(v.proactiveReply),
       proactiveRate: v.proactiveReply ? Number(v.proactiveRate ?? 100) : undefined,
+      mentionReply: v.mentionReply === undefined ? undefined : Boolean(v.mentionReply),
     };
     try {
       if (editing) {
@@ -649,6 +651,16 @@ export function ChannelsView(): React.ReactElement {
                             <Slider min={0} max={100} step={5} marks={{ 0: "0", 50: "50", 100: "100" }} />
                           </Form.Item>
                         )}
+                        {/* 提及必回（默认开）：@ / 引用回复机器人直接放行，不经漏斗 */}
+                        <Form.Item
+                          name="mentionReply"
+                          valuePropName="checked"
+                          label={t("channels.f.mentionReply")}
+                          extra={t("channels.f.mentionReplyHelp")}
+                          initialValue={true}
+                        >
+                          <Switch size="small" />
+                        </Form.Item>
                       </>
                     )}
                   </Form.Item>
