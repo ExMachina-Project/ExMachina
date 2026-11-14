@@ -342,7 +342,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
             )
             .await
             {
-                GateDecision::Allow(clean) => {
+                GateDecision::Allow(clean, _proactive) => {
                     text = clean;
                     // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）
                     let sender_mark = crate::channel_util::sender_origin(

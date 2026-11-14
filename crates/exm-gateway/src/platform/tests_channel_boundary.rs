@@ -183,6 +183,7 @@ mod channel_boundary_tests {
             scope: exm_core::types::ToolScope::Tools,
             origin: None,
             external_id: None,
+            proactive: false,
             flow: None,
             round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -233,6 +234,7 @@ mod channel_boundary_tests {
             scope: exm_core::types::ToolScope::Tools,
             origin: None,
             external_id: None,
+            proactive: false,
             flow: None,
             round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -290,6 +292,7 @@ mod channel_boundary_tests {
             scope: exm_core::types::ToolScope::Tools,
             origin: None,
             external_id: None,
+            proactive: false,
             flow: None,
             round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };

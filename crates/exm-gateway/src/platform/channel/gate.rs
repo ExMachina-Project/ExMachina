@@ -25,9 +25,12 @@ pub(crate) struct InboundCtx<'a> {
 }
 
 pub(crate) enum GateDecision {
-    /// 放行，携带消毒后文本——消毒在身份判定之后执行（inbound-sanitization 分层要求：
-    /// 已过身份判定的消息仍必经消毒），携带于返回值使调用方无法绕过消毒结果
-    Allow(String),
+    /// 放行，携带消毒后文本与「是否主动回复放行」标记——消毒在身份判定之后执行
+    /// （inbound-sanitization 分层要求），携带于返回值使调用方无法绕过消毒结果。
+    /// proactive=true（主动插话，非 @ 点名）时执行层降 Chat 档：插话是参与讨论，
+    /// 不是接受任务——群友间闲聊不能被当成工作指令执行工具；需要干活的场景
+    /// 由用户 @ 点名触发完整能力。
+    Allow(String, bool),
     /// 群聊未唤醒：静默忽略
     Ignore,
     /// 拒绝执行并回复提示（含 /pair 结果与配对指引）
@@ -44,7 +47,18 @@ pub(crate) async fn admit(
     let identity_cfg = &core.config().identity;
 
     // ⓪ /stop 停止指令（先于一切校验）：直接终止该通道会话运行中的轮次并回执
+    // 权限：仅管理员（通道 admins 清单或绑定身份 role=admin）——与 /reset 同口径。
+    // 聊天流是共享上下文，任何成员都能中止运行中任务 = 一个人手滑全班陪葬。
+    // 非管理员未 @ 静默忽略（不进旁听噪音）；@ 场景给拒绝回执（被点名不回应是失礼）。
     if ctx.text.trim() == "/stop" {
+        if !is_channel_admin(core, ch, ctx.external_id) {
+            if ctx.mentioned {
+                return GateDecision::Deny(
+                    "【报告】/stop 需要管理员权限：停止的是共享会话的运行任务，会影响所有人。请联系管理员操作。".into(),
+                );
+            }
+            return GateDecision::Ignore;
+        }
         let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
         let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
         let sid = core
@@ -137,6 +151,7 @@ pub(crate) async fn admit(
     // 提及必回（mention_reply，默认开）：@ 机器人本体 / 引用回复机器人消息
     // 属「明确点名」，门控直接放行（不经主动回复漏斗）。关闭后提及消息
     // 同样进漏斗判断（纯陪聊场景：连 @ 也可被决策模型按语境拒掉）。
+    let mut proactive_pass = false;
     if ch.gate_enabled(core) && ctx.is_group && ctx.mentioned && ch.mention_reply_enabled() {
         // 放行：直接落到后续闸门（身份/限流），不进漏斗
     } else if ch.gate_enabled(core) && ctx.is_group {
@@ -151,6 +166,7 @@ pub(crate) async fn admit(
             record_ambient(core, ch, ctx).await;
             return GateDecision::Ignore;
         }
+        proactive_pass = true;
     }
 
     // ③ 身份管控：开启后未绑定用户拒绝执行并给配对指引。管理者账号清单命中豁免——
@@ -213,7 +229,7 @@ pub(crate) async fn admit(
             "actions": findings.iter().map(|f| f.action).collect::<Vec<_>>(),
         }));
     }
-    GateDecision::Allow(clean_text)
+    GateDecision::Allow(clean_text, proactive_pass)
 }
 
 /// 群聊旁听落库（ambient context）：门控拦下的未 @ 群消息以 `imctx:` 标记
@@ -358,12 +374,7 @@ async fn flow_command(
     // 非管理员静默忽略（不回执，避免「权限拒绝」刷屏）；@ 场景（mentioned）
     // 给拒绝回执——被点名不回应是失礼，说明原因即可。
     if text == "/reset" {
-        let is_admin = ch.admins.iter().any(|a| a.trim() == ctx.external_id)
-            || core
-                .identity_of(&ch.id, ctx.external_id)
-                .map(|i| i.role == "admin")
-                .unwrap_or(false);
-        if !is_admin {
+        if !is_channel_admin(core, ch, ctx.external_id) {
             if ctx.mentioned {
                 return Some(
                     "【报告】/reset 需要管理员权限：聊天流是共享上下文，重置影响所有人（会话归档 + 运行任务中止）。请联系管理员操作。".into(),
@@ -389,6 +400,16 @@ async fn flow_command(
         }
     }
     None
+}
+
+/// 通道管理员判权（/reset、/stop 等管理指令共用）：通道 admins 清单命中，
+/// 或绑定身份 role=admin（判权跟人走——人在本通道说话，身份登记在别的通道）。
+fn is_channel_admin(core: &exm_core::Core, ch: &Channel, external_id: &str) -> bool {
+    ch.admins.iter().any(|a| a.trim() == external_id)
+        || core
+            .identity_of(&ch.id, external_id)
+            .map(|i| i.role == "admin")
+            .unwrap_or(false)
 }
 
 /// /reset 落地：归档旧会话 → 新建会话 → 流绑定切换。
