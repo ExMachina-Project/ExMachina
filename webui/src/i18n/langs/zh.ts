@@ -23,7 +23,7 @@ export const zh = {
   "nav.channels": "通道",
   "nav.ledger": "三账",
   "nav.memory": "记忆",
-  "nav.knowledge": "知识库",
+  "nav.knowledge": "知识",
   "nav.events": "事件",
   "nav.settings": "设置",
 
