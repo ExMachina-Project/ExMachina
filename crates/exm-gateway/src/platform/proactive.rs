@@ -40,14 +40,26 @@ const PROACTIVE_EVAL_PROMPT: &str = r#"你是群聊参与的把关者。判断�
 {"reply": true, "why": "一句话理由"}
 {"reply": false, "why": "一句话理由"}"#;
 
+/// 保守口径附加段（采样未命中的软权重）：只在明确高价值时才插话，
+/// 群聊活跃期宁漏勿吵——主动回复的参与度由回复率滑杆整体调节。
+const PROACTIVE_CONSERVATIVE_SUFFIX: &str = "\n\n当前处于节流窗口：仅当这条消息满足「有人明确求助且无人应答」「出现必须纠正的事实错误」「话题正中本集群核心领域且能提供关键增量」之一才 reply: true；普通可回可不回的一律 false。";
+
 /// 一次主动回复决策：返回 true = 放行进完整轮次。
 /// 决策失败（模型不可用 / 输出不合法）保守返回 false——主动回复是增益不是义务。
+/// `sampled` = 回复率采样是否命中（软权重）：命中用标准口径；未命中收紧为
+/// 保守口径（仅高价值消息回）——采样不再硬拦截消息，只调节决策松紧。
 pub(crate) async fn decide(
     core: &Core,
     ch: &Channel,
     ctx: &InboundCtx<'_>,
     recent: &[String],
+    sampled: bool,
 ) -> bool {
+    let system = if sampled {
+        PROACTIVE_EVAL_PROMPT.to_string()
+    } else {
+        format!("{PROACTIVE_EVAL_PROMPT}{PROACTIVE_CONSERVATIVE_SUFFIX}")
+    };
     let who = if ctx.display_name.trim().is_empty() {
         ctx.external_id.to_string()
     } else {
@@ -67,10 +79,7 @@ pub(crate) async fn decide(
     let orch = core.orchestrator();
     let req = ChatRequest::new(
         orch.orch_model.clone(),
-        vec![
-            ChatMessage::system(PROACTIVE_EVAL_PROMPT),
-            ChatMessage::user(user),
-        ],
+        vec![ChatMessage::system(system), ChatMessage::user(user)],
     );
     let output = match orch.orch_provider.chat(req).await {
         Ok(r) => r.content,
@@ -89,6 +98,7 @@ pub(crate) async fn decide(
         "channel": ch.id,
         "externalId": ctx.external_id,
         "reply": decision,
+        "sampled": sampled,
         "why": extract_why(&output),
     }));
     decision
@@ -138,21 +148,20 @@ pub(crate) async fn should_proactively_reply(
     ch: &Channel,
     ctx: &InboundCtx<'_>,
 ) -> bool {
-    // ① 回复率采样：概率闸门挡在最前（零成本漏斗，控制决策模型调用量）
-    let rate = ch.proactive_rate_pct();
-    if rate == 0 {
-        return false;
-    }
-    if rate < 100 && !rate_hit(rate) {
-        return false;
-    }
+    // ① 回复率采样（软权重）：不再是硬拦截——采样只决定决策口径：
+    // 命中 → 标准口径（值得回应即回）；未命中 → 保守口径（仅高价值消息回）。
+    // 每条消息都保证过一次决策模型，采样低值不再让消息连判断机会都没有。
+    let sampled = {
+        let rate = ch.proactive_rate_pct();
+        rate == 100 || (rate > 0 && rate_hit(rate))
+    };
     // ② 探活词表：在吗/晚安这类不该被主动抢答（用户没 @，抢答「在」是噪音）
     if exm_core::orchestrator::probe_reply(ctx.text).is_some() {
         return false;
     }
-    // ③ 决策模型：带最近群聊上下文判断
+    // ③ 决策模型：带最近群聊上下文判断（口径随采样软权重收紧/放宽）
     let recent = recent_group_lines(core, ch, ctx);
-    decide(core, ch, ctx, &recent).await
+    decide(core, ch, ctx, &recent, sampled).await
 }
 
 /// 概率采样命中判定（0~100 百分比）。std 哈希伪随机（time 种子）——
@@ -277,7 +286,8 @@ mod tests {
             config: Default::default(),
             group_gate: Some(true),
             proactive_reply: Some(true),
-            proactive_rate: Some(0), // 回复率 0 = 概率闸门恒拒
+            proactive_rate: Some(0), // 回复率 0 = 采样软权重恒走保守口径（不再硬拦截）
+            mention_reply: None,
             capability: "computer".into(),
             memory_isolation: false,
             created_at: exm_core::types::now_iso(),
@@ -293,7 +303,9 @@ mod tests {
             flow_name: None,
             media: &[],
         };
-        // ① 回复率 0：概率闸门在最前，不该触达任何后续判定
+        // ① 回复率 0：采样软权重恒未命中 → 保守口径决策模型。模型调用失败
+        //（本测试环境无可用 provider）→ 保守拒。rate=0 语义 = 「只回高价值」，
+        // 不再是「全不回」（软权重化后每条消息都保证过一次决策模型）。
         assert!(!should_proactively_reply(&core, &ch, &ctx).await);
 
         // ② 探活词表：rate=100 但消息是探活——不该被主动抢答
@@ -303,7 +315,58 @@ mod tests {
         assert!(!should_proactively_reply(&core, &ch_full, &probe_ctx).await);
 
         // ③ 正常求助消息 + rate=100：漏斗走到底，决策模型调用失败（本测试环境
-        // 无可用 provider）→ 保守拒。三级漏斗的「宁可漏不可吵」语义锚定。
+        // 无可用 provider）→ 保守拒。漏斗的「宁可漏不可吵」语义锚定。
         assert!(!should_proactively_reply(&core, &ch_full, &ctx).await);
+    }
+
+    /// 采样软权重口径：rate=0（恒未命中）时决策提示词带保守附加段，
+    /// rate=100（恒命中）时用标准提示词——采样不再拦截消息，只收紧口径。
+    #[tokio::test]
+    async fn 采样软权重_口径随rate收紧() {
+        let dir = std::env::temp_dir().join(format!("exm-proactive-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let core = exm_core::Core::create(&dir).expect("创建 Core 失败");
+        let ch0 = Channel {
+            id: "napcat-soft".into(),
+            kind: "napcat".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            admins: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: Some(true),
+            proactive_reply: Some(true),
+            proactive_rate: Some(0),
+            mention_reply: None,
+            capability: "computer".into(),
+            memory_isolation: false,
+            created_at: exm_core::types::now_iso(),
+        };
+        let text = String::from("帮我看看这个报错");
+        let ctx = InboundCtx {
+            text: &text,
+            external_id: "10086",
+            display_name: "黑星",
+            is_group: true,
+            mentioned: false,
+            chat_key: "777",
+            flow_name: None,
+            media: &[],
+        };
+        // rate=0：软权重恒未命中 → 决策模型照常调用（口径收紧但不拦截）。
+        // 测试环境无 provider → evalError 保守拒。与旧硬拦截的关键差异锚点：
+        // 事件流里出现 proactive.evalError = 消息到达了决策层（旧采样硬拦截
+        // 在此之前就丢弃，不会产生任何事件）。
+        assert!(!should_proactively_reply(&core, &ch0, &ctx).await);
+        let evts = core.store.list_events("").unwrap();
+        let reached_eval = evts.iter().any(|env| {
+            env["payload"]["type"].as_str() == Some("sanitize.finding")
+                && env["payload"]["payload"]["kind"].as_str() == Some("proactive.evalError")
+        });
+        assert!(reached_eval, "rate=0 的消息应仍到达决策模型（evalError 事件可证采样不再硬拦截）");
     }
 }

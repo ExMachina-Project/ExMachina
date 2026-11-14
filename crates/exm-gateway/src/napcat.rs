@@ -761,9 +761,20 @@ async fn napcat_gate(
     // 数组消息恒判「未提及」→ 群聊唤醒门控全灭（群里说话无反应的根因）。
     let self_id = v_self_id(raw);
     let raw_message = raw.get("message");
-    let mentioned = raw_message
-        .map(|m| is_mentioned(m, self_id))
-        .unwrap_or(false);
+    // 提及判定：@ 机器人本体 **或引用回复机器人消息**——「回复」与「@」同为
+    // 明确点名（回复机器人上一条发言却因不带 at 段被当未提及 → 概率丢弃 =
+    // 用户点名石沉大海）。回查引用消息的 sender 是否机器人本体（get_msg）。
+    let at_hit = raw_message.map(|m| is_mentioned(m, self_id)).unwrap_or(false);
+    let mentioned = if at_hit {
+        true
+    } else {
+        let reply_ids = raw_message.map(reply_para_ids).unwrap_or_default();
+        if reply_ids.is_empty() {
+            false
+        } else {
+            reply_targets_self(&ch.id, &reply_ids, self_id).await
+        }
+    };
     let external_id = user_id.map(|u| u.to_string()).unwrap_or_default();
     // 会话键（与 ChannelRun::begin 同口径）：群号优先，私聊为用户 id
     let peer = group_id
@@ -1070,6 +1081,25 @@ async fn reply_quote_note(ch_id: &str, msg_ids: &[String]) -> String {
     }
 }
 
+/// 引用回复是否指向机器人本体：逐条 get_msg 回查引用消息的 sender.user_id。
+/// 任一条命中即 true；回查失败/超时按 false（保守——漏比错好）。
+/// 上限 3 条与 reply_quote_note 同口径（引用链是尽力而为，不阻塞消息）。
+async fn reply_targets_self(ch_id: &str, msg_ids: &[String], self_id: Option<i64>) -> bool {
+    let Some(self_id) = self_id else {
+        return false;
+    };
+    for id in msg_ids.iter().take(3) {
+        let Some(resp) = api_call(ch_id, "get_msg", serde_json::json!({ "message_id": id })).await
+        else {
+            continue;
+        };
+        if resp.pointer("/data/sender/user_id").and_then(|x| x.as_i64()) == Some(self_id) {
+            return true;
+        }
+    }
+    false
+}
+
 /// 取上报事件里的机器人自身 QQ（self_id 字段；数组段提及判定的比对基准）
 fn v_self_id(raw: &serde_json::Value) -> Option<i64> {
     raw.get("self_id").and_then(|x| x.as_i64())
@@ -1077,8 +1107,7 @@ fn v_self_id(raw: &serde_json::Value) -> Option<i64> {
 
 /// 消息是否 @ 了机器人本体（两种上报格式都认；群内 @ 他人不算）。
 /// CQ 码：`[CQ:at qq=2511705734]`；数组段：`{"type":"at","data":{"qq":"2511705734"}}`。
-fn is_mentioned(m: &serde_json::Value, self_id: Option<i64>) -> bool {
-    if let Some(arr) = m.as_array() {
+fn is_mentioned(m: &serde_json::Value, self_id: Option<i64>) -> bool {    if let Some(arr) = m.as_array() {
         arr.iter().any(|seg| {
             let qq = seg
                 .pointer("/data/qq")
@@ -1535,5 +1564,33 @@ mod tests {
         // 无 self_id（异常上报）：CQ 码退化为「含 at 即提及」（旧行为），数组段严格不命中
         assert!(is_mentioned(&cq_hit, None));
         assert!(!is_mentioned(&arr_hit, None));
+    }
+
+    /// 提及判定补全（引用回复）：回复机器人消息与「@」同为明确点名——
+    /// 回复段指向机器人上一条发言却因不带 at 段被判未提及 → 漏斗概率丢弃
+    /// = 用户点名石沉大海。reply_para_ids 提取引用链 id（回查 sender 的钥匙）。
+    #[test]
+    fn 提及判定_引用回复段id提取() {
+        // 数组段 reply：标准形态
+        let arr = json!([
+            { "type": "reply", "data": { "id": "12345" } },
+            { "type": "text", "data": { "text": " 这个怎么用" } }
+        ]);
+        assert_eq!(reply_para_ids(&arr), vec!["12345".to_string()]);
+        // CQ 码形态：[CQ:reply,id=12345]
+        let cq = json!("[CQ:reply,id=67890] 这个呢");
+        assert_eq!(reply_para_ids(&cq), vec!["67890".to_string()]);
+        // 无引用：空
+        assert!(reply_para_ids(&json!([{ "type": "text", "data": { "text": "hi" } }])).is_empty());
+        assert!(reply_para_ids(&json!("没有回复的纯文本")).is_empty());
+        // 引用链多条（多级回复）：按事件顺序全收
+        let multi = json!([
+            { "type": "reply", "data": { "id": "111" } },
+            { "type": "reply", "data": { "id": "222" } }
+        ]);
+        assert_eq!(
+            reply_para_ids(&multi),
+            vec!["111".to_string(), "222".to_string()]
+        );
     }
 }

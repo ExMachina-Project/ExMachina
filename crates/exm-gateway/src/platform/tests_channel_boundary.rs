@@ -29,6 +29,7 @@ mod channel_boundary_tests {
             group_gate: None,
             proactive_reply: None,
             proactive_rate: None,
+            mention_reply: None,
             capability: capability.into(),
             memory_isolation: isolation,
             created_at: String::new(),
