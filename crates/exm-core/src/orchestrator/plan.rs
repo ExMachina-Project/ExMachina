@@ -203,8 +203,16 @@ impl Orchestrator {
             _ => String::new(),
         };
 
+        // 输入框定：IM 会话用群聊口径（生产实测：任务框定会让模型把每条命中的
+        // 群聊消息当成「用户对我下的指令」，回复像应答机而非参与群聊；群聊
+        // 语境下模型是「群里的一员看到发言」，回复是插话不是复命）
+        let input_frame = if is_im_session(session_id) {
+            format!("本轮群聊发言：{text}")
+        } else {
+            format!("用户任务输入：{text}")
+        };
         let mut user_msg = ChatMessage::user(format!(
-            "{context_block}用户任务输入：{text}\n\n【要求】按 OrchestratorPlan 契约输出 JSON。nodes 中的 agentIdentifier 必须来自上方可调度清单。"
+            "{context_block}{input_frame}\n\n【要求】按 OrchestratorPlan 契约输出 JSON。nodes 中的 agentIdentifier 必须来自上方可调度清单。"
         ));
         // 多模态输入：本轮附带的图片（data URL）。生效模型未标记视觉能力时，
         // 走「视觉转述」模型把图片转成文字描述注入；未配置转述且明确无视觉 → 丢弃并说明。
