@@ -28,6 +28,7 @@ mod identity_gate_tests {
             group_gate: gate,
             proactive_reply: None,
             proactive_rate: None,
+            mention_reply: None,
             capability: "computer".into(),
             memory_isolation: false,
             created_at: exm_core::types::now_iso(),
@@ -318,7 +319,7 @@ mod identity_gate_tests {
         };
         match admit(&core, &member, &ctx_member).await {
             GateDecision::Ignore => {}
-            other => panic!("非管理员未 @ /reset 应静默忽略（得非 Deny 决策）"),
+            _other => panic!("非管理员未 @ /reset 应静默忽略（得非 Deny 决策）"),
         }
         // 静默忽略 = 无重置动作（无会话被归档/新建绑定；后续闸门可能按旁听
         // 语义建流会话，那是门控②的正常行为，与 /reset 无关）
@@ -336,7 +337,7 @@ mod identity_gate_tests {
         let ctx_member_at = InboundCtx { mentioned: true, chat_key: "g401", ..ctx_member };
         match admit(&core, &member, &ctx_member_at).await {
             GateDecision::Deny(msg) => assert!(msg.contains("管理员权限"), "{msg}"),
-            other => panic!("非管理员 @ /reset 应回权限提示（得非 Deny 决策）"),
+            _other => panic!("非管理员 @ /reset 应回权限提示（得非 Deny 决策）"),
         }
         // Deny 前无重置动作：流若有会话（旁听所建）必非归档态；无会话更佳
         let bound = core.flow_active_session(&member.id, "g401");
@@ -352,7 +353,7 @@ mod identity_gate_tests {
         let ctx_admin = InboundCtx { external_id: "boss", display_name: "boss", ..ctx_member };
         match admit(&core, &admin_ch, &ctx_admin).await {
             GateDecision::Deny(msg) => assert!(msg.contains("已重置"), "{msg}"),
-            other => panic!("管理员 /reset 应回执成功（得非 Deny 决策）"),
+            _other => panic!("管理员 /reset 应回执成功（得非 Deny 决策）"),
         }
         assert!(core.flow_active_session(&admin_ch.id, "g400").is_some(), "管理员重置应建会话");
 
@@ -370,7 +371,7 @@ mod identity_gate_tests {
         let ctx_admin2 = InboundCtx { external_id: "boss2", display_name: "二号管理", ..ctx_member };
         match admit(&core, &member, &ctx_admin2).await {
             GateDecision::Deny(msg) => assert!(msg.contains("已重置"), "{msg}"),
-            other => panic!("role=admin 身份 /reset 应回执成功（得非 Deny 决策）"),
+            _other => panic!("role=admin 身份 /reset 应回执成功（得非 Deny 决策）"),
         }
     }
 
@@ -594,6 +595,7 @@ mod ambient_context_tests {
             group_gate: gate,
             proactive_reply: None,
             proactive_rate: None,
+            mention_reply: None,
             capability: "computer".into(),
             memory_isolation: false,
             created_at: exm_core::types::now_iso(),

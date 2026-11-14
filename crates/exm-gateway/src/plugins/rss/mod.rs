@@ -606,6 +606,7 @@ mod tests {
             group_gate: None,
             proactive_reply: None,
             proactive_rate: None,
+            mention_reply: None,
             capability: "chat".into(),
             memory_isolation: true,
             created_at: String::new(),
