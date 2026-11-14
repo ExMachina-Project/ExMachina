@@ -297,11 +297,89 @@ mod identity_gate_tests {
         assert_eq!(run3.session_id, sid1, "指令退役后消息应仍落原会话");
     }
 
+    /// /reset 权限（管理员限定）：管理员正常重置；非管理员未 @ 静默忽略、
+    /// @ 了给拒绝回执。共享流上下文的重置是破坏性操作，不能人人可触发。
+    #[tokio::test]
+    async fn 聊天流_reset_权限() {
+        let core = std::sync::Arc::new(test_core());
+        let member = chan(None);
+        let admin_ch = Channel { admins: vec!["boss".into()], ..chan(None) };
+
+        // 非管理员 + 未 @：静默忽略（None 语义 = 不回执、状态不变）
+        let ctx_member = InboundCtx {
+            text: "/reset",
+            external_id: "u1",
+            display_name: "u1",
+            is_group: true,
+            mentioned: false,
+            chat_key: "g400",
+            flow_name: None,
+            media: &[],
+        };
+        match admit(&core, &member, &ctx_member).await {
+            GateDecision::Ignore => {}
+            other => panic!("非管理员未 @ /reset 应静默忽略（得非 Deny 决策）"),
+        }
+        // 静默忽略 = 无重置动作（无会话被归档/新建绑定；后续闸门可能按旁听
+        // 语义建流会话，那是门控②的正常行为，与 /reset 无关）
+        let bound = core.flow_active_session(&member.id, "g400");
+        assert!(bound.is_none_or(|sid| core
+            .store
+            .get_session(&sid)
+            .ok()
+            .flatten()
+            .map(|s| s.archived_at.is_none())
+            .unwrap_or(true)), "静默忽略不应产生归档动作");
+
+        // 非管理员 + @：拒绝回执（被点名不回应是失礼），但不做任何状态变更。
+        // 独立 chat_key（上一段静默忽略已经旁听建流，断言要不受串扰）
+        let ctx_member_at = InboundCtx { mentioned: true, chat_key: "g401", ..ctx_member };
+        match admit(&core, &member, &ctx_member_at).await {
+            GateDecision::Deny(msg) => assert!(msg.contains("管理员权限"), "{msg}"),
+            other => panic!("非管理员 @ /reset 应回权限提示（得非 Deny 决策）"),
+        }
+        // Deny 前无重置动作：流若有会话（旁听所建）必非归档态；无会话更佳
+        let bound = core.flow_active_session(&member.id, "g401");
+        assert!(bound.is_none_or(|sid| core
+            .store
+            .get_session(&sid)
+            .ok()
+            .flatten()
+            .map(|s| s.archived_at.is_none())
+            .unwrap_or(true)), "拒绝路径不应产生归档动作");
+
+        // 管理员（通道 admins 清单）：正常重置
+        let ctx_admin = InboundCtx { external_id: "boss", display_name: "boss", ..ctx_member };
+        match admit(&core, &admin_ch, &ctx_admin).await {
+            GateDecision::Deny(msg) => assert!(msg.contains("已重置"), "{msg}"),
+            other => panic!("管理员 /reset 应回执成功（得非 Deny 决策）"),
+        }
+        assert!(core.flow_active_session(&admin_ch.id, "g400").is_some(), "管理员重置应建会话");
+
+        // 绑定身份 role=admin 同样放行（判权跟人走，跨通道管理员）
+        core.save_identity(&exm_core::types::UserIdentity {
+            id: format!("{}:boss2", member.id),
+            channel: member.id.clone(),
+            external_id: "boss2".into(),
+            display_name: "二号管理".into(),
+            role: "admin".into(),
+            paired_at: exm_core::types::now_iso(),
+            note: String::new(),
+        })
+        .unwrap();
+        let ctx_admin2 = InboundCtx { external_id: "boss2", display_name: "二号管理", ..ctx_member };
+        match admit(&core, &member, &ctx_admin2).await {
+            GateDecision::Deny(msg) => assert!(msg.contains("已重置"), "{msg}"),
+            other => panic!("role=admin 身份 /reset 应回执成功（得非 Deny 决策）"),
+        }
+    }
+
     /// /reset 重置聊天上下文：旧会话归档、流绑定切新会话、后续消息落新会话
     #[tokio::test]
     async fn 聊天流_reset_归档旧会话并切新() {
         let core = std::sync::Arc::new(test_core());
-        let ch = chan(None);
+        // 管理员通道（权限修复后 /reset 仅管理员可触发）
+        let ch = Channel { admins: vec!["u1".into()], ..chan(None) };
         // 流已有绑定会话并落过消息
         let (run, _) = ChannelRun::begin(&core, &ch, "g200").await.unwrap();
         let sid1 = run.session_id.clone();
@@ -342,7 +420,8 @@ mod identity_gate_tests {
     #[tokio::test]
     async fn 聊天流_reset_空流与非整词() {
         let core = std::sync::Arc::new(test_core());
-        let ch = chan(None);
+        // 管理员通道（权限修复后 /reset 仅管理员可触发）
+        let ch = Channel { admins: vec!["u1".into()], ..chan(None) };
         // 流尚无会话：/reset 直接建新
         let ctx = InboundCtx {
             text: "/reset",

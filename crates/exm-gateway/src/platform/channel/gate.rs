@@ -135,10 +135,13 @@ pub(crate) async fn admit(
 
     // ② 群聊唤醒门控：群内仅提及 / 回复触发；私聊豁免。
     // 主动回复（实验性，通道级开关）：未 @ 但通道开了 proactive_reply 时，
-    // 经三级漏斗（回复率采样 → 探活词表 → 决策模型）判断是否主动回应
-    // （proactive.rs；任何一级失败都保守忽略——主动回复是增益不是义务）。
+    // 经漏斗（概率软权重 → 探活词表 → 决策模型）判断是否主动回应
+    // （proactive.rs；决策失败保守忽略——主动回复是增益不是义务）。
     // 被拦下的未 @ 消息不再完全丢弃：落流会话作为「旁听」上下文（imctx: 标记，
     // 不触发轮次）——「仅 @ 回复」模式下 Agent 被点名时仍能接住群聊话题。
+    // 提及必回（mention_reply，默认开）：@ 机器人本体 / 引用回复机器人消息
+    // 属「明确点名」，门控直接放行（不受主动回复漏斗影响）；关闭后提及
+    // 消息同样进漏斗（纯陪聊场景）。
     if ch.gate_enabled(core) && ctx.is_group && !ctx.mentioned {
         let proactive = ch.proactive_enabled()
             && super::proactive::should_proactively_reply(core, ch, ctx).await;
@@ -348,7 +351,24 @@ async fn flow_command(
     // 切到新会话，后续消息从零开始。「聊天流固定单会话」退役了 /new /sessions
     // /use，但「干净重开」是真实高频诉求（上下文被长对话灌满 / 话题彻底换轨），
     // 只靠控制台手动归档对通道侧用户不可达。
+    // 权限：仅管理员（通道 admins 清单或绑定身份 role=admin）——群聊流是共享
+    // 上下文，任何成员都能归档会话/中止运行任务 = 一个人手滑全班陪葬。
+    // 非管理员静默忽略（不回执，避免「权限拒绝」刷屏）；@ 场景（mentioned）
+    // 给拒绝回执——被点名不回应是失礼，说明原因即可。
     if text == "/reset" {
+        let is_admin = ch.admins.iter().any(|a| a.trim() == ctx.external_id)
+            || core
+                .identity_of(&ch.id, &ctx.external_id.to_string())
+                .map(|i| i.role == "admin")
+                .unwrap_or(false);
+        if !is_admin {
+            if ctx.mentioned {
+                return Some(
+                    "【报告】/reset 需要管理员权限：聊天流是共享上下文，重置影响所有人（会话归档 + 运行任务中止）。请联系管理员操作。".into(),
+                );
+            }
+            return None; // 未 @ 的非管理员：静默忽略（不进后续闸门，也不落旁听噪音）
+        }
         return Some(reset_flow_session(core, ch, ctx).await);
     }
     let retired = [
