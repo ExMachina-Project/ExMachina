@@ -40,14 +40,14 @@ fn transcript_line(m: &ChatMessage) -> String {
     format!("[{who}] {}", body.chars().take(400).collect::<String>())
 }
 
-/// user 消息的转录署名：带 im: 发送者标记（群聊多人区分）时渲染「用户·名字」，
+/// user 消息的转录署名：带 im: 发送者标记（群聊多人区分）时渲染「群聊·名字」，
 /// imctx: 旁听（门控拦下的未 @ 群消息）渲染「旁听·群聊·名字」——方括号背景语义
 /// 与 history 渲染同口径（orchestrator.rs），明确是背景上下文而非对本体的指令，
 /// 其余（WebUI / 私聊 / 自动任务）保持「用户」。
 fn user_label(m: &ChatMessage) -> String {
     match m.agent_id.as_deref() {
         Some(mark) if mark.starts_with("imctx:") => format!("旁听·群聊·{}", &mark[6..]),
-        Some(mark) if mark.starts_with("im:") => format!("用户·{}", &mark[3..]),
+        Some(mark) if mark.starts_with("im:") => format!("群聊·{}", &mark[3..]),
         _ => "用户".into(),
     }
 }
@@ -422,7 +422,7 @@ mod tests {
         let mut real = mk_msg(MessageRole::User, "正式问一下");
         real.agent_id = Some("im:李四".into());
         let out2 = render_recent(&[real]);
-        assert!(out2.contains("[用户·李四] 正式问一下"), "{out2}");
+        assert!(out2.contains("[群聊·李四] 正式问一下"), "{out2}");
         assert_ne!(out, out2, "旁听与真实输入渲染必须不同");
     }
 

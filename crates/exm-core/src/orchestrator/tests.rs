@@ -401,7 +401,7 @@ mod pending_inputs_tests {
     }
 
     /// 群聊旁听（imctx:）不并入 goal：它是背景上下文，不是本轮任务输入。
-    /// 尾部真实 @ 消息正常收集；旁听消息跳过且不打断连续窗口扫描。
+    /// 尾部真实 @ 消息正常收集（带群聊署名）；旁听消息跳过且不打断连续窗口扫描。
     #[test]
     fn 旁听消息_跳过_真实输入正常合并() {
         let msgs = vec![
@@ -410,7 +410,7 @@ mod pending_inputs_tests {
             msg(MessageRole::User, Some("im:王五"), "@bot 帮我们推荐"),
         ];
         let goal = pending_inputs_from(&msgs).expect("应收集到真实输入");
-        assert_eq!(goal, "@bot 帮我们推荐");
+        assert_eq!(goal, "[群聊·王五] @bot 帮我们推荐");
         assert!(!goal.contains("今晚吃什么"), "旁听不得并入 goal：{goal}");
         assert!(!goal.contains("随便"), "旁听不得并入 goal：{goal}");
     }
@@ -448,11 +448,13 @@ mod pending_inputs_tests {
             "助手回复后的旁听另起一块: {}",
             hist[2].content
         );
-        // 真实输入独立成条、无背景标注
-        assert_eq!(hist[3].content, "@bot 在吗");
+        // 真实输入独立成条、无背景标注；群聊真实输入带署名前缀（群聊参与感：
+        // 模型看到「谁在说话」，不是无差别「在跟我说话」）
+        assert_eq!(hist[3].content, "[群聊·赵六] @bot 在吗");
     }
 
-    /// 历史装配：普通会话（无旁听）行为不变——真实输入与助手消息原样呈现
+    /// 历史装配：普通会话（无旁听）行为不变——真实输入与助手消息原样呈现；
+    /// 群聊真实输入（im:）带署名前缀
     #[test]
     fn 历史装配_无旁听_行为不变() {
         let rows = vec![
@@ -463,7 +465,7 @@ mod pending_inputs_tests {
         let hist = history_with_ambient(&rows);
         assert_eq!(hist.len(), 3);
         assert_eq!(hist[0].content, "普通输入");
-        assert_eq!(hist[2].content, "群聊真实输入");
+        assert_eq!(hist[2].content, "[群聊·甲] 群聊真实输入");
         assert!(
             !hist.iter().any(|m| m.content.contains("群聊记录")),
             "无旁听不应出现记录块"
@@ -480,7 +482,7 @@ mod pending_inputs_tests {
         assert!(pending_inputs_from(&msgs).is_none());
     }
 
-    /// 非 user 消息是窗口边界：旁听在其后、边界前的 @ 消息不应被回溯收集
+    /// 非user 消息是窗口边界：旁听在其后、边界前的 @ 消息不应被回溯收集
     #[test]
     fn 轮次边界_不回溯() {
         let msgs = vec![
@@ -490,7 +492,32 @@ mod pending_inputs_tests {
             msg(MessageRole::User, Some("im:王五"), "@bot 新任务"),
         ];
         let goal = pending_inputs_from(&msgs).expect("应有新任务");
-        assert_eq!(goal, "@bot 新任务");
+        assert_eq!(goal, "[群聊·王五] @bot 新任务");
+    }
+
+    /// 群聊参与感（im-group-context）：排队窗口内多人先后发言合并为一轮时
+    /// 每条带署名——模型能分清「谁在说话」，不会当成单人连环指令；
+    /// 这是对话流多人语境的最小锚定。
+    #[test]
+    fn 排队合并_多人署名保留() {
+        let msgs = vec![
+            msg(MessageRole::User, Some("im:张三"), "刚才那个报错怎么解"),
+            msg(MessageRole::User, Some("im:李四"), "对，我也想知道"),
+        ];
+        let goal = pending_inputs_from(&msgs).expect("应合并多人输入");
+        assert!(
+            goal.contains("[群聊·张三] 刚才那个报错怎么解"),
+            "张三署名丢失：{goal}"
+        );
+        assert!(
+            goal.contains("[群聊·李四] 对，我也想知道"),
+            "李四署名丢失：{goal}"
+        );
+        assert_ne!(
+            goal.lines().count(),
+            1,
+            "多人都应保留独立行，不是拼成一段"
+        );
     }
 }
 
