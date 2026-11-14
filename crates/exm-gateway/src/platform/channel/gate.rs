@@ -134,15 +134,17 @@ pub(crate) async fn admit(
     }
 
     // ② 群聊唤醒门控：群内仅提及 / 回复触发；私聊豁免。
-    // 主动回复（实验性，通道级开关）：未 @ 但通道开了 proactive_reply 时，
-    // 经漏斗（概率软权重 → 探活词表 → 决策模型）判断是否主动回应
-    // （proactive.rs；决策失败保守忽略——主动回复是增益不是义务）。
-    // 被拦下的未 @ 消息不再完全丢弃：落流会话作为「旁听」上下文（imctx: 标记，
-    // 不触发轮次）——「仅 @ 回复」模式下 Agent 被点名时仍能接住群聊话题。
     // 提及必回（mention_reply，默认开）：@ 机器人本体 / 引用回复机器人消息
-    // 属「明确点名」，门控直接放行（不受主动回复漏斗影响）；关闭后提及
-    // 消息同样进漏斗（纯陪聊场景）。
-    if ch.gate_enabled(core) && ctx.is_group && !ctx.mentioned {
+    // 属「明确点名」，门控直接放行（不经主动回复漏斗）。关闭后提及消息
+    // 同样进漏斗判断（纯陪聊场景：连 @ 也可被决策模型按语境拒掉）。
+    if ch.gate_enabled(core) && ctx.is_group && ctx.mentioned && ch.mention_reply_enabled() {
+        // 放行：直接落到后续闸门（身份/限流），不进漏斗
+    } else if ch.gate_enabled(core) && ctx.is_group {
+        // 主动回复（实验性，通道级开关）：未 @（或提及必回已关）时经漏斗
+        // （概率软权重 → 探活词表 → 决策模型）判断是否主动回应
+        // （proactive.rs；决策失败保守忽略——主动回复是增益不是义务）。
+        // 被拦下的消息不再完全丢弃：落流会话作为「旁听」上下文（imctx: 标记，
+        // 不触发轮次）——「仅 @ 回复」模式下 Agent 被点名时仍能接住群聊话题。
         let proactive = ch.proactive_enabled()
             && super::proactive::should_proactively_reply(core, ch, ctx).await;
         if !proactive {
@@ -358,7 +360,7 @@ async fn flow_command(
     if text == "/reset" {
         let is_admin = ch.admins.iter().any(|a| a.trim() == ctx.external_id)
             || core
-                .identity_of(&ch.id, &ctx.external_id.to_string())
+                .identity_of(&ch.id, ctx.external_id)
                 .map(|i| i.role == "admin")
                 .unwrap_or(false);
         if !is_admin {

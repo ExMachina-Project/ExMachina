@@ -62,10 +62,14 @@ pub struct Channel {
     /// 主动回复（实验性）：群聊免 @ 时经决策模型判断是否回应。None/false = 关（仅 @ 触发）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proactive_reply: Option<bool>,
-    /// 主动回复率（0~100 百分比采样）：决策模型前的概率闸门——未命中直接忽略，
-    /// 控制成本。缺省 100 = 全量交决策模型判断。
+    /// 主动回复率（0~100 百分比采样）：决策口径的软权重——未命中走保守口径
+    /// （仅高价值消息回），命中走标准口径；不再硬拦截消息。缺省 100 = 全量标准口径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proactive_rate: Option<u32>,
+    /// 提及必回（默认开）：@ 机器人本体 / 引用回复机器人消息直接放行进完整轮次，
+    /// 不经主动回复漏斗。关闭后提及消息同样走漏斗（纯陪聊场景）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention_reply: Option<bool>,
     /// 能力边界：chat = 仅聊天；tools = 可调工具（不含 computer）；computer = 完整能力。
     /// 缺省 computer：兼容旧通道配置，不改变既有接入账号的行为。
     #[serde(default = "default_channel_capability")]
@@ -126,9 +130,14 @@ impl Channel {
         self.proactive_reply.unwrap_or(false)
     }
 
-    /// 主动回复率（0~100）：决策模型前的概率闸门；非法值钳到 0~100
+    /// 主动回复率（0~100）：决策口径软权重；非法值钳到 0~100
     pub(crate) fn proactive_rate_pct(&self) -> u32 {
         self.proactive_rate.unwrap_or(100).min(100)
+    }
+
+    /// 提及必回（默认开）：@ / 引用回复机器人直接放行，不经主动回复漏斗
+    pub(crate) fn mention_reply_enabled(&self) -> bool {
+        self.mention_reply.unwrap_or(true)
     }
 
     /// 能力边界（未知值回退完整档：老配置不因新字段失效）。
@@ -626,6 +635,9 @@ pub struct ChannelBody {
     /// 主动回复率 0~100（None = 创建用 100；更新不传 = 保持）
     #[serde(default)]
     pub proactive_rate: Option<u32>,
+    /// 提及必回（None = 创建用开；更新不传 = 保持）
+    #[serde(default)]
+    pub mention_reply: Option<bool>,
     /// 能力边界：chat | tools | computer（None = 创建用完整档；更新不传 = 保持）
     #[serde(default)]
     pub capability: Option<String>,
@@ -787,6 +799,7 @@ pub async fn create_channel(
         group_gate: b.group_gate,
         proactive_reply: b.proactive_reply,
         proactive_rate: b.proactive_rate,
+        mention_reply: b.mention_reply,
         capability: capability.to_string(),
         memory_isolation: b.memory_isolation.unwrap_or(false),
         created_at: exm_core::types::now_iso(),
@@ -831,6 +844,9 @@ pub async fn update_channel(
     }
     if let Some(v) = b.proactive_rate {
         ch.proactive_rate = Some(v.min(100));
+    }
+    if let Some(v) = b.mention_reply {
+        ch.mention_reply = Some(v);
     }
     if let Some(v) = &b.capability {
         let cap = v.trim();
