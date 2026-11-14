@@ -486,6 +486,11 @@ async fn on_text(
         return;
     }
     let mut text = extract_text(v.get("message").unwrap_or(&serde_json::Value::Null));
+    // @ 名字回查（流显示可读性）：extract_text 是纯同步转换，at 段缺
+    // data.name 时只能落 `@QQ号` 占位——群名片/昵称回查是异步 API 调用
+    // （get_group_member_info），在拿到文本后补：把 `@数字` 换回真名。
+    // 失败静默保留占位（名字是增益不是义务）。
+    text = resolve_at_names(&ch.id, group_id, &v, &text).await;
     // 引用消息回查（get_msg）：reply 段的 id 换回原文——「回复图片：这是什么」
     // 若不带原文，模型只看到「这是什么」三个字，引用语义整个丢失。
     // 注记拼在正文头（【回复 某人：…】），尽力而为：回查失败不阻塞主链。
@@ -864,6 +869,126 @@ fn extract_text(m: &serde_json::Value) -> String {
     } else {
         String::new()
     }
+}
+
+/// @ 占位名字回查：文本中 `@<纯数字>`（extract_text 在 at 段缺 data.name
+/// 时的回落形态）经 OneBot API 回查群名片/昵称后替换为真名。
+/// 群内用 get_group_member_info（群名片 card 优先，回落昵称）；私聊场景
+/// at 语义罕见，仅群内回查。回查失败/超时保留占位原文——名字是增益
+/// 不是义务，不阻塞消息主链。
+async fn resolve_at_names(
+    ch_id: &str,
+    group_id: Option<i64>,
+    raw: &serde_json::Value,
+    text: &str,
+) -> String {
+    use std::collections::HashMap;
+    let Some(gid) = group_id else {
+        return text.to_string();
+    };
+    let targets = collect_at_placeholders(text);
+    if targets.is_empty() {
+        return text.to_string();
+    }
+    let self_id = v_self_id(raw);
+    let mut names: HashMap<String, String> = HashMap::new();
+    for qq in &targets {
+        // 机器人本体：事件 sender 段自带昵称，无需 API 回查
+        if let Some(sid) = self_id {
+            if qq == &sid.to_string() {
+                if let Some(nick) = raw
+                    .pointer("/sender/nickname")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    names.insert(qq.clone(), nick.to_string());
+                    continue;
+                }
+            }
+        }
+        let Some(resp) = api_call(
+            ch_id,
+            "get_group_member_info",
+            serde_json::json!({ "group_id": gid, "user_id": qq.parse::<i64>().unwrap_or(0), "no_cache": false }),
+        )
+        .await
+        else {
+            continue;
+        };
+        let name = resp
+            .pointer("/data/card")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                resp.pointer("/data/nickname")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            });
+        if let Some(name) = name {
+            names.insert(qq.clone(), name.to_string());
+        }
+    }
+    apply_at_names(text, &names)
+}
+
+/// 收集文本中的 `@数字` 占位（QQ 号长度 5~12 位；去重）。按字符迭代——
+/// 中文正文是 UTF-8 多字节，字节索引切片会拆坏序列。
+fn collect_at_placeholders(text: &str) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    let mut cs = text.chars().peekable();
+    while let Some(c) = cs.next() {
+        if c == '@' {
+            let mut digits = String::new();
+            while let Some(&dc) = cs.peek() {
+                if dc.is_ascii_digit() {
+                    digits.push(dc);
+                    cs.next();
+                } else {
+                    break;
+                }
+            }
+            if (5..=12).contains(&digits.len()) && !targets.iter().any(|t| t == &digits) {
+                targets.push(digits);
+            }
+        }
+    }
+    targets
+}
+
+/// 占位替换：`names` 中命中的 `@数字` 换成 `@名字`；未命中原样保留。
+/// 按字符迭代推进（天然 UTF-8 边界安全）。
+fn apply_at_names(text: &str, names: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cs = text.chars().peekable();
+    while let Some(c) = cs.next() {
+        if c == '@' {
+            let mut digits = String::new();
+            while let Some(&dc) = cs.peek() {
+                if dc.is_ascii_digit() {
+                    digits.push(dc);
+                    cs.next();
+                } else {
+                    break;
+                }
+            }
+            if (5..=12).contains(&digits.len()) {
+                if let Some(name) = names.get(&digits) {
+                    out.push('@');
+                    out.push_str(name);
+                    continue;
+                }
+            }
+            // 未命中：@ 与已吃掉的数字原样回填
+            out.push('@');
+            out.push_str(&digits);
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// 回复消息体的 id 清单（reply 段，按事件顺序）。
@@ -1320,6 +1445,36 @@ mod tests {
         assert_eq!(extract_text(&m3), "正文");
         // 非数组（CQ 码字符串）走剥离路径
         assert_eq!(extract_text(&json!("看[CQ:image,id=1]这张")), "看这张");
+    }
+
+    /// @ 占位名字回查（纯函数层）：收集/替换/边界语义三面。
+    /// 异步回查（get_group_member_info）依赖 WS 连接，此处锚定纯文本变换。
+    #[test]
+    fn at占位名字回查_收集与替换() {
+        use std::collections::HashMap;
+        let mut names = HashMap::new();
+        names.insert("10086".to_string(), "黑星".to_string());
+        // 基础替换：中文正文 + @QQ号 → @名字
+        assert_eq!(
+            apply_at_names("帮我看这张图@10086 你看", &names),
+            "帮我看这张图@黑星 你看"
+        );
+        // 短数字串（<5 位）不是 QQ 占位：不替换（@100 是普通文本）
+        assert_eq!(apply_at_names("第@100 名", &names), "第@100 名");
+        // 未命中的 QQ 号原样保留
+        assert_eq!(apply_at_names("@99999 在吗", &names), "@99999 在吗");
+        // 同一人多次 @ 只替换全部
+        assert_eq!(
+            apply_at_names("@10086 你好，@10086 再见", &names),
+            "@黑星 你好，@黑星 再见"
+        );
+        // 收集去重：同一 QQ 只出现一次；@ 后超长数字串整体拒收（不留残段）
+        assert_eq!(
+            collect_at_placeholders("@12345 @12345 @678901234567890"),
+            vec!["12345".to_string()]
+        );
+        // 中文紧贴 @数字（字节边界场景）：名字替换不破坏多字节字符
+        assert_eq!(apply_at_names("问@10086一下", &names), "问@黑星一下");
     }
 
     /// CQ 码剥离：完整码剥掉；未闭合码不吞后面正文；at 码转写为 @（语义保留）
