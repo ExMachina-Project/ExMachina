@@ -437,13 +437,10 @@ impl Drop for GroupRestore {
 /// 大小写不敏感；单号非空即受理（不存在/已处理在裁决点报告,不在解析点挡）。
 pub(crate) fn parse_approval_directive(text: &str) -> Option<(bool, String)> {
     let lower = text.trim().to_lowercase();
-    let (approve, rest) = if let Some(r) = lower.strip_prefix("ok:") {
-        (true, r)
-    } else if let Some(r) = lower.strip_prefix("no:") {
-        (false, r)
-    } else {
-        return None;
-    };
+    let (approve, rest) = lower
+        .strip_prefix("ok:")
+        .map(|r| (true, r))
+        .or_else(|| lower.strip_prefix("no:").map(|r| (false, r)))?;
     let id = rest.trim();
     if id.is_empty() {
         return None;
@@ -495,9 +492,9 @@ pub(crate) async fn quick_directive_reply(
                 .iter()
                 .any(|c| c.admins.iter().any(|a| a.trim() == caller));
         if !caller.is_empty() && origin_user != caller && !is_admin {
-            return Some(format!(
-                "【报告】计划裁决被拒绝：发送者无权批准/拒绝该会话的计划（仅发起用户或管理员）。"
-            ));
+            return Some(
+                "【报告】计划裁决被拒绝：发送者无权批准/拒绝该会话的计划（仅发起用户或管理员）。".to_string(),
+            );
         }
         if approve {
             return Some(match core.plan_approve(session_id).await {
