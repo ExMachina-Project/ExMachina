@@ -33,8 +33,11 @@ mod inbound_media_tests {
             ),
         ];
         let note = stage_inbound_media(&core, "ses-inb", &saved);
-        assert!(note.contains("图片附件 shot.png 已注入"), "{note}");
-        assert!(note.contains("文件附件 report.txt 已保存"), "{note}");
+        // 中性注记（防注入腔进历史）：图片只标存在，文件带路径供引用
+        assert!(note.contains("（附图 shot.png）"), "{note}");
+        assert!(note.contains("（附件 report.txt："), "{note}");
+        assert!(!note.contains("已注入"), "不得出现注入程序腔：{note}");
+        assert!(!note.contains("描述画面"), "不得出现分析指令腔：{note}");
         // 图片确实进入多模态暂存（session 维度）
         let staged = exm_core::image_stash::take("ses-inb");
         assert_eq!(staged.len(), 1, "应有一条暂存图片");
