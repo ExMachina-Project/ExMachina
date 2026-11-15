@@ -360,16 +360,20 @@ pub(crate) fn stage_inbound_media(
                         base64::engine::general_purpose::STANDARD.encode(bytes)
                     );
                     exm_core::image_stash::stage(session_id, vec![data]);
-                    notes.push_str(&format!("\n（图片附件 {name} 已注入，可直接描述画面内容）"));
+                    // 图片经多模态暂存注入（模型直接「看见」画面）。正文只留
+                    // 中性存在注记——不含「已注入/描述画面」程序腔（生产实测：
+                    // 注记随正文落库 3843 条，模型回看历史模仿注入腔，把图片
+                    // 分析的过程话术混进回复）
+                    notes.push_str(&format!("\n（附图 {name}）"));
                 } else {
-                    notes.push_str(&format!("\n（图片附件 {name} 读取失败）"));
+                    notes.push_str(&format!("\n（附图 {name} 读取失败）"));
                 }
             }
             "voice" => {
-                notes.push_str(&format!("\n（语音附件 {name} 已保存：{path}，可按需处理）"));
+                notes.push_str(&format!("\n（语音 {name}：{path}）"));
             }
             _ => {
-                notes.push_str(&format!("\n（文件附件 {name} 已保存：{path}）"));
+                notes.push_str(&format!("\n（附件 {name}：{path}）"));
             }
         }
     }

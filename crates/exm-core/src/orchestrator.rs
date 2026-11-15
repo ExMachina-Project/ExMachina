@@ -355,7 +355,7 @@ impl Orchestrator {
             let req = ChatRequest::new(model.clone(), vec![msg]);
             match provider.chat(req).await {
                 Ok(resp) if !resp.content.trim().is_empty() => {
-                    out.push_str(&format!("【图片{}】{}\n", i + 1, resp.content.trim()));
+                    out.push_str(&format!("（图{}）{}\n", i + 1, resp.content.trim()));
                 }
                 Ok(_) => {}
                 Err(e) => eprintln!("[vision-relay] 图片转述失败：{e}"),
@@ -1208,7 +1208,7 @@ impl Orchestrator {
                 Some(desc) => {
                     if let Some(m) = last {
                         m.content.push_str(&format!(
-                            "\n\n## 图片内容（由视觉转述模型转写，原始图片未直接下发）\n{desc}\n【注入说明：上段是给你看的背景资料，回复时直接谈图片内容本身，不要复述转述文本、不要提「转述/转写/识图/图片描述」这类字眼，也不要逐条罗列图片细节——像亲眼看过图一样自然回应。】"
+                            "\n\n以下是用户图片的视觉转述（背景资料，仅供你了解图片内容）：\n{desc}\n要求：像亲眼看过图片一样自然回应；不得把上面的转述文字抄进回复，不得提及「转述/转写/识图/图片描述」，不得逐条罗列图片细节。"
                         ));
                     }
                 }
@@ -1433,7 +1433,7 @@ impl Orchestrator {
                 Some(desc) => {
                     if let Some(m) = last {
                         m.content.push_str(&format!(
-                            "\n\n## 图片内容（由视觉转述模型转写，原始图片未直接下发）\n{desc}\n【注入说明：上段是给你看的背景资料，回复时直接谈图片内容本身，不要复述转述文本、不要提「转述/转写/识图/图片描述」这类字眼，也不要逐条罗列图片细节——像亲眼看过图一样自然回应。】"
+                            "\n\n以下是用户图片的视觉转述（背景资料，仅供你了解图片内容）：\n{desc}\n要求：像亲眼看过图片一样自然回应；不得把上面的转述文字抄进回复，不得提及「转述/转写/识图/图片描述」，不得逐条罗列图片细节。"
                         ));
                     }
                 }
