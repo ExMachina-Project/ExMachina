@@ -56,8 +56,12 @@ jobs:
             artifact: exmachina-windows-x64.zip
           - os: ubuntu-22.04
             artifact: exmachina-linux-x64.tar.gz
-          - os: macos-14
-            artifact: exmachina-macos-arm64.tar.gz
+          # macOS 暂停随版发布：macos-14 runner 被平台侧拒配（排队 1 秒即
+          # cancelled、无 runner 分配，2026-11-10 起 4+2 次复现），矩阵整体非
+          # success 会连带 skip publish——tag/Release 全发不出。摘除条目放行，
+          # 平台恢复后恢复以下两行即可：
+          # - os: macos-14
+          #   artifact: exmachina-macos-arm64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -122,8 +126,9 @@ jobs:
             artifact: exmachina-desktop-windows-x64-setup.exe
           - os: ubuntu-22.04
             artifact: exmachina-desktop-linux-x64.AppImage
-          - os: macos-14
-            artifact: exmachina-desktop-macos-arm64.dmg
+          # macOS 暂停随版发布（同 server 矩阵注释）：
+          # - os: macos-14
+          #   artifact: exmachina-desktop-macos-arm64.dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
