@@ -581,6 +581,46 @@ textarea.ant-input:focus,
 }
 .page-actions { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 
+/* ============ 页头二级页签（Segmented）提对比 ============
+   实测问题：默认 Segmented（32px 高 / 14px 字 / 底色 rgb(24,24,27) /
+   选中块 rgb(39,39,42)）贴在暗背景上几乎不可见——页签是页面级导航，
+   不是次要控件，必须有清晰的边界与选中对比（视觉走查 2026-11）。
+   挂点两类：.page-actions（PageHeader actions）与 .page-head-row > .ant-space
+   （自绘头 Space 包裹，如会话页），统一覆盖。 */
+.page-actions .ant-segmented,
+.page-head-row .ant-space .ant-segmented {
+  padding: 3px;
+  background: color-mix(in srgb, var(--bg-sunken) 72%, var(--bg)) !important;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.page-actions .ant-segmented-item,
+.page-head-row .ant-space .ant-segmented-item {
+  border-radius: 4px;
+}
+.page-actions .ant-segmented .ant-segmented-item-label,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-label {
+  min-height: 26px;
+  padding: 0 14px;
+  line-height: 26px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted);
+}
+.page-actions .ant-segmented .ant-segmented-item-selected .ant-segmented-item-label,
+.page-actions .ant-segmented .ant-segmented-item-label:hover,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-selected .ant-segmented-item-label,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-label:hover {
+  color: var(--text-hi);
+}
+.page-actions .ant-segmented .ant-segmented-thumb,
+.page-actions .ant-segmented .ant-segmented-item-selected,
+.page-head-row .ant-space .ant-segmented .ant-segmented-thumb,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-selected {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
 /* ============ 通用分页骨架 ============ */
 .pane-wrap { width: 100%; }
 .pane-toolbar { margin-bottom: 14px; }
