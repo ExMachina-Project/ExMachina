@@ -1,4 +1,7 @@
-/** 通道网关：多平台多账号接入（QQ 官方机器人 / NapCat / Telegram / Discord / Slack / Matrix / webhook 桥接），每个账号可绑定不同智能体组 */
+/** 智能连结页（nexus-channels-merge）：统一的外部连接入口，三页签——
+ *  账号通道（IM/平台多账号接入，绑定智能体组）/ 智能连结（外部智能体连结体：
+ *  远程网关与 CLI 智能体接入编成）/ 身份与配对。通道与连结体心智一致：
+ *  都是把 EXMACHINA 与外部世界连起来——连平台（聊天入口）、连智能体（干活编成）。 */
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Button, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Slider, Space, Spin, Switch, Table, Tag, Tooltip, message,
@@ -17,6 +20,7 @@ import { useIsNarrow } from "../../useIsNarrow";
 import { fullTime, relativeTime } from "../../time";
 
 import { PLATFORMS, BRIDGE_TYPES, platformDefaults, type ChanPlat, type ChanField } from "./catalog";
+import { NexusPanel } from "./NexusPanel";
 
 export function ChannelsView(): React.ReactElement {
   const t = useT();
@@ -305,9 +309,9 @@ export function ChannelsView(): React.ReactElement {
   return (
     <div className="pane-wrap">
       <PageHeader
-        en="CHANNELS"
-        title={t("nav.channels")}
-        desc={t("channels.desc")}
+        en="NEXUS"
+        title={t("nav.nexus")}
+        desc={t("nexus.mergedDesc")}
         actions={
           <>
             <Segmented
@@ -315,6 +319,7 @@ export function ChannelsView(): React.ReactElement {
               onChange={(v) => setTab(v as string)}
               options={[
                 { value: "accounts", label: t("channels.tabAccounts") },
+                { value: "nexus", label: t("channels.tabNexus") },
                 { value: "identity", label: t("channels.tabIdentity") },
               ]}
             />
@@ -333,6 +338,8 @@ export function ChannelsView(): React.ReactElement {
       <Spin spinning={loading}>
         {tab === "identity" ? (
           <IdentityPanel expanded />
+        ) : tab === "nexus" ? (
+          <NexusPanel />
         ) : (
           <div className={narrow ? "tbl-fit" : undefined}>
           <Table<Channel>
