@@ -1,5 +1,5 @@
 
-# ExMachina — Rationalist Agents
+# ExMachina
 
 > [!WARNING]
 > This project is in pre-alpha. Interfaces and data formats may break without notice. Do not use in production.
@@ -56,6 +56,12 @@ cargo run -p exm-gateway --release        # http://127.0.0.1:4173
 ```
 
 **Terminal workbench** (`exm` with no subcommand): a fullscreen ratatui TUI (message stream / input / status bar) with Chat, Approvals and plan pages — native coding on the terminal. `exm chat` keeps the classic readline panel.
+
+## Persona Freedom: Rational or Emotional, It's All Just a SOUL
+
+The default persona is absolute rationality, but EXMACHINA goes beyond it. The persona (SOUL) is editable data under `entities/`.
+Swap the SOUL file to build emotionally rich, warm, outgoing agents, or anything in between,
+with the same memory, tooling, teaming, and multi-agent collaboration foundation.
 
 ## One Agent, or a Team
 
