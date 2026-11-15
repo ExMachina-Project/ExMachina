@@ -34,6 +34,43 @@ pub(crate) struct MemoryQuery {
     limit: Option<usize>,
 }
 
+/// 记忆全量导出（memory-lifecycle 6.3）：JSONL 流式返回全量条目，
+/// 字段与 REST list 单条一致；?agent= 过滤同 list 口径。
+/// 不含派生索引数据（倒排/哈希索引）——仅条目本体。
+/// Content-Disposition 带日期文件名（memory-export-<日期>.jsonl）。
+pub(crate) async fn export_memory(
+    State(st): State<AppState>,
+    Query(q): Query<MemoryQuery>,
+) -> impl IntoResponse {
+    match st.core.memory_list_filtered(None, q.agent.as_deref(), usize::MAX) {
+        Ok(items) => {
+            let body = items
+                .iter()
+                .map(|e| serde_json::to_string(e).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let date = chrono::Local::now().format("%Y%m%d");
+            let mut resp = axum::response::Response::new(body);
+            let h = resp.headers_mut();
+            h.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/x-ndjson; charset=utf-8"),
+            );
+            if let Ok(v) = axum::http::HeaderValue::from_str(&format!(
+                "attachment; filename=\"memory-export-{date}.jsonl\""
+            )) {
+                h.insert(axum::http::header::CONTENT_DISPOSITION, v);
+            }
+            resp.into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MemoryBody {
@@ -256,6 +293,46 @@ pub(crate) async fn pin_memory(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// 条目编辑（assistant-parity T3）：title/body/tags/kind 可选字段——
+/// 缺省字段不改动；id 不存在 404；非法 kind 400。
+#[derive(Deserialize)]
+pub(crate) struct MemoryUpdateBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+pub(crate) async fn update_memory(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<MemoryUpdateBody>,
+) -> impl IntoResponse {
+    // 空串视为「未提供」：面板清空编辑框不等于清空正文（删除走 forget）
+    let title = b.title.filter(|s| !s.trim().is_empty());
+    let body = b.body.filter(|s| !s.trim().is_empty());
+    match st
+        .core
+        .memory_update(&id, title.as_deref(), body.as_deref(), b.tags, b.kind.as_deref())
+    {
+        Ok(Some(e)) => Json(serde_json::to_value(e).unwrap_or_default()).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("记忆条目不存在：{id}") })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": err.to_string() })),
         )
             .into_response(),
     }

@@ -938,6 +938,34 @@ impl Store {
         Ok(items)
     }
 
+    /// 排空产物（含派发子会话）：子个体在派发运行里 send_file/截图/语音登记的
+    /// outbox 落在子会话名下，主会话收束时若只 drain 自己的键，产物会永远滞留
+    /// （部署实测：创意个体生成 SVG 后 send_file 成功，用户却收不到任何文件）。
+    /// 这里把「本会话 + parent 指向它的子会话」一并排空，按登记时间排序。
+    pub fn outbox_drain_with_children(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
+        let mut kids: Vec<String> = self
+            .db
+            .list::<Session>("sessions")?
+            .into_iter()
+            .filter(|s| s.parent_session.as_deref() == Some(session_id))
+            .map(|s| s.id)
+            .collect();
+        kids.push(session_id.to_string());
+        let mut all: Vec<(String, serde_json::Value)> = Vec::new();
+        for key in &kids {
+            for item in self.outbox_drain(key)? {
+                let at = item
+                    .get("at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                all.push((at, item));
+            }
+        }
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(all.into_iter().map(|(_, v)| v).collect())
+    }
+
     // ---------------------------------------------------------------- 会话来源（通道身份升级语义）
 
     /// 登记会话的外部来源（通道闸门放行时写入；审批单创建时读取打标）
@@ -1138,6 +1166,47 @@ mod store_tests {
     fn test_store() -> Store {
         let dir = std::env::temp_dir().join(format!("exm-store-{}", uuid::Uuid::new_v4()));
         Store::open(&dir).expect("打开测试存储失败")
+    }
+
+    /// 子会话产物汇入（回归锚定）：派发子个体 send_file 登记的 outbox 落在子会话，
+    /// 主会话收束 drain_with_children 必须一并带走——只 drain 主键会让文件永远发不出。
+    #[test]
+    fn 产物汇入_子会话outbox随主会话收束排空() {
+        let store = test_store();
+        let main = store.create_session("主会话", "g1").unwrap();
+        let child = store
+            .create_child_session(&main.id, "sub:creative-agent:生成SVG·T1")
+            .unwrap();
+        // 子个体在派发运行里登记产物；主会话自己也有一条（顺序验证用）
+        store
+            .outbox_push(&child.id, "file", "output/a.svg", "子个体产物")
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        store
+            .outbox_push(&main.id, "image", "shot.png", "主会话截图")
+            .unwrap();
+
+        // 旧口径只 drain 主会话：拿得到自己的产物，但子个体的拿不到（缺陷现场）
+        let old = store.outbox_drain(&main.id).unwrap();
+        assert_eq!(old.len(), 1, "主会话自己的产物应被旧口径取走");
+        assert_eq!(
+            old[0].get("path").and_then(|v| v.as_str()),
+            Some("shot.png")
+        );
+        // 重新登记后再走新口径
+        store
+            .outbox_push(&main.id, "image", "shot.png", "主会话截图")
+            .unwrap();
+        let items = store.outbox_drain_with_children(&main.id).unwrap();
+        assert_eq!(items.len(), 2, "子会话 + 主会话产物都要收走");
+        // 按登记时间排序：子个体产物（先登记）在前
+        assert_eq!(
+            items[0].get("path").and_then(|v| v.as_str()),
+            Some("output/a.svg")
+        );
+        // 读出即清空：子会话与主会话都不留残余
+        assert!(store.outbox_drain(&child.id).unwrap().is_empty());
+        assert!(store.outbox_drain_with_children(&main.id).unwrap().is_empty());
     }
 
     /// 审计追加日志：写入后过滤读回（回归——list() 只扫 .json 文档曾致审计面永远为空）

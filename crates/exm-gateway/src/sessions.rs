@@ -3,9 +3,14 @@
 use super::*;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct EffortBody {
     /// low | medium | high；空/null = 恢复端点默认
     effort: Option<String>,
+    /// 推理 token 硬上限（≥1024 生效；null = 默认安全网 16384）。reasoning+content
+    /// 共享预算，防推理模型思考无限烧（anti-runaway-thinking）
+    #[serde(default)]
+    reasoning_token_cap: Option<u32>,
 }
 
 /// 会话内容检索参数（session-search）
@@ -42,17 +47,31 @@ pub(crate) async fn search_sessions(
     }
 }
 
-/// 当前模型思考强度
+/// 当前模型思考强度与推理 token 上限（None = 默认安全网 16384）
 pub(crate) async fn get_effort() -> impl IntoResponse {
-    Json(json!({ "effort": exm_core::provider::reasoning_effort() }))
+    Json(json!({
+        "effort": exm_core::provider::reasoning_effort(),
+        "reasoningTokenCap": exm_core::provider::reasoning_token_cap(),
+        "effectiveCap": exm_core::provider::reasoning_token_cap().unwrap_or(16384),
+    }))
 }
 
-/// 设置模型思考强度（进程级，重启后回到端点默认；客户端可自行记忆并在启动时重设）
+/// 设置模型思考强度（进程级，重启后回到端点默认；客户端可自行记忆并在启动时重设）。
+/// body.reasoningTokenCap：推理 token 硬上限（≥1024 生效；null/缺省 = 默认安全网
+/// 16384）——对推理模型（reasoning+content 共享预算）这是防「思考无限烧」的硬闸。
 pub(crate) async fn put_effort(Json(body): Json<EffortBody>) -> impl IntoResponse {
-    let raw = body.effort.unwrap_or_default();
-    exm_core::provider::set_reasoning_effort(Some(&raw));
-    let effort = exm_core::provider::reasoning_effort();
-    Json(json!({ "ok": true, "effort": effort }))
+    if let Some(raw) = body.effort.as_deref() {
+        exm_core::provider::set_reasoning_effort(Some(raw));
+    }
+    if let Some(cap) = body.reasoning_token_cap {
+        exm_core::provider::set_reasoning_token_cap(Some(cap));
+    }
+    Json(json!({
+        "ok": true,
+        "effort": exm_core::provider::reasoning_effort(),
+        "reasoningTokenCap": exm_core::provider::reasoning_token_cap(),
+        "effectiveCap": exm_core::provider::reasoning_token_cap().unwrap_or(16384),
+    }))
 }
 
 // ---------------------------------------------------------------- 工作目录（干活的项目）
@@ -715,6 +734,125 @@ pub(crate) async fn list_messages(State(st): State<AppState>, Path(id): Path<Str
 pub(crate) struct ExportQuery {
     /// markdown | json（缺省 markdown）
     format: Option<String>,
+}
+
+// ---------------------------------------------------------------- 训练轨迹导出
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrajectoryQuery {
+    /// json（缺省）| jsonl（每轮一行）
+    format: Option<String>,
+    include_thinking: Option<bool>,
+    include_tool_args: Option<bool>,
+    max_tool_chars: Option<usize>,
+}
+
+/// GET /api/sessions/:id/trajectory?format=json|jsonl&includeThinking=false&maxToolChars=2000
+/// 训练/评测样本：按轮次切分、默认剥离思维链、工具结果可控截断（schema: exm.trajectory/v1）。
+pub(crate) async fn export_trajectory(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<TrajectoryQuery>,
+) -> impl IntoResponse {
+    let Some(session) = st.core.store.get_session(&id).ok().flatten() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
+    };
+    let messages = st.core.store.list_messages(&id, 0).unwrap_or_default();
+    let opts = exm_core::trajectory::TrajectoryOptions {
+        include_thinking: q.include_thinking.unwrap_or(false),
+        include_tool_args: q.include_tool_args.unwrap_or(true),
+        max_tool_chars: q.max_tool_chars.unwrap_or(2000).clamp(100, 20_000),
+    };
+    let trajectory = exm_core::trajectory::build_trajectory(&session, &messages, &opts);
+    let jsonl = q.format.as_deref() == Some("jsonl");
+    let body = if jsonl {
+        exm_core::trajectory::trajectory_jsonl(&trajectory)
+    } else {
+        serde_json::to_string_pretty(&trajectory).unwrap_or_else(|_| "{}".into())
+    };
+    let safe_id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(12)
+        .collect();
+    let safe_id = if safe_id.is_empty() { "session".to_string() } else { safe_id };
+    let fname = format!(
+        "exm-trajectory-{}.{}",
+        safe_id,
+        if jsonl { "jsonl" } else { "json" }
+    );
+    (
+        StatusCode::OK,
+        [
+            (
+                "content-type",
+                if jsonl {
+                    "application/x-ndjson; charset=utf-8"
+                } else {
+                    "application/json; charset=utf-8"
+                },
+            ),
+            (
+                "content-disposition",
+                Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str()) as &str,
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------- 中断改向
+
+#[derive(Deserialize)]
+pub(crate) struct SteerBody {
+    pub text: String,
+}
+
+/// POST /api/sessions/:id/steer —— 中断当前轮次并把新输入排入下一轮。
+/// 语义：正在跑 → 置位取消令牌（工具循环在检查点终止），新消息走会话串行队列；
+/// 空闲 → 等价普通 chat。返回 interrupted 标记便于前端提示。
+pub(crate) async fn steer_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<SteerBody>,
+) -> impl IntoResponse {
+    let text = b.text.trim().to_string();
+    if text.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text 不能为空" })),
+        )
+            .into_response();
+    }
+    if st.core.store.get_session(&id).ok().flatten().is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
+    }
+    let interrupted = st.core.stop_session(&id).is_ok();
+    let core = st.core.clone();
+    tokio::spawn(async move {
+        if let Err(e) = core.chat(&id, &text).await {
+            let _ = core.events.send(exm_core::types::CoreEvent {
+                kind: "run.error".into(),
+                session_id: id.clone(),
+                payload: json!({ "message": e.to_string() }),
+            });
+        }
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "accepted": true, "interrupted": interrupted })),
+    )
+        .into_response()
 }
 
 /// GET /api/sessions/:id/export?format=markdown|json

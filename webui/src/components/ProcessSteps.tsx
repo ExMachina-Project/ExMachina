@@ -5,7 +5,7 @@
 import React from "react";
 import { UsageBar } from "./UsageBar";
 import { ToolCallList } from "./ToolCall";
-import type { ToolCallItem } from "../types";
+import type { MessageStep, ToolCallItem } from "../types";
 
 export interface ProcessPart {
   kind: "thinking" | "text" | "tool";
@@ -75,4 +75,61 @@ export function ProcessSteps({ parts, toolCalls, live, labelThinking, labelTools
   }
   if (rows.length === 0) return null;
   return <div className="msg-process">{rows}</div>;
+}
+
+export interface MessageProcessProps {
+  /** 本轮思维链（旧消息无有序步骤时的回落数据源） */
+  thinking?: string;
+  /** 有序过程步骤（服务端留存；优先于 thinking/toolCalls 聚合渲染） */
+  steps?: MessageStep[];
+  /** 工具记录（callId 关联）；旧消息无 steps 时直接聚合展示 */
+  toolCalls?: ToolCallItem[];
+  sessionId?: string;
+  turn?: number;
+  labelThinking: (chars: number) => string;
+  labelTools: (n: number) => string;
+}
+
+/** 消息过程块：对话页与聊天流只读页共用，保证两处过程透明口径一致。
+ *  优先按服务端留存的有序步骤渲染（思考/工具按发生顺序交错）；
+ *  存量消息没有 steps 时回落「思考 / 工具」两条聚合收起栏。 */
+export function MessageProcess({
+  thinking,
+  steps,
+  toolCalls,
+  sessionId,
+  turn,
+  labelThinking,
+  labelTools,
+}: MessageProcessProps): React.ReactElement | null {
+  const ordered = steps ?? [];
+  const hasThinking = Boolean(thinking && thinking.trim());
+  const hasTools = Boolean(toolCalls && toolCalls.length > 0);
+  if (ordered.length > 0) {
+    return (
+      <ProcessSteps
+        parts={ordered.map((s) => ({ kind: s.kind, text: s.text, callId: s.callId }))}
+        toolCalls={toolCalls ?? []}
+        labelThinking={labelThinking}
+        labelTools={labelTools}
+        sessionId={sessionId}
+        turn={turn}
+      />
+    );
+  }
+  if (!hasThinking && !hasTools) return null;
+  return (
+    <div className="msg-process">
+      {hasThinking && (
+        <UsageBar label={labelThinking(thinking!.length)}>
+          <pre className="usage-think">{thinking}</pre>
+        </UsageBar>
+      )}
+      {hasTools && (
+        <UsageBar label={labelTools(toolCalls!.length)}>
+          <ToolCallList calls={toolCalls!} sessionId={sessionId} turn={turn} />
+        </UsageBar>
+      )}
+    </div>
+  );
 }

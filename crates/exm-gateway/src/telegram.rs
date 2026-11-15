@@ -337,11 +337,12 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                     mentioned,
                     chat_key: &chat_key,
                     flow_name: None,
+                    media: &[],
                 },
             )
             .await
             {
-                GateDecision::Allow(clean) => {
+                GateDecision::Allow(clean, _proactive) => {
                     text = clean;
                     // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）
                     let sender_mark = crate::channel_util::sender_origin(
@@ -356,16 +357,32 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                         send_message(ch.token.as_deref().unwrap_or_default(), chat_id, &reply)
                             .await;
                     } else {
-                        handle_message(
-                            &core,
-                            &ch,
-                            chat_id,
-                            &from_id,
-                            inbound_media.unwrap_or_default(),
-                            &text,
-                            sender_mark.as_deref(),
-                        )
-                        .await
+                        // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖任务
+                        // 之前处理，避免原轮次审批等待中新建回帖任务造成重复投递与答复丢失
+                        if crate::platform::is_quick_directive(&text) {
+                            let sid = core.flow_active_session(&ch.id, &chat_key);
+                            let reply = crate::platform::quick_directive_reply(
+                                &core,
+                                sid.as_deref(),
+                                Some(&from_id),
+                                &text,
+                            )
+                            .await
+                            .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
+                            send_message(ch.token.as_deref().unwrap_or_default(), chat_id, &reply)
+                                .await;
+                        } else {
+                            handle_message(
+                                &core,
+                                &ch,
+                                chat_id,
+                                &from_id,
+                                inbound_media.unwrap_or_default(),
+                                &text,
+                                sender_mark.as_deref(),
+                            )
+                            .await
+                        }
                     }
                 }
                 GateDecision::Ignore => {}

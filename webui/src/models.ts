@@ -7,22 +7,34 @@ export interface ModelOption {
   label: string;
 }
 
-/** 默认模型选项：空值 = 跟随全局默认（当前生效提供商）；其余 = 档案ID（可带 /模型名 覆盖） */
+/** 默认模型选项：空值 = 跟随全局默认（当前生效提供商）；其余 = 档案ID 或 档案ID/模型名。
+ *  档案有清单时逐模型展开（模型选择权在智能体层——provider 档案只管接入），
+ *  无清单时回档案粒度（后端以档案视角解析）。 */
 export function buildModelOptions(profiles: LlmProfile[]): ModelOption[] {
   const opts: ModelOption[] = [{ value: "", label: tr("models.followGlobalOption") }];
   for (const p of profiles) {
-    opts.push({ value: p.id, label: `${p.name} · ${p.model || tr("models.noModel")}` });
+    if (p.models.length) {
+      for (const m of p.models) {
+        opts.push({ value: `${p.id}/${m.model}`, label: `${p.name} / ${m.model}` });
+      }
+    } else {
+      opts.push({ value: p.id, label: p.name });
+    }
   }
   return opts;
 }
 
-/** 能力模型选项（模型设置页 / 组级覆盖共用）：档案默认（value=档案ID）+ 清单逐模型（value=档案ID/模型名） */
+/** 能力模型选项（模型设置页 / 组级覆盖共用）：清单逐模型（value=档案ID/模型名）；
+ *  档案后端缺省（value=档案ID）仅在档案无清单时给出。 */
 export function buildCapabilityOptions(profiles: LlmProfile[]): ModelOption[] {
   const opts: ModelOption[] = [];
   for (const p of profiles) {
-    if (p.model) opts.push({ value: p.id, label: `${p.name} · ${tr("models.capDefault")}` });
-    for (const m of p.models) {
-      opts.push({ value: `${p.id}/${m.model}`, label: `${p.name} / ${m.model}` });
+    if (p.models.length) {
+      for (const m of p.models) {
+        opts.push({ value: `${p.id}/${m.model}`, label: `${p.name} / ${m.model}` });
+      }
+    } else {
+      opts.push({ value: p.id, label: p.name });
     }
   }
   return opts;

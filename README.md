@@ -1,5 +1,5 @@
 
-# ExMachina — 理性至上主义的智能体
+# ExMachina
 
 > [!WARNING]
 > 项目处于开发阶段（pre-alpha），接口与数据格式可能破坏性变更，请勿用于生产环境。
@@ -69,6 +69,12 @@ cargo run -p exm-cli --release --bin exm -- agents
 
 > **桌面端**（Tauri 壳，自带本地网关 / `--remote` 远程直连）：对话与全部管理均为原生界面，零 webui 依赖——见 [desktop/README.md](./desktop/README.md)。
 > **移动端**：无需单独 App——手机浏览器 / PWA 打开网关地址（服务器部署的网关同端口托管 WebUI / API / WS）即为同源客户端。
+
+## 人设自由：理性或感性，都只是一份 SOUL
+
+默认人设是绝对理性，但 EXMACHINA 不止于此。人设（SOUL）是 `entities/` 下可编辑的数据，
+换个 SOUL 文件即可构造情感丰富、热情外向、或任何中间态的智能体，
+同一套记忆、工具、编队与多智能体协作底座原样可用。
 
 ## 两种形态：单个智能体，或一支队伍
 

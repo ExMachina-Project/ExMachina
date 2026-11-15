@@ -27,6 +27,7 @@ pub mod matrix;
 pub mod napcat;
 pub mod napcat_tools;
 pub mod nexus_api;
+pub mod openapi;
 pub mod plan_mode_tools;
 pub mod platform;
 pub mod plugin_admin;
@@ -41,9 +42,10 @@ pub mod triggers;
 pub mod worker_hub;
 // 资源域 handlers（自本文件拆出；build_router 经此引入）
 use assets::{download_asset, get_asset, health};
+use openapi::serve_openapi;
 use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
 use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
-use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
+use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, export_trajectory, steer_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
 use agents_admin::{list_agents, create_agent, remove_agent_from_group, remove_agent, set_agent_model, update_agent};
 use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, update_group, set_group_self_optimize, list_templates};
 use version::{version_info, version_check, version_apply, version_apply_status};
@@ -52,7 +54,7 @@ use playbooks::list_playbooks;
 use mcp_admin::{mcp_servers, mcp_refresh, mcp_mount};
 use voice::{voice_transcribe, voice_speak};
 use checkpoints::{list_checkpoints, restore_checkpoint};
-use memory_admin::{list_memory, add_memory, search_memory, memory_stats, memory_reindex, memory_decay, get_memory_md, put_memory_md, memory_render, forget_memory, pin_memory};
+use memory_admin::{list_memory, add_memory, search_memory, memory_stats, memory_reindex, memory_decay, get_memory_md, put_memory_md, memory_render, forget_memory, pin_memory, update_memory, export_memory};
 use ws::{ws_handler, ws_auth_guard};
 
 pub mod assets;
@@ -62,6 +64,7 @@ pub mod config_admin;
 pub mod groups_admin;
 pub mod mcp_admin;
 pub mod memory_admin;
+pub mod knowledge_admin;
 pub mod persona;
 pub mod playbooks;
 pub mod sessions;
@@ -145,6 +148,10 @@ async fn auth_middleware(
     // 守 /api/* 与 MCP 挂载；静态资源（壳/登录页）与 verify 豁免。
     // /ws 不在此守卫：浏览器 WebSocket 无法携带自定义头，改由路由级 ws_auth_guard
     // 前置校验查询参数密钥（缺失/错误同样 401，安全口径不降级）。MCP HTTP 挂载（10.3）启用时纳入守卫。
+    // OpenAPI 契约文档豁免：端点目录本身非敏感（路径/方法/摘要），机器可发现性优先。
+    if path == "/api/openapi.json" {
+        return next.run(req).await;
+    }
     let mcp_path = {
         let c = st.core.config();
         if c.mcp_serve.enabled {
@@ -189,6 +196,24 @@ async fn auth_middleware(
                 .get(axum::http::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ").map(|s| s.to_string()))
+        })
+        // 资产端点的 <img>/<a> 通道（部署实测缺陷）：浏览器无法为子资源
+        // 携带自定义请求头，只带头部校验时聊天流/会话视图的全部附件图
+        // 恒 401（破图）。与 /ws 同款查询参数密钥回退——仅限 GET 的
+        // /api/asset*（内联预览与下载两个端点），其余 API 维持「仅头部」
+        // 口径不降级。
+        .or_else(|| {
+            let is_asset_get =
+                req.method() == axum::http::Method::GET && path.starts_with("/api/asset");
+            if !is_asset_get {
+                return None;
+            }
+            req.uri().query().and_then(|q| {
+                q.split('&').find_map(|kv| {
+                    let (k, v) = kv.split_once('=')?;
+                    (k == "key").then(|| crate::ws::percent_decode(v))
+                })
+            })
         });
     match provided {
         Some(k) if k == st.core.config().security.auth_key => {
@@ -224,12 +249,16 @@ pub fn build_router(core: Arc<Core>) -> Router {
     let state = AppState { core: core.clone() };
     let mut router = Router::new()
         .route("/api/health", get(health))
+        // OpenAPI 契约文档（2.3）：静态清单生成，公共面（发现性优先，鉴权豁免见 auth_middleware）
+        .route("/api/openapi.json", get(serve_openapi))
         .route("/api/selfcheck", get(selfcheck::selfcheck))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/search", get(search_sessions))
         .route("/api/sessions/:id", get(get_session).delete(delete_session))
         .route("/api/sessions/:id/messages", get(list_messages))
         .route("/api/sessions/:id/export", get(export_session))
+        .route("/api/sessions/:id/trajectory", get(export_trajectory))
+        .route("/api/sessions/:id/steer", post(steer_session))
         .route("/api/sessions/:id/chat", post(chat))
         .route("/api/sessions/:id/graph", get(get_graph))
         .route("/api/sessions/:id/evidence", get(get_evidence))
@@ -283,13 +312,20 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/checkpoints/restore", post(restore_checkpoint))
         // 记忆系统（docs/08 §6）
         .route("/api/memory", get(list_memory).post(add_memory))
+        .route("/api/memory/export", get(export_memory))
         .route("/api/memory/search", post(search_memory))
         .route("/api/memory/stats", get(memory_stats))
         .route("/api/memory/reindex", post(memory_reindex))
         .route("/api/memory/decay", post(memory_decay))
         .route("/api/memory/render", post(memory_render))
-        .route("/api/memory/:id", axum::routing::delete(forget_memory))
+        .route("/api/memory/:id", axum::routing::delete(forget_memory).put(update_memory))
         .route("/api/memory/:id/pin", post(pin_memory))
+        // 知识库（knowledge-base）：全局共享知识层管理面
+        .route(
+            "/api/knowledge",
+            get(knowledge_admin::list_knowledge).post(knowledge_admin::add_knowledge),
+        )
+        .route("/api/knowledge/:id", axum::routing::delete(knowledge_admin::delete_knowledge))
         .route("/api/memory/md", get(get_memory_md).put(put_memory_md))
         .route(
             "/ws",
@@ -413,6 +449,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
 /// `host`：默认 `0.0.0.0`（公网可访问，方便本地开发用 `127.0.0.1` 收紧）。
 ///   可通过 `EXM_HOST` 环境变量覆盖；显式传 `None` 时读取环境变量，传 `Some(s)` 时强制使用 `s`。
 pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Result<()> {
+    core.attach_session_send_executor();
     platform::spawn_cron_scheduler(core.clone());
     // 回收站周期清理（spec: trash-retention；1h 间隔 + 启动错峰，supervisor 同款模式）
     {
@@ -437,12 +474,26 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             }
         });
     }
-    telegram::spawn_supervisor(core.clone());
-    napcat::spawn_supervisor(core.clone());
-    qqbot::spawn_supervisor(core.clone());
-    discord::spawn_supervisor(core.clone());
-    slack::spawn_supervisor(core.clone());
-    matrix::spawn_supervisor(core.clone());
+    // 通道接入：EXM_CHANNELS=off / none 时全部不拉起（开发预览/本地调试用——
+    // 防止 dev 实例与生产实例同时连同一账号产生重复回复与配对竞争）。
+    // off 只关通道 supervisor（cron/心跳/插件照常），不影响控制台会话使用。
+    let channels_off = matches!(
+        std::env::var("EXM_CHANNELS")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "off" | "none" | "0" | "false"
+    );
+    if channels_off {
+        println!("[gateway]   通道  EXM_CHANNELS=off：全部通道不拉起（开发预览模式）");
+    } else {
+        telegram::spawn_supervisor(core.clone());
+        napcat::spawn_supervisor(core.clone());
+        qqbot::spawn_supervisor(core.clone());
+        discord::spawn_supervisor(core.clone());
+        slack::spawn_supervisor(core.clone());
+        matrix::spawn_supervisor(core.clone());
+    }
     // 插件装载面：builtin 插件注册 + watcher 拉起（video 走新路径，行为等价）
     plugins::spawn_all(core.clone());
     // 会话任务队列工具（task__queue）：全局动态工具——智能体执行中收到新任务时
@@ -565,7 +616,7 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             let lines: Vec<String> = enabled
                 .iter()
                 .map(|c| {
-                    let cp = platform::channel_runtime::caps(&c.kind);
+                    let cp = platform::channel::caps(&c.kind);
                     let media = |b: bool| if b { "✓" } else { "—" };
                     format!(
                         "{}[{}] {}（图{} 文{} 语{}）",

@@ -246,6 +246,36 @@ fn fingerprint(ch: &Channel) -> String {
     )
 }
 
+/// 通道配置 TTL 缓存（channel-hot-reload）：channels.json 的解析结果 +
+/// 加载时刻。2 秒窗口内多条群消息共享一次磁盘读；窗口过期后首条消息重读。
+type ChannelCacheSlot = parking_lot::Mutex<Option<(u64, std::sync::Arc<Vec<Channel>>)>>;
+
+fn channel_cache() -> &'static ChannelCacheSlot {
+    static C: std::sync::OnceLock<ChannelCacheSlot> = std::sync::OnceLock::new();
+    C.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// 取本通道的最新配置（TTL 缓存兜底）；读不到回落连接克隆。
+/// 通道被删除/禁用不在此拦截——reconcile 5s 周期会摘连接，这里只管
+/// 「配置更新及时可见」。
+fn fresh_channel(core: &Arc<Core>, conn_clone: &Channel) -> Channel {
+    let now = exm_core::types::now_ms();
+    let mut slot = channel_cache().lock();
+    let need_load = match slot.as_ref() {
+        Some((at, _)) => now.saturating_sub(*at) > 2000,
+        None => true,
+    };
+    if need_load {
+        *slot = Some((now, std::sync::Arc::new(crate::platform::load_channels(core))));
+    }
+    if let Some((_, list)) = slot.as_ref() {
+        if let Some(hit) = list.iter().find(|c| c.id == conn_clone.id) {
+            return hit.clone();
+        }
+    }
+    conn_clone.clone()
+}
+
 pub fn spawn_supervisor(core: Arc<Core>) {
     tokio::spawn(async move {
         loop {
@@ -424,6 +454,13 @@ async fn on_text(
     let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
         return;
     };
+    // 通道配置热刷新（channel-hot-reload）：连接持有 spawn 时的通道克隆，凭据
+    // 之外的字段更新（proactiveReply/admins/allowedChats/groupGate/capability/
+    // memoryIsolation/mentionReply）不会重启连接（fingerprint 只含 url|token）——
+    // 旧克隆会让配置漂移存活数天（生产实测：proactiveReply 开启后主动回复
+    // 永不触发）。每条消息按 id 重读配置（2s TTL 缓存，群聊高峰不打磁盘），
+    // 找不到（已删除）回落连接克隆保持收尾兼容。
+    let ch = fresh_channel(core, ch);
     // API 回包（带 echo 的响应）：自检回包打日志；exm-api-* 投递给 api_call 等待方
     //（引用回查 / 群文件 URL 等）；其余忽略
     if let Some(echo) = v.get("echo").and_then(|x| x.as_str()) {
@@ -486,14 +523,23 @@ async fn on_text(
         return;
     }
     let mut text = extract_text(v.get("message").unwrap_or(&serde_json::Value::Null));
+    // @ 名字回查（流显示可读性）：extract_text 是纯同步转换，at 段缺
+    // data.name 时只能落 `@QQ号` 占位——群名片/昵称回查是异步 API 调用
+    // （get_group_member_info），在拿到文本后补：把 `@数字` 换回真名。
+    // 失败静默保留占位（名字是增益不是义务）。
+    text = resolve_at_names(&ch.id, group_id, &v, &text).await;
     // 引用消息回查（get_msg）：reply 段的 id 换回原文——「回复图片：这是什么」
     // 若不带原文，模型只看到「这是什么」三个字，引用语义整个丢失。
     // 注记拼在正文头（【回复 某人：…】），尽力而为：回查失败不阻塞主链。
     let reply_ids = reply_para_ids(v.get("message").unwrap_or(&serde_json::Value::Null));
     let ch_id_for_reply = ch.id.clone();
+    // 引用回查（get_msg，单次）：注记拼正文头（【回复 某人：…】）+ 是否指向
+    // 机器人本体（判提及）一并提取——尽力而为，回查失败不阻塞主链。
+    let mut reply_hits = false;
     if !reply_ids.is_empty() {
-        let quote = reply_quote_note(&ch_id_for_reply, &reply_ids).await;
+        let (quote, hits) = reply_quote_note(&ch_id_for_reply, &reply_ids, v_self_id(&v)).await;
         text = format!("{quote}{text}");
+        reply_hits = hits;
     }
     // 入站媒体段（组 6.4）：先盘类型，纯媒体消息给占位正文——
     // 曾在文本为空时直接 return，「只发一张图」被整体丢弃
@@ -509,6 +555,45 @@ async fn on_text(
     let peer = group_id
         .map(|g| g.to_string())
         .or(user_id.map(|u| u.to_string()));
+    // 旁听媒体预下载（ambient-media-attach）：**未被 @** 的群媒体在闸门**前**
+    // 下载入窗——@ 轮次 take 注入模型的窗口先于闸门就绪（旧序曾致旁听图片
+    // 丢窗）。仅未提及消息预下载：@ 轮次走主链自行下载注入，预下载会造成
+    // 同图双份（take 取走 + 主链再下）。take 语义不变（取走即清）。
+    // 下载结果同时随任务带入闸门（InboundCtx.media）——旁听占位消息的附件
+    // 回填只挂本条消息自带的媒体，不再读窗口快照（曾致每条旁听消息复读
+    // 窗口内全部近期图片）。
+    // 已知小瑕疵：此处提及判定只查 at 段（同步纯函数）——「引用回复机器人
+    // + 带图」的消息在闸门侧经 get_msg 回查判提及（mentioned=true 走完整
+    // 轮次），但预下载已先行入窗。主链 take 后同图再下载一次，由同轮指纹
+    // 去重（seen_fp）+ 指纹文件名落盘兜底：磁盘仍只一份、注入不重复。
+    // 不提前做引用回查：get_msg 是 8s 超时 API 调用，放预下载前会阻塞
+    // 纯旁听链路（高频路径），一次偶发冗余下载可接受。
+    let will_be_ambient = group_id.is_some()
+        && !media.is_empty()
+        && !is_mentioned(
+            v.get("message").unwrap_or(&serde_json::Value::Null),
+            v_self_id(&v),
+        );
+    let mut prewindowed: Vec<(String, String, String)> = Vec::new();
+    if will_be_ambient {
+        for (kind, src) in &media {
+            if kind != "image" {
+                continue;
+            }
+            let name = format!("napcat-{}.png", exm_core::types::now_ms());
+            let bytes = if let Some(local) = src.strip_prefix("file://") {
+                std::fs::read(local).ok()
+            } else {
+                crate::platform::download_bytes(src).await
+            };
+            if let Some(b) = bytes {
+                if let Some(p) = crate::platform::save_inbound_media(core, &ch, &name, b).await {
+                    prewindowed.push((kind.clone(), p, name));
+                }
+            }
+        }
+        ambient_media::push(&ch.id, peer.as_deref().unwrap_or(""), prewindowed.clone());
+    }
     if !ch.allowed_chats.is_empty() {
         let ok = peer
             .as_deref()
@@ -523,6 +608,8 @@ async fn on_text(
     let ch = ch.clone();
     let tx = tx.clone();
     let raw = v.clone();
+    let prewindowed = prewindowed; // 闸门前已下载的旁听媒体（随 ctx 带给 record_ambient 回填附件）
+    let reply_hits = reply_hits; // 引用判提及（主链单次回查的结果，闸门复用）
     tokio::spawn(async move {
         // 流展示名（会话管理可用性修复）：群聊取事件自带 group_name，私聊取
         // 对端昵称——流列表显示「萝莉领主二群」而非裸群号。解析不到则 None
@@ -538,39 +625,13 @@ async fn on_text(
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty() && group_id.is_none())
             });
-        let Some((external_id, text, sender_mark)) =
-            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text).await
+        let Some((external_id, text, sender_mark, proactive)) =
+            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text, &prewindowed, reply_hits).await
         else {
-            // 旁听媒体窗口（ambient-media）：未 @ 的群媒体也下载落盘入窗——
-            // 「先发图、后 @ 问」时取走并入多模态注入。仅群聊进窗口（私聊无旁听语义）；
-            // 语音不入窗（转写依赖当轮上下文，隔轮转写语义漂移）。
-            let peer = group_id
-                .map(|g| g.to_string())
-                .or_else(|| user_id.map(|u| u.to_string()))
-                .unwrap_or_default();
-            if group_id.is_some() {
-                let mut windowed = Vec::new();
-                for (kind, src) in media {
-                    if kind != "image" {
-                        continue;
-                    }
-                    let name = format!("napcat-{}.png", exm_core::types::now_ms());
-                    let bytes = if let Some(local) = src.strip_prefix("file://") {
-                        std::fs::read(local).ok()
-                    } else {
-                        crate::platform::download_bytes(&src).await
-                    };
-                    if let Some(b) = bytes {
-                        if let Some(p) =
-                            crate::platform::save_inbound_media(&core, &ch, &name, b).await
-                        {
-                            windowed.push((kind, p, name));
-                        }
-                    }
-                }
-                ambient_media::push(&ch.id, &peer, windowed);
-            }
-            return; // 闸门拦截（忽略 / 已回复）
+            // 闸门拦截（忽略 / 已回复）：旁听媒体已在闸门前预下载，且已随
+            // InboundCtx.media 带入闸门——record_ambient 落占位消息时用它回填
+            // 本条消息的附件元数据；这里无需再下载。
+            return;
         };
         // 入站媒体（组 6.4）：下载或本地 file:// 复制 → 注入（段清单已在闸门前盘好）；
         // 语音段（record/voice）顺带转写为文本注记——telegram 同款能力，
@@ -582,6 +643,15 @@ async fn on_text(
             .unwrap_or_default();
         let mut saved: Vec<(String, String, String)> = ambient_media::take(&ch.id, &peer);
         let mut transcript_note = String::new();
+        // 同轮指纹去重（inbound-media-dedup）：同消息重复段/旁听窗口回灌的
+        // 同字节媒体按指纹只留首个；跨消息重推由指纹文件名天然复用（磁盘一份）
+        let mut seen_fp: std::collections::HashSet<String> =
+            saved.iter().map(|(_, p, _)| {
+                std::path::Path::new(p)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            }).collect();
         for (kind, src) in media {
             let name = format!(
                 "napcat-{}.{}",
@@ -600,6 +670,10 @@ async fn on_text(
                 crate::platform::download_bytes(&src).await
             };
             if let Some(b) = bytes {
+                let fp = crate::platform::media_fingerprint(&b);
+                if !seen_fp.insert(fp) {
+                    continue; // 同轮重复：静默丢弃
+                }
                 if let Some(p) =
                     crate::platform::save_inbound_media(&core, &ch, &name, b.clone()).await
                 {
@@ -637,6 +711,31 @@ async fn on_text(
             let _ = tx.send(action);
             return;
         }
+        // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖任务之前处理，
+        // 避免原轮次审批等待中新建回帖任务造成重复投递与最终答复丢失。
+        if crate::platform::is_quick_directive(&text) {
+            let sid = core.flow_active_session(&ch.id, &peer);
+            let reply = crate::platform::quick_directive_reply(
+                &core,
+                sid.as_deref(),
+                Some(&external_id),
+                &text,
+            )
+            .await
+            .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
+            let action = match group_id {
+                Some(g) => serde_json::json!({
+                    "action": "send_group_msg",
+                    "params": { "group_id": g, "message": [{ "type": "text", "data": { "text": reply } }] },
+                }),
+                None => serde_json::json!({
+                    "action": "send_private_msg",
+                    "params": { "user_id": user_id.unwrap_or(0), "message": [{ "type": "text", "data": { "text": reply } }] },
+                }),
+            };
+            let _ = tx.send(action);
+            return;
+        }
         handle_message(
             &core,
             &ch,
@@ -648,6 +747,7 @@ async fn on_text(
             &text,
             sender_mark.as_deref(),
             flow_name.as_deref(),
+            proactive,
         )
         .await;
     });
@@ -692,6 +792,7 @@ fn collect_media(m: &serde_json::Value) -> Vec<(String, String)> {
 
 /// OneBot 消息的入站闸门（群聊唤醒 + 身份管控）：在 spawn 的任务内执行
 /// 闸门放行时返回 (external_id, 消毒后文本)——消毒后文本替代原始 text 进入会话执行
+#[allow(clippy::too_many_arguments)] // 平台入站上下文天然多参数，拆结构体收益低
 async fn napcat_gate(
     core: &Core,
     ch: &Channel,
@@ -700,7 +801,9 @@ async fn napcat_gate(
     user_id: Option<i64>,
     raw: &serde_json::Value,
     text: &str,
-) -> Option<(String, String, Option<String>)> {
+    media: &[(String, String, String)],
+    reply_hits: bool,
+) -> Option<(String, String, Option<String>, bool)> {
     let is_group = group_id.is_some();
     // 提及归一化：@ 机器人本体才算提及（群内 @ 机器人是主语义）。
     // NapCat 上报两种格式：CQ 码字符串（[CQ:at qq=xxx]）与数组段
@@ -708,9 +811,17 @@ async fn napcat_gate(
     // 数组消息恒判「未提及」→ 群聊唤醒门控全灭（群里说话无反应的根因）。
     let self_id = v_self_id(raw);
     let raw_message = raw.get("message");
-    let mentioned = raw_message
-        .map(|m| is_mentioned(m, self_id))
-        .unwrap_or(false);
+    // 提及判定：@ 机器人本体 **或引用回复机器人消息**——「回复」与「@」同为
+    // 明确点名（回复机器人上一条发言却因不带 at 段被当未提及 → 概率丢弃 =
+    // 用户点名石沉大海）。回查引用消息的 sender 是否机器人本体（get_msg）。
+    let at_hit = raw_message.map(|m| is_mentioned(m, self_id)).unwrap_or(false);
+    let mentioned = if at_hit {
+        true
+    } else {
+        // 引用判提及复用主链已回查的结果（reply_quote_hits_self 经 reply_hits
+        // 传入，见 handle_ws_msg）——同一条消息不再二次 get_msg。
+        reply_hits
+    };
     let external_id = user_id.map(|u| u.to_string()).unwrap_or_default();
     // 会话键（与 ChannelRun::begin 同口径）：群号优先，私聊为用户 id
     let peer = group_id
@@ -733,6 +844,8 @@ async fn napcat_gate(
         is_group,
         mentioned,
         chat_key: &peer,
+        // 本条消息自带的已落盘媒体（闸门前预下载）：旁听路径附件回填用
+        media,
         // 流展示名：群名（事件自带）优先；私聊用发送者昵称（对端即流主体）
         flow_name: raw
             .pointer("/group_name")
@@ -761,7 +874,7 @@ async fn napcat_gate(
         &external_id,
     );
     match admit(core, ch, &ctx).await {
-        GateDecision::Allow(clean) => Some((external_id, clean, sender_mark)),
+        GateDecision::Allow(clean, proactive) => Some((external_id, clean, sender_mark, proactive)),
         GateDecision::Ignore => None,
         GateDecision::Deny(reply) => {
             let action = match group_id {
@@ -816,6 +929,126 @@ fn extract_text(m: &serde_json::Value) -> String {
     }
 }
 
+/// @ 占位名字回查：文本中 `@<纯数字>`（extract_text 在 at 段缺 data.name
+/// 时的回落形态）经 OneBot API 回查群名片/昵称后替换为真名。
+/// 群内用 get_group_member_info（群名片 card 优先，回落昵称）；私聊场景
+/// at 语义罕见，仅群内回查。回查失败/超时保留占位原文——名字是增益
+/// 不是义务，不阻塞消息主链。
+async fn resolve_at_names(
+    ch_id: &str,
+    group_id: Option<i64>,
+    raw: &serde_json::Value,
+    text: &str,
+) -> String {
+    use std::collections::HashMap;
+    let Some(gid) = group_id else {
+        return text.to_string();
+    };
+    let targets = collect_at_placeholders(text);
+    if targets.is_empty() {
+        return text.to_string();
+    }
+    let self_id = v_self_id(raw);
+    let mut names: HashMap<String, String> = HashMap::new();
+    for qq in &targets {
+        // 机器人本体：事件 sender 段自带昵称，无需 API 回查
+        if let Some(sid) = self_id {
+            if qq == &sid.to_string() {
+                if let Some(nick) = raw
+                    .pointer("/sender/nickname")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    names.insert(qq.clone(), nick.to_string());
+                    continue;
+                }
+            }
+        }
+        let Some(resp) = api_call(
+            ch_id,
+            "get_group_member_info",
+            serde_json::json!({ "group_id": gid, "user_id": qq.parse::<i64>().unwrap_or(0), "no_cache": false }),
+        )
+        .await
+        else {
+            continue;
+        };
+        let name = resp
+            .pointer("/data/card")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                resp.pointer("/data/nickname")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            });
+        if let Some(name) = name {
+            names.insert(qq.clone(), name.to_string());
+        }
+    }
+    apply_at_names(text, &names)
+}
+
+/// 收集文本中的 `@数字` 占位（QQ 号长度 5~12 位；去重）。按字符迭代——
+/// 中文正文是 UTF-8 多字节，字节索引切片会拆坏序列。
+fn collect_at_placeholders(text: &str) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    let mut cs = text.chars().peekable();
+    while let Some(c) = cs.next() {
+        if c == '@' {
+            let mut digits = String::new();
+            while let Some(&dc) = cs.peek() {
+                if dc.is_ascii_digit() {
+                    digits.push(dc);
+                    cs.next();
+                } else {
+                    break;
+                }
+            }
+            if (5..=12).contains(&digits.len()) && !targets.iter().any(|t| t == &digits) {
+                targets.push(digits);
+            }
+        }
+    }
+    targets
+}
+
+/// 占位替换：`names` 中命中的 `@数字` 换成 `@名字`；未命中原样保留。
+/// 按字符迭代推进（天然 UTF-8 边界安全）。
+fn apply_at_names(text: &str, names: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cs = text.chars().peekable();
+    while let Some(c) = cs.next() {
+        if c == '@' {
+            let mut digits = String::new();
+            while let Some(&dc) = cs.peek() {
+                if dc.is_ascii_digit() {
+                    digits.push(dc);
+                    cs.next();
+                } else {
+                    break;
+                }
+            }
+            if (5..=12).contains(&digits.len()) {
+                if let Some(name) = names.get(&digits) {
+                    out.push('@');
+                    out.push_str(name);
+                    continue;
+                }
+            }
+            // 未命中：@ 与已吃掉的数字原样回填
+            out.push('@');
+            out.push_str(&digits);
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// 回复消息体的 id 清单（reply 段，按事件顺序）。
 /// 引用语义在 IM 高频出现（「回复图片：这是什么」），id 是回查原文的唯一钥匙。
 fn reply_para_ids(m: &serde_json::Value) -> Vec<String> {
@@ -849,16 +1082,26 @@ fn reply_para_ids(m: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// 回查引用原文（get_msg）：返回 `【回复 <发送者>：<摘要>】` 注记前缀。
-/// 失败/超时返回空串（引用链路是尽力而为，不阻塞消息）——模型侧拿到
+/// 回查引用原文（get_msg）：返回 `（注记前缀, 是否指向机器人本体）`。
+/// 一次回查同时提取原文摘要（注记）与 sender.user_id（比对 self_id）——
+/// 引用判提及与原文注记共用结果，避免同 id 双查。
+/// 失败/超时返回空注记（引用链路是尽力而为，不阻塞消息）——模型侧拿到
 /// 「【回复 某人：…】正文」即知用户在回应哪条消息。
-async fn reply_quote_note(ch_id: &str, msg_ids: &[String]) -> String {
+async fn reply_quote_note(
+    ch_id: &str,
+    msg_ids: &[String],
+    self_id: Option<i64>,
+) -> (String, bool) {
     let mut notes = Vec::new();
+    let mut hits_self = false;
     for id in msg_ids.iter().take(3) {
         let Some(resp) = api_call(ch_id, "get_msg", serde_json::json!({ "message_id": id })).await
         else {
             continue;
         };
+        if resp.pointer("/data/sender/user_id").and_then(|x| x.as_i64()) == self_id {
+            hits_self = true;
+        }
         let sender = resp
             .pointer("/data/sender/card")
             .or_else(|| resp.pointer("/data/sender/nickname"))
@@ -888,11 +1131,12 @@ async fn reply_quote_note(ch_id: &str, msg_ids: &[String]) -> String {
         let body = body.trim().chars().take(200).collect::<String>();
         notes.push(format!("【回复 {sender}：{body}】"));
     }
-    if notes.is_empty() {
+    let prefix = if notes.is_empty() {
         String::new()
     } else {
         format!("{}\n", notes.join(" "))
-    }
+    };
+    (prefix, hits_self)
 }
 
 /// 取上报事件里的机器人自身 QQ（self_id 字段；数组段提及判定的比对基准）
@@ -981,6 +1225,7 @@ async fn handle_message(
     text: &str,
     sender_mark: Option<&str>,
     flow_name: Option<&str>,
+    proactive: bool,
 ) {
     // 会话键：群聊优先，无群号走私聊
     let peer = group_id
@@ -1087,7 +1332,8 @@ async fn handle_message(
     } else {
         run
     }
-    .with_external_id(external_id);
+    .with_external_id(external_id)
+    .with_proactive(proactive);
     let session_id = run.session_id.clone();
     run.run(&text).await;
     let _ = reply.await;
@@ -1103,6 +1349,55 @@ async fn handle_message(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 通道配置热刷新（channel-hot-reload）：连接克隆是 spawn 时的快照，
+    /// fingerprint 只含凭据——凭据外的字段更新（proactiveReply/admins 等）
+    /// 不重启连接。fresh_channel 必须能看到磁盘上的最新配置。
+    ///（生产实测根因：proactiveReply 开启后连接仍持旧克隆，主动回复永不触发。）
+    #[test]
+    fn 通道热刷新_配置更新及时可见() {
+        let dir = std::env::temp_dir().join(format!("exm-hotreload-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let core = std::sync::Arc::new(exm_core::Core::create(&dir).expect("创建 Core 失败"));
+        let conn_clone = Channel {
+            id: "hot-ch".into(),
+            kind: "napcat".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            admins: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: None,
+            proactive_reply: None, // 连接建立时主动回复还是关的
+            proactive_rate: None,
+            mention_reply: None,
+            capability: "computer".into(),
+            memory_isolation: false,
+            created_at: exm_core::types::now_iso(),
+        };
+        // 首次：磁盘无配置文件 → 回落连接克隆
+        assert!(!fresh_channel(&core, &conn_clone).proactive_enabled());
+        // 磁盘写入新配置（proactiveReply=true + admins）
+        let updated = Channel {
+            proactive_reply: Some(true),
+            admins: vec!["boss".into()],
+            ..conn_clone.clone()
+        };
+        crate::platform::save_channels(&core, &[updated]).unwrap();
+        // TTL 缓存直读旁路：测试不等 2s 窗口，直接清缓存再取
+        *channel_cache().lock() = None;
+        let fresh = fresh_channel(&core, &conn_clone);
+        assert!(fresh.proactive_enabled(), "配置更新应及时可见（连接克隆不可吞噬）");
+        assert!(fresh.admins.iter().any(|a| a == "boss"));
+        // 通道删除（磁盘清空）：回落连接克隆，收尾兼容
+        crate::platform::save_channels(&core, &[]).unwrap();
+        *channel_cache().lock() = None;
+        assert_eq!(fresh_channel(&core, &conn_clone).id, "hot-ch");
+    }
 
     /// 登录态分流（5.4 误报修复）：超窗零事件但近期确认在线 → ok（等待登录轮换
     /// 文案，不降级不建议重启）；登录打点过期/从未确认 → 维持 degraded 原判。
@@ -1272,6 +1567,36 @@ mod tests {
         assert_eq!(extract_text(&json!("看[CQ:image,id=1]这张")), "看这张");
     }
 
+    /// @ 占位名字回查（纯函数层）：收集/替换/边界语义三面。
+    /// 异步回查（get_group_member_info）依赖 WS 连接，此处锚定纯文本变换。
+    #[test]
+    fn at占位名字回查_收集与替换() {
+        use std::collections::HashMap;
+        let mut names = HashMap::new();
+        names.insert("10086".to_string(), "黑星".to_string());
+        // 基础替换：中文正文 + @QQ号 → @名字
+        assert_eq!(
+            apply_at_names("帮我看这张图@10086 你看", &names),
+            "帮我看这张图@黑星 你看"
+        );
+        // 短数字串（<5 位）不是 QQ 占位：不替换（@100 是普通文本）
+        assert_eq!(apply_at_names("第@100 名", &names), "第@100 名");
+        // 未命中的 QQ 号原样保留
+        assert_eq!(apply_at_names("@99999 在吗", &names), "@99999 在吗");
+        // 同一人多次 @ 只替换全部
+        assert_eq!(
+            apply_at_names("@10086 你好，@10086 再见", &names),
+            "@黑星 你好，@黑星 再见"
+        );
+        // 收集去重：同一 QQ 只出现一次；@ 后超长数字串整体拒收（不留残段）
+        assert_eq!(
+            collect_at_placeholders("@12345 @12345 @678901234567890"),
+            vec!["12345".to_string()]
+        );
+        // 中文紧贴 @数字（字节边界场景）：名字替换不破坏多字节字符
+        assert_eq!(apply_at_names("问@10086一下", &names), "问@黑星一下");
+    }
+
     /// CQ 码剥离：完整码剥掉；未闭合码不吞后面正文；at 码转写为 @（语义保留）
     #[test]
     fn cq码剥离_未闭合不吞正文() {
@@ -1330,5 +1655,33 @@ mod tests {
         // 无 self_id（异常上报）：CQ 码退化为「含 at 即提及」（旧行为），数组段严格不命中
         assert!(is_mentioned(&cq_hit, None));
         assert!(!is_mentioned(&arr_hit, None));
+    }
+
+    /// 提及判定补全（引用回复）：回复机器人消息与「@」同为明确点名——
+    /// 回复段指向机器人上一条发言却因不带 at 段被判未提及 → 漏斗概率丢弃
+    /// = 用户点名石沉大海。reply_para_ids 提取引用链 id（回查 sender 的钥匙）。
+    #[test]
+    fn 提及判定_引用回复段id提取() {
+        // 数组段 reply：标准形态
+        let arr = json!([
+            { "type": "reply", "data": { "id": "12345" } },
+            { "type": "text", "data": { "text": " 这个怎么用" } }
+        ]);
+        assert_eq!(reply_para_ids(&arr), vec!["12345".to_string()]);
+        // CQ 码形态：[CQ:reply,id=12345]
+        let cq = json!("[CQ:reply,id=67890] 这个呢");
+        assert_eq!(reply_para_ids(&cq), vec!["67890".to_string()]);
+        // 无引用：空
+        assert!(reply_para_ids(&json!([{ "type": "text", "data": { "text": "hi" } }])).is_empty());
+        assert!(reply_para_ids(&json!("没有回复的纯文本")).is_empty());
+        // 引用链多条（多级回复）：按事件顺序全收
+        let multi = json!([
+            { "type": "reply", "data": { "id": "111" } },
+            { "type": "reply", "data": { "id": "222" } }
+        ]);
+        assert_eq!(
+            reply_para_ids(&multi),
+            vec!["111".to_string(), "222".to_string()]
+        );
     }
 }

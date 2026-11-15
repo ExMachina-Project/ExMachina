@@ -160,7 +160,9 @@ pub(crate) fn media_placeholder(kinds: &[&str]) -> String {
     if parts.is_empty() {
         return String::new();
     }
-    format!("（用户发来附件：{}，附件细节见消息注入）", parts.join("、"))
+    // 中性占位（生产实测教训）：不写「细节见消息注入」这类程序腔——占位
+    // 正文随旁听/主链落库进历史，模型会模仿这种话术把过程性文字混进回复
+    format!("（{}）", parts.join(" + "))
 }
 
 // ---------------------------------------------------------------- 发送者标注
@@ -282,7 +284,7 @@ mod tests {
         );
         assert_eq!(
             media_placeholder(&["image"]),
-            "（用户发来附件：图片 x1，附件细节见消息注入）"
+            "（图片 x1）"
         );
         let multi = media_placeholder(&["image", "image", "file"]);
         assert!(
@@ -357,6 +359,7 @@ mod tests {
             group_gate: None,
             proactive_reply: None,
             proactive_rate: None,
+            mention_reply: None,
             capability: "computer".into(),
             memory_isolation: false,
             created_at: String::new(),

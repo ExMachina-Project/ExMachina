@@ -143,6 +143,13 @@ pub enum ToolName {
     /// 子智能体派生：主智能体把封闭子任务交给独立上下文的子智能体执行（单层限制，
     /// 子级无 spawn/agent_manage），返回结论摘要。并发与超时受控（spec: subagent-spawn）
     Spawn,
+    /// 跨会话互通：列示/检索同组会话、读取历史、向另一会话投递消息并触发执行。
+    /// 组隔离在工具层强制（只允许同 group_id 的会话互相可见）。
+    Sessions,
+    /// 技能自管理：列示/创建/更新/删除技能包与导出 SKILL.md。
+    /// 仅组主智能体与独立指挥体默认获得（子个体需在编成 tools 中显式声明）。
+    #[serde(rename = "skill_manage")]
+    SkillManage,
     /// 动态上下文压缩（实验性，experiments.dynamicCompaction 开启才下发）：
     /// 模型自行判断时机，把窗口外旧历史主动压成滚动摘要
     #[serde(rename = "context_compact")]
@@ -160,6 +167,30 @@ pub enum ToolName {
     /// 元智能体构建（实验性 experiments.metaAgent）：新智能体/组定义草稿落 [meta] 审批单
     #[serde(rename = "meta_build")]
     MetaBuild,
+    /// 语音回复（assistant-parity T2）：文本 → TTS 合成 → 语音条产出（outbox voice
+    /// artifact），收束时经平台直发（telegram sendVoice / napcat record）或 WebUI 卡片。
+    /// 未配置 TTS 能力模型时返回未装配说明（不进工具面）。
+    #[serde(rename = "speech_reply")]
+    Speech,
+    /// 知识写入（knowledge-base）：通用知识沉淀进全智能体共享知识库
+    /// （内容哈希去重，重复写入去重提升）；与记忆分离——知识不分区
+    #[serde(rename = "knowledge_write")]
+    KnowledgeWrite,
+    /// 知识读取（knowledge-base）：op=search 检索 / get 取全文 / list 最近
+    #[serde(rename = "knowledge_read")]
+    KnowledgeRead,
+    /// 图像生成（image-gen）：prompt → 图片（PNG/JPEG/WebP），产物经 outbox
+    /// 随本轮回复直发。未配置生图槽位时不下发（不承诺不存在的能力）。
+    #[serde(rename = "image_gen")]
+    ImageGen,
+    /// 图表渲染（chart-rendering）：mermaid 源码 → SVG（Kroki 兼容端点），
+    /// 产物经 outbox 随本轮回复直发。chart.endpoint 空串时不下发。
+    #[serde(rename = "render_chart")]
+    RenderChart,
+    /// 深度研究（deep-research）：topic → 计划 → 并行检索 → 引用聚合 →
+    /// 结构化 Markdown 报告（四节 + 内联引用 + 来源清单）。
+    #[serde(rename = "research_report")]
+    ResearchReport,
 }
 
 impl ToolName {
@@ -183,11 +214,19 @@ impl ToolName {
             ToolName::MemoryLink => "memory_link",
             ToolName::Git => "git",
             ToolName::Spawn => "spawn",
+            ToolName::Sessions => "sessions",
+            ToolName::SkillManage => "skill_manage",
             ToolName::ContextCompact => "context_compact",
             ToolName::Todo => "todo",
             ToolName::MetaObserve => "meta_observe",
             ToolName::MetaPropose => "meta_propose",
             ToolName::MetaBuild => "meta_build",
+            ToolName::Speech => "speech_reply",
+            ToolName::KnowledgeWrite => "knowledge_write",
+            ToolName::KnowledgeRead => "knowledge_read",
+            ToolName::ImageGen => "image_gen",
+            ToolName::RenderChart => "render_chart",
+            ToolName::ResearchReport => "research_report",
         }
     }
 
@@ -203,6 +242,7 @@ impl ToolName {
                 | ToolName::MemoryRead
                 | ToolName::Todo
                 | ToolName::MetaObserve
+                | ToolName::KnowledgeRead
         )
     }
 
@@ -226,11 +266,19 @@ impl ToolName {
             "memory_link" => Some(ToolName::MemoryLink),
             "git" => Some(ToolName::Git),
             "spawn" => Some(ToolName::Spawn),
+            "sessions" => Some(ToolName::Sessions),
+            "skill_manage" => Some(ToolName::SkillManage),
             "context_compact" => Some(ToolName::ContextCompact),
             "meta_observe" => Some(ToolName::MetaObserve),
             "meta_propose" => Some(ToolName::MetaPropose),
             "meta_build" => Some(ToolName::MetaBuild),
             "todo" => Some(ToolName::Todo),
+            "speech_reply" => Some(ToolName::Speech),
+            "knowledge_write" => Some(ToolName::KnowledgeWrite),
+            "knowledge_read" => Some(ToolName::KnowledgeRead),
+            "image_gen" => Some(ToolName::ImageGen),
+            "render_chart" => Some(ToolName::RenderChart),
+            "research_report" => Some(ToolName::ResearchReport),
             _ => None,
         }
     }
@@ -259,11 +307,19 @@ impl ToolName {
             ToolName::MemoryLink,
             ToolName::Git,
             ToolName::Spawn,
+            ToolName::Sessions,
+            ToolName::SkillManage,
             ToolName::ContextCompact,
             ToolName::Todo,
             ToolName::MetaObserve,
             ToolName::MetaPropose,
             ToolName::MetaBuild,
+            ToolName::Speech,
+            ToolName::KnowledgeWrite,
+            ToolName::KnowledgeRead,
+            ToolName::ImageGen,
+            ToolName::RenderChart,
+            ToolName::ResearchReport,
         ]
     }
 }
@@ -508,6 +564,9 @@ pub struct GroupCapabilities {
     /// 嵌入（组记忆语义检索）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<String>,
+    /// 图像生成（image-gen）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_gen: Option<String>,
 }
 
 // ---------------------------------------------------------------- 编成模板
@@ -979,6 +1038,12 @@ pub struct SyncReport {
     #[serde(default)]
     pub next_suggestion: NextSuggestion,
     pub confidence: f64,
+    /// 解析层受控修复标记（sync-report-resilience）：缺白名单字段
+    /// （summary/confidence/title/agentIdentifier）补齐重试成功时置 true。
+    /// 旁路标记——不是契约必填字段，仅事件与回流 JSON 可见，指挥体可识别
+    /// 低置信来源。正常解析产出 None（不序列化，旧契约不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repaired: Option<bool>,
 }
 
 // ---------------------------------------------------------------- 指挥体计划
@@ -1129,7 +1194,7 @@ pub fn new_id() -> String {
 /// 技能包：任务目标命中触发词时，把指令注入相关个体的派发指令。
 /// 存储格式 = SKILL.md（YAML frontmatter + Markdown 正文=instructions，跨工具通用标准）；
 /// 旧 `*.json` 单文件仍可读（热转换，迁移零成本）。热装载，扩编不写代码。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDef {
     pub id: String,
@@ -1146,6 +1211,18 @@ pub struct SkillDef {
     pub agents: Vec<String>,
     #[serde(default)]
     pub created_at: String,
+    /// 运行期使用统计（由技能目录侧车 `.usage.jsonl` 聚合，不写入 SKILL.md）
+    #[serde(default)]
+    pub use_count: u64,
+    /// 成功完成次数（工具注入技能后所在节点终态为完成）
+    #[serde(default)]
+    pub success_count: u64,
+    /// 最近一次使用时间（ISO）
+    #[serde(default)]
+    pub last_used_at: String,
+    /// 来源：manual（手工）/ agent（智能体沉淀）/ import（外部导入）
+    #[serde(default)]
+    pub source: String,
 }
 
 impl SkillDef {

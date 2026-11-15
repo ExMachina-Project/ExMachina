@@ -118,6 +118,36 @@ pub fn run_memory_pin(core: &Core, id: &str, pinned: bool) -> anyhow::Result<()>
     Ok(())
 }
 
+/// 编辑条目（assistant-parity T3）：缺省字段不改动；条目不存在报错
+pub fn run_memory_edit(
+    core: &Core,
+    id: &str,
+    title: Option<String>,
+    body: Option<String>,
+    tags: Option<Vec<String>>,
+    kind: Option<String>,
+) -> anyhow::Result<()> {
+    // 空串视为「未提供」，与 REST 面板语义一致（删除走 forget）
+    let title = title.filter(|s| !s.trim().is_empty());
+    let body = body.filter(|s| !s.trim().is_empty());
+    if title.is_none() && body.is_none() && tags.is_none() && kind.is_none() {
+        anyhow::bail!("至少提供 --title / --body / --tags / --kind 之一");
+    }
+    match core.memory_update(
+        id,
+        title.as_deref(),
+        body.as_deref(),
+        tags,
+        kind.as_deref(),
+    )? {
+        Some(e) => {
+            println!("{} {}（{}）", ok("已更新"), e.id, e.title);
+            Ok(())
+        }
+        None => anyhow::bail!("记忆条目不存在：{id}"),
+    }
+}
+
 pub fn run_memory_forget(core: &Core, id: &str) -> anyhow::Result<()> {
     core.memory_forget(id)?;
     println!("{} {}", ok("已遗忘"), id);
@@ -174,5 +204,29 @@ pub fn run_memory_stats(core: &Core) -> anyhow::Result<()> {
 pub fn run_memory_render(core: &Core) -> anyhow::Result<()> {
     let n = core.render_memory_md()?;
     println!("{} memory.md 已重渲染（固定记忆 {n} 条）", ok("完成"));
+    Ok(())
+}
+
+/// 全量导出为 JSONL（memory-lifecycle 6.3）：每行一条完整条目 JSON，
+/// 字段与 list 单条一致；--agent 过滤同口径；不含派生索引数据。
+/// file 缺省打印 stdout（管道友好）；传 file 落盘并回显路径。
+pub fn run_memory_export(core: &Core, file: Option<&str>, agent: Option<&str>) -> anyhow::Result<()> {
+    let entries = core.memory_list_filtered(None, agent, usize::MAX)?;
+    let jsonl: String = entries
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    match file {
+        Some(path) => {
+            std::fs::write(path, format!("{jsonl}\n"))?;
+            println!(
+                "{} 已导出 {} 条到 {path}（JSONL，每行一条）",
+                ok("完成"),
+                entries.len()
+            );
+        }
+        None => println!("{jsonl}"),
+    }
     Ok(())
 }

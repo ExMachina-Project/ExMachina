@@ -1,6 +1,485 @@
 //! tools/tests.rs —— 原 tools.rs 内联测试随拆分整体迁出（纯搬移）
 
 use super::*;
+mod knowledge_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::{AgentDefinition, Tier};
+    use std::sync::Arc;
+
+    struct TestRig {
+        gw: ToolGateway,
+        no_knowledge_gw: ToolGateway,
+    }
+
+    fn rig() -> TestRig {
+        let dir = std::env::temp_dir().join(format!("exm-ktool-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let knowledge = Arc::new(crate::knowledge::KnowledgeStore::open(dir.join("data")).unwrap());
+        let gw = ToolGateway::new(&dir, store.clone(), registry.clone(), events.clone(), SecurityConfig::default())
+            .with_knowledge(knowledge);
+        // 未装配对照组：恒下发但知识库未注入时应明确报错而非静默失败
+        let no_knowledge_gw = ToolGateway::new(
+            &dir,
+            store,
+            registry,
+            events,
+            SecurityConfig::default(),
+        );
+        TestRig { gw, no_knowledge_gw }
+    }
+
+    async fn k_write(gw: &ToolGateway, title: &str, body: &str, tags: &[&str]) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-k",
+            &[ToolName::KnowledgeWrite, ToolName::KnowledgeRead],
+            ToolName::KnowledgeWrite,
+            &serde_json::json!({ "title": title, "body": body, "tags": tags }),
+        )
+        .await
+    }
+
+    async fn k_read(gw: &ToolGateway, args: serde_json::Value) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-k",
+            &[ToolName::KnowledgeWrite, ToolName::KnowledgeRead],
+            ToolName::KnowledgeRead,
+            &args,
+        )
+        .await
+    }
+
+    /// 三 op 全链路：write 回显状态与 id → search 命中并累加 hits → get 取全文 → list 列示
+    #[tokio::test]
+    async fn 知识工具_三op全链路() {
+        let rig = rig();
+        // 新建
+        let w = k_write(
+            &rig.gw,
+            "napcat 图片直发约束",
+            "QQ 官方机器人 files 上行仅支持 png/jpg，file_data 为 base64，≤20MB",
+            &["qq", "media"],
+        )
+        .await;
+        assert!(w.ok, "写入应成功：{}", w.error.unwrap_or_default());
+        assert!(w.output.contains("新建"), "首写回显新建：{}", w.output);
+        let id = w
+            .output
+            .lines()
+            .find(|l| l.starts_with("id: "))
+            .unwrap()
+            .trim_start_matches("id: ")
+            .to_string();
+        assert!(!id.is_empty(), "回显条目 id");
+
+        // search：命中且 hits 累加
+        let s = k_read(
+            &rig.gw,
+            serde_json::json!({ "op": "search", "query": "napcat 直发", "limit": 5 }),
+        )
+        .await;
+        assert!(s.ok);
+        assert!(s.output.contains(&id), "检索应命中：{}", s.output);
+        assert!(s.output.contains("hits: 1"), "命中累加 hits：{}", s.output);
+
+        // get：取全文
+        let g = k_read(&rig.gw, serde_json::json!({ "op": "get", "id": id })).await;
+        assert!(g.ok);
+        assert!(g.output.contains("file_data 为 base64"), "get 应含全文");
+
+        // list：最近条目列示
+        let l = k_read(&rig.gw, serde_json::json!({ "op": "list", "limit": 5 })).await;
+        assert!(l.ok);
+        assert!(l.output.contains(&id), "list 应列示：{}", l.output);
+
+        // 重复写入：去重提升（回显既有 id 而非新建）
+        let w2 = k_write(
+            &rig.gw,
+            "napcat 图片直发约束",
+            "QQ 官方机器人 files 上行仅支持 png/jpg，file_data 为 base64，≤20MB",
+            &[],
+        )
+        .await;
+        assert!(w2.ok);
+        assert!(
+            w2.output.contains("去重提升"),
+            "重复写入回显去重提升：{}",
+            w2.output
+        );
+        assert!(
+            w2.output.contains(&id),
+            "去重回显原条目 id：{}",
+            w2.output
+        );
+        // 来源标注：写入个体与会话
+        let g2 = k_read(&rig.gw, serde_json::json!({ "op": "get", "id": id })).await;
+        assert!(g2.output.contains("来源: t"), "来源标注写入个体");
+        assert!(g2.output.contains("会话: s-k"), "来源标注会话");
+    }
+
+    /// body 超限拒绝（8000 字符护栏）：拒绝并引导拆分，不落库
+    #[tokio::test]
+    async fn 知识工具_正文超限拒绝() {
+        let rig = rig();
+        let long = "知".repeat(crate::knowledge::KNOWLEDGE_BODY_CAP_CHARS + 1);
+        let w = k_write(&rig.gw, "超长", &long, &[]).await;
+        assert!(!w.ok, "超限应拒绝");
+        let err = w.error.unwrap_or_default();
+        assert!(err.contains("拆分"), "拒绝信息引导拆分：{err}");
+        // 库里没有残留
+        let l = k_read(&rig.gw, serde_json::json!({ "op": "list" })).await;
+        assert!(l.output.contains("知识库为空"), "拒绝不落库：{}", l.output);
+    }
+
+    /// 必填护栏：title/body 空拒绝；未知 op 拒绝
+    #[tokio::test]
+    async fn 知识工具_入参护栏() {
+        let rig = rig();
+        let w = k_write(&rig.gw, "", "有正文无标题", &[]).await;
+        assert!(!w.ok && w.error.unwrap().contains("title"));
+        let w = k_write(&rig.gw, "标题", "", &[]).await;
+        assert!(!w.ok && w.error.unwrap().contains("body"));
+        let r = k_read(&rig.gw, serde_json::json!({ "op": "wat" })).await;
+        assert!(!r.ok && r.error.unwrap().contains("未知 op"));
+        let r = k_read(&rig.gw, serde_json::json!({ "op": "search", "query": "" })).await;
+        assert!(!r.ok && r.error.unwrap().contains("query"));
+        let r = k_read(&rig.gw, serde_json::json!({ "op": "get", "id": "nope" })).await;
+        assert!(!r.ok && r.error.unwrap().contains("不存在"));
+    }
+
+    /// 未装配对照：明确报错（不静默失败）
+    #[tokio::test]
+    async fn 知识工具_未装配明确报错() {
+        let rig = rig();
+        let w = rig
+            .no_knowledge_gw
+            .execute(
+                "t",
+                "s-k",
+                &[ToolName::KnowledgeWrite],
+                ToolName::KnowledgeWrite,
+                &serde_json::json!({ "title": "t", "body": "b" }),
+            )
+            .await;
+        assert!(!w.ok);
+        assert!(w.error.unwrap().contains("未装配"));
+    }
+}
+
+mod image_gen_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::Tier;
+    use std::sync::Arc;
+
+    struct TestRig {
+        gw: ToolGateway,
+        store: Arc<Store>,
+    }
+
+    fn rig() -> TestRig {
+        let dir = std::env::temp_dir().join(format!("exm-imgtool-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            crate::types::AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        TestRig { gw, store }
+    }
+
+    async fn gen(gw: &ToolGateway, prompt: &str, size: &str) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-img",
+            &[ToolName::ImageGen],
+            ToolName::ImageGen,
+            &serde_json::json!({ "prompt": prompt, "size": size }),
+        )
+        .await
+    }
+
+    /// 三态之成功：PNG 字节 → 魔数嗅探过 → outbox 登记 image 条目（kind/文件/尺寸/字节回显）
+    #[tokio::test]
+    async fn 生图工具_成功登记() {
+        let rig = rig();
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async {
+                Ok(vec![
+                    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4,
+                ])
+            })
+        }));
+        let r = gen(&rig.gw, "a red cat", "1024x1024").await;
+        assert!(r.ok, "成功态：{}", r.error.unwrap_or_default());
+        assert!(r.output.contains("png"), "回显格式：{}", r.output);
+        assert!(r.output.contains("1024"), "回显尺寸：{}", r.output);
+        let outbox = rig.store.outbox_drain("s-img").unwrap();
+        assert_eq!(outbox.len(), 1, "登记一条产物");
+        assert_eq!(outbox[0]["kind"], "image");
+        assert!(
+            outbox[0]["path"].as_str().unwrap_or("").ends_with(".png"),
+            "扩展名按魔数：{}",
+            outbox[0]["path"]
+        );
+    }
+
+    /// 三态之超时：120s 硬超时（测试里闭包睡 >120s 太慢——用极小超时不可行，
+    /// 改验证「上游报错透传」与超时同一错误面；超时路径由 tokio timeout 保证）
+    #[tokio::test]
+    async fn 生图工具_上游错误透传() {
+        let rig = rig();
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async { Err(anyhow::anyhow!("上游生图端点 429: 额度耗尽")) })
+        }));
+        let r = gen(&rig.gw, "x", "1024x1024").await;
+        assert!(!r.ok);
+        assert!(r.error.unwrap().contains("429"), "上游错误透传");
+    }
+
+    /// 三态之非法字节：HTML 错误页字节 → 魔数嗅探拒绝，不登记不落盘
+    #[tokio::test]
+    async fn 生图工具_非法字节拒绝() {
+        let rig = rig();
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async { Ok(b"<html>error page</html>".to_vec()) })
+        }));
+        let r = gen(&rig.gw, "x", "1024x1024").await;
+        assert!(!r.ok, "非图片字节应拒绝");
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("不是有效图片"), "拒绝话术：{err}");
+        let outbox = rig.store.outbox_drain("s-img").unwrap();
+        assert!(outbox.is_empty(), "拒绝不登记产物");
+    }
+
+    /// 未装配：明确报错；入参护栏：空 prompt / 非法 size 拒绝
+    #[tokio::test]
+    async fn 生图工具_未装配与入参护栏() {
+        let rig = rig();
+        let r = gen(&rig.gw, "x", "1024x1024").await;
+        assert!(!r.ok && r.error.unwrap().contains("未装配"));
+        rig.gw.set_image_gen(Arc::new(|_p, _s| {
+            Box::pin(async { Ok(vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) })
+        }));
+        let r = gen(&rig.gw, "  ", "1024x1024").await;
+        assert!(!r.ok && r.error.unwrap().contains("prompt"));
+        let r = gen(&rig.gw, "x", "800x600").await;
+        assert!(!r.ok && r.error.unwrap().contains("size"));
+    }
+}
+
+mod chart_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::Tier;
+    use std::sync::Arc;
+
+    struct TestRig {
+        gw: ToolGateway,
+        store: Arc<Store>,
+    }
+
+    fn rig() -> TestRig {
+        let dir = std::env::temp_dir().join(format!("exm-charttool-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            crate::types::AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        TestRig { gw, store }
+    }
+
+    async fn render(gw: &ToolGateway, mermaid: &str) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-chart",
+            &[ToolName::RenderChart],
+            ToolName::RenderChart,
+            &serde_json::json!({ "mermaid": mermaid }),
+        )
+        .await
+    }
+
+    /// 最小 Kroki 兼容服务器：POST /mermaid/svg 回固定 SVG；?fail=1 回 400 错误体
+    async fn spawn_kroki(fail: bool) -> String {
+        use axum::response::IntoResponse;
+        let app = axum::Router::new().route(
+            "/mermaid/svg",
+            axum::routing::post(move || {
+                let fail = fail;
+                async move {
+                    if fail {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "Syntax Error (line 1): unknown diagram type",
+                        )
+                            .into_response()
+                    } else {
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>",
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// 成功：SVG 落盘并登记 outbox（kind=file、.svg 扩展名）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 图表工具_成功登记() {
+        let rig = rig();
+        rig.gw.set_chart_endpoint(&spawn_kroki(false).await);
+        let r = render(&rig.gw, "flowchart TD\n  A --> B").await;
+        assert!(r.ok, "成功态：{}", r.error.unwrap_or_default());
+        assert!(r.output.contains("SVG"), "回显 SVG：{}", r.output);
+        let outbox = rig.store.outbox_drain("s-chart").unwrap();
+        assert_eq!(outbox.len(), 1, "登记一条产物");
+        assert_eq!(outbox[0]["kind"], "file");
+        assert!(
+            outbox[0]["path"].as_str().unwrap_or("").ends_with(".svg"),
+            "扩展名 .svg：{}",
+            outbox[0]["path"]
+        );
+    }
+
+    /// 语法错误：400 带回服务端错误摘要，不登记产物（模型可修正重试）
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 图表工具_语法错误带回摘要() {
+        let rig = rig();
+        rig.gw.set_chart_endpoint(&spawn_kroki(true).await);
+        let r = render(&rig.gw, "not valid mermaid").await;
+        assert!(!r.ok);
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("400"), "状态码带回：{err}");
+        assert!(err.contains("Syntax Error"), "服务端摘要带回：{err}");
+        let outbox = rig.store.outbox_drain("s-chart").unwrap();
+        assert!(outbox.is_empty(), "失败不登记产物");
+    }
+
+    /// 空 endpoint：明确报错；且 chart_ready=false 时工具不在 spec 清单（不下发）
+    #[tokio::test]
+    async fn 图表工具_空endpoint不下发() {
+        let rig = rig();
+        assert!(!rig.gw.chart_ready(), "默认空 = 未启用");
+        let specs = ToolGateway::tool_specs(
+            &[ToolName::RenderChart],
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(
+            specs.iter().all(|s| s.name != "render_chart"),
+            "空 endpoint 不下发"
+        );
+        let r = render(&rig.gw, "flowchart TD\n A-->B").await;
+        assert!(!r.ok && r.error.unwrap().contains("未启用"));
+    }
+
+    /// 超长拒绝（20000 字符护栏）；非 SVG 响应拒绝
+    #[tokio::test]
+    async fn 图表工具_超长拒绝() {
+        let rig = rig();
+        rig.gw.set_chart_endpoint("http://127.0.0.1:1"); // 不可达也行——超长在请求前拒绝
+        let long = format!("flowchart TD\n  {}", "A-->B".repeat(6000));
+        let r = render(&rig.gw, &long).await;
+        assert!(!r.ok);
+        assert!(r.error.unwrap().contains("过长"), "超长拒绝并引导精简");
+    }
+}
 mod memory_tool_tests {
     use super::*;
     use std::sync::Arc;
@@ -76,6 +555,36 @@ mod memory_tool_tests {
         assert_eq!(items[0]["kind"], "file");
         assert_eq!(items[0]["path"], "report.md", "登记必须为工作区相对路径");
         assert_eq!(items[0]["caption"], "周报");
+        // 图片扩展名 → kind=image（IM 平台原生内嵌展示走直发）
+        std::fs::write(rig.dir.join("chart.png"), "fake-png").unwrap();
+        let rp = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "chart.png" }),
+            )
+            .await;
+        assert!(rp.ok, "send_file png 应成功: {:?}", rp.error);
+        let items_p = rig.gw.store.outbox_drain("s-send").unwrap();
+        assert_eq!(items_p[0]["kind"], "image", "png 应登记为 image");
+        // svg 保持 file（QQ 无法内嵌渲染 web 图片格式）
+        std::fs::write(rig.dir.join("figure.svg"), "<svg/>").unwrap();
+        let rs = rig
+            .gw
+            .execute(
+                "t",
+                "s-send",
+                &[ToolName::Filesystem],
+                ToolName::Filesystem,
+                &serde_json::json!({ "op": "send_file", "path": "figure.svg" }),
+            )
+            .await;
+        assert!(rs.ok, "send_file svg 应成功: {:?}", rs.error);
+        let items_s = rig.gw.store.outbox_drain("s-send").unwrap();
+        assert_eq!(items_s[0]["kind"], "file", "svg 应保持 file");
         // 目录 → 拒绝
         let r2 = rig
             .gw
@@ -245,7 +754,7 @@ mod memory_tool_tests {
     fn 工具面快照_schema按白名单下发() {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
-        let specs = ToolGateway::tool_specs(&allow, false, false, false);
+        let specs = ToolGateway::tool_specs(&allow, false, false, false, false, false, false);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"memory_read")
@@ -261,6 +770,9 @@ mod memory_tool_tests {
         let unit = def("unit-1", Tier::Unit, &[ToolName::Read]);
         let specs2 = ToolGateway::tool_specs(
             &ToolGateway::runtime_allowlist(&unit, None),
+            false,
+            false,
+            false,
             false,
             false,
             false,
@@ -588,11 +1100,11 @@ mod memory_tool_tests {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
         // 深层开启：三工具照常下发（兼容口径不变）
-        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         assert!(deep.iter().any(|s| s.name == "memory_write"));
         assert!(deep.iter().any(|s| s.name == "memory_link"));
         // 文件模式：write/link 不承诺（必然失败的工具不下发），read 保留（读 md 有意义）
-        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false);
+        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, false);
         assert!(
             file.iter().any(|s| s.name == "memory_read"),
             "memory_read 保留"
@@ -1685,18 +2197,18 @@ mod terminal_gate_tests {
     #[test]
     fn 实验开关_动态压缩关闭时schema剔除context_compact() {
         let allow = [ToolName::Terminal, ToolName::ContextCompact];
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, false, false, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "开关关闭时 context_compact 不应下发"
         );
         // 开启时保留
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, false, false);
         assert!(specs.iter().any(|s| s.name == "context_compact"));
         // 滑动窗口互斥：dynamic=true + sliding=true 仍不下发
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, true);
+        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, true, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
@@ -2440,10 +2952,12 @@ mod search_discipline_tests {
 
     fn search_cfg(provider: &str, key: &str, proactive: bool) -> crate::config::SearchConfig {
         crate::config::SearchConfig {
+            backends: Vec::new(),
             provider: provider.into(),
             endpoint: String::new(),
             api_key: key.into(),
             max_results: 5,
+            content_fetch_n: 3,
             proactive,
         }
     }
@@ -2524,7 +3038,7 @@ mod browser_search_tests {
             assert!(
                 text.contains("https://"),
                 "结构化结果应含 URL: {}",
-                &text.chars().take(200).collect::<String>()
+                text.chars().take(200).collect::<String>()
             );
         } else {
             // 无外网环境：导航失败可接受，但错误信息应可理解
@@ -2532,5 +3046,284 @@ mod browser_search_tests {
             assert!(!err.is_empty(), "失败也要有原因");
             println!("    [browser-search] 网络不可达: {err}");
         }
+    }
+}
+
+/// schedule 工具（assistant-parity T1）：notify_channels/session_title 透传 + 时区回显
+mod schedule_tool_tests {
+    use super::*;
+    use crate::cron::CronStore;
+    use crate::store::Store;
+    use crate::types::{AgentDefinition, Tier};
+    use std::sync::Arc;
+
+    struct SchedRig {
+        gw: ToolGateway,
+        cron: Arc<CronStore>,
+        dir: std::path::PathBuf,
+    }
+
+    fn rig(tz: &str) -> SchedRig {
+        let dir = std::env::temp_dir().join(format!("exm-sched-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry.create_group(Some("t".into()), "测试组", "").unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let cron = Arc::new(CronStore::open(dir.join("data")).unwrap());
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default())
+            .with_cron(cron.clone())
+            .with_cron_timezone(tz.to_string());
+        SchedRig { gw, cron, dir }
+    }
+
+    async fn exec(gw: &ToolGateway, args: serde_json::Value) -> String {
+        let r = gw
+            .execute(
+                "t",
+                "s-sched",
+                &[ToolName::Schedule],
+                ToolName::Schedule,
+                &args,
+            )
+            .await;
+        if r.ok {
+            r.output
+        } else {
+            r.error.unwrap_or_default()
+        }
+    }
+
+    /// 通道订阅透传：模型建的任务带 notify_channels（此前硬编码空清单断链）
+    #[tokio::test]
+    async fn 建任务_通道订阅透传() {
+        let rig = rig("");
+        let out = exec(
+            &rig.gw,
+            serde_json::json!({
+                "op": "create",
+                "name": "每日天气",
+                "prompt": "查天气并汇报",
+                "cron": "0 8 * * *",
+                "notify_channels": ["qq:12345", "tg:77"],
+            }),
+        )
+        .await;
+        assert!(out.contains("已排程"), "{out}");
+        assert!(out.contains("推送通道=qq:12345,tg:77"), "{out}");
+        // 落库校验
+        let job = rig.cron.list().unwrap().into_iter().next().unwrap();
+        assert_eq!(job.notify_channels, vec!["qq:12345".to_string(), "tg:77".to_string()]);
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 时区回显：配置 Asia/Shanghai 时「每天 8 点」的下次执行渲染为本地 08:00 +08
+    #[tokio::test]
+    async fn 建任务_时区回显下次执行() {
+        let rig = rig("Asia/Shanghai");
+        let out = exec(
+            &rig.gw,
+            serde_json::json!({
+                "op": "create",
+                "name": "早报",
+                "prompt": "早报",
+                "cron": "0 8 * * *",
+            }),
+        )
+        .await;
+        assert!(out.contains("已排程"), "{out}");
+        assert!(out.contains("下次执行="), "回显缺下次执行：{out}");
+        assert!(out.contains("08:00"), "上海 8 点任务应渲染本地 08:00：{out}");
+        assert!(!out.contains("T08:00"), "不应是 UTC RFC3339 形态：{out}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 不带新参数的调用 = 旧行为（无推送注记、默认组激活）
+    #[tokio::test]
+    async fn 建任务_缺省参数保持旧行为() {
+        let rig = rig("");
+        let out = exec(
+            &rig.gw,
+            serde_json::json!({
+                "op": "create",
+                "name": "巡检",
+                "prompt": "巡检",
+                "cron": "0 9 * * *",
+            }),
+        )
+        .await;
+        assert!(out.contains("已排程"), "{out}");
+        assert!(!out.contains("推送通道="), "缺省无推送注记：{out}");
+        // UTC 语义（空时区）：下次执行回显 RFC3339 Z 结尾
+        assert!(out.contains("下次执行="), "{out}");
+        let job = rig.cron.list().unwrap().into_iter().next().unwrap();
+        assert!(job.notify_channels.is_empty());
+        assert!(job.session_title.is_none(), "缺省无会话标题");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+}
+
+/// speech_reply 工具（assistant-parity T2）：TTS 合成 → 落盘 → outbox voice 登记
+mod speech_tool_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::types::{AgentDefinition, Tier};
+    use std::sync::Arc;
+
+    struct SpeechRig {
+        gw: ToolGateway,
+        dir: std::path::PathBuf,
+    }
+
+    fn rig(synth: Option<&[u8]>) -> SpeechRig {
+        let dir = std::env::temp_dir().join(format!("exm-speech-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        registry.create_group(Some("t".into()), "测试组", "").unwrap();
+        let _ = registry.upsert_agent(
+            "t",
+            AgentDefinition {
+                name: "orch-1".into(),
+                identifier: "orch-1".into(),
+                domain: "测试".into(),
+                tier: Tier::Orchestrator,
+                description: "测试主智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+            },
+            None,
+        );
+        registry.set_primary("t", "orch-1").unwrap();
+        registry.set_active_group("t").unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        if let Some(bytes) = synth {
+            let b = bytes.to_vec();
+            gw.set_speech_synth(Arc::new(move |_text| {
+                let b = b.clone();
+                Box::pin(async move { Ok(b) })
+            }));
+        }
+        SpeechRig { gw, dir }
+    }
+
+    async fn exec(gw: &ToolGateway, args: serde_json::Value) -> ToolResult {
+        gw.execute(
+            "t",
+            "s-speech",
+            &[ToolName::Speech],
+            ToolName::Speech,
+            &args,
+        )
+        .await
+    }
+
+    /// 合成成功：mp3 落盘 + outbox 登记 kind=voice（此前全仓库无 voice 生产者）
+    #[tokio::test]
+    async fn 语音合成_落盘并登记发件箱() {
+        let mp3: &[u8] = &[0x49, 0x44, 0x33, 1, 2, 3, 4]; // 假 ID3 头
+        let rig = rig(Some(mp3));
+        let r = exec(
+            &rig.gw,
+            serde_json::json!({ "text": "你好，这是语音回复测试" }),
+        )
+        .await;
+        assert!(r.ok, "合成应成功：{}", r.error.unwrap_or_default());
+        assert!(r.output.contains("语音已合成"), "{}", r.output);
+        // 落盘校验
+        let outbox = rig.dir.join(".exmachina/outbox");
+        let files: Vec<_> = std::fs::read_dir(&outbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(files.len(), 1, "应恰好一个音频文件");
+        let written = std::fs::read(files[0].path()).unwrap();
+        assert_eq!(written, mp3, "音频字节一致");
+        // outbox 登记：voice 类型 + 带预览 caption
+        let store = Store::open(rig.dir.join("data")).unwrap();
+        let drained = store.outbox_drain("s-speech").unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0]["kind"], "voice");
+        let caption = drained[0]["caption"].as_str().unwrap();
+        assert!(caption.contains("语音回复"), "{caption}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 未装配（无 TTS 能力）：明确错误而非静默失败
+    #[tokio::test]
+    async fn 未装配_明确报错() {
+        let rig = rig(None);
+        let r = exec(&rig.gw, serde_json::json!({ "text": "念一下" })).await;
+        assert!(!r.ok);
+        let e = r.error.unwrap_or_default();
+        assert!(e.contains("未装配"), "{e}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// 长文本护栏：>600 字符拒绝并引导精炼
+    #[tokio::test]
+    async fn 长文本_护栏拒绝() {
+        let mp3: &[u8] = &[1, 2, 3];
+        let rig = rig(Some(mp3));
+        let long = "很".repeat(601);
+        let r = exec(&rig.gw, serde_json::json!({ "text": long })).await;
+        assert!(!r.ok);
+        let e = r.error.unwrap_or_default();
+        assert!(e.contains("过长"), "{e}");
+        let _ = std::fs::remove_dir_all(&rig.dir);
+    }
+
+    /// schema 门控：speech_ready=false 不下发（能力未装配不承诺）
+    #[test]
+    fn schema门控_未装配不下发() {
+        let dir = std::env::temp_dir().join(format!("exm-speech-sch-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(8);
+        let store = Arc::new(Store::open(&dir).unwrap());
+        let registry = Arc::new(LocalRegistry::new(&dir).unwrap());
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        assert!(!gw.speech_ready(), "未注入合成器不算就绪");
+        let off = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, false, false, false);
+        assert!(off.is_empty(), "未装配不下发 speech_reply");
+        gw.set_speech_synth(Arc::new(|_t| Box::pin(async { Ok(vec![1u8]) })));
+        assert!(gw.speech_ready());
+        let on = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true, false, false);
+        assert_eq!(on.len(), 1);
+        assert_eq!(on[0].name, "speech_reply");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
