@@ -613,13 +613,44 @@ mod plan_tests {
 mod root_approval_tests {
     use super::*;
 
+    /// 当前进程 uid 字符串（unix）。测试的 execUser 约束目标用自己：写死 "0" 在
+    /// 非 root CI runner 上 spawn setuid(0) 必 EPERM，命令必 failed——该组测试
+    /// 验证的是「约束开启后代执行仍走加固路径」，不是降权本身；同 uid 约束是
+    /// 无操作降权，解析/confine_home/envs 链路照常走到。
+    #[cfg(unix)]
+    fn current_uid_string() -> String {
+        // 无 libc 依赖：读 /proc/self/status 的 Uid 行（Linux）；其他 unix 走 id 命令
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if let Some(v) = line.strip_prefix("Uid:") {
+                    if let Some(real) = v.split_whitespace().next() {
+                        return real.to_string();
+                    }
+                }
+            }
+        }
+        let out = std::process::Command::new("id").arg("-u").output();
+        if let Ok(o) = out {
+            if let Ok(t) = String::from_utf8(o.stdout) {
+                return t.trim().to_string();
+            }
+        }
+        "0".to_string()
+    }
+    #[cfg(not(unix))]
+    fn current_uid_string() -> String {
+        "0".to_string()
+    }
+
     fn root_core() -> Core {
         let dir = std::env::temp_dir().join(format!("exm-root-{}", crate::types::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = ExmConfig::load(&dir);
         cfg.use_mock = true;
         cfg.memory_enabled = false;
-        cfg.security.exec_user = "0".into(); // 数字 uid:约束开启(测试以 uid 0 近似)
+        // 数字 uid:约束开启(用当前进程 uid——CI runner 非 root,setuid 到别的 uid 会 EPERM;
+        // 同 uid 降权是无操作,约束链路(解析/confine_home/envs)照常走到)
+        cfg.security.exec_user = current_uid_string();
         Core::with_config(cfg).expect("创建 Core 失败")
     }
 
