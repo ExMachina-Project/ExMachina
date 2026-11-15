@@ -50,6 +50,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "metaIntervalMin": cfg.automation.meta_interval_min,
             "flowIdleDays": cfg.automation.flow_idle_days,
             "memoryDigestMinTurns": cfg.automation.memory_digest_min_turns,
+            "timezone": cfg.automation.timezone,
         },
         "search": {
             "provider": cfg.search.provider,
@@ -57,6 +58,13 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "apiKey": if cfg.search.api_key.is_empty() { String::new() } else { "***已配置***".to_string() },
             "maxResults": cfg.search.max_results,
             "proactive": cfg.search.proactive,
+            "backends": cfg.search.effective_backends().iter().map(|b| serde_json::json!({
+                "provider": b.provider,
+                "endpoint": b.endpoint,
+                "apiKey": if b.api_key.is_empty() { String::new() } else { "***已配置***".to_string() },
+                "weight": b.weight,
+            })).collect::<Vec<_>>(),
+            "contentFetchN": cfg.search.content_fetch_n,
         },
         "hooks": {
             "preTool": cfg.hooks.pre_tool,
@@ -95,6 +103,44 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "autoMemoryDigest": cfg.experiments.auto_memory_digest,
         },
         "mock": st.core.is_mock(),
+        // 五组补齐（此前 schema 有分组、设置页可渲染，但 get 不回显/put 不接收——保存被静默丢弃）
+        "identity": {
+            "identityRequired": cfg.identity.identity_required,
+            "pairingTtlSecs": cfg.identity.pairing_ttl_secs,
+            "pairingMaxFailures": cfg.identity.pairing_max_failures,
+            "pairingLockoutSecs": cfg.identity.pairing_lockout_secs,
+            "groupGateDefault": cfg.identity.group_gate_default,
+        },
+        "limits": {
+            "enabled": cfg.limits.enabled,
+            "windowSecs": cfg.limits.window_secs,
+            "maxRequests": cfg.limits.max_requests,
+            "quotaPeriod": cfg.limits.quota_period,
+            "quotaTokens": cfg.limits.quota_tokens,
+            "quotaRequests": cfg.limits.quota_requests,
+            "quotaRunningPolicy": cfg.limits.quota_running_policy,
+        },
+        "triggers": {
+            "fileWatch": {
+                "enabled": cfg.triggers.file_watch.enabled,
+                "debounceMs": cfg.triggers.file_watch.debounce_ms,
+                "exclude": cfg.triggers.file_watch.exclude,
+            },
+            "eventWebhook": {
+                "enabled": cfg.triggers.event_webhook.enabled,
+                "secret": if cfg.triggers.event_webhook.secret.is_empty() { String::new() } else { "***已配置***".to_string() },
+            },
+        },
+        "mcpServe": {
+            "enabled": cfg.mcp_serve.enabled,
+            "httpPath": cfg.mcp_serve.http_path,
+            "allowedGroups": cfg.mcp_serve.allowed_groups,
+            "allowedTools": cfg.mcp_serve.allowed_tools,
+        },
+        "notify": {
+            "enabled": cfg.notify.enabled,
+            "maxChars": cfg.notify.max_chars,
+        },
     }))
 }
 
@@ -138,6 +184,114 @@ pub(crate) struct ConfigBody {
     /// 实验性功能开关（动态压缩 / 组共享上下文）
     #[serde(default)]
     experiments: Option<PartialExperiments>,
+    /// 通道身份（配对绑定与群聊唤醒门控）
+    #[serde(default)]
+    identity: Option<PartialIdentity>,
+    /// 用量限制（限流与配额）
+    #[serde(default)]
+    limits: Option<PartialLimits>,
+    /// 事件触发器（文件监听 / 事件 webhook）
+    #[serde(default)]
+    triggers: Option<PartialTriggers>,
+    /// MCP 服务端（工具对外暴露）
+    #[serde(default)]
+    mcp_serve: Option<PartialMcpServe>,
+    /// 结果推送
+    #[serde(default)]
+    notify: Option<PartialNotify>,
+}
+
+/// 通道身份（设置页）：部分更新语义——缺省字段沿用旧值
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialIdentity {
+    #[serde(default)]
+    identity_required: Option<bool>,
+    #[serde(default)]
+    pairing_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pairing_max_failures: Option<u32>,
+    #[serde(default)]
+    pairing_lockout_secs: Option<u64>,
+    #[serde(default)]
+    group_gate_default: Option<bool>,
+}
+
+/// 用量限制（设置页）：部分更新语义——缺省字段沿用旧值
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialLimits {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    window_secs: Option<u64>,
+    #[serde(default)]
+    max_requests: Option<u32>,
+    #[serde(default)]
+    quota_period: Option<String>,
+    #[serde(default)]
+    quota_tokens: Option<u64>,
+    #[serde(default)]
+    quota_requests: Option<u32>,
+    #[serde(default)]
+    quota_running_policy: Option<String>,
+}
+
+/// 事件触发器（设置页）：部分更新语义——缺省字段沿用旧值
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialTriggers {
+    #[serde(default)]
+    file_watch: Option<PartialFileWatch>,
+    #[serde(default)]
+    event_webhook: Option<PartialEventWebhook>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialFileWatch {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    debounce_ms: Option<u64>,
+    /// 排除前缀：逗号分隔字符串或字符串数组
+    #[serde(default)]
+    exclude: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialEventWebhook {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+/// MCP 服务端（设置页）：部分更新语义——缺省字段沿用旧值
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialMcpServe {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    http_path: Option<String>,
+    /// 允许的组：逗号分隔字符串或字符串数组
+    #[serde(default)]
+    allowed_groups: Option<serde_json::Value>,
+    /// 允许的工具：逗号分隔字符串或字符串数组
+    #[serde(default)]
+    allowed_tools: Option<serde_json::Value>,
+}
+
+/// 结果推送（设置页）：部分更新语义——缺省字段沿用旧值
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialNotify {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    max_chars: Option<usize>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -308,6 +462,8 @@ pub(crate) struct PartialAutomation {
     flow_idle_days: Option<u32>,
     #[serde(default)]
     memory_digest_min_turns: Option<usize>,
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -392,23 +548,46 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         meta_interval_min: None,
         flow_idle_days: None,
         memory_digest_min_turns: None,
+        timezone: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
     // 搜索 API Key 三态语义（与 auth_key 一致）：掩码/缺省 = 沿用旧值；显式空串 = 清除；明文 = 新值
+    // 多后端（search-aggregation）：backends 透传（缺省 = 沿用旧值）；旧平铺字段仍可写入（backends 为空时生效）
     let search = match sec_search {
         None => current.search.clone(),
-        Some(s) => exm_core::config::SearchConfig {
-            provider: s.provider.trim().to_string(),
-            endpoint: s.endpoint.trim().to_string(),
-            api_key: match s.api_key.trim() {
-                "" => String::new(),
-                "***已配置***" => current.search.api_key.clone(),
-                other => other.to_string(),
-            },
-            max_results: s.max_results.clamp(1, 20),
-            proactive: s.proactive,
-        },
+        Some(s) => {
+            let backends = if s.backends.is_empty() {
+                current.search.backends.clone()
+            } else {
+                s.backends
+                    .into_iter()
+                    .map(|mut b| {
+                        b.api_key = match b.api_key.trim() {
+                            "" => String::new(),
+                            "***已配置***" => String::new(), // 后端级掩码无法回查旧值：置空待用户重填
+                            other => other.to_string(),
+                        };
+                        b.provider = b.provider.trim().to_string();
+                        b.endpoint = b.endpoint.trim().to_string();
+                        b
+                    })
+                    .collect()
+            };
+            exm_core::config::SearchConfig {
+                backends,
+                provider: s.provider.trim().to_string(),
+                endpoint: s.endpoint.trim().to_string(),
+                api_key: match s.api_key.trim() {
+                    "" => String::new(),
+                    "***已配置***" => current.search.api_key.clone(),
+                    other => other.to_string(),
+                },
+                max_results: s.max_results.clamp(1, 20),
+                content_fetch_n: s.content_fetch_n.clamp(0, 5),
+                proactive: s.proactive,
+            }
+        }
     };
     let hooks = match sec_hooks {
         None => current.hooks.clone(),
@@ -581,6 +760,11 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             memory_digest_min_turns: auto
                 .memory_digest_min_turns
                 .unwrap_or(current.automation.memory_digest_min_turns),
+            // cron 时区：显式空串 = 回落 UTC；缺省 = 沿用现值
+            timezone: auto
+                .timezone
+                .clone()
+                .unwrap_or_else(|| current.automation.timezone.clone()),
         },
         search,
         hooks,
@@ -624,6 +808,111 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                     .unwrap_or(current.experiments.auto_memory_digest),
             }
         },
+        // 五组补链（此前 put 不接收：设置页保存被静默丢弃）
+        identity: {
+            let i = body.identity.clone().unwrap_or_default();
+            exm_core::config::IdentityConfig {
+                identity_required: i
+                    .identity_required
+                    .unwrap_or(current.identity.identity_required),
+                pairing_ttl_secs: i
+                    .pairing_ttl_secs
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.identity.pairing_ttl_secs),
+                pairing_max_failures: i
+                    .pairing_max_failures
+                    .unwrap_or(current.identity.pairing_max_failures),
+                pairing_lockout_secs: i
+                    .pairing_lockout_secs
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.identity.pairing_lockout_secs),
+                group_gate_default: i
+                    .group_gate_default
+                    .unwrap_or(current.identity.group_gate_default),
+            }
+        },
+        limits: {
+            let l = body.limits.clone().unwrap_or_default();
+            exm_core::config::LimitsConfig {
+                enabled: l.enabled.unwrap_or(current.limits.enabled),
+                window_secs: l
+                    .window_secs
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.limits.window_secs),
+                max_requests: l.max_requests.unwrap_or(current.limits.max_requests),
+                quota_period: l
+                    .quota_period
+                    .filter(|p| ["daily", "weekly", "monthly"].contains(&p.as_str()))
+                    .unwrap_or_else(|| current.limits.quota_period.clone()),
+                quota_tokens: l.quota_tokens.unwrap_or(current.limits.quota_tokens),
+                quota_requests: l
+                    .quota_requests
+                    .unwrap_or(current.limits.quota_requests),
+                quota_running_policy: l
+                    .quota_running_policy
+                    .filter(|p| ["finish", "interrupt"].contains(&p.as_str()))
+                    .unwrap_or_else(|| current.limits.quota_running_policy.clone()),
+            }
+        },
+        triggers: {
+            let t = body.triggers.clone().unwrap_or_default();
+            exm_core::config::TriggersConfig {
+                file_watch: match t.file_watch {
+                    Some(fw) => {
+                        let cur = current.triggers.file_watch.clone();
+                        exm_core::config::FileWatchConfig {
+                            enabled: fw.enabled.unwrap_or(cur.enabled),
+                            debounce_ms: fw
+                                .debounce_ms
+                                .filter(|v| *v > 0)
+                                .unwrap_or(cur.debounce_ms),
+                            exclude: to_hook_list(fw.exclude).unwrap_or(cur.exclude),
+                        }
+                    }
+                    None => current.triggers.file_watch.clone(),
+                },
+                event_webhook: match t.event_webhook {
+                    Some(ew) => {
+                        let cur = current.triggers.event_webhook.clone();
+                        exm_core::config::EventWebhookConfig {
+                            enabled: ew.enabled.unwrap_or(cur.enabled),
+                            // 掩码 = 沿用旧密钥；显式空串 = 清除
+                            secret: match ew.secret.as_deref() {
+                                Some("***已配置***") => cur.secret,
+                                Some(s) => s.trim().to_string(),
+                                None => cur.secret,
+                            },
+                        }
+                    }
+                    None => current.triggers.event_webhook.clone(),
+                },
+            }
+        },
+        mcp_serve: {
+            let m = body.mcp_serve.clone().unwrap_or_default();
+            let cur = current.mcp_serve.clone();
+            exm_core::config::McpServeConfig {
+                enabled: m.enabled.unwrap_or(cur.enabled),
+                http_path: {
+                    let p = m.http_path.unwrap_or_else(|| cur.http_path.clone());
+                    let p = p.trim().to_string();
+                    if p.is_empty() { "/mcp".to_string() } else { p }
+                },
+                allowed_groups: to_hook_list(m.allowed_groups).unwrap_or(cur.allowed_groups),
+                allowed_sessions: cur.allowed_sessions,
+                allowed_tools: to_hook_list(m.allowed_tools).unwrap_or(cur.allowed_tools),
+            }
+        },
+        notify: {
+            let n = body.notify.clone().unwrap_or_default();
+            exm_core::config::NotifyConfig {
+                enabled: n.enabled.unwrap_or(current.notify.enabled),
+                max_chars: n
+                    .max_chars
+                    .filter(|v| *v > 0)
+                    .unwrap_or(current.notify.max_chars),
+            }
+        },
         ..(*current).clone()
     };
     // 测试替身状态由运行期/环境决定，配置载荷不改变它（设置页的 llm 修改只在"真实通道"语义内生效）
@@ -663,7 +952,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
 // ---------------------------------------------------------------- 记忆系统
 
 pub(crate) async fn get_config_schema() -> impl IntoResponse {
-    Json(exm_core::config::config_schema())
+    Json(exm_core::config_schema::config_schema())
 }
 
 /// 消毒命中统计（inbound-sanitization 设置页可见性）：模式 → 计数（进程级）

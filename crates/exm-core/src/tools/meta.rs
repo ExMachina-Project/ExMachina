@@ -65,6 +65,19 @@ impl ToolGateway {
         let req = self.make_meta_approval(agent_id, session_id, &proposal);
         match self.store.add_approval(&req) {
             Ok(_) => {
+                // 实验可观测（assistant-parity）：提议生成事件（meta.proposal，
+                // kind+target 明细）——广播 + 落事件库（事件页可检索提议轨迹）
+                self.emit_and_persist(CoreEvent {
+                    kind: "meta.proposal".into(),
+                    session_id: session_id.to_string(),
+                    payload: serde_json::json!({
+                        "phase": "created",
+                        "approvalId": req.id,
+                        "agentId": agent_id,
+                        "kind": proposal.kind,
+                        "target": proposal.target,
+                    }),
+                });
                 let _ = self.events.send(CoreEvent {
                     kind: "approval.required".into(),
                     session_id: session_id.to_string(),
@@ -352,5 +365,29 @@ mod meta_tool_tests {
         assert!(!res.ok, "不存在的个体应报错");
         let all = gw.meta_observe(&serde_json::json!({}));
         assert!(all.ok, "全体观测应成功");
+    }
+
+    /// 实验可观测（assistant-parity 7.1）：提议落单同时产生 meta.proposal
+    /// 事件（phase=created，含 kind/target 明细）——事件页可检索提议轨迹
+    #[tokio::test]
+    async fn 提议事件_meta_proposal落库() {
+        let gw = tool_gw();
+        let args = serde_json::json!({
+            "kind": "prompt", "target": "worker",
+            "change": { "promptPatch": "测试补段：编码任务先读相邻文件再动手" },
+            "rationale": "事件断言用"
+        });
+        let r = gw
+            .tool_meta("meta", "s-ev", ToolName::MetaPropose, &args)
+            .await;
+        assert!(r.ok, "提议应落单: {:?}", r.error);
+        let events = gw.store.list_events("s-ev").unwrap_or_default();
+        let hit = events
+            .iter()
+            .any(|env| env["payload"]["type"] == "meta.proposal"
+                && env["payload"]["payload"]["phase"] == "created"
+                && env["payload"]["payload"]["kind"] == "prompt"
+                && env["payload"]["payload"]["target"] == "worker");
+        assert!(hit, "meta.proposal(created) 事件应落库: {events:?}");
     }
 }

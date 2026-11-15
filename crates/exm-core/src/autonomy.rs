@@ -98,6 +98,54 @@ pub fn auto_backoff_minutes(cfg: &ExmConfig, idle_streak: u32) -> u64 {
     base * n.min(cap)
 }
 
+/// Super Agent 停机类型三态（assistant-parity 实验可观测）：深度委托会话
+/// 只在三种情况产出非空回复——解析最终文本标记停机类型，事件可检索。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaltKind {
+    /// 交付结果（结论 + 关键产出 + 验证证据）
+    Delivered,
+    /// 需要决策（一个具体问题 + 候选方案 + 建议）
+    NeedsDecision,
+    /// 无法继续（明确说明缺口与已尝试路径）
+    Blocked,
+}
+
+impl HaltKind {
+    pub fn key(&self) -> &'static str {
+        match self {
+            HaltKind::Delivered => "delivered",
+            HaltKind::NeedsDecision => "needs_decision",
+            HaltKind::Blocked => "blocked",
+        }
+    }
+}
+
+/// 启发式解析停机类型：输出契约里三种停机各有语言特征——
+/// 需决策（问句/「建议」「选」）、无法继续（「无法」「缺口」「失败」）、
+/// 其余非空产出按交付。判据宽松即可：事件可观测目的在检索聚合，
+/// 不在精确分类（误分类不影响执行，只影响面板标签）。
+pub fn parse_halt_kind(text: &str) -> HaltKind {
+    let t = text.trim();
+    // 需决策：明确决策请求词，或问句 + 建议/候选特征
+    if t.contains("请确认")
+        || t.contains("请决策")
+        || t.contains("需要你决定")
+        || t.contains("需要决策")
+        || (t.chars().any(|c| c == '？' || c == '?')
+            && (t.contains("建议") || t.contains("还是") || t.contains("选")))
+    {
+        return HaltKind::NeedsDecision;
+    }
+    if t.contains("无法继续")
+        || t.contains("无法完成")
+        || (t.contains("缺口") && t.contains("尝试"))
+        || (t.contains("失败") && !t.contains("已修复"))
+    {
+        return HaltKind::Blocked;
+    }
+    HaltKind::Delivered
+}
+
 /// Auto Agent 单次行动步数预算：显式配置优先，0 = 沿用派发步数上限
 pub fn auto_act_max_steps(cfg: &ExmConfig) -> usize {
     let s = cfg.automation.auto_agent_max_steps;
@@ -200,6 +248,38 @@ mod autonomy_tests {
         assert!(SUPER_AGENT_DISCIPLINE.contains("组模式"), "组模式并行拆解指引");
         assert!(AUTO_ACT_DISCIPLINE.contains("风险闸门"), "自主行动风险闸门");
         assert!(AUTO_EVAL_PROMPT.contains("不确定 = 不做"), "Eval 保守纪律");
+    }
+
+    /// 停机三态解析（实验可观测 7.1）：交付 / 需决策 / 无法继续
+    #[test]
+    fn 停机三态_解析() {
+        // 交付：结论 + 证据，无问句决策
+        assert_eq!(parse_halt_kind("任务完成：报告已生成并验证通过。"), HaltKind::Delivered);
+        // 需决策：问句 + 建议/候选特征
+        assert_eq!(
+            parse_halt_kind("下一步用方案 A 还是方案 B？建议 A（成本低）。"),
+            HaltKind::NeedsDecision
+        );
+        assert_eq!(
+            parse_halt_kind("需要你确认部署窗口，请确认是否今晚执行。"),
+            HaltKind::NeedsDecision
+        );
+        // 无法继续：缺口/失败特征
+        assert_eq!(
+            parse_halt_kind("无法继续：依赖的 API Key 缺失，已尝试三种路径。"),
+            HaltKind::Blocked
+        );
+        assert_eq!(
+            parse_halt_kind("任务失败：上游服务 503，重试三次未恢复。"),
+            HaltKind::Blocked
+        );
+    }
+
+    #[test]
+    fn 停机类型_key_事件检索用() {
+        assert_eq!(HaltKind::Delivered.key(), "delivered");
+        assert_eq!(HaltKind::NeedsDecision.key(), "needs_decision");
+        assert_eq!(HaltKind::Blocked.key(), "blocked");
     }
 
 }

@@ -25,10 +25,13 @@ pub fn spawn_cron_scheduler(core: std::sync::Arc<exm_core::Core>) {
 
 pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
+    // cron 时区（automation.timezone）：五段表达式按配置时区的墙上时钟解释——
+    // 「每天 8 点」在配置时区 8 点触发；空/非法名 = UTC（既有行为）。at 不受影响。
+    let tz = core.config().automation.timezone.clone();
     let jobs = core.cron.list()?;
     let mut changed = false;
     for mut job in jobs {
-        if !exm_core::cron::job_due(&job, now) {
+        if !exm_core::cron::job_due_in(&job, now, &tz) {
             continue;
         }
         let _ = core.events.send(CoreEvent {
@@ -145,6 +148,7 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
     // 自主记忆摘要（实验性 experiments.autoMemoryDigest，9.1）：每日一次低峰期
     // （UTC 4:30，避开 4:00 归档窗口）。关闭态不进扫描（零任务零 token）。
     // 当日去重：同 IDLE_ARCHIVE_MARKER 模式复用 cron 表标记行。
+    // 执行后落 memory.digest 事件（实验可观测：归纳会话数与产出条数）。
     if core.config().experiments.auto_memory_digest {
         use chrono::Timelike;
         if (now.hour(), now.minute()) == (4, 30) {
@@ -158,20 +162,87 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
             if last != minute_key {
                 let sessions = core.list_sessions_admin().unwrap_or_default();
                 let mut digested = 0usize;
+                let before_entries = core
+                    .memory_stats()
+                    .ok()
+                    .and_then(|s| s["memory"]["total"].as_u64())
+                    .unwrap_or(0);
                 for s in &sessions {
                     if core.memory_digest_session(&s.id).await.is_some() {
                         digested += 1;
                     }
                 }
+                let after_entries = core
+                    .memory_stats()
+                    .ok()
+                    .and_then(|s| s["memory"]["total"].as_u64())
+                    .unwrap_or(0);
                 if digested > 0 {
                     eprintln!("[memory-digest] 低峰归纳完成：{digested} 个会话产出记忆条目");
                 }
+                // 实验可观测（assistant-parity）：摘要执行事件——归纳会话数与
+                // 产出条数（前后差值），全局事件流可检索
+                core.emit_session_event(
+                    "",
+                    "memory.digest",
+                    json!({
+                        "sessions": digested,
+                        "entriesProduced": after_entries.saturating_sub(before_entries),
+                    }),
+                );
                 let marker = exm_core::types::CronJob {
                     id: DIGEST_MARKER.into(),
                     name: "自主记忆摘要标记".into(),
                     prompt: String::new(),
                     kind: None,
                     cron: Some("30 4 * * *".into()),
+                    at: None,
+                    target_session: None,
+                    steps: vec![],
+                    group: None,
+                    session_title: None,
+                    enabled: false,
+                    last_run_at: Some(exm_core::types::now_iso()),
+                    last_status: None,
+                    last_run_minute: Some(minute_key),
+                    notify_channels: vec![],
+                    created_at: exm_core::types::now_iso(),
+                };
+                let _ = core.cron.upsert(marker);
+            }
+        }
+    }
+
+    // 每日自动衰减（memory-lifecycle 6.2）：memory.autoDecay 开启时每日一次
+    // 低峰窗口（UTC 4:40，错开 4:30 记忆摘要）全量衰减。关闭态不进扫描
+    // （零任务零开销）。当日去重同 DIGEST_MARKER 模式（cron 表标记行）。
+    // 衰减只调 importance 数值（钳 floor），绝不删除条目；手动端点保留可并存。
+    if core.config().memory_auto_decay {
+        use chrono::Timelike;
+        if (now.hour(), now.minute()) == (4, 40) {
+            const DECAY_MARKER: &str = "__memory_decay_marker__";
+            let minute_key = exm_core::cron::minute_key(now);
+            let last = core
+                .cron
+                .get(DECAY_MARKER)?
+                .and_then(|j| j.last_run_minute)
+                .unwrap_or_default();
+            if last != minute_key {
+                let changed = core.memory_decay(0.05).unwrap_or(0);
+                // 可观测：执行条数落全局事件流（memory.decay.ran；广播 +
+                // 落事件库，事件页/实验卡片可检索——与 emit_and_persist 同口径）
+                core.emit_session_event(
+                    "",
+                    "memory.decay.ran",
+                    json!({ "changed": changed, "floor": 0.05 }),
+                );
+                eprintln!("[memory-decay] 低峰衰减完成：{changed} 条 importance 更新");
+                let marker = exm_core::types::CronJob {
+                    id: DECAY_MARKER.into(),
+                    name: "记忆衰减标记".into(),
+                    prompt: String::new(),
+                    kind: None,
+                    cron: Some("40 4 * * *".into()),
                     at: None,
                     target_session: None,
                     steps: vec![],
@@ -306,5 +377,75 @@ pub(crate) async fn notify_cron_result(
                     }),
                 );
         }
+    }
+}
+
+/// 每日自动衰减（memory-lifecycle 6.2）测试：开关两态与当日不重复
+#[cfg(test)]
+mod auto_decay_tests {
+    fn test_core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-decay-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        exm_core::Core::create(&dir).expect("创建 Core 失败")
+    }
+
+    /// 关闭态：不注册标记行（零任务零开销）
+    #[tokio::test]
+    async fn 关闭态_不注册标记() {
+        let core = test_core();
+        let mut cfg = (*core.config()).clone();
+        cfg.memory_auto_decay = false;
+        core.apply_config(cfg).unwrap();
+        assert!(!core.config().memory_auto_decay, "热更关闭生效");
+        // 关闭态不进扫描分支：标记行不存在（若注册过即行为错误）
+        assert!(core.cron.get("__memory_decay_marker__").unwrap().is_none());
+    }
+
+    /// 衰减语义锚定：只调 importance（钳 floor），绝不删除条目
+    #[tokio::test]
+    async fn 开启态_衰减不删除条目() {
+        let core = test_core();
+        assert!(core.config().memory_auto_decay, "缺省开启");
+        let draft = exm_core::memory::MemoryDraft::new(
+            exm_core::memory::MemoryKind::Fact,
+            "老记忆",
+            "测试记忆",
+        );
+        core.memory_remember_global(draft).unwrap();
+        // 连续执行两次衰减（幂等 + 不删除）
+        let _ = core.memory_decay(0.05).unwrap();
+        let _ = core.memory_decay(0.05).unwrap();
+        let after = core.memory_list(None, 100).unwrap();
+        assert_eq!(after.len(), 1, "衰减绝不删除条目");
+        assert!(
+            (0.05..=1.0).contains(&after[0].importance),
+            "importance 钳在 [floor, 初始] 区间: {}",
+            after[0].importance
+        );
+    }
+
+    /// 标记行当日去重基础：同分钟同 minute_key
+    #[test]
+    fn 标记行_minute_key去重语义() {
+        let now = chrono::Utc::now();
+        let k1 = exm_core::cron::minute_key(now);
+        let k2 = exm_core::cron::minute_key(now);
+        assert_eq!(k1, k2, "同分钟同 key（当日同窗口去重的基础）");
+    }
+
+    /// 事件口径锚定：decay/digest 事件走 emit_session_event（广播 + 落库），
+    /// 全局事件文件可检索（7.2 实验卡片的数据源）。events.send 只广播不落库，
+    /// 用它事件永远进不了事件页——这里锚定修复后的落库行为。
+    #[tokio::test]
+    async fn 事件_衰减执行后落全局事件库() {
+        let core = test_core();
+        assert!(core.config().memory_auto_decay, "缺省开启");
+        core.emit_session_event("", "memory.decay.ran", serde_json::json!({ "changed": 3, "floor": 0.05 }));
+        let evts = core.store.list_events("").unwrap();
+        let hit = evts.iter().any(|env| {
+            env["payload"]["type"].as_str() == Some("memory.decay.ran")
+                && env["payload"]["payload"]["changed"].as_u64() == Some(3)
+        });
+        assert!(hit, "memory.decay.ran 应广播并落全局事件库（空 session_id 文件）");
     }
 }

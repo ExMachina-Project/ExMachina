@@ -4,6 +4,7 @@
 import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { MermaidBlock } from "./MermaidBlock";
 
 /** 复制文本：优先 Clipboard API，非安全上下文降级 execCommand */
 export async function copyText(text: string): Promise<boolean> {
@@ -55,6 +56,11 @@ function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>): React.ReactElem
   const lineCount = text ? text.replace(/\n$/, "").split("\n").length : 0;
   const long = lineCount > FOLD_LINES;
   const [expanded, setExpanded] = useState(false);
+  // mermaid 围栏分流：代码块管线交给图表渲染（动态 import、错误回落原码）。
+  // Hooks 全部前置（rules-of-hooks）——mermaid 分支 return 在所有 Hook 调用后
+  if (lang === "mermaid") {
+    return <MermaidBlock code={text.replace(/\n$/, "")} />;
+  }
   const showFolded = long && !expanded;
   return (
     <div className={`code-block-wrap${long ? " code-block-long" : ""}`}>

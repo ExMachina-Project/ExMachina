@@ -7,13 +7,17 @@
 //! （被动消息 5 分钟有效；群/单聊文本限 2000 字节，收束陈述截断到 650 字符）。
 //! 断线重连：优先 Resume（补发漏掉的事件），Invalid Session(op9) 回退重新 Identify；
 //! config.sandbox = "true" 时走沙箱 openapi（sandbox.api.sgroup.qq.com）。
-//! 平台限制：被动消息仅支持文本——媒体产物以链接注记降级、无 typing 指示（见 platform::caps）；
+//! 平台限制：被动消息正文以文本为主（群/单聊 markdown 已开放到所有机器人，
+//! 审批富消息走 markdown，其余正文仍文本）——媒体产物以链接注记降级、
+//! 无 typing 指示（见 platform::caps）；被动回复每条入站消息限 ~5 次
+//! （群 5 次/5 分钟），回帖段数相应收紧。
 //! 入站附件按扩展名归 image/file，落 inbox 注入（官方 bot 无语音消息形态）。
 //! 监督循环每 5 秒对账：新增账号拉起会话，删除/停用/凭证变更的账号回收任务。
 
 use crate::channel_util::{builtin_command, first_seen, media_placeholder};
 use crate::platform::{
-    admit, report_status, spawn_reply, Channel, ChannelRun, GateDecision, InboundCtx, MediaItem,
+    admit, report_status, spawn_reply_with_approval, ApprovalPrompt, Channel, ChannelRun,
+    GateDecision, InboundCtx, MediaItem,
 };
 use exm_core::Core;
 use futures_util::{SinkExt, StreamExt};
@@ -302,8 +306,12 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         if !first_seen(&format!("qqbot:{}", ch.id), &msg_id) {
                                             continue;
                                         }
-                                        // 入站媒体（组 6.4）：attachments 下载
+                                        // 入站媒体（组 6.4）：attachments 下载。
+                                        // 同轮指纹去重（inbound-media-dedup）：平台同消息
+                                        // 多附件重推致同字节重复——按 (channel, SHA-256[..16])
+                                        // 判重，同指纹只留首个
                                         let mut inbound: Vec<(String, String, String, Vec<u8>)> = Vec::new();
+                                        let mut seen_fp: std::collections::HashSet<String> = std::collections::HashSet::new();
                                         if let Some(atts) = d.get("attachments").and_then(|x| x.as_array()) {
                                             for att in atts {
                                                 let url = att.get("url").and_then(|x| x.as_str()).unwrap_or("");
@@ -314,6 +322,10 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                 let full = if url.starts_with("http") { url.to_string() } else { format!("https://multimedia.qq.com{url}") };
                                                 let kind = if is_image_name(name) { "image" } else { "file" };
                                                 if let Some(bytes) = crate::platform::download_bytes(&full).await {
+                                                    let fp = crate::platform::media_fingerprint(&bytes);
+                                                    if !seen_fp.insert(fp) {
+                                                        continue; // 同轮重复：静默丢弃（debug 级语义）
+                                                    }
                                                     inbound.push((kind.into(), name.into(), peer.key().to_string(), bytes));
                                                 }
                                             }
@@ -352,9 +364,10 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                             mentioned: true,
                                             chat_key: peer.key(),
                                             flow_name: None,
+                                            media: &[],
                                         };
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
-                                            GateDecision::Allow(clean) => {
+                                            GateDecision::Allow(clean, _proactive) => {
                                                 text = clean;
                                             }
                                             GateDecision::Ignore => continue,
@@ -362,8 +375,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                 let creds2 = creds.clone();
                                                 let peer2 = peer.clone();
                                                 let msg_id2 = msg_id.clone();
+                                                let seq2 = Arc::new(AtomicU64::new(0));
                                                 tokio::spawn(async move {
-                                                    send_passive(&creds2, base, &peer2, &msg_id2, 1, &reply).await;
+                                                    send_passive(&creds2, base, &peer2, &msg_id2, &seq2, &reply).await;
                                                 });
                                                 continue;
                                             }
@@ -374,8 +388,38 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                             let creds2 = creds.clone();
                                             let peer2 = peer.clone();
                                             let msg_id2 = msg_id.clone();
+                                            let seq2 = Arc::new(AtomicU64::new(0));
                                             tokio::spawn(async move {
-                                                send_passive(&creds2, base, &peer2, &msg_id2, 1, &reply).await;
+                                                send_passive(&creds2, base, &peer2, &msg_id2, &seq2, &reply).await;
+                                            });
+                                            continue;
+                                        }
+                                        // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖
+                                        // 任务之前处理，避免原轮次审批等待中新建回帖任务造成重复
+                                        // 投递与最终答复丢失（按钮点击产生的 ok:/no: 也走这里）。
+                                        // 裁决可能执行长命令：整体 spawn，不阻塞 WS 事件循环。
+                                        if crate::platform::is_quick_directive(&text) {
+                                            let core2 = core.clone();
+                                            let ch2 = ch.clone();
+                                            let peer2 = peer.clone();
+                                            let external_id2 = external_id.clone();
+                                            let text2 = text.clone();
+                                            let creds2 = creds.clone();
+                                            let msg_id2 = msg_id.clone();
+                                            tokio::spawn(async move {
+                                                let sid = core2.flow_active_session(&ch2.id, peer2.key());
+                                                let reply = crate::platform::quick_directive_reply(
+                                                    &core2,
+                                                    sid.as_deref(),
+                                                    Some(&external_id2),
+                                                    &text2,
+                                                )
+                                                .await
+                                                .unwrap_or_else(|| {
+                                                    "【报告】当前无待审批计划或审批单。".into()
+                                                });
+                                                send_passive(&creds2, base, &peer2, &msg_id2, &Arc::new(AtomicU64::new(0)), &reply)
+                                                    .await;
                                             });
                                             continue;
                                         }
@@ -548,7 +592,133 @@ async fn handle_message(
     let max_chars = peer.max_chars();
     let creds = creds.clone();
     let base = base.to_string();
-    let reply = spawn_reply(
+    // 审批富消息（approval-ergonomics × QQ 官方机器人）：markdown + 内嵌键盘，
+    // 按钮为「指令按钮」——点击等价于用户发出 ok:/no: 文本；平台不支持时逐级回落
+    //（markdown 被拒 → 文本+键盘 → 纯文本），按钮尽量保住。
+    let ap_creds = creds.clone();
+    let ap_base = base.clone();
+    let ap_peer = peer.clone();
+    let ap_msg_id = msg_id.clone();
+    let ap_seq = seq.clone();
+    // 富媒体直发（qqbot-media-files）：官方 files 上行支持 file_data（二进制
+    // base64）——先 POST /files 换 file_info，再 msg_type=7 携带发送。全程
+    // 出站请求，无需公网入站可达（URL 上传要 QQ 服务器来拉文件，NAT 后不可行）。
+    // 官方仅图片（png/jpg）支持充分；视频/语音/文件不走此路（仍降级注记）。
+    let md_creds = creds.clone();
+    let md_base = base.clone();
+    let md_peer = peer.clone();
+    let md_msg_id = msg_id.clone();
+    let md_seq = seq.clone();
+    let media_send: crate::platform::channel::MediaHook = Box::new(
+        move |item: MediaItem| {
+            let creds = md_creds.clone();
+            let base = md_base.clone();
+            let peer = md_peer.clone();
+            let msg_id = md_msg_id.clone();
+            let seq = md_seq.clone();
+            Box::pin(async move {
+                if item.kind != "image" {
+                    return false;
+                }
+                let Some(token) = creds.token().await else {
+                    eprintln!("[qqbot] 媒体发送失败：access_token 获取失败");
+                    return false;
+                };
+                let Ok(bytes) = tokio::fs::read(&item.path).await else {
+                    return false;
+                };
+                // 图片格式护栏：官方 png/jpg；其它扩展名（svg/webp…）直接拒——
+                // 上传后平台侧展示失败，不如在此诚实回落
+                let ext = item
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                    eprintln!("[qqbot] 媒体降级：仅 png/jpg 可直发（收到 .{ext}）");
+                    return false;
+                }
+                use base64::Engine as _;
+                let file_data =
+                    base64::engine::general_purpose::STANDARD.encode(&bytes);
+                // 20MB 软限制（官方文档）：超限回落注记
+                if bytes.len() > 20 * 1024 * 1024 {
+                    eprintln!("[qqbot] 媒体降级：图片超 20MB（{}）", bytes.len());
+                    return false;
+                }
+                let (files_path, msg_path) = match &peer {
+                    Peer::Group(g) => (
+                        format!("/v2/groups/{g}/files"),
+                        format!("/v2/groups/{g}/messages"),
+                    ),
+                    Peer::C2C(u) => (
+                        format!("/v2/users/{u}/files"),
+                        format!("/v2/users/{u}/messages"),
+                    ),
+                    Peer::Guild(_) => return false,
+                };
+                // 第一步：上传换 file_info（srv_send_msg=false 不直接发）
+                let up_body = json!({
+                    "file_type": 1,
+                    "file_data": file_data,
+                    "srv_send_msg": false,
+                });
+                let file_info = match creds
+                    .client
+                    .post(format!("{base}{files_path}"))
+                    .header("Authorization", format!("QQBot {token}"))
+                    .json(&up_body)
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        let v: Value = r.json().await.unwrap_or(Value::Null);
+                        v.get("file_info")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string())
+                    }
+                    Ok(r) => {
+                        let status = r.status();
+                        let body = r.text().await.unwrap_or_default();
+                        eprintln!("[qqbot] 媒体上传失败：HTTP {status} {body}");
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("[qqbot] 媒体上传网络错误：{e}");
+                        None
+                    }
+                };
+                let Some(file_info) = file_info else {
+                    return false;
+                };
+                // 第二步：msg_type=7 携带 file_info 发送（被动回复带 msg_id）
+                let next = seq.fetch_add(1, Ordering::Relaxed) + 1;
+                let msg_body = json!({
+                    "msg_type": 7,
+                    "msg_id": msg_id,
+                    "msg_seq": next,
+                    "media": { "file_info": file_info },
+                });
+                post_message(&creds, &base, &msg_path, &msg_body).await
+            })
+        },
+    );
+    let approval_send: crate::platform::channel::ApprovalHook = Box::new(
+        move |prompt: ApprovalPrompt| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = bool> + Send>,
+        > {
+            let creds = ap_creds.clone();
+            let base = ap_base.clone();
+            let peer = ap_peer.clone();
+            let msg_id = ap_msg_id.clone();
+            let seq = ap_seq.clone();
+            Box::pin(async move {
+                send_passive_approval(&creds, &base, &peer, &msg_id, seq.as_ref(), &prompt).await
+            })
+        },
+    );
+    let reply = spawn_reply_with_approval(
         &run,
         rx,
         max_chars,
@@ -559,11 +729,11 @@ async fn handle_message(
             let msg_id = msg_id.clone();
             let seq = seq.clone();
             async move {
-                let n = seq.fetch_add(1, Ordering::Relaxed) + 1;
-                send_passive(&creds, &base, &peer, &msg_id, n, &text).await;
+                send_passive(&creds, &base, &peer, &msg_id, seq.as_ref(), &text).await;
             }
         },
-        move |_item: MediaItem| async { false },
+        media_send,
+        Some(approval_send),
     );
     // 群聊发送者标记 → 消息 agent_id（消息头显示 + 模型上下文区分发言人）
     let run = if let Some(mark) = sender_mark {
@@ -576,48 +746,240 @@ async fn handle_message(
     let _ = reply.await;
 }
 
-async fn send_passive(
-    creds: &BotCreds,
-    base: &str,
-    peer: &Peer,
-    msg_id: &str,
-    msg_seq: u64,
-    content: &str,
-) {
+/// 被动消息 POST（返回是否成功）：普通文本与审批富消息共用。
+async fn post_message(creds: &BotCreds, base: &str, path: &str, body: &Value) -> bool {
     let Some(token) = creds.token().await else {
         eprintln!("[qqbot] 回复失败：access_token 获取失败");
-        return;
-    };
-    let (path, body) = match peer {
-        Peer::Group(g) => (
-            format!("/v2/groups/{g}/messages"),
-            json!({ "content": content, "msg_type": 0, "msg_id": msg_id, "msg_seq": msg_seq }),
-        ),
-        Peer::C2C(u) => (
-            format!("/v2/users/{u}/messages"),
-            json!({ "content": content, "msg_type": 0, "msg_id": msg_id, "msg_seq": msg_seq }),
-        ),
-        Peer::Guild(c) => (
-            format!("/channels/{c}/messages"),
-            json!({ "content": content, "msg_id": msg_id, "msg_seq": msg_seq }),
-        ),
+        return false;
     };
     match creds
         .client
         .post(format!("{base}{path}"))
         .header("Authorization", format!("QQBot {token}"))
-        .json(&body)
+        .json(body)
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => {}
+        Ok(r) if r.status().is_success() => true,
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             eprintln!("[qqbot] 回复失败：HTTP {status} {body}");
+            false
         }
-        Err(e) => eprintln!("[qqbot] 回复网络错误：{e}"),
+        Err(e) => {
+            eprintln!("[qqbot] 回复网络错误：{e}");
+            false
+        }
     }
+}
+
+/// 被动回复（群/单聊/频道端点各异）。群/单聊正文含 markdown 语法时优先
+/// msg_type=2 原生渲染（2026-04 起开放到所有机器人，无需开关；与主流
+/// 框架的默认行为一致），被平台拒收（内容审核/权限）时换新 msg_seq
+/// 回落 msg_type=0 文本——失败请求未送达不占被动回复额度。
+/// 频道（Guild）markdown 仍需内邀，恒走文本。
+async fn send_passive(
+    creds: &BotCreds,
+    base: &str,
+    peer: &Peer,
+    msg_id: &str,
+    seq: &AtomicU64,
+    content: &str,
+) {
+    let next = || seq.fetch_add(1, Ordering::Relaxed) + 1;
+    match peer {
+        Peer::Group(g) => {
+            let path = format!("/v2/groups/{g}/messages");
+            if has_markdown_syntax(content) {
+                let body = json!({
+                    "msg_type": 2,
+                    "markdown": { "content": content },
+                    "msg_id": msg_id,
+                    "msg_seq": next(),
+                });
+                if post_message(creds, base, &path, &body).await {
+                    return;
+                }
+            }
+            let body = json!({
+                "content": content,
+                "msg_type": 0,
+                "msg_id": msg_id,
+                "msg_seq": next(),
+            });
+            let _ = post_message(creds, base, &path, &body).await;
+        }
+        Peer::C2C(u) => {
+            let path = format!("/v2/users/{u}/messages");
+            if has_markdown_syntax(content) {
+                let body = json!({
+                    "msg_type": 2,
+                    "markdown": { "content": content },
+                    "msg_id": msg_id,
+                    "msg_seq": next(),
+                });
+                if post_message(creds, base, &path, &body).await {
+                    return;
+                }
+            }
+            let body = json!({
+                "content": content,
+                "msg_type": 0,
+                "msg_id": msg_id,
+                "msg_seq": next(),
+            });
+            let _ = post_message(creds, base, &path, &body).await;
+        }
+        Peer::Guild(c) => {
+            let path = format!("/channels/{c}/messages");
+            let body = json!({ "content": content, "msg_id": msg_id, "msg_seq": next() });
+            let _ = post_message(creds, base, &path, &body).await;
+        }
+    }
+}
+
+/// 正文是否含值得原生渲染的 markdown 语法（纯函数，保守判定）：
+/// 只有确实出现结构标记才走 msg_type=2——普通闲聊不碰 markdown 通路
+/// （规避内容审核的不确定性），误判代价只是符号照原样显示。
+fn has_markdown_syntax(text: &str) -> bool {
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("```") {
+            return true; // 代码块（开闭都算，出现即受益）
+        }
+        if t.starts_with('#')
+            || t.starts_with("> ")
+            || t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("1. ")
+        {
+            return true;
+        }
+        if line.contains("**") || (line.contains("`") && !t.starts_with('`')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 审批消息富发送（approval-ergonomics × QQ 官方机器人）——三级回落：
+/// ① msg_type=2 markdown + 内嵌键盘：markdown 渲染 + 按钮（2026-04 起
+///    群/单聊自定义 markdown 已开放到所有机器人，无需申请模板）；
+/// ② msg_type=0 纯文本 + 键盘：markdown 被拒（内容审核 50056 / 语法
+///    拒收）时按钮仍可用——键盘不依赖 markdown 权限；
+/// ③ 返回 false 由调用方回落分段纯文本（键盘也被拒的保底）。
+/// 按钮用「指令按钮」（type=2）而非回调按钮——无需 INTERACTION intent
+/// 与 3 秒回调响应，点击等价于用户发出 ok:/no: 文本：单聊 enter=true
+/// 自动发送；群聊填入输入框（带 @机器人）后由用户发送。
+/// 每次尝试递增 msg_seq（失败请求也可能已消耗序号，重试必须换号）。
+async fn send_passive_approval(
+    creds: &BotCreds,
+    base: &str,
+    peer: &Peer,
+    msg_id: &str,
+    seq: &std::sync::atomic::AtomicU64,
+    prompt: &ApprovalPrompt,
+) -> bool {
+    // 频道消息 API 的键盘形态与群/单聊不同，保守回落纯文本。
+    let path = match peer {
+        Peer::Group(g) => format!("/v2/groups/{g}/messages"),
+        Peer::C2C(u) => format!("/v2/users/{u}/messages"),
+        Peer::Guild(_) => return false,
+    };
+    // ① markdown + 键盘
+    let body_md = approval_body_markdown(prompt, msg_id, seq.fetch_add(1, Ordering::Relaxed) + 1);
+    if post_message(creds, base, &path, &body_md).await {
+        return true;
+    }
+    // ② 纯文本 + 键盘：正文保持原文（无 markdown 修饰），指令指引保留
+    let body_kb = approval_body_text(prompt, msg_id, seq.fetch_add(1, Ordering::Relaxed) + 1);
+    post_message(creds, base, &path, &body_kb).await
+    // ③ 两级都失败 → false，调用方走分段纯文本回落（不在这里重试纯文本，
+    //    避免与调用方回落叠加造成同内容重复投递）。
+}
+
+/// 审批富消息请求体（纯函数，便于测试）——首选形态：markdown + 键盘。
+fn approval_body_markdown(prompt: &ApprovalPrompt, msg_id: &str, msg_seq: u64) -> Value {
+    json!({
+        "msg_type": 2,
+        "markdown": { "content": approval_markdown(&prompt.text) },
+        "keyboard": approval_keyboard(&prompt.approval_id),
+        "msg_id": msg_id,
+        "msg_seq": msg_seq,
+    })
+}
+
+/// 审批富消息请求体（纯函数，便于测试）——回落形态：纯文本 + 键盘。
+/// markdown 被平台拒收（权限 50056 / 内容审核）时按钮仍可用。
+fn approval_body_text(prompt: &ApprovalPrompt, msg_id: &str, msg_seq: u64) -> Value {
+    json!({
+        "msg_type": 0,
+        "content": prompt.text,
+        "keyboard": approval_keyboard(&prompt.approval_id),
+        "msg_id": msg_id,
+        "msg_seq": msg_seq,
+    })
+}
+
+/// 审批 markdown 正文：首行升为标题，保留摘要原文，尾部补按钮操作提示。
+fn approval_markdown(text: &str) -> String {
+    let mut lines = text.trim().lines();
+    let head = lines.next().unwrap_or("⛔ 审批请求");
+    let mut out = format!("## {head}");
+    for line in lines {
+        out.push('\n');
+        out.push_str(line);
+    }
+    out.push_str("\n\n点击下方按钮可直接裁决（群聊点击后发送即可）");
+    out
+}
+
+/// 审批内嵌键盘（纯函数，便于测试）：批准/拒绝两个指令按钮。
+/// data 即快捷裁决指令（`ok:<单号>` / `no:<单号>`），权限由通道侧
+/// `parse_approval_directive` 的 origin/管理员判定兜底。
+fn approval_keyboard(approval_id: &str) -> Value {
+    let button = |id: &str, label: &str, visited: &str, style: i64, data: String, tip: String| {
+        json!({
+            "id": id,
+            "render_data": {
+                "label": label,
+                "visited_label": visited,
+                "style": style,
+            },
+            "action": {
+                "type": 2,
+                "permission": { "type": 2 },
+                "data": data,
+                "enter": true,
+                "unsupport_tips": tip,
+            },
+        })
+    };
+    json!({
+        "content": {
+            "rows": [{
+                "buttons": [
+                    button(
+                        "approve",
+                        "批准",
+                        "已批准",
+                        1,
+                        format!("ok:{approval_id}"),
+                        format!("请回复 ok:{approval_id} 批准"),
+                    ),
+                    button(
+                        "deny",
+                        "拒绝",
+                        "已拒绝",
+                        0,
+                        format!("no:{approval_id}"),
+                        format!("请回复 no:{approval_id} 拒绝"),
+                    ),
+                ],
+            }],
+        },
+    })
 }
 
 // ---------------------------------------------------------------- 测试（纯函数部分）
@@ -701,5 +1063,83 @@ mod tests {
         );
         assert!(!is_image_name("report.pdf"));
         assert!(!is_image_name("noext"), "无扩展名不算图片");
+    }
+
+    /// 审批键盘（approval-ergonomics × QQ 官方机器人）：两个指令按钮，
+    /// data 即 ok:/no: 裁决指令；用 type=2（指令按钮）避免 INTERACTION 回调依赖。
+    #[test]
+    fn 审批键盘_指令按钮带裁决指令() {
+        let kb = approval_keyboard("abcd1234");
+        let buttons = kb
+            .pointer("/content/rows/0/buttons")
+            .and_then(|v| v.as_array())
+            .expect("键盘应含一行按钮");
+        assert_eq!(buttons.len(), 2, "批准/拒绝两个按钮");
+        let approve = &buttons[0];
+        let deny = &buttons[1];
+        assert_eq!(approve["action"]["type"], 2, "指令按钮（非回调按钮）");
+        assert_eq!(approve["action"]["data"], "ok:abcd1234");
+        assert_eq!(deny["action"]["data"], "no:abcd1234");
+        assert_eq!(
+            approve["action"]["permission"]["type"], 2,
+            "所有人可见按钮；裁决权限由通道侧兜底"
+        );
+        assert_eq!(approve["action"]["enter"], true, "单聊点击自动发送");
+        assert!(
+            approve["action"].get("reply").is_none(),
+            "官方 action 无 reply 字段，非标字段会导致整条消息 400 被拒"
+        );
+        assert_eq!(approve["render_data"]["label"], "批准");
+        assert_eq!(deny["render_data"]["label"], "拒绝");
+    }
+
+    /// markdown 语法嗅探（纯函数）：结构标记（标题/列表/引用/代码块/粗体/
+    /// 行内码）出现才走 msg_type=2；普通闲聊不误入 markdown 通路。
+    #[test]
+    fn markdown嗅探_保守判定() {
+        assert!(has_markdown_syntax("## 报告\n正文"));
+        assert!(has_markdown_syntax("- 第一项\n- 第二项"));
+        assert!(has_markdown_syntax("1. 步骤"));
+        assert!(has_markdown_syntax("> 引用"));
+        assert!(has_markdown_syntax("重点**加粗**说明"));
+        assert!(has_markdown_syntax("运行 `cargo test` 即可"));
+        assert!(has_markdown_syntax("```rust\nfn main() {}\n```"));
+        // 普通文本：不碰 markdown 通路（含「沉默」等无结构标记的闲聊）
+        assert!(!has_markdown_syntax("已把任务跑完，结果见文件。"));
+        assert!(!has_markdown_syntax("好的，我看看\n稍等"));
+        // 纯反引号开头（未闭合代码块）也算——渲染收益优先
+        assert!(has_markdown_syntax("```\nfn main() {}"));
+    }
+
+    /// 审批富消息三级回落的请求体形态（纯函数部分）：markdown 体带
+    /// msg_type=2 + markdown.content；文本体带 msg_type=0 + content + keyboard。
+    #[test]
+    fn 审批富消息_回落链请求体() {
+        let prompt = ApprovalPrompt {
+            approval_id: "abcd1234".into(),
+            text: "⛔ 审批请求（单号 abcd1234）：\necho hi".into(),
+        };
+        // 构造两级请求体的纯函数抽出（与 send_passive_approval 内联保持一致）
+        let md = approval_body_markdown(&prompt, "m1", 1);
+        assert_eq!(md["msg_type"], 2, "首选 markdown 形态");
+        assert!(md["markdown"]["content"].as_str().unwrap().contains("## "));
+        assert!(md["keyboard"]["content"]["rows"].is_array(), "带内嵌键盘");
+
+        let plain = approval_body_text(&prompt, "m1", 2);
+        assert_eq!(plain["msg_type"], 0, "回落形态为纯文本");
+        assert!(plain["content"].as_str().unwrap().starts_with("⛔"), "正文为原文");
+        assert!(plain["keyboard"]["content"]["rows"].is_array(), "键盘保留");
+        assert!(plain.get("markdown").is_none(), "文本体不得携带 markdown 字段");
+    }
+
+    /// 审批 markdown：首行升标题、保留摘要原文、附按钮提示。
+    #[test]
+    fn 审批markdown_标题与操作提示() {
+        let text = "⛔ 审批请求（单号 abcd1234）：\necho hi\n120 秒内回复 ok:abcd1234 批准 / no:abcd1234 拒绝，或到控制台裁决";
+        let md = approval_markdown(text);
+        assert!(md.starts_with("## ⛔ 审批请求"), "首行应为标题: {md}");
+        assert!(md.contains("echo hi"), "应保留命令摘要: {md}");
+        assert!(md.contains("ok:abcd1234"), "应保留文本裁决指引: {md}");
+        assert!(md.contains("点击下方按钮"), "应提示按钮操作: {md}");
     }
 }

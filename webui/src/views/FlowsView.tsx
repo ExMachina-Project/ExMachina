@@ -8,7 +8,7 @@
  *  右侧选中流的绑定会话消息流（StatementList 只读渲染）。窄屏单列切换。
  *  数据与通道侧/WebUI 同源（/channels/flows 系端点 + /sessions/:id/messages）。
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Skeleton, Tag } from "antd";
 import {
   ArrowLeftOutlined,
@@ -17,12 +17,13 @@ import {
   NumberOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
-import { api, assetUrl, serverBase, type Channel, type ChannelFlow } from "../api";
+import { api, assetUrl, downloadUrl, type Channel, type ChannelFlow } from "../api";
 import type { ChatMessage, InboundAttachment } from "../types";
 import { relativeTime } from "../time";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
 import { StatementList } from "../components/Statements";
+import { MessageProcess } from "../components/ProcessSteps";
 import { useIsNarrow } from "../useIsNarrow";
 import { createPortal } from "react-dom";
 import { useSubbarSlot } from "../components/Subbar";
@@ -129,9 +130,11 @@ export function FlowsView(): React.ReactElement {
   }, [reloadBound]);
   /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新；上翻回看时不抢滚动条） */
   // 定位语义：切流后首次拿到「非空消息列表」时瞬时定位到最新（骨架期与空列表不定位——
-  // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）
+  // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）。
+  // 用 useLayoutEffect：绘制前同步定位——useEffect 会先绘制顶部再跳底，
+  // 切流时可见「从头滚到尾」闪动（部署实测）。
   const anchoredRef = useRef<string | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const sid = activeSid ?? null;
     if (sid && anchoredRef.current !== sid) {
       if (msgLoading || messages.length === 0) return;
@@ -141,7 +144,7 @@ export function FlowsView(): React.ReactElement {
       return;
     }
     if (!stickRef.current) return;
-    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight, behavior: "smooth" });
+    msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
   }, [messages, msgLoading, activeSid]);
 
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
@@ -299,6 +302,14 @@ export function FlowsView(): React.ReactElement {
                         <span className="flows-msg-role">{sender}</span>
                         <span className="flows-msg-time">{relativeTime(m.createdAt)}</span>
                       </div>
+                      {/* 过程透明：聊天流与对话页同源展示思考/工具调用（只读，不挂回滚操作） */}
+                      <MessageProcess
+                        thinking={m.thinking}
+                        steps={m.steps}
+                        toolCalls={m.toolCalls}
+                        labelThinking={(n) => t("chat.usedThinking", { n: String(n) })}
+                        labelTools={(n) => t("chat.usedTools", { n: String(n) })}
+                      />
                       <StatementList statements={m.statements} plain />
                       {m.attachments && m.attachments.length > 0 && (
                         <InboundAttachments items={m.attachments} />
@@ -325,7 +336,7 @@ function InboundAttachments({ items }: { items: InboundAttachment[] }) {
   return (
     <div className="msg-artifacts inbound">
       {items.map((a, i) => {
-        const href = `${serverBase()}/api/asset/download?path=${encodeURIComponent(a.path)}`;
+        const href = downloadUrl(a.path);
         return a.kind === "image" ? (
           <a key={i} className="msg-artifact image" href={href} target="_blank" rel="noreferrer">
             <img src={assetUrl(a.path)} alt={a.name} loading="lazy" />

@@ -319,9 +319,10 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                         mentioned,
                         chat_key: channel.as_str(),
                         flow_name: None,
+                        media: &[],
                     };
                     match admit(core.as_ref(), &ch, &gate_ctx).await {
-                        GateDecision::Allow(clean) => {
+                        GateDecision::Allow(clean, _proactive) => {
                             text = clean;
                         }
                         GateDecision::Ignore => continue,
@@ -337,6 +338,26 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                     }
                     // 内置命令（/new /status）：闸门放行后、进入会话执行前拦截
                     if let Some(reply) = builtin_command(&core, &ch, &channel, &text).await {
+                        let client2 = client.clone();
+                        let token2 = bot_token.clone();
+                        let chan = channel.clone();
+                        tokio::spawn(async move {
+                            send_message(&client2, &token2, &chan, &reply).await
+                        });
+                        continue;
+                    }
+                    // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖任务之前
+                    // 处理，避免原轮次审批等待中新建回帖任务造成重复投递与答复丢失。
+                    if crate::platform::is_quick_directive(&text) {
+                        let sid = core.flow_active_session(&ch.id, &channel);
+                        let reply = crate::platform::quick_directive_reply(
+                            &core,
+                            sid.as_deref(),
+                            Some(&external_id),
+                            &text,
+                        )
+                        .await
+                        .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
                         let client2 = client.clone();
                         let token2 = bot_token.clone();
                         let chan = channel.clone();

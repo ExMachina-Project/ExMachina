@@ -291,6 +291,7 @@ mod tests {
             group_gate: None,
             proactive_reply: None,
             proactive_rate: None,
+            mention_reply: None,
             capability: "computer".into(),
             memory_isolation: false,
             created_at: String::new(),

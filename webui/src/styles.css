@@ -310,6 +310,16 @@ input, textarea { caret-color: var(--accent); }
   color: var(--muted);
   transition: color var(--dur-fast) var(--ease-out);
 }
+/* 图标与文字间距：antd v6 给「图标后首个 span」加 margin-inline-start（默认 10px），
+   与上面 icon 的 margin-inline-end 叠加成 19px——归零收敛为单侧 9px。
+   :where 包裹下 antd 规则零优先级，直接类名覆盖即可稳定生效 */
+.app-sider .ant-menu-item .anticon + .ant-menu-title-content {
+  margin-inline-start: 0;
+}
+/* 同源间距：选中态右侧徽标/括注同样被加了 start margin，一并归零 */
+.app-sider .ant-menu-item .ant-menu-item-icon + .ant-menu-title-content {
+  margin-inline-start: 0;
+}
 .app-sider .ant-menu-item:hover {
   background: var(--hover) !important;
 }
@@ -571,6 +581,46 @@ textarea.ant-input:focus,
 }
 .page-actions { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 
+/* ============ 页头二级页签（Segmented）提对比 ============
+   实测问题：默认 Segmented（32px 高 / 14px 字 / 底色 rgb(24,24,27) /
+   选中块 rgb(39,39,42)）贴在暗背景上几乎不可见——页签是页面级导航，
+   不是次要控件，必须有清晰的边界与选中对比（视觉走查 2026-11）。
+   挂点两类：.page-actions（PageHeader actions）与 .page-head-row > .ant-space
+   （自绘头 Space 包裹，如会话页），统一覆盖。 */
+.page-actions .ant-segmented,
+.page-head-row .ant-space .ant-segmented {
+  padding: 3px;
+  background: color-mix(in srgb, var(--bg-sunken) 72%, var(--bg)) !important;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.page-actions .ant-segmented-item,
+.page-head-row .ant-space .ant-segmented-item {
+  border-radius: 4px;
+}
+.page-actions .ant-segmented .ant-segmented-item-label,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-label {
+  min-height: 26px;
+  padding: 0 14px;
+  line-height: 26px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted);
+}
+.page-actions .ant-segmented .ant-segmented-item-selected .ant-segmented-item-label,
+.page-actions .ant-segmented .ant-segmented-item-label:hover,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-selected .ant-segmented-item-label,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-label:hover {
+  color: var(--text-hi);
+}
+.page-actions .ant-segmented .ant-segmented-thumb,
+.page-actions .ant-segmented .ant-segmented-item-selected,
+.page-head-row .ant-space .ant-segmented .ant-segmented-thumb,
+.page-head-row .ant-space .ant-segmented .ant-segmented-item-selected {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
 /* ============ 通用分页骨架 ============ */
 .pane-wrap { width: 100%; }
 .pane-toolbar { margin-bottom: 14px; }
@@ -757,7 +807,10 @@ textarea.ant-input:focus,
   color: var(--accent);
 }
 .msg-user .msg-head b { color: var(--text-hi); }
-.stmt-line { margin: 4px 0; line-height: 1.75; }
+.stmt-line { margin: 4px 0; line-height: 1.75; overflow-wrap: anywhere; }
+/* 聊天流纯文本直排（stmt-plain）：保换行结构 + 长不可断串（URL/base64/
+ * 长路径/代码原文）任意断行——否则会撑出内容区横向滚动（部署实测） */
+.stmt-plain { white-space: pre-wrap; }
 .stmt-tag { margin-right: 6px; }
 .stmt-level { margin-left: 6px; font-family: var(--mono); font-size: 11px; }
 
@@ -1421,7 +1474,10 @@ textarea.ant-input:focus,
   padding: 2px 8px;
   border-left: 3px solid var(--amber);
   border-radius: var(--r-sm);
-  display: inline-block;
+  display: block;
+  /* tableLayout=fixed 下长命令不再参与列宽分配：列内自行断行（路径/参数长串兜底 anywhere） */
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 /* 审批行元信息跳转（移动端查漏）：无边框文本按钮，触屏热区靠行高撑 */
 .link-btn {
@@ -2776,6 +2832,18 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
 
 /* 代码块复制按钮 */
 .code-block-wrap { position: relative; }
+
+/* mermaid 图表块（chart-rendering）：SVG 居中 + 横向滚动防溢出 */
+.mermaid-block {
+  overflow-x: auto;
+  padding: 12px 8px;
+  text-align: center;
+  border: 1px solid var(--line);
+  background: var(--bg-1, transparent);
+}
+.mermaid-block svg { max-width: 100%; height: auto; }
+.mermaid-err { color: var(--warn, #fbbf24); font-size: 11px; }
+
 .code-block-wrap .code-copy-btn {
   position: absolute;
   top: 6px; right: 8px;
@@ -2815,6 +2883,11 @@ body:has(.ant-modal-root) .app-content { overflow: hidden; }
   max-width: 100%;
 }
 .msg-artifact:hover { border-color: var(--accent); color: var(--accent); }
+/* 语音条产物（speech_reply）：caption + 原生 audio 播放器 */
+.msg-artifact.voice {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+}
+.msg-artifact.voice audio { width: 260px; height: 36px; }
 /* 入站附件（im-inbound-attach）：聊天流 user 消息里的缩略图网格（ChatView 产物条同款卡片） */
 .msg-artifacts.inbound { border-top: none; padding-top: 4px; margin-top: 6px; }
 .msg-artifacts.inbound .msg-artifact.image { padding: 0; border: none; background: none; }
@@ -3850,10 +3923,11 @@ mark.search-hit {
   display: flex; align-items: baseline; gap: 10px;
   padding: 14px 18px 10px;
   border-bottom: 1px solid var(--line);
+  min-width: 0;
 }
-.flows-thread-name { font-size: 15px; font-weight: 600; color: var(--text-hi); }
+.flows-thread-name { font-size: 15px; font-weight: 600; color: var(--text-hi); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flows-thread-meta { font-size: 11px; color: var(--muted-dim); }
-.flows-messages { flex: 1; overflow-y: auto; padding: 14px 18px; min-height: 0; }
+.flows-messages { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 14px 18px; min-height: 0; }
 .flows-msg { margin-bottom: 14px; }
 .flows-msg-head {
   display: flex; align-items: baseline; gap: 8px;

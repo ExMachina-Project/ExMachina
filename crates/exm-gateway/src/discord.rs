@@ -310,9 +310,9 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         let sender_mark = crate::channel_util::sender_origin(
                                             is_group, &display, &external_id,
                                         );
-                                        let gate_ctx = InboundCtx { text: &text, external_id: &external_id, display_name: &display, is_group, mentioned, chat_key: channel_id.as_str(), flow_name: None };
+                                        let gate_ctx = InboundCtx { text: &text, external_id: &external_id, display_name: &display, is_group, mentioned, chat_key: channel_id.as_str(), flow_name: None, media: &[] };
                                         match admit(core.as_ref(), &ch, &gate_ctx).await {
-                                            GateDecision::Allow(clean) => {
+                                            GateDecision::Allow(clean, _proactive) => {
                                                 text = clean;
                                             }
                                             GateDecision::Ignore => continue,
@@ -326,6 +326,27 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                         }
                                         // 内置命令（/new /status）：闸门放行后、进入会话执行前拦截
                                         if let Some(reply) = builtin_command(&core, &ch, &channel_id, &text).await {
+                                            let client2 = client.clone();
+                                            let token2 = token.clone();
+                                            let cid = channel_id.clone();
+                                            tokio::spawn(async move { send_message(&client2, &token2, &cid, &reply).await });
+                                            continue;
+                                        }
+                                        // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖
+                                        // 任务之前处理，避免原轮次审批等待中新建回帖任务造成重复
+                                        // 投递与最终答复丢失。
+                                        if crate::platform::is_quick_directive(&text) {
+                                            let sid = core.flow_active_session(&ch.id, &channel_id);
+                                            let reply = crate::platform::quick_directive_reply(
+                                                &core,
+                                                sid.as_deref(),
+                                                Some(&external_id),
+                                                &text,
+                                            )
+                                            .await
+                                            .unwrap_or_else(|| {
+                                                "【报告】当前无待审批计划或审批单。".into()
+                                            });
                                             let client2 = client.clone();
                                             let token2 = token.clone();
                                             let cid = channel_id.clone();

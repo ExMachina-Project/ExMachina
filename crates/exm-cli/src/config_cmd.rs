@@ -10,7 +10,8 @@
 //! 即时生效口径请用 WebUI / 桌面端设置页（PUT /config）。
 
 use crate::render::*;
-use exm_core::config::{config_schema, ExmConfig};
+use exm_core::config::ExmConfig;
+use exm_core::config_schema::config_schema;
 use owo_colors::OwoColorize;
 use std::path::Path;
 

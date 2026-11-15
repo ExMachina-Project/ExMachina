@@ -2,7 +2,7 @@
 //! take_reply 推送摘要 / ok:no 裁决权限 / 无关方裁决被拒 / 非 flow 会话天然隔离。
 #[cfg(test)]
 mod channel_approval_tests {
-    use crate::platform::channel_runtime::{ChannelRun, parse_approval_directive};
+    use crate::platform::channel::{ChannelRun, parse_approval_directive};
     use exm_core::types::{now_iso, ApprovalRequest, CoreEvent};
 
     fn core() -> exm_core::Core {
@@ -30,6 +30,7 @@ mod channel_approval_tests {
             group_gate: None,
             proactive_reply: None,
             proactive_rate: None,
+            mention_reply: None,
             capability: "tools".into(),
             memory_isolation: false,
             created_at: String::new(),
@@ -241,6 +242,261 @@ mod channel_approval_tests {
         // run() 对 ok: 指令在无 external_id 时:caller 为空串,既非 origin
         // 用户也非 admin → 拒绝。锁定该行为(admins 空 + origin_user 空 = 全拒)。
         let ws = core_arc.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    // ---------------- 回帖循环：中间提示不吞收束答复 ----------------
+
+    /// 审批推送后回帖循环不得退出：审批是本轮中间事件，最终答复（run.finished）
+    /// 仍须送达——否则通道里用户批完只看到审批摘要，永远等不到执行结果。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 审批推送后不结束回帖_最终答复仍送达() {
+        let core = std::sync::Arc::new(core());
+        let c = ch(vec![]);
+        let (run, rx) = ChannelRun::begin(&core, &c, "chat-1").await.unwrap();
+        let sid = run.session_id.clone();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sent2 = sent.clone();
+        let reply = crate::platform::channel::spawn_reply(
+            &run,
+            rx,
+            500,
+            move |text| {
+                let sent = sent2.clone();
+                async move {
+                    sent.lock().unwrap().push(text);
+                }
+            },
+            |_item: crate::platform::MediaItem| async { false },
+        );
+        core.events
+            .send(CoreEvent {
+                kind: "approval.required".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "approvalId": "abcd1234", "agentId": "a1", "command": "echo hi"
+                }),
+            })
+            .unwrap();
+        // 新回帖契约（重复回复根治）：收束事件只对本轮有效 = run() 已返回
+    //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
+    run.round_done
+        .store(true, std::sync::atomic::Ordering::Release);
+    core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "statements": [{ "text": "已完成" }]
+                }),
+            })
+            .unwrap();
+        reply.await.unwrap();
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.iter().any(|t| t.contains("abcd1234")),
+            "审批提示应送达: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|t| t.contains("已完成")),
+            "审批后的最终答复应送达: {sent:?}"
+        );
+        drop(sent);
+        let ws = core.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 审批富消息钩子（QQ 官方机器人按钮）：命中后审批文本不再走普通发送，
+    /// 回帖循环继续等待收束答复。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 审批富消息钩子_命中后不走文本且继续收束() {
+        type HookFuture = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+        let core = std::sync::Arc::new(core());
+        let c = ch(vec![]);
+        let (run, rx) = ChannelRun::begin(&core, &c, "chat-1").await.unwrap();
+        let sid = run.session_id.clone();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let hooked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sent2 = sent.clone();
+        let hooked2 = hooked.clone();
+        let hook: crate::platform::channel::ApprovalHook = Box::new(
+            move |prompt: crate::platform::ApprovalPrompt| -> HookFuture {
+                let hooked = hooked2.clone();
+                Box::pin(async move {
+                    hooked.lock().unwrap().push(prompt.approval_id);
+                    true
+                })
+            },
+        );
+        let reply = crate::platform::channel::spawn_reply_with_approval(
+            &run,
+            rx,
+            500,
+            move |text| {
+                let sent = sent2.clone();
+                async move {
+                    sent.lock().unwrap().push(text);
+                }
+            },
+            |_item: crate::platform::MediaItem| async { false },
+            Some(hook),
+        );
+        core.events
+            .send(CoreEvent {
+                kind: "approval.required".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "approvalId": "abcd1234", "agentId": "a1", "command": "echo hi"
+                }),
+            })
+            .unwrap();
+        // 新回帖契约（重复回复根治）：收束事件只对本轮有效 = run() 已返回
+    //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
+    run.round_done
+        .store(true, std::sync::atomic::Ordering::Release);
+    core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({
+                    "statements": [{ "text": "已完成" }]
+                }),
+            })
+            .unwrap();
+        reply.await.unwrap();
+        assert_eq!(
+            hooked.lock().unwrap().as_slice(),
+            ["abcd1234"],
+            "审批钩子应收到单号"
+        );
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.iter().all(|t| !t.contains("abcd1234")),
+            "富消息命中后审批文本不应重复走普通发送: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|t| t.contains("已完成")),
+            "钩子命中后仍应送达收束答复: {sent:?}"
+        );
+        drop(sent);
+        let ws = core.config().workspace_root.clone();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}
+
+// ---------------- 回帖发言权（latest-wins）：重复回复根治 ----------------
+
+mod reply_speaker_tests {
+    use crate::platform::channel::spawn_reply;
+    use crate::platform::channels::Channel;
+    use exm_core::types::CoreEvent;
+    use std::sync::Arc;
+
+    fn core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-rsp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        exm_core::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    fn ch() -> Channel {
+        Channel {
+            id: "c-rsp".into(),
+            kind: "webhook".into(),
+            enabled: true,
+            group: None,
+            allowed_chats: vec![],
+            admins: vec![],
+            account: None,
+            secret: None,
+            reply_webhook: None,
+            token: None,
+            config: Default::default(),
+            group_gate: None,
+            proactive_reply: None,
+            proactive_rate: None,
+            mention_reply: None,
+            capability: "tools".into(),
+            memory_isolation: false,
+            created_at: String::new(),
+        }
+    }
+
+    /// 同会话并发两个回帖任务（长轮次期间用户追问的生产形态）：
+    /// 前一轮的收束回复只能被发送一次——旧任务被新任务取代后不得再发言。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 并发回帖_前轮收束只发一遍() {
+        let core = Arc::new(core());
+        let c = ch();
+        // 任务①：订阅先建立（模拟上一轮的回帖任务）
+        let (run1, rx1) = crate::platform::channel::ChannelRun::begin(&core, &c, "chat-dup")
+            .await
+            .unwrap();
+        let sid = run1.session_id.clone();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        let mk_send = |sent: Arc<std::sync::Mutex<Vec<String>>>| {
+            move |text: String| {
+                let sent = sent.clone();
+                async move {
+                    sent.lock().unwrap().push(text);
+                }
+            }
+        };
+        let reply1 = spawn_reply(&run1, rx1, 500, mk_send(sent.clone()), |_i| async { false });
+
+        // 任务②：新消息到达（run2 round_done 置位前先挂任务，模拟 handle_message 顺序）
+        let (run2, rx2) = crate::platform::channel::ChannelRun::begin(&core, &c, "chat-dup")
+            .await
+            .unwrap();
+        // 同一流 → 同一会话
+        assert_eq!(run2.session_id, sid);
+        let reply2 = spawn_reply(&run2, rx2, 500, mk_send(sent.clone()), |_i| async { false });
+
+        // 前一轮（任务①的轮次）收束：事件广播，两个任务都收得到
+        run1
+            .round_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({ "statements": [{ "text": "第一轮答复" }] }),
+            })
+            .unwrap();
+
+        // 第二轮随后收束
+        run2
+            .round_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        core.events
+            .send(CoreEvent {
+                kind: "run.finished".into(),
+                session_id: sid.clone(),
+                payload: serde_json::json!({ "statements": [{ "text": "第二轮答复" }] }),
+            })
+            .unwrap();
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let (_, _) = tokio::join!(reply1, reply2);
+        })
+        .await;
+
+        let sent = sent.lock().unwrap();
+        let count_first = sent
+            .iter()
+            .filter(|t| t.contains("第一轮答复"))
+            .count();
+        let count_second = sent
+            .iter()
+            .filter(|t| t.contains("第二轮答复"))
+            .count();
+        assert_eq!(count_first, 1, "前一轮答复只发一遍（重复回复根治）: {sent:?}");
+        assert_eq!(count_second, 1, "第二轮答复不丢失: {sent:?}");
+        drop(sent);
+        let ws = core.config().workspace_root.clone();
         let _ = std::fs::remove_dir_all(&ws);
     }
 }
