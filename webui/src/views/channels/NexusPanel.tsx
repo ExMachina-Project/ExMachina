@@ -1,12 +1,13 @@
-/** 智能连结网络（实验性）：外部连结体管理——远程 EXMACHINA 网关 / 本机 CLI 智能体的接入与维护 */
+/** 智能连结面板（nexus-channels-merge）：外部智能体连结体管理，作为「智能连结」页的页签内容。
+ *  自 NexusView.tsx 搬移（PageHeader/页面壳去掉，实验性 Alert 保留——功能本身仍实验）：
+ *  远程 EXMACHINA 网关 / 本机 CLI 智能体（opencode / codex / claude）的接入、拓扑与维护。 */
 import React, { useCallback, useEffect, useState } from "react";
 import { Alert, Button, Card, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch, Tag, message } from "antd";
-import { BrandEmpty } from "../components/BrandEmpty";
+import { BrandEmpty } from "../../components/BrandEmpty";
 import { ApiOutlined, PlusOutlined, SettingOutlined, UsergroupDeleteOutlined } from "@ant-design/icons";
-import { api, type NexusLink } from "../api";
-import { PageHeader } from "../components/PageHeader";
-import { NexusTopology, type TopoEdge, type TopoNode } from "../components/NexusTopology";
-import { useT } from "../i18n/core";
+import { api, type NexusLink } from "../../api";
+import { NexusTopology, type TopoEdge, type TopoNode } from "../../components/NexusTopology";
+import { useT } from "../../i18n/core";
 
 // 连结体类别 → 资产灰阶语汇：仅 opencode（自研外部连结）保留品牌紫点缀，其余中性
 const KIND_COLORS: Record<string, string | undefined> = {
@@ -23,7 +24,7 @@ const CLI_DEFAULTS: Record<string, string> = {
   claude: "claude -p",
 };
 
-export function NexusView(): React.ReactElement {
+export function NexusPanel(): React.ReactElement {
   const t = useT();
   const [links, setLinks] = useState<NexusLink[]>([]);
   const [loading, setLoading] = useState(false);
@@ -60,45 +61,12 @@ export function NexusView(): React.ReactElement {
     setEdgeBusy(true);
     try {
       await api.editNexusEdge("unbind", agentId, linkId);
-      message.success(t("nexus.topoUnbound"));
-      await load();
+      const g = await api.nexusGraph();
+      setTopo(g);
     } catch (e) {
-      message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
+      message.error(String(e));
     } finally {
       setEdgeBusy(false);
-    }
-  };
-
-  const submit = async () => {
-    const v = await form.validateFields();
-    setSaving(true);
-    try {
-      const r = await api.saveNexusLink({
-        id: v.id.trim(),
-        name: v.name.trim(),
-        kind: v.kind,
-        endpoint: (v.endpoint ?? "").trim(),
-        apiKey: (v.apiKey ?? "").trim(),
-        command: (v.command ?? "").trim(),
-        enabled: v.enabled ?? true,
-      });
-      message.success(t("nexus.saved", { name: r.link.name }));
-      setModal(null);
-      await load();
-    } catch (e) {
-      message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const remove = async (id: string) => {
-    try {
-      await api.deleteNexusLink(id);
-      message.success(t("nexus.deleted"));
-      await load();
-    } catch (e) {
-      message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
     }
   };
 
@@ -106,30 +74,45 @@ export function NexusView(): React.ReactElement {
     setProbing(id);
     try {
       const r = await api.probeNexusLink(id);
-      if (r.ok) {
-        message.success(t("nexus.probeOk"));
-      } else {
-        message.error(t("nexus.probeFail", { msg: r.message.slice(0, 160) }));
-      }
+      if (r.ok) message.success(t("nexus.probeOk", { id }));
+      else message.error(t("nexus.probeFail", { id, msg: r.message ?? "" }));
     } catch (e) {
-      message.error(t("common.saveFailed", { err: String(e).slice(0, 140) }));
+      message.error(String(e));
     } finally {
       setProbing(null);
     }
   };
 
+  const remove = async (id: string) => {
+    try {
+      await api.deleteNexusLink(id);
+      message.success(t("nexus.deleted", { id }));
+      await load();
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const submit = async () => {
+    const v = await form.validateFields();
+    setSaving(true);
+    try {
+      if (modal?.link) {
+        await api.saveNexusLink({ ...modal.link, ...v } as NexusLink);
+      } else {
+        await api.saveNexusLink(v as NexusLink);
+      }
+      setModal(null);
+      await load();
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="pane-wrap">
-      <PageHeader
-        en="NEXUS"
-        title={t("nav.nexus")}
-        desc={t("nexus.desc")}
-        actions={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setModal({ link: null }); }}>
-            {t("nexus.add")}
-          </Button>
-        }
-      />
+    <div>
       <Alert
         type="warning"
         showIcon
@@ -138,62 +121,60 @@ export function NexusView(): React.ReactElement {
         description={t("nexus.expDesc")}
         style={{ marginBottom: 12 }}
       />
-      <div className="pane-body">
-        <Spin spinning={loading}>
-          {/* 拓扑/列表切换（nexus-topology-admin）：默认拓扑（结构可读），列表保留管理操作 */}
-          <Segmented
-            value={view}
-            onChange={(v) => setView(v as "topo" | "list")}
-            options={[
-              { value: "topo", label: t("nexus.viewTopo") },
-              { value: "list", label: t("nexus.viewList") },
-            ]}
-            style={{ marginBottom: 12 }}
-          />
-          {view === "topo" ? (
-            <NexusTopology nodes={topo.nodes} edges={topo.edges} onUnbind={(a, l) => void unbind(a, l)} busy={edgeBusy} />
-          ) : links.length === 0 ? (
-            <BrandEmpty description={t("nexus.empty")} className="pane-empty" />
-          ) : (
-            <div className="nexus-links">
-              {links.map((l) => (
-                <Card key={l.id} size="small" className="hud nexus-link-card">
-                  <div className="nexus-link-row">
-                    <Tag color={l.enabled ? KIND_COLORS[l.kind] : undefined}>{t("nexus.kind." + l.kind)}</Tag>
-                    <b>{l.name}</b>
-                    <span className="mono dim">{l.id}</span>
-                    {(l.endpoint || l.command || CLI_DEFAULTS[l.kind]) && (
-                      <span className="dim mono nexus-endpoint">{l.endpoint || l.command || CLI_DEFAULTS[l.kind]}</span>
-                    )}
-                    <Space size={4} style={{ marginLeft: "auto" }}>
-                      {!l.enabled && <Tag>disabled</Tag>}
-                      <Button
-                        size="small"
-                        loading={probing === l.id}
-                        icon={<ApiOutlined />}
-                        onClick={() => void probe(l.id)}
-                        title={t("nexus.probe")}
-                      />
-                      <Button
-                        size="small"
-                        icon={<SettingOutlined />}
-                        onClick={() => {
-                          // forceRender 常驻挂载：编辑回填必须在打开弹窗前写入表单
-                          form.setFieldsValue({ ...l, apiKey: undefined });
-                          setModal({ link: l });
-                        }}
-                      />
-                      <Popconfirm title={t("nexus.delConfirm", { name: l.name })} onConfirm={() => void remove(l.id)}>
-                        <Button size="small" danger icon={<UsergroupDeleteOutlined />} />
-                      </Popconfirm>
-                    </Space>
-                  </div>
-                </Card>
-              ))}
-            </div>
-          )}
-        </Spin>
-      </div>
+      <Spin spinning={loading}>
+        {/* 拓扑/列表切换（nexus-topology-admin）：默认拓扑（结构可读），列表保留管理操作 */}
+        <Segmented
+          value={view}
+          onChange={(v) => setView(v as "topo" | "list")}
+          options={[
+            { value: "topo", label: t("nexus.viewTopo") },
+            { value: "list", label: t("nexus.viewList") },
+          ]}
+          style={{ marginBottom: 12 }}
+        />
+        {view === "topo" ? (
+          <NexusTopology nodes={topo.nodes} edges={topo.edges} onUnbind={(a, l) => void unbind(a, l)} busy={edgeBusy} />
+        ) : links.length === 0 ? (
+          <BrandEmpty description={t("nexus.empty")} className="pane-empty" />
+        ) : (
+          <div className="nexus-links">
+            {links.map((l) => (
+              <Card key={l.id} size="small" className="hud nexus-link-card">
+                <div className="nexus-link-row">
+                  <Tag color={l.enabled ? KIND_COLORS[l.kind] : undefined}>{t("nexus.kind." + l.kind)}</Tag>
+                  <b>{l.name}</b>
+                  <span className="mono dim">{l.id}</span>
+                  {(l.endpoint || l.command || CLI_DEFAULTS[l.kind]) && (
+                    <span className="dim mono nexus-endpoint">{l.endpoint || l.command || CLI_DEFAULTS[l.kind]}</span>
+                  )}
+                  <Space size={4} style={{ marginLeft: "auto" }}>
+                    {!l.enabled && <Tag>disabled</Tag>}
+                    <Button
+                      size="small"
+                      loading={probing === l.id}
+                      icon={<ApiOutlined />}
+                      onClick={() => void probe(l.id)}
+                      title={t("nexus.probe")}
+                    />
+                    <Button
+                      size="small"
+                      icon={<SettingOutlined />}
+                      onClick={() => {
+                        // forceRender 常驻挂载：编辑回填必须在打开弹窗前写入表单
+                        form.setFieldsValue({ ...l, apiKey: undefined });
+                        setModal({ link: l });
+                      }}
+                    />
+                    <Popconfirm title={t("nexus.delConfirm", { name: l.name })} onConfirm={() => void remove(l.id)}>
+                      <Button size="small" danger icon={<UsergroupDeleteOutlined />} />
+                    </Popconfirm>
+                  </Space>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </Spin>
 
       <Modal
         open={modal !== null}

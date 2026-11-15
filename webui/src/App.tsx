@@ -16,7 +16,6 @@ import {
   UserOutlined,
   FundOutlined,
   ClockCircleOutlined,
-  CloudUploadOutlined,
   UnorderedListOutlined,
   AppstoreAddOutlined,
   DeploymentUnitOutlined,
@@ -49,14 +48,14 @@ const LedgerView = lazy(() => import("./views/LedgerView").then((m) => ({ defaul
 const MemoryView = lazy(() => import("./views/MemoryView").then((m) => ({ default: m.MemoryView })));
 const KnowledgeView = lazy(() => import("./views/KnowledgeView").then((m) => ({ default: m.KnowledgeView })));
 const SettingsView = lazy(() => import("./views/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
-const NexusView = lazy(() => import("./views/NexusView").then((m) => ({ default: m.NexusView })));
 const SinglesView = lazy(() => import("./views/SinglesView").then((m) => ({ default: m.SinglesView })));
 const SkillsView = lazy(() => import("./views/SkillsView").then((m) => ({ default: m.SkillsView })));
 const PluginsView = lazy(() => import("./views/PluginsView").then((m) => ({ default: m.PluginsView })));
 const AutomationsView = lazy(() => import("./views/AutomationsView").then((m) => ({ default: m.AutomationsView })));
 const ApprovalsView = lazy(() => import("./views/ApprovalsView").then((m) => ({ default: m.ApprovalsView })));
-const ChannelsView = lazy(() => import("./views/channels/ChannelsView").then((m) => ({ default: m.ChannelsView })));
 const ActivityView = lazy(() => import("./views/ActivityView").then((m) => ({ default: m.ActivityView })));
+/** 智能连结页（nexus-channels-merge）：通道已并入，三页签合一 */
+const NexusView = lazy(() => import("./views/channels/ChannelsView").then((m) => ({ default: m.ChannelsView })));
 
 /** 懒加载 chunk 未就绪时的兜底：品牌徽记 + 等宽字状态行（替代裸 Spin） */
 function ViewSuspense({ children }: { children: React.ReactNode }): React.ReactElement {
@@ -87,7 +86,6 @@ type ViewKey =
   | "models"
   | "automations"
   | "approvals"
-  | "channels"
   | "ledger"
   | "memory"
   | "knowledge"
@@ -97,10 +95,10 @@ type ViewKey =
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
   "chat", "flows", "tasks", "sessions", "agent", "nexus", "graph", "automations",
-  "skills", "plugins", "models", "approvals", "channels", "ledger", "memory", "knowledge", "activity", "settings",
+  "skills", "plugins", "models", "approvals", "ledger", "memory", "knowledge", "activity", "settings",
 ];
 
-/** 旧路由兼容（agent-groups-merge）：独立组页已并入「智能体」页，#/groups 落到 #/agent */
+/** 旧路由兼容：独立组页已并入「智能体」页（#/groups → #/agent） */
 const LEGACY_VIEW_ALIASES: Record<string, ViewKey> = { groups: "agent" };
 
 /** 从 hash 解析视图：#/chat/<sessionId> → { view: chat, session }; 非法回落 chat */
@@ -127,7 +125,7 @@ export const NAV_ITEMS: {
   { key: "flows", en: "FLOWS", labelKey: "nav.flows", icon: <CommentOutlined /> },
   { key: "tasks", en: "TASKS", labelKey: "nav.tasks", icon: <ThunderboltOutlined /> },
   { key: "agent", en: "AGENTS", labelKey: "nav.agent", icon: <UserOutlined /> },
-  { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined />, experimental: true },
+  { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined /> },
   { key: "sessions", en: "SESSIONS", labelKey: "nav.sessions", icon: <UnorderedListOutlined /> },
   { key: "graph", en: "DAG", labelKey: "nav.dag", icon: <ApartmentOutlined /> },
   { key: "automations", en: "CRON", labelKey: "nav.cron", icon: <ClockCircleOutlined /> },
@@ -135,7 +133,6 @@ export const NAV_ITEMS: {
   { key: "plugins", en: "PLUGINS", labelKey: "nav.plugins", icon: <AppstoreAddOutlined /> },
   { key: "models", en: "MODELS", labelKey: "nav.models", icon: <ApiOutlined /> },
   { key: "approvals", en: "APPROVALS", labelKey: "nav.approvals", icon: <BellOutlined /> },
-  { key: "channels", en: "CHANNELS", labelKey: "nav.channels", icon: <CloudUploadOutlined /> },
   { key: "ledger", en: "LEDGER", labelKey: "nav.ledger", icon: <FundOutlined /> },
   { key: "memory", en: "MEMORY", labelKey: "nav.memory", icon: <DatabaseOutlined /> },
   { key: "knowledge", en: "KNOWLEDGE", labelKey: "nav.knowledge", icon: <BookOutlined /> },
@@ -503,7 +500,6 @@ export default function App(): React.ReactElement {
             {view === "models" && <ModelsView />}
             {view === "automations" && <AutomationsView />}
             {view === "approvals" && <ApprovalsView />}
-            {view === "channels" && <ChannelsView />}
             {view === "ledger" && <LedgerView />}
             {view === "memory" && <MemoryView />}
             {view === "knowledge" && <KnowledgeView />}
