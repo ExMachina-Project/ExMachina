@@ -20,7 +20,6 @@ import {
 import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../../api";
 import { buildCapabilityOptions } from "../../models";
 import { getTestRecord, putTestRecord } from "../../testLog";
-import { CapabilityBadges, badgesOfModel } from "../../components/CapabilityBadges";
 import { PageHeader } from "../../components/PageHeader";
 import { useT, type TKey } from "../../i18n/core";
 
@@ -454,10 +453,6 @@ export function ModelsView(): React.ReactElement {
                       <Tag color="warning">{t("models.keyMissing")}</Tag>
                     )}
                   </span>
-                  <span className="model-status-item">
-                    <span className="k">{t("models.modelList")}</span>
-                    <span className="mono">{t("models.modelCount", { n: p.models.length })}</span>
-                  </span>
                   <span className={`model-status-item test-state ${(() => {
                     const rec = getTestRecord(p.id);
                     return rec ? (rec.ok ? "ok" : "fail") : "";
@@ -482,21 +477,6 @@ export function ModelsView(): React.ReactElement {
                   <span className="k">{t("models.endpoint")}</span>
                   <span className="mono">{p.baseUrl}</span>
                   <Tag>{t(FORMAT_LABEL_KEY[p.apiFormat || "openai"] ?? "models.fmtShort.openai")}</Tag>
-                </div>
-                <div className="model-kv">
-                  <span className="k">{t("models.modelList")}</span>
-                  <span className="model-caps">
-                    {p.models.length ? (
-                      p.models.map((m) => (
-                        <Tag key={m.model}>
-                          {m.model}
-                          <CapabilityBadges items={badgesOfModel(m)} />
-                        </Tag>
-                      ))
-                    ) : (
-                      <span className="dim">{t("models.capNone")}</span>
-                    )}
-                  </span>
                 </div>
                 <div className="model-kv">
                   <span className="k">{t("models.keyLabel")}</span>
