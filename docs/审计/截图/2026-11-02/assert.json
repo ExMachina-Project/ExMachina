@@ -1,0 +1,50 @@
+[
+  {
+    "view": "chat",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/chat.png"
+  },
+  {
+    "view": "sessions",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/sessions.png"
+  },
+  {
+    "view": "models",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/models.png"
+  },
+  {
+    "view": "channels",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/channels.png"
+  },
+  {
+    "view": "groups",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/groups.png"
+  },
+  {
+    "view": "memory",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/memory.png"
+  },
+  {
+    "view": "activity",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/activity.png"
+  },
+  {
+    "view": "settings",
+    "ok": true,
+    "missing": [],
+    "shot": "docs/审计/截图/2026-11-02/settings.png"
+  }
+]
