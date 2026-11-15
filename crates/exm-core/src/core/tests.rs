@@ -649,8 +649,11 @@ mod root_approval_tests {
         cfg.use_mock = true;
         cfg.memory_enabled = false;
         // 数字 uid:约束开启(用当前进程 uid——CI runner 非 root,setuid 到别的 uid 会 EPERM;
-        // 同 uid 降权是无操作,约束链路(解析/confine_home/envs)照常走到)
+        // 同 uid 降权是无操作,约束链路(解析/confine_home/envs)照常走到)。
+        // execHome 显式指到测试目录:缺省 /home/<uid> 在 CI 上不可写(root 所有),
+        // spawn current_dir 会 ENOENT——圈禁链路走到了,但不依赖 /home 权限
         cfg.security.exec_user = current_uid_string();
+        cfg.security.exec_home = dir.display().to_string();
         Core::with_config(cfg).expect("创建 Core 失败")
     }
 
