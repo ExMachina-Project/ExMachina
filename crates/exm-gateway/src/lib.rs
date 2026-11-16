@@ -73,6 +73,7 @@ pub mod selfcheck;
 pub mod version;
 pub mod voice;
 pub mod ws;
+pub mod editor;
 
 /// 提取器拒绝（请求体 / 查询串解析失败）统一成全站错误契约：400 + {"error": 可读中文}。
 ///
@@ -335,6 +336,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
             )),
         )
         .merge(platform::routes())
+        .merge(editor::routes())
         .merge(llm_admin::routes())
         .merge(plugin_admin::routes())
         .merge(identity::routes())

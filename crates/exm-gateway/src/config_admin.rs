@@ -24,6 +24,15 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "halfLifeDays": cfg.memory_half_life_days,
             "semanticModel": cfg.memory_semantic_model,
             "mdMaxChars": cfg.memory_md_max_chars,
+            "autoDecay": cfg.memory_auto_decay,
+        },
+        "compaction": cfg.compaction,
+        "knowledge": { "injectTopK": cfg.knowledge_inject_top_k, "injectMaxChars": cfg.knowledge_inject_max_chars },
+        "computer": {
+            "enabled": cfg.computer.enabled,
+            "approval": cfg.computer.approval,
+            "maxEdge": cfg.computer.max_edge,
+            "actionIntervalMs": cfg.computer.action_interval_ms,
         },
         "security": {
             "execApproval": cfg.security.exec_approval,
@@ -36,6 +45,9 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "approvalWaitSecs": cfg.security.approval_wait_secs,
             "keySetupDismissed": cfg.security.key_setup_dismissed,
             "toolCallBudget": cfg.security.tool_call_budget,
+            "sanitizeRules": cfg.security.sanitize_rules,
+            "chatMaxSteps": cfg.security.chat_max_steps,
+            "contextBudgetRatio": cfg.security.context_budget_ratio,
         },
         "automation": {
             "heartbeatEnabled": cfg.automation.heartbeat_enabled,
@@ -148,6 +160,10 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConfigBody {
     #[serde(default)]
+    compaction: Option<PartialCompaction>,
+    #[serde(default)]
+    knowledge: Option<PartialKnowledge>,
+    #[serde(default)]
     llm: Option<PartialLlm>,
     #[serde(default)]
     max_concurrency: Option<usize>,
@@ -199,6 +215,28 @@ pub(crate) struct ConfigBody {
     /// 结果推送
     #[serde(default)]
     notify: Option<PartialNotify>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialCompaction {
+    trigger_ratio: Option<f32>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialKnowledge {
+    inject_top_k: Option<usize>,
+    inject_max_chars: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PartialSanitizeRules {
+    fake_system_prompt: Option<bool>,
+    hijack_directive: Option<bool>,
+    fake_tool_result: Option<bool>,
+    hidden_unicode: Option<bool>,
 }
 
 /// 通道身份（设置页）：部分更新语义——缺省字段沿用旧值
@@ -388,6 +426,8 @@ pub(crate) fn to_hook_list(v: Option<serde_json::Value>) -> Option<Vec<String>> 
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PartialSecurity {
     #[serde(default)]
+    sanitize_rules: Option<PartialSanitizeRules>,
+    #[serde(default)]
     exec_approval: Option<String>,
     /// 命令前缀白名单：接受「逗号分隔字符串」或「字符串数组」两种形态（schema 下发 string，设置页文本框直存）
     #[serde(default)]
@@ -470,6 +510,8 @@ pub(crate) struct PartialAutomation {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PartialMemory {
     #[serde(default)]
+    auto_decay: Option<bool>,
+    #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
     recall_limit: Option<usize>,
@@ -506,6 +548,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         Some(v) => v.to_string(),
     };
     let mem = body.memory.unwrap_or(PartialMemory {
+        auto_decay: None,
         enabled: None,
         recall_limit: None,
         half_life_days: None,
@@ -513,6 +556,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
         md_max_chars: None,
     });
     let sec = body.security.unwrap_or(PartialSecurity {
+        sanitize_rules: None,
         exec_approval: None,
         exec_allowlist: None,
         auth_key: None,
@@ -624,7 +668,17 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             None => current.tools.clone(),
         },
     };
+    let compaction = body.compaction.unwrap_or_default();
+    let knowledge = body.knowledge.unwrap_or_default();
+    let sanitize = sec.sanitize_rules.unwrap_or_default();
     let mut next = ExmConfig {
+        compaction: exm_core::config::CompactionConfig {
+            trigger_ratio: compaction.trigger_ratio.filter(|v| (0.0..=0.95).contains(v))
+                .unwrap_or(current.compaction.trigger_ratio),
+        },
+        knowledge_inject_top_k: knowledge.inject_top_k.unwrap_or(current.knowledge_inject_top_k).min(10),
+        knowledge_inject_max_chars: knowledge.inject_max_chars.unwrap_or(current.knowledge_inject_max_chars).clamp(100, 2000),
+        memory_auto_decay: mem.auto_decay.unwrap_or(current.memory_auto_decay),
         llm: LlmConfig {
             base_url: partial
                 .base_url
@@ -682,15 +736,19 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             sanitize_rules: exm_core::config::SanitizeRuleConfig {
                 fake_system_prompt: sec
                     .sanitize_fake_system_prompt
+                    .or(sanitize.fake_system_prompt)
                     .unwrap_or(current.security.sanitize_rules.fake_system_prompt),
                 hijack_directive: sec
                     .sanitize_hijack_directive
+                    .or(sanitize.hijack_directive)
                     .unwrap_or(current.security.sanitize_rules.hijack_directive),
                 fake_tool_result: sec
                     .sanitize_fake_tool_result
+                    .or(sanitize.fake_tool_result)
                     .unwrap_or(current.security.sanitize_rules.fake_tool_result),
                 hidden_unicode: sec
                     .sanitize_hidden_unicode
+                    .or(sanitize.hidden_unicode)
                     .unwrap_or(current.security.sanitize_rules.hidden_unicode),
             },
             // 执行身份约束（Linux）：请求未带 = 沿用现值

@@ -262,6 +262,12 @@ pub fn endpoints() -> Vec<Endpoint> {
         // ---------------- 工作目录
         Endpoint::new("get", "/api/workspace", "工作目录查看"),
         Endpoint::new("put", "/api/workspace", "工作目录设置"),
+        Endpoint::new("get", "/api/fs/list", "桌面工作区目录"),
+        Endpoint::new("get", "/api/fs/file", "桌面文本预览"),
+        Endpoint::new("put", "/api/fs/file", "桌面文件保存与检查点"),
+        Endpoint::new("get", "/api/workspace/changes", "工作区变更"),
+        Endpoint::new("get", "/api/git/overview", "Git 分支与历史"),
+        Endpoint::new("post", "/api/git/op", "Git 操作"),
     ]
 }
 

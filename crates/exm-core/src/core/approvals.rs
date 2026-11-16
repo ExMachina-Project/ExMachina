@@ -7,6 +7,32 @@ use super::super::Core;
 use crate::types::*;
 use std::sync::Arc;
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EditorGitAction {
+    root: std::path::PathBuf,
+    args: Vec<String>,
+}
+
+fn editor_git_args_valid(args: &[String]) -> bool {
+    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["push"] | ["reset", "--hard"] => true,
+        ["restore", "--", path] => !path.is_empty() && !path.starts_with(['/', '\\'])
+            && !path.contains(':') && !path.replace('\\', "/").split('/').any(|s| s == ".."),
+        _ => false,
+    }
+}
+
+async fn execute_editor_git(req: &ApprovalRequest) -> anyhow::Result<String> {
+    let action: EditorGitAction = serde_json::from_str(req.meta_json.as_deref().ok_or_else(|| anyhow::anyhow!("Git 审批缺少工作区信息"))?)?;
+    anyhow::ensure!(editor_git_args_valid(&action.args), "Git 审批参数无效");
+    anyhow::ensure!(action.root.join(".git").exists(), "审批来源工作区已不是 Git 仓库");
+    let out = tokio::time::timeout(std::time::Duration::from_secs(60), tokio::process::Command::new("git")
+        .arg("--literal-pathspecs").args(&action.args).current_dir(&action.root).env("GIT_TERMINAL_PROMPT", "0")
+        .kill_on_drop(true).output()).await.map_err(|_| anyhow::anyhow!("Git 操作超时"))??;
+    anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    Ok(String::from_utf8_lossy(&out.stdout).chars().take(4000).collect())
+}
+
 impl Core {
     /// 会话审批授权写入（approval-ergonomics「本会话允许」档）：
     /// 前缀口径见 allowlist::command_head。红线校验在 approval_decide 调用侧——
@@ -112,6 +138,22 @@ impl Core {
             ApprovalScope::Once { approve: false }
         };
         let approve = effective.is_approve();
+        if req.command.starts_with("[git] ") {
+            req.decided_at = Some(now_iso());
+            if !approve {
+                req.status = "denied".into();
+            } else {
+                let result = execute_editor_git(&req).await;
+                req.status = if result.is_ok() { "executed" } else { "failed" }.into();
+                req.result = Some(match result { Ok(text) => text, Err(e) => e.to_string() });
+                self.store.audit_tool_best_effort("desktop", "git", &serde_json::json!({
+                    "approvalId": req.id, "command": req.command,
+                }), req.result.as_deref().unwrap_or(""), 0);
+            }
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
+        }
         // 视频动作审批单（[video] 前缀）：批准 = 回调代发执行器，拒绝 = 记录跳过
         if req.command.starts_with("[video]") {
             let payload = req.command.trim_start_matches("[video]").trim().to_string();
@@ -340,6 +382,27 @@ impl Core {
             session_id: String::new(),
             payload: serde_json::json!({ "approvalId": req.id, "agentId": "webui", "command": command }),
         });
+        Ok(req)
+    }
+
+    /// The exact project and argv survive a workspace switch while awaiting approval.
+    pub async fn request_editor_git_approval(
+        &self,
+        root: &std::path::Path,
+        args: Vec<String>,
+    ) -> anyhow::Result<ApprovalRequest> {
+        anyhow::ensure!(editor_git_args_valid(&args), "不支持的 Git 审批动作");
+        let root = root.canonicalize()?;
+        let command = format!("[git] {} · git {}", root.display(), args.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(" "));
+        let req = ApprovalRequest {
+            id: crate::types::new_id(), session_id: String::new(), node_id: None,
+            agent_id: "desktop".into(), command, status: "pending".into(), result: None,
+            created_at: now_iso(), decided_at: None, origin_user: None, origin_role: None,
+            meta_json: Some(serde_json::to_string(&EditorGitAction { root, args })?),
+        };
+        self.store.add_approval(&req)?;
+        let _ = self.events.send(CoreEvent { kind: "approval.required".into(), session_id: String::new(),
+            payload: serde_json::json!({ "approvalId": req.id, "agentId": req.agent_id, "command": req.command }) });
         Ok(req)
     }
 

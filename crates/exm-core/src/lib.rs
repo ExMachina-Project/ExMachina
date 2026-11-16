@@ -414,18 +414,21 @@ impl Core {
     /// 工作区文件保存（WebUI 编辑器写入口径）：路径防 `..` 兜底、写前检查点、工具审计。
     /// 与写类工具同规则（当日首次改动前的版本落 `.exmachina/checkpoints/`，供回滚）。
     /// 返回结果摘要；越界/非法路径报错。网关侧已做工作区规范化校验，此处兜底拒绝。
-    /// （当前无调用点——预留接口；pub(crate) 化待接入方出现再升 pub，codebase-refactor D2）
-    #[allow(dead_code)]
-    pub(crate) fn save_workspace_file(&self, rel: &str, content: &str) -> anyhow::Result<String> {
-        let norm = rel.replace('\\', "/").trim_matches('/').to_string();
-        if norm.is_empty()
-            || std::path::Path::new(rel.trim()).is_absolute()
-            || norm.split('/').any(|seg| seg == "..")
-        {
-            anyhow::bail!("路径越界（仅允许工作区内的相对路径）: {rel}");
+    pub fn save_workspace_file(&self, rel: &str, content: &str) -> anyhow::Result<String> {
+        let root = self.orchestrator().tools.editor_path(".")?;
+        self.save_workspace_file_in(&root, rel, content)
+    }
+
+    /// Bind an editor save to the project captured by its HTTP request.
+    pub fn save_workspace_file_in(&self, root: &std::path::Path, rel: &str, content: &str) -> anyhow::Result<String> {
+        let orchestrator = self.orchestrator();
+        let root = root.canonicalize()?;
+        anyhow::ensure!(root == orchestrator.tools.editor_path(".")?, "工作区已切换，请重新打开文件");
+        let target = orchestrator.tools.editor_path_in(&root, rel)?;
+        let norm = target.strip_prefix(&root)?.to_string_lossy().replace('\\', "/");
+        if let Ok(meta) = std::fs::symlink_metadata(&target) {
+            anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "只能保存普通文件");
         }
-        let root = self.config().workspace_root.clone();
-        let target = root.join(&norm);
         if target.is_file() {
             let day: String = crate::types::now_iso().chars().take(10).collect();
             let dst = root
@@ -433,7 +436,19 @@ impl Core {
                 .join("checkpoints")
                 .join(&day)
                 .join(&norm);
-            if !dst.exists() {
+            orchestrator.tools.editor_path_in(&root, &norm)?;
+            // Checkpoint directories must not redirect the backup outside this project.
+            let mut parent = dst.parent();
+            while let Some(p) = parent {
+                if p == root { break; }
+                if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+                    anyhow::bail!("检查点目录不能是符号链接");
+                }
+                parent = p.parent();
+            }
+            if let Ok(meta) = std::fs::symlink_metadata(&dst) {
+                anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "检查点不能是符号链接或特殊文件");
+            } else {
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -452,7 +467,7 @@ impl Core {
             0,
         );
         Ok(format!(
-            "已保存 {norm}（{} 字节，写前检查点已记录）",
+            "已保存 {norm}（{} 字节）",
             content.len()
         ))
     }

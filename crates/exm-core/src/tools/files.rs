@@ -161,6 +161,37 @@ fn build_walker(root: &Path, glob: &str) -> ignore::Walk {
 }
 
 impl ToolGateway {
+    /// Editor paths are relative to the selected workspace. Symlinks are deliberately
+    /// excluded so reading and saving always refer to the same workspace file.
+    pub fn editor_path(&self, raw: &str) -> anyhow::Result<PathBuf> {
+        self.editor_path_in(&self.effective_root(), raw)
+    }
+
+    /// Resolve against a captured root so an in-flight editor operation cannot change projects.
+    pub fn editor_path_in(&self, root: &Path, raw: &str) -> anyhow::Result<PathBuf> {
+        let normalized = raw.replace('\\', "/");
+        if normalized.is_empty() || normalized.starts_with('/') || normalized.contains(':')
+            || normalized.split('/').any(|part| matches!(part, ".." | ".git" | ".exmachina")) {
+            bail!("路径越界（仅允许工作区内的相对路径）");
+        }
+        let root = root.canonicalize()?;
+        let mut path = root.clone();
+        for part in Path::new(&normalized).components() {
+            if let std::path::Component::Normal(part) = part {
+                path.push(part);
+                if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                    bail!("编辑器不读取或写入符号链接");
+                }
+            }
+        }
+        // Reuse execution-identity restrictions as well as the workspace boundary.
+        self.resolve_safe(&path.to_string_lossy())?;
+        if !canonicalize_best(&path).starts_with(strip_verbatim(root)) {
+            bail!("路径越界");
+        }
+        Ok(path)
+    }
+
     /// 路径安全解析：规范化后必须落在「组工作区」或「全局工作区」之内。
     /// 不存在的路径按「最近存在的父目录」规范化后再判定 —— 否则 `..` 拼接可绕过越界检查。
     pub(crate) fn resolve_safe(&self, raw: &str) -> anyhow::Result<PathBuf> {
