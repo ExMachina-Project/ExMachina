@@ -85,7 +85,7 @@ pub(super) async fn stage_selfcheck(e: &Env, c: &mut Checker) -> anyhow::Result<
     c.check(
         "OpenAPI：核心端点在册",
         doc["paths"]["/api/sessions"].is_object()
-            && doc["paths"]["/api/sessions/:id/chat"].is_object()
+            && doc["paths"]["/api/sessions/{id}/chat"]["post"].is_object()
             && doc["paths"]["/api/agents"].is_object(),
     );
 }
@@ -186,4 +186,3 @@ pub(super) async fn stage_nexus_topology(e: &Env, c: &mut Checker) -> anyhow::Re
 
     Ok(())
 }
-
