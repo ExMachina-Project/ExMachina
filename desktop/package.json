@@ -2,8 +2,13 @@
   "name": "exmachina-desktop",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "EXMACHINA 桌面端（Tauri v2）：自带本地网关 / 远程直连",
   "scripts": {
+    "build:ui": "npm --prefix .. run build:desktop-ui",
+    "check:ui": "npm --prefix .. run check:desktop-ui",
+    "dev:ui": "vite --config vite.config.ts",
+    "lint:ui": "eslint src",
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build"

@@ -10,7 +10,12 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-rust": "^6.0.2",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
     "@types/qrcode": "^1.5.6",
+    "@uiw/react-codemirror": "^4.25.12",
     "antd": "^6.6.3",
     "mermaid": "^11.17.2",
     "qrcode": "^1.5.4",

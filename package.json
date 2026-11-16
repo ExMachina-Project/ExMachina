@@ -2,6 +2,7 @@
   "name": "exmachina",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "EXMACHINA - Ex-Machina multi-agent cluster collaboration system (Rust core + CLI + Gateway + WebUI)",
   "workspaces": [
     "webui"
@@ -9,16 +10,26 @@
   "scripts": {
     "build": "cargo build --release",
     "build:webui": "npm run build -w @exmachina/webui",
+    "build:desktop-ui": "tsx scripts/build-desktop.ts",
+    "check:desktop-ui": "tsx scripts/build-desktop.ts --check",
+    "check:scripts": "tsc -p scripts/tsconfig.json",
+    "lint:desktop-ui": "npm --prefix desktop run lint:ui",
     "dev:webui": "npm run dev -w @exmachina/webui",
     "test": "cargo test --workspace",
     "check": "cargo check --workspace",
     "check:i18n": "node scripts/i18n-check.mjs",
+    "test:ui": "npm run build:desktop-ui && tsx scripts/ui-regression.ts",
     "gateway": "cargo run -p exm-gateway --release",
     "serve": "cargo run -p exm-gateway --release",
     "exm": "cargo run -p exm-cli --release --bin exm --",
     "e2e": "cargo run -p exm-gateway --example e2e"
   },
   "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "playwright-core": "^1.65.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "tsx": "^4.19.0"
   }
 }

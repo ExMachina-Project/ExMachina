@@ -4,7 +4,10 @@
   "version": "0.7.0",
   "identifier": "io.exmachina.desktop",
   "build": {
-    "frontendDist": "../ui"
+    "beforeDevCommand": "npm run dev:ui",
+    "beforeBuildCommand": "npm run build:ui",
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:5174"
   },
   "app": {
     "windows": [],

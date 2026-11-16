@@ -89,6 +89,7 @@ function manualChunks(id: string): string | undefined {
 }
 
 export default defineConfig({
+  resolve: { dedupe: ["react", "react-dom"] },
   plugins: [react()],
   server: {
     port: 5173,
