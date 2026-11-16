@@ -11,7 +11,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Button, Empty, Skeleton, Tag } from "antd";
 import { ArrowLeftOutlined, ReloadOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { api } from "../api";
-import type { ChatMessage, Session } from "../types";
+import type { Session } from "../types";
+import { useSessionMessages } from "../hooks/useSessionMessages";
 import { relativeTime } from "../time";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
@@ -31,13 +32,13 @@ export function TasksView(): React.ReactElement {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Session | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [msgLoading, setMsgLoading] = useState(false);
+  const { messages, loading: msgLoading } = useSessionMessages(selected?.id, 5000);
   /** 消息流容器：加载/新消息后滚到底（任务会话最新运行产物在底部） */
   const msgBoxRef = useRef<HTMLDivElement | null>(null);
   // 贴底跟随（与对话页同口径）：用户本来就贴底才跟随，中途上翻回看不抢滚动条
   const stickRef = useRef(true);
   useEffect(() => {
+    stickRef.current = true;
     const el = msgBoxRef.current;
     if (!el) return;
     const onScroll = () => {
@@ -60,7 +61,7 @@ export function TasksView(): React.ReactElement {
       const hit = all.find(
         (s) => s.id === cur && !s.archivedAt && (isAutoSessionTitle(s.title) || isDispatchChildTitle(s.title)),
       );
-      setSelected((prev) => prev ?? hit ?? null);
+      setSelected((prev) => all.find((s) => s.id === prev?.id && !s.archivedAt) ?? hit ?? null);
     } catch {
       // 网关不可用：空态
     } finally {
@@ -75,30 +76,6 @@ export function TasksView(): React.ReactElement {
     return () => window.removeEventListener("exm:flows-refresh", h);
   }, [load]);
 
-  /** 选中任务会话 → 拉消息流（只读） */
-  const selId = selected?.id;
-  useEffect(() => {
-    if (!selId) {
-      setMessages([]);
-      return;
-    }
-    setMsgLoading(true);
-    void api
-      .messages(selId)
-      .then(setMessages)
-      .catch(() => setMessages([]))
-      .finally(() => setMsgLoading(false));
-  }, [selId]);
-  /** 任务会话新轮次收束 → 静默重拉（任务页盯运行进度不需要手动刷新） */
-  const reloadTask = useCallback((e?: Event) => {
-    if (!selId) return;
-    if (e && "detail" in e && (e as CustomEvent<string | undefined>).detail && (e as CustomEvent<string | undefined>).detail !== selId) return;
-    void api.messages(selId).then(setMessages).catch(() => undefined);
-  }, [selId]);
-  useEffect(() => {
-    window.addEventListener("exm:bound-refresh", reloadTask as EventListener);
-    return () => window.removeEventListener("exm:bound-refresh", reloadTask as EventListener);
-  }, [reloadTask]);
   /** 消息加载完成/更新 → 滚到底（盯运行进度默认关注最新；上翻回看时不抢滚动条） */
   // 定位语义与 FlowsView 相同：切任务后首次拿到非空列表瞬时定位，增量更新平滑跟随
   const anchoredRef = useRef<string | null>(null);

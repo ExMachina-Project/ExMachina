@@ -1,14 +1,13 @@
 //! api/sessions.ts —— 会话域：会话 CRUD、消息读写、undo/edit/fork、图谱、轮次快照、聊天发送、计划裁决（codebase-refactor 7.1 拆分）。纯搬移。
 
-import { req } from "./core";
+import { req, serverBase, authHeaders } from "./core";
 import type { ChatMessage, EvidenceItem, PlanAppliedItem, PlanInfo, Session, SessionSearchHit, SessionSnapshot, StoredEvent, TaskGraph } from "./core";
 import { tr } from "../i18n/core";
 export const apiSessions = {
   speak: async (text: string) => {
-    const key = localStorage.getItem("exm.key") ?? "";
-    const resp = await fetch("/api/voice/speak", {
+    const resp = await fetch(`${serverBase()}/api/voice/speak`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(key ? { "X-Auth-Key": key } : {}) },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ text }),
     });
     if (!resp.ok) {
@@ -112,13 +111,14 @@ export const apiSessions = {
   stopSession: (id: string) =>
     req<{ ok: boolean; toolsExecuted: number }>(`/sessions/${id}/stop`, { method: "POST", body: JSON.stringify({}) }),
 
-  chat: (id: string, text: string, images?: string[], mode?: string) =>
+  chat: (id: string, text: string, images?: string[], mode?: string, agent?: string) =>
     req<{ accepted: boolean }>(`/sessions/${id}/chat`, {
       method: "POST",
       body: JSON.stringify({
         text,
         ...(images?.length ? { images } : {}),
         ...(mode ? { mode } : {}),
+        ...(agent ? { agent } : {}),
       }),
     }),
 

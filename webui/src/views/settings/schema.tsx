@@ -2,7 +2,7 @@
 import type React from "react";
 import type { GatewayConfig } from "../../api";
 import type { TKey } from "../../i18n/core";
-import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DeleteOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
+import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DeleteOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 
 
 export const SECTIONS: Record<string, { icon: React.ReactNode; titleKey: TKey; descKey: TKey }> = {
@@ -302,7 +302,8 @@ export function readCurrent(cfg: GatewayConfig | null, key: string): unknown {
     case "notify.maxChars":
       return cfg.notify?.maxChars;
     default:
-      return undefined;
+      // New schema fields and nested paths must round-trip without a hand-maintained switch.
+      return key.split(".").reduce<unknown>((value, part) =>
+        value && typeof value === "object" ? (value as Record<string, unknown>)[part] : undefined, cfg);
   }
 }
-

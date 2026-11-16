@@ -5,6 +5,7 @@
 import { Button, Input, Popconfirm, Select, message } from "antd";
 import { ArrowUpOutlined, CloseOutlined, PauseCircleOutlined, PlusOutlined, RobotOutlined } from "@ant-design/icons";
 import type React from "react";
+import { useRef } from "react";
 import { api } from "../../api";
 import { FileMentionPopup, type MentionState } from "../../components/FileMention";
 import type { WorkbenchNode } from "../../api";
@@ -52,6 +53,7 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
     sessionId, setDraft, messages, recallIdxRef, isSubSession, running, doSend,
     addImage, currentModel, changeModel, modelOptions, profiles, t,
   } = p;
+  const fileInputRef = useRef<HTMLInputElement>(null);
   return (
     <div className="chat-composer">
       <FileMentionPopup
@@ -66,12 +68,13 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
         <div className="attach-row">
           {images.map((src, i) => (
             <span key={i} className="attach-thumb">
-              <img src={src} alt={`附件${i + 1}`} />
+              <img src={src} alt={t("chat.attachAlt", { n: String(i + 1) })} />
               <Button
                 size="small"
                 type="text"
                 className="attach-del"
                 icon={<CloseOutlined />}
+                aria-label={t("chat.removeAttachment", { n: String(i + 1) })}
                 onClick={() => removeImage(i)}
               />
             </span>
@@ -81,6 +84,8 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
       <Input.TextArea
         className="composer-textarea"
         value={text}
+        placeholder={t("chat.inputPlaceholder")}
+        aria-label={t("chat.messageLabel")}
         disabled={isSubSession}
         onChange={(e) => {
           setText(e.target.value);
@@ -88,8 +93,9 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
           if (sessionId) setDraft(sessionId, e.target.value);
         }}
         onBlur={onBlurMention}
-        autoSize={{ minRows: 1, maxRows: 6 }}
+        autoSize={{ minRows: 2, maxRows: 6 }}
         onPressEnter={(e) => {
+          if (e.nativeEvent.isComposing || e.repeat || e.keyCode === 229) return;
           if (mention.open) return; // 提及弹层接管 Enter
           if (!e.shiftKey) {
             e.preventDefault();
@@ -99,6 +105,7 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
           }
         }}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (onMentionKey(e)) return; // 提及弹层优先接管方向键/确认/关闭
           // 上/下箭头召回历史用户消息（chat-ergonomics）：仅在空输入时接管
           if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
@@ -115,29 +122,38 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
             if (idx >= userMsgs.length) {
               recallIdxRef.current = null;
               setText("");
+              if (sessionId) setDraft(sessionId, "");
               return;
             }
           }
           recallIdxRef.current = idx;
           const recalled = userMsgs[idx]?.statements.map((st) => st.text).join("\n") ?? "";
           setText(recalled);
+          if (sessionId) setDraft(sessionId, recalled);
         }}
       />
       <div className="composer-bar">
         <div className="composer-tools">
-          <label className="attach-btn composer-attach" title={t("chat.attachTip")}>
-            <PlusOutlined />
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              style={{ display: "none" }}
-              onChange={(e) => {
-                Array.from(e.target.files ?? []).slice(0, 4).forEach(addImage);
-                e.target.value = "";
-              }}
-            />
-          </label>
+          <Button
+            type="text"
+            className="attach-btn composer-attach"
+            title={t("chat.attachTip")}
+            aria-label={t("chat.attachTip")}
+            icon={<PlusOutlined />}
+            disabled={isSubSession}
+            onClick={() => fileInputRef.current?.click()}
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              Array.from(e.target.files ?? []).slice(0, 4).forEach(addImage);
+              e.target.value = "";
+            }}
+          />
           <span className="composer-model">
             <RobotOutlined />
             <Select
@@ -147,6 +163,7 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
               variant="borderless"
               size="small"
               className="composer-model-select"
+              aria-label={t("chat.modelLabel")}
               popupMatchSelectWidth={false}
               disabled={isSubSession || profiles.length === 0}
             />
