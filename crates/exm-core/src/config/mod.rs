@@ -15,6 +15,7 @@ pub const CONFIG_VERSION: u32 = 2;
 // ---------------------------------------------------------------- 域分文件
 
 mod automation;
+mod client_identity;
 mod exec_identity;
 mod llm;
 mod misc;
@@ -22,6 +23,7 @@ mod plugins;
 mod security;
 
 pub use automation::*;
+pub use client_identity::*;
 pub use exec_identity::*;
 pub use llm::*;
 pub use misc::*;
@@ -263,6 +265,8 @@ struct LlmProfileFile {
     api_keys: Vec<String>,
     #[serde(default)]
     api_format: String,
+    #[serde(default, skip_serializing_if = "ClientIdentity::is_default")]
+    client_identity: ClientIdentity,
     /// 现役：该提供商的默认模型名
     #[serde(default)]
     model: String,
@@ -311,6 +315,7 @@ impl LlmProfileFile {
             api_key: self.api_key,
             api_keys: self.api_keys,
             api_format: self.api_format,
+            client_identity: self.client_identity,
             model,
             models: self
                 .models
@@ -365,6 +370,7 @@ impl LlmConfigFile {
             api_key: self.api_key,
             api_keys: Vec::new(),
             api_format: String::new(),
+            client_identity: ClientIdentity::default(),
             model,
         }
     }
@@ -619,6 +625,7 @@ impl ExmConfig {
             api_key: env_or("EXM_LLM_API_KEY", &file_llm.api_key, ""),
             api_keys: Vec::new(),
             api_format: String::new(),
+            client_identity: ClientIdentity::default(),
             model: env_or("EXM_LLM_MODEL", &file_llm.model, ""),
         };
 
@@ -642,6 +649,7 @@ impl ExmConfig {
                 api_key: llm.api_key.clone(),
                 api_keys: Vec::new(),
                 api_format: String::new(),
+                client_identity: llm.client_identity.clone(),
                 model: llm.model.clone(),
                 models: Vec::new(),
                 fallback: None,
@@ -658,6 +666,7 @@ impl ExmConfig {
                     api_key: env_or("EXM_LLM_API_KEY", &first.api_key, ""),
                     api_keys: Vec::new(),
                     api_format: String::new(),
+                    client_identity: first.client_identity.clone(),
                     model: env_or("EXM_LLM_MODEL", &first.model, ""),
                 };
             }
@@ -676,6 +685,7 @@ impl ExmConfig {
                 api_key: env_or("EXM_LLM_API_KEY", &p.api_key, ""),
                 api_keys: keys,
                 api_format: p.api_format.clone(),
+                client_identity: p.client_identity.clone(),
                 model: env_or("EXM_LLM_MODEL", &p.model, ""),
             };
         }
@@ -762,6 +772,10 @@ impl ExmConfig {
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
+        self.llm.client_identity.request_headers()?;
+        for profile in &self.llm_profiles {
+            profile.client_identity.request_headers()?;
+        }
         let file = ConfigFile {
             config_version: Some(CONFIG_VERSION),
             llm: Some(LlmConfigFile {
@@ -798,6 +812,7 @@ impl ExmConfig {
                         api_key: p.api_key.clone(),
                         api_keys: p.api_keys.clone(),
                         api_format: p.api_format.clone(),
+                        client_identity: p.client_identity.clone(),
                         model: p.model.clone(),
                         models: Some(p.models.clone()),
                         orch_model: None,
@@ -977,4 +992,3 @@ pub struct ExecIdentity {
     /// 圈禁根目录（绝对路径）
     pub home: String,
 }
-

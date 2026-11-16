@@ -17,15 +17,16 @@ import {
   ApiOutlined, AudioOutlined, ClusterOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
-import { api, KEY_MASK, KEY_CLEAR, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../../api";
+import { api, KEY_MASK, KEY_CLEAR, type ClientIdentity, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../../api";
 import { buildCapabilityOptions } from "../../models";
 import { getTestRecord, putTestRecord } from "../../testLog";
 import { PageHeader } from "../../components/PageHeader";
-import { useT, type TKey } from "../../i18n/core";
+import { useT } from "../../i18n/core";
 
 /** 厂商预设：选中即填端点、协议与常用模型名（模型名可在表单里改） */
 import { PRESETS, PRESET_LABEL, CUSTOM, API_FORMAT_KEYS, FORMAT_LABEL_KEY, type KeyForm, type Tab, liveRows } from "./presets";
 import { ModelPicker } from "./ModelPicker";
+import { ClientIdentityFields, parseClientIdentity } from "./ClientIdentityFields";
 
 export function ModelsView(): React.ReactElement {
   const t = useT();
@@ -47,21 +48,24 @@ export function ModelsView(): React.ReactElement {
   const [picker, setPicker] = useState<{ open: boolean; models: string[]; selected: string[] } | null>(null);
   const [pickerSaving, setPickerSaving] = useState(false);
   const [form] = Form.useForm();
-  const profiles = info?.profiles ?? [];
+  const profiles = useMemo(() => info?.profiles ?? [], [info]);
 
   /** 拉取端点可用模型：编辑态按档案 id（沿用已存密钥）；新建态用表单当前端点 + 首行明文密钥。
    *  拉取成功后弹选择窗，勾选的模型才合入表单清单（保留既有行的能力标记，仅补缺）。 */
   const fetchModels = async () => {
     setFetchingModels(true);
     try {
-      const all = form.getFieldsValue(true) as KeyForm & { baseUrl?: string; apiFormat?: string };
+      await form.validateFields([["clientIdentity", "userAgent"], "clientHeaders"]);
+      const all = form.getFieldsValue(true) as KeyForm & { baseUrl?: string; apiFormat?: string; clientIdentity?: ClientIdentity; clientHeaders?: string };
+      const clientIdentity = parseClientIdentity(all.clientIdentity, all.clientHeaders, t("models.clientHeadersInvalid"));
       const rows = liveRows(all.keys);
-      let body: { id?: string; baseUrl?: string; apiFormat?: string; apiKey?: string } = editing
-        ? { id: editing.id }
+      let body: { id?: string; baseUrl?: string; apiFormat?: string; apiKey?: string; clientIdentity: ClientIdentity } = editing
+        ? { id: editing.id, clientIdentity }
         : {
             baseUrl: (all.baseUrl ?? "").trim(),
             apiFormat: all.apiFormat ?? "openai",
             apiKey: rows[0]?.value ?? "",
+            clientIdentity,
           };
       if (!editing && (!body.baseUrl || !rows[0]?.value)) {
         message.warning(t("models.fetchNeedsKey"));
@@ -69,7 +73,7 @@ export function ModelsView(): React.ReactElement {
       }
       if (editing && rows[0]?.value && rows[0].value !== KEY_MASK) {
         // 编辑态且首行填了新明文密钥：用明文探测（与保存语义一致）
-        body = { baseUrl: all.baseUrl, apiFormat: all.apiFormat ?? "openai", apiKey: rows[0].value };
+        body = { baseUrl: all.baseUrl, apiFormat: all.apiFormat ?? "openai", apiKey: rows[0].value, clientIdentity };
       }
       const r = await api.listProviderModels(body);
       if (!r.ok) {
@@ -139,12 +143,13 @@ export function ModelsView(): React.ReactElement {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
-    form.setFieldsValue({ preset: "openai", apiFormat: "openai", keys: [{ value: "" }], models: [] });
+    form.setFieldsValue({ preset: "openai", apiFormat: "openai", clientIdentity: { preset: "default" }, clientHeaders: "", keys: [{ value: "" }], models: [] });
     setModal(true);
   };
 
   const openEdit = (p: LlmProfile) => {
     setEditing(p);
+    form.resetFields();
     const preset = PRESETS.find((x) => x.baseUrl === p.baseUrl)?.key ?? CUSTOM;
     // 密钥行合并为一行序列：主 Key 掩码行（keep: -1 = 主沿用，不入池）+ Key 池掩码行（keep = 旧池索引）
     const maskRows = p.apiKey ? [{ value: KEY_MASK, keep: -1 }] : [];
@@ -156,6 +161,8 @@ export function ModelsView(): React.ReactElement {
       name: p.name,
       baseUrl: p.baseUrl,
       apiFormat: p.apiFormat || "openai",
+      clientIdentity: p.clientIdentity ?? { preset: "default" },
+      clientHeaders: Object.keys(p.clientIdentity?.headers ?? {}).length ? JSON.stringify(p.clientIdentity?.headers, null, 2) : "",
       models: rows,
       fallback: p.fallback ?? undefined,
       keys: [...maskRows, ...poolRows],
@@ -180,7 +187,12 @@ export function ModelsView(): React.ReactElement {
   const submit = async () => {
     // 校验规则用 validateFields；取值用 getFieldsValue(true)——
     // 掩码行的 keep 无控件绑定，validateFields 只返回已注册字段会把它丢掉
-    const v = await form.validateFields();
+    try {
+      await form.validateFields();
+    } catch {
+      return;
+    }
+    const v = form.getFieldsValue(true);
     setSaving(true);
     try {
       const all = form.getFieldsValue(true) as KeyForm & Record<string, unknown>;
@@ -196,7 +208,7 @@ export function ModelsView(): React.ReactElement {
         keep: r?.keep,
       }));
       // 行是否携带沿用标记（编辑时由 openEdit 注入；-1 = 主 Key 位，>=0 = 旧池索引）
-      const hasKeep = (r: { keep?: number }) => r.keep !== undefined;
+      const hasKeep = (r: { keep?: number } | undefined) => r?.keep !== undefined;
       // 当前各行表达的旧池意图：keep=j 的掩码行 = 沿用第 j 把；keep=j 的空行 = 删除第 j 把
       const oldPoolSize = existing ? (existing.apiKeys ?? []).filter((k) => k && k.trim()).length : 0;
       const poolIntent = new Map<number, string>(); // j -> KEY_MASK(沿用) | KEY_CLEAR(删除)
@@ -244,6 +256,7 @@ export function ModelsView(): React.ReactElement {
         name: (v.name ?? "").trim() || t("models.unnamed"),
         baseUrl: (v.baseUrl ?? "").trim(),
         apiFormat: v.apiFormat ?? "openai",
+        clientIdentity: parseClientIdentity(v.clientIdentity, v.clientHeaders, t("models.clientHeadersInvalid")),
         apiKey,
         apiKeys,
         clearKeys,
@@ -477,6 +490,9 @@ export function ModelsView(): React.ReactElement {
                   <span className="k">{t("models.endpoint")}</span>
                   <span className="mono">{p.baseUrl}</span>
                   <Tag>{t(FORMAT_LABEL_KEY[p.apiFormat || "openai"] ?? "models.fmtShort.openai")}</Tag>
+                  {p.clientIdentity && p.clientIdentity.preset !== "default" && (
+                    <Tag>{t("models.clientIdentity")}: {p.clientIdentity.preset}</Tag>
+                  )}
                 </div>
                 <div className="model-kv">
                   <span className="k">{t("models.keyLabel")}</span>
@@ -554,6 +570,13 @@ export function ModelsView(): React.ReactElement {
           <Form.Item name="apiFormat" label={t("models.apiFormat")} extra={t("models.apiFormatExtra")}>
             <Select options={apiFormats} />
           </Form.Item>
+
+          <Collapse size="small" className="form-section" items={[{
+            key: "clientIdentity",
+            label: t("models.clientIdentity"),
+            forceRender: true,
+            children: <ClientIdentityFields />,
+          }]} />
 
           {/* 密钥池独立小节（增删/掩码/三态语义说明） */}
           <Collapse

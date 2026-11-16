@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use exm_core::config::{LlmProfile, ModelEntry};
+use exm_core::config::{ClientIdentity, LlmProfile, ModelEntry};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -44,6 +44,7 @@ fn profile_json(p: &LlmProfile) -> Value {
         "apiKey": mask_key(&p.api_key),
         "apiKeys": keys,
         "apiFormat": if p.api_format.is_empty() { "openai" } else { &p.api_format },
+        "clientIdentity": p.client_identity,
         "model": p.model,
         "models": models,
         "fallback": p.fallback,
@@ -78,6 +79,9 @@ pub struct LlmProfileBody {
     pub clear_keys: bool,
     #[serde(default)]
     pub api_format: Option<String>,
+    /// 缺省沿用旧身份；传默认对象显式关闭。
+    #[serde(default)]
+    pub client_identity: Option<ClientIdentity>,
     #[serde(default)]
     pub model: Option<String>,
     /// 模型清单（模型名 + 视觉/语音能力开关）；缺省 = 沿用旧清单
@@ -230,6 +234,10 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
             .api_format
             .clone()
             .unwrap_or_else(|| existing.map(|e| e.api_format.clone()).unwrap_or_default()),
+        client_identity: v
+            .client_identity
+            .clone()
+            .unwrap_or_else(|| existing.map(|e| e.client_identity.clone()).unwrap_or_default()),
         model: model_name,
         fallback: match v.fallback.as_deref() {
             None => existing.and_then(|e| e.fallback.clone()),
@@ -259,6 +267,13 @@ pub async fn save_profile(
         )
             .into_response();
     }
+    if let Err(error) = profile.client_identity.request_headers() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response();
+    }
     if let Some(slot) = cfg.llm_profiles.iter_mut().find(|p| p.id == profile.id) {
         *slot = profile.clone();
     } else {
@@ -280,6 +295,7 @@ pub async fn save_profile(
             api_key: profile.api_key.clone(),
             api_keys: keys,
             api_format: profile.api_format.clone(),
+            client_identity: profile.client_identity.clone(),
             model: profile.model.clone(),
         };
     }
@@ -325,6 +341,7 @@ pub async fn delete_profile(
             api_key: first.api_key.clone(),
             api_keys: keys,
             api_format: first.api_format.clone(),
+            client_identity: first.client_identity.clone(),
             model: first.model.clone(),
         };
     }
@@ -368,6 +385,7 @@ pub async fn activate_profile(
         api_key: p.api_key,
         api_keys: keys,
         api_format: p.api_format.clone(),
+        client_identity: p.client_identity.clone(),
         model: p.model,
     };
     cfg.use_mock = cfg.use_mock || exm_core::config::mock_enabled_from_env();
@@ -398,6 +416,7 @@ pub async fn test_profile(
             api_key: cfg.llm.api_key.clone(),
             api_keys: cfg.llm.api_keys.clone(),
             api_format: cfg.llm.api_format.clone(),
+            client_identity: cfg.llm.client_identity.clone(),
             model: cfg.llm.model.clone(),
             models: Vec::new(),
             fallback: None,
@@ -431,6 +450,16 @@ pub async fn test_profile(
         p.api_format.as_str()
     };
     let client = reqwest::Client::new();
+    let identity_headers = match p.client_identity.request_headers() {
+        Ok(headers) => headers,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    };
     let rb = match fmt {
         "anthropic" => client
             .post(format!("{base}/v1/messages"))
@@ -465,7 +494,11 @@ pub async fn test_profile(
             })),
     };
     let t0 = std::time::Instant::now();
-    let resp = rb.timeout(std::time::Duration::from_secs(10)).send().await;
+    let resp = rb
+        .headers(identity_headers)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
     let latency_ms = t0.elapsed().as_millis() as u64;
     match resp {
         Ok(r) => {
@@ -581,6 +614,8 @@ pub struct ListModelsBody {
     pub api_key: Option<String>,
     #[serde(default)]
     pub api_format: Option<String>,
+    #[serde(default)]
+    pub client_identity: Option<ClientIdentity>,
 }
 
 pub async fn list_provider_models(
@@ -588,7 +623,7 @@ pub async fn list_provider_models(
     Json(b): Json<ListModelsBody>,
 ) -> impl IntoResponse {
     let cfg = st.core.config();
-    let (base, probe_key, fmt): (String, String, String) = if let Some(id) = &b.id {
+    let (base, probe_key, fmt, identity) = if let Some(id) = &b.id {
         let Some(p) = cfg.llm_profiles.iter().find(|p| p.id == *id) else {
             return (
                 StatusCode::NOT_FOUND,
@@ -609,6 +644,9 @@ pub async fn list_provider_models(
             } else {
                 p.api_format.clone()
             },
+            b.client_identity
+                .clone()
+                .unwrap_or_else(|| p.client_identity.clone()),
         )
     } else {
         let base = b
@@ -628,7 +666,18 @@ pub async fn list_provider_models(
             base,
             b.api_key.clone().unwrap_or_default(),
             b.api_format.clone().unwrap_or_else(|| "openai".into()),
+            b.client_identity.clone().unwrap_or_default(),
         )
+    };
+    let identity_headers = match identity.request_headers() {
+        Ok(headers) => headers,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
     };
     if probe_key.trim().is_empty() {
         return Json(json!({ "ok": false, "configured": false, "models": [], "message": "尚未配置 API Key" }))
@@ -652,7 +701,11 @@ pub async fn list_provider_models(
         }
         _ => client.get(format!("{base}/models")).bearer_auth(&probe_key),
     };
-    let resp = rb.timeout(std::time::Duration::from_secs(12)).send().await;
+    let resp = rb
+        .headers(identity_headers)
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await;
     match resp {
         Ok(r) => {
             let status = r.status().as_u16();
@@ -708,6 +761,7 @@ mod key_tests {
             api_keys: vec!["sk-pool-1".into(), "sk-pool-2".into()],
             models: vec![],
             api_format: "openai".into(),
+            client_identity: ClientIdentity::default(),
             model: "m1".into(),
             fallback: None,
         }

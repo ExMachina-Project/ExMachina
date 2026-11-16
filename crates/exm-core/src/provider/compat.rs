@@ -9,6 +9,7 @@ pub struct OpenAiCompatibleProvider {
     keys: Vec<String>,
     sticky: Mutex<std::collections::HashMap<String, usize>>,
     client: reqwest::Client,
+    identity_headers: reqwest::header::HeaderMap,
 }
 
 impl OpenAiCompatibleProvider {
@@ -26,6 +27,7 @@ impl OpenAiCompatibleProvider {
             api_format: fmt.into(),
             keys: keys.into_iter().filter(|k| !k.trim().is_empty()).collect(),
             sticky: Mutex::new(std::collections::HashMap::new()),
+            identity_headers: reqwest::header::HeaderMap::new(),
             // 全局请求超时（审计 错误处理 P1-1）：端点 TCP 建连后僵死（代理半开/服务商挂起）
             // 时 reqwest 默认无总超时 → chat/embed 永久阻塞 → run 永不收束、run_lock 永久持有。
             // 300s = 非流式调用的宽上限（对比 transcribe/speak 已有的 120s）；
@@ -37,6 +39,14 @@ impl OpenAiCompatibleProvider {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
+    }
+
+    pub fn with_client_identity(
+        mut self,
+        identity: &crate::config::ClientIdentity,
+    ) -> anyhow::Result<Self> {
+        self.identity_headers = identity.request_headers()?;
+        Ok(self)
     }
 
     fn url(&self, model: &str, stream: bool) -> String {
@@ -88,6 +98,7 @@ impl OpenAiCompatibleProvider {
         let rb = self
             .client
             .post(self.url(model, stream))
+            .headers(self.identity_headers.clone())
             .header(name, value);
         // 流式请求覆盖总超时为 600s 宽上限：SSE 长回答合法超过 client 的 300s
         // 非流式上限；帧间卡死由收流侧 idle deadline 兜底（见 call_orch_stream）
@@ -669,6 +680,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let resp = self
             .client
             .post(&url)
+            .headers(self.identity_headers.clone())
             .header(name, value)
             .json(&serde_json::json!({ "model": model, "input": texts }))
             .send()
@@ -744,6 +756,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let resp = self
             .client
             .post(&url)
+            .headers(self.identity_headers.clone())
             .header(name, value)
             .multipart(form)
             .timeout(std::time::Duration::from_secs(120))
@@ -785,6 +798,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let resp = self
             .client
             .post(&url)
+            .headers(self.identity_headers.clone())
             .header(name, value)
             .json(&serde_json::json!({
                 "model": model, "input": text, "voice": "alloy", "response_format": "mp3",
@@ -825,6 +839,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let resp = self
             .client
             .post(&url)
+            .headers(self.identity_headers.clone())
             .header(name, value)
             .json(&serde_json::json!({
                 "model": model, "prompt": prompt, "size": size,
@@ -1047,4 +1062,3 @@ impl LlmProvider for OpenAiCompatibleProvider {
         Ok(asm.finish(&tx))
     }
 }
-

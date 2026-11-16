@@ -686,6 +686,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
             api_key,
             api_keys: current.llm.api_keys.clone(),
             api_format: current.llm.api_format.clone(),
+            client_identity: current.llm.client_identity.clone(),
             model: partial.model.unwrap_or_else(|| current.llm.model.clone()),
         },
         max_concurrency: body.max_concurrency.unwrap_or(current.max_concurrency),

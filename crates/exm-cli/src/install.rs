@@ -64,6 +64,7 @@ pub fn run_install(workspace_root: &std::path::Path, quick: bool) -> anyhow::Res
     cfg.llm = LlmConfig {
         api_keys: Vec::new(),
         api_format: String::new(),
+        client_identity: cfg.llm.client_identity.clone(),
         base_url,
         api_key,
         model,

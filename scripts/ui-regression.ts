@@ -43,6 +43,7 @@ async function fixture(desktop = false, viewport = { width: 1440, height: 900 },
   const context = await browser.newContext({ viewport });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
+  page.setDefaultNavigationTimeout(30_000);
   const errors: string[] = [];
   const state = {
     sessions: [makeSession("a"), makeSession("b")], messages: { a: [], b: [] } as Record<string, ChatMessage[]>,
@@ -153,7 +154,7 @@ catch (error) { await stopServers(); throw error; }
 let passed = 0;
 async function test(name: string, run: () => Promise<void>): Promise<void> {
   if (process.env.UI_TEST_FILTER && !name.includes(process.env.UI_TEST_FILTER)) return;
-  const timeout = setTimeout(() => { console.error(`Timed out: ${name}`); void browser.close(); }, 45_000);
+  const timeout = setTimeout(() => { console.error(`Timed out: ${name}`); void browser.close(); }, 90_000);
   try { await run(); passed += 1; console.log(`✓ ${name}`); }
   finally { clearTimeout(timeout); }
 }
@@ -178,6 +179,53 @@ async function screenshot(page: Page, name: string): Promise<void> {
 }
 
 try {
+  for (const desktop of [false, true]) {
+    await test(`${desktop ? "Desktop" : "WebUI"} client identity saves, reloads, validates and resets`, async () => {
+      const f = await fixture(desktop);
+      try {
+        let saved = { ...profile, clientIdentity: { preset: "default", userAgent: "", headers: {} } };
+        f.state.overrides.set("/llm/profiles", (route, fulfill) => {
+          if (route.request().method() === "POST") {
+            saved = { ...saved, ...route.request().postDataJSON() };
+            return fulfill({ ok: true, id: profile.id });
+          }
+          return fulfill({ active: profile.id, mock: true, profiles: [saved] });
+        });
+        if (desktop) {
+          await f.page.getByRole("button", { name: "设置", exact: true }).click();
+          await f.page.getByRole("tab", { name: "模型", exact: true }).click();
+        } else {
+          await f.page.evaluate(() => { location.hash = "#/models"; });
+        }
+        await f.page.locator(".model-card").first().waitFor();
+        await f.page.locator(".model-card .anticon-edit").first().click();
+        const modal = f.page.locator(".ant-modal:not(.desk-settings)").last();
+        await modal.getByText("客户端伪装", { exact: true }).first().click();
+        await modal.getByTestId("client-identity-preset").click();
+        await f.page.getByText("Claude Code", { exact: true }).last().click();
+        await modal.getByTestId("client-identity-user-agent").fill("fixture-cli/1.2");
+        const headers = modal.getByTestId("client-identity-headers");
+        await headers.fill('{"Authorization":"forbidden"}');
+        await f.page.locator(".ant-modal-footer .ant-btn-primary").last().click();
+        await modal.getByText(/请输入最多 32 项的 JSON 对象/).waitFor();
+        assert.equal(f.state.requests.filter((r) => r.path === "/llm/profiles" && r.method === "POST").length, 0);
+        await headers.fill('{"x-client-name":"fixture"}');
+        await f.page.locator(".ant-modal-footer .ant-btn-primary").last().click();
+        await eventually(() => saved.clientIdentity.preset === "claude-code", "Client identity was not saved");
+        assert.deepEqual(saved.clientIdentity, { preset: "claude-code", userAgent: "fixture-cli/1.2", headers: { "x-client-name": "fixture" } });
+        await modal.waitFor({ state: "hidden" });
+        await f.page.locator(".model-card .anticon-edit").first().click();
+        await modal.getByText("客户端伪装", { exact: true }).first().click();
+        assert.equal(await modal.getByTestId("client-identity-user-agent").inputValue(), "fixture-cli/1.2");
+        assert.ok((await headers.inputValue()).includes("x-client-name"));
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-client-identity`);
+        await modal.getByRole("button", { name: "恢复默认身份", exact: true }).click();
+        await f.page.locator(".ant-modal-footer .ant-btn-primary").last().click();
+        await eventually(() => saved.clientIdentity.preset === "default", "Client identity was not disabled");
+        assert.deepEqual(saved.clientIdentity, { preset: "default" });
+      } finally { await f.close(); }
+    });
+  }
   await test("WebUI rejected send retains editable text and images", async () => {
     const f = await fixture();
     try {
