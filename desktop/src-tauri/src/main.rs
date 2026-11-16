@@ -1,9 +1,9 @@
 //! EXMACHINA 桌面端（Tauri v2 壳）—— 桌面集成（组 11）
 //!
-//! 桌面优先形态：**主窗口 = 壳内嵌的对话式 UI**（desktop/ui，经 frontendDist 嵌入二进制），
+//! 桌面优先形态：**主窗口 = 独立 React 编程工作区**（desktop/src → desktop/dist，经 frontendDist 嵌入二进制），
 //! 参考常见 agent 桌面客户端：打开即对话，会话列表 + 流式回答 + 审批内联裁决。
 //! 壳拉起捆绑的 exm-gateway 作为后端（REST/WS 同端口），全部管理能力（模型/组/通道/定时/
-//! 安全）由壳内原生设置视图直连环口 API 完成，**不依赖任何 webui**；亦支持 `--remote <url>`。
+//! 安全）由工作区设置视图直连环口 API 完成；亦支持 `--remote <url>`。
 //! 移动端无需单独 App：手机浏览器 / PWA 打开网关地址即为同源客户端。
 //!
 //! 启动形态：
@@ -81,6 +81,8 @@ fn main() {
             min_window,
             max_window,
             close_window,
+            hide_window,
+            toggle_max_window,
             gateway_restart
         ])
         .setup(move |app| {
@@ -92,14 +94,14 @@ fn main() {
             let key_val = key.clone().unwrap_or_default();
             app.manage(GatewayInfo { url: url.clone(), key: key_val.clone(), remote: remote_mode });
 
-            // 主界面：壳内嵌的对话式 UI（desktop/ui，经 frontendDist 打进二进制），
+            // 主界面：独立 React 编程工作区（desktop/dist，经 frontendDist 打进二进制），
             // 网关只做后端（REST/WS）。网关地址与密钥经初始化脚本注入（window.__EXM_GATEWAY__），
-            // UI 据此直连环口；管理能力经原生设置视图完成（桌面端零 webui 依赖）。
+            // UI 据此直连环口；管理组件仅在工作区设置中打开。
             let script = format!(
-                "window.__EXM_GATEWAY__ = {{ url: '{url}', key: '{key}', version: '{ver}', remote: {remote} }};",
-                url = url.replace('\\', "\\\\").replace('\'', "\\'"),
-                key = key_val.replace('\\', "\\\\").replace('\'', "\\'"),
-                ver = env!("CARGO_PKG_VERSION"),
+                "window.__EXM_GATEWAY__ = {{ url: {url}, key: {key}, version: {version}, remote: {remote} }};",
+                url = serde_json::to_string(&url)?,
+                key = serde_json::to_string(&key_val)?,
+                version = serde_json::to_string(env!("CARGO_PKG_VERSION"))?,
                 remote = remote_mode,
             );
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
@@ -254,6 +256,22 @@ fn close_window(w: tauri::Window) {
     let _ = w.close();
 }
 
+#[tauri::command]
+fn hide_window(w: tauri::Window) {
+    let _ = w.hide();
+}
+
+#[tauri::command]
+fn toggle_max_window(w: tauri::Window) -> bool {
+    let maximized = w.is_maximized().unwrap_or(false);
+    if maximized {
+        let _ = w.unmaximize();
+    } else {
+        let _ = w.maximize();
+    }
+    !maximized
+}
+
 /// 保存桌面配置：快捷键改绑即时重注册；冲突返回提示（不落盘失败配置的快捷键行为）
 #[tauri::command]
 fn set_desktop_config(
@@ -314,15 +332,9 @@ fn spawn_event_bridge(app: tauri::AppHandle) {
         rt.block_on(async move {
             loop {
                 let info = app.state::<GatewayInfo>().inner().clone();
-                let ws_url = format!("{}://{}{}/ws", ws_scheme(&info.url), host_of(&info.url), {
-                    let mut q = String::new();
-                    if !info.key.is_empty() {
-                        q = format!("?key={}", info.key);
-                    }
-                    q
-                });
+                let ws_url = event_stream_url(&info.url, &info.key);
                 match connect_and_pump(&app, &ws_url).await {
-                    Ok(()) => return, // 收到优雅关闭（不应发生，重连口径）
+                    Ok(()) => return,
                     Err(e) => {
                         eprintln!("[desktop] 事件流断开，5s 后重连: {e}");
                         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -334,13 +346,12 @@ fn spawn_event_bridge(app: tauri::AppHandle) {
 }
 
 async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str) -> Result<(), String> {
-    use futures_util::StreamExt;
+    use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
-    let (ws, _resp) = tokio_tungstenite::connect_async(ws_url)
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| e.to_string())?;
-    let (_tx, mut rx) = ws.split();
-    while let Some(msg) = rx.next().await {
+    while let Some(msg) = ws.next().await {
         match msg {
             Ok(Message::Text(text)) => {
                 let Ok(evt) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
@@ -360,26 +371,46 @@ async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str) -> Result<(), St
                     }
                 }
             }
+            Ok(Message::Ping(_)) => {
+                // Tungstenite queues Pong while reading; flush it even when no events arrive.
+                ws.flush().await.map_err(|e| e.to_string())?;
+            }
             Ok(Message::Close(_)) | Err(_) => return Err("事件流已关闭".into()),
             _ => {}
         }
     }
-    Ok(())
+    Err("事件流已结束".into())
 }
 
-/// http(s) → ws(s)
-fn ws_scheme(url: &str) -> &'static str {
-    if url.starts_with("https") {
-        "wss"
+/// Keep reverse-proxy path prefixes, and append authentication after the WS path.
+fn event_stream_url(base: &str, key: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let base = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
     } else {
-        "ws"
-    }
+        base.to_string()
+    };
+    let query = if key.is_empty() {
+        String::new()
+    } else {
+        format!("?key={}", percent_encode_query_value(key))
+    };
+    format!("{base}/ws{query}")
 }
 
-/// 提取 host:port（去掉 scheme 与路径）
-fn host_of(url: &str) -> String {
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    rest.split('/').next().unwrap_or(rest).to_string()
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 // ---------------------------------------------------------------- 本地网关（捆绑交付）
@@ -471,4 +502,30 @@ fn free_port() -> u16 {
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .unwrap_or(4173)
+}
+
+#[cfg(test)]
+mod query_encoding_tests {
+    use super::{event_stream_url, percent_encode_query_value};
+
+    #[test]
+    fn notification_stream_path_precedes_authentication() {
+        assert_eq!(
+            event_stream_url("http://localhost:4173/", "a&b"),
+            "ws://localhost:4173/ws?key=a%26b"
+        );
+        assert_eq!(
+            event_stream_url("https://example.com/agent/", ""),
+            "wss://example.com/agent/ws"
+        );
+    }
+
+    #[test]
+    fn websocket_key_is_encoded_as_a_query_value() {
+        assert_eq!(
+            percent_encode_query_value("key with+/&中文"),
+            "key%20with%2B%2F%26%E4%B8%AD%E6%96%87"
+        );
+        assert_eq!(percent_encode_query_value("safe-._~"), "safe-._~");
+    }
 }
