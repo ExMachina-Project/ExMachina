@@ -110,6 +110,8 @@ export interface Session {
   id: string;
   title: string;
   status: string;
+  /** Live process state returned by the session detail endpoint (absent on older gateways). */
+  running?: boolean;
   /** 会话归属的智能体组（组是交互对象） */
   groupId: string;
   /** 派生来源会话（fork 分支 / 派发子会话） */

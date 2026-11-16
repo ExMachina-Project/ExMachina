@@ -5,6 +5,7 @@
 /** REST 客户端 —— 契约见 docs/04 §7 */
 export type { AgentDefinition, ChatMessage, EvidenceItem, Session, SessionSearchHit, SessionSnapshot, TaskGraph } from "../types";
 import { tr } from "../i18n/core";
+import "../desktop";
 
 /** 密钥掩码哨兵（与后端 llm_admin::KEY_MASK / 通道脱敏同一契约）：提交时收到此值 = 沿用服务端旧值 */
 export const KEY_MASK = "***已配置***";
@@ -15,7 +16,11 @@ export const KEY_CLEAR = "__CLEAR__";
 /** 远程服务器基址（桌面/移动客户端连接任意网关；空 = 同源）。
  *  同一份 WebUI 既能被本机网关托管（桌面/浏览器），也能作为客户端连远程网关（手机 PWA）。 */
 export function serverBase(): string {
-  return (localStorage.getItem("exm.server") ?? "").replace(/\/+$/, "");
+  return (window.__EXM_GATEWAY__?.url ?? localStorage.getItem("exm.server") ?? "").replace(/\/+$/, "");
+}
+
+export function accessKey(): string {
+  return window.__EXM_GATEWAY__?.key ?? localStorage.getItem("exm.key") ?? "";
 }
 
 export function setServerBase(url: string): void {
@@ -25,7 +30,7 @@ export function setServerBase(url: string): void {
 }
 
 export function authHeaders(): Record<string, string> {
-  const key = localStorage.getItem("exm.key") ?? "";
+  const key = accessKey();
   return key ? { "X-Auth-Key": key } : {};
 }
 
@@ -38,7 +43,7 @@ export async function req<T>(path: string, init?: RequestInit): Promise<T> {
     // 密钥失效才清键回登录门；无 key 的 401 = 未登录（dev 源首访 / 角标预热早于
     // 登录门），不 reload——否则挂载期轮询（approvals/flows 角标）会触发
     // 401→清键→reload 死循环，页面永远卡在 CONNECTING（dev 预览实测踩中）
-    if (localStorage.getItem("exm.key") && path !== "/auth/verify") {
+    if (!window.__EXM_GATEWAY__ && localStorage.getItem("exm.key") && path !== "/auth/verify") {
       localStorage.removeItem("exm.key");
       window.location.reload();
     }
@@ -73,7 +78,10 @@ export interface GatewayConfig {
     mdMaxChars?: number;
     /** 语义检索目标："档案ID" 或 "档案ID/模型名"；空 = 仅词项召回 */
     semanticModel: string;
+    autoDecay?: boolean;
   };
+  compaction?: { triggerRatio: number };
+  knowledge?: { injectTopK: number; injectMaxChars: number };
   security: {
     execApproval: string;
     execAllowlist: string;
@@ -89,6 +97,7 @@ export interface GatewayConfig {
     execUser?: string;
     /** 圈禁根目录（绝对路径；空 = 自动推导） */
     execHome?: string;
+    sanitizeRules?: { fakeSystemPrompt: boolean; hijackDirective: boolean; fakeToolResult: boolean; hiddenUnicode: boolean };
   };
   /** Computer Use（截屏 + 键鼠控制本机；默认关闭） */
   computer?: { enabled: boolean; approval: boolean; maxEdge: number; actionIntervalMs: number };
@@ -611,14 +620,14 @@ export interface MemoryStats {
 
 /** 工作区资产 URL（computer 截图 / 工具输出预览）：<img> 无法带请求头，密钥走查询参数 */
 export function assetUrl(relPath: string): string {
-  const key = localStorage.getItem("exm.key") ?? "";
+  const key = accessKey();
   return `${serverBase()}/api/asset?path=${encodeURIComponent(relPath)}&key=${encodeURIComponent(key)}`;
 }
 
 /** 工作区文件下载 URL（/api/asset/download）：<a target="_blank"> 导航同样无法带
  *  请求头，密钥与 assetUrl 同款走查询参数（网关侧对 GET /api/asset* 开放该通道） */
 export function downloadUrl(relPath: string): string {
-  const key = localStorage.getItem("exm.key") ?? "";
+  const key = accessKey();
   return `${serverBase()}/api/asset/download?path=${encodeURIComponent(relPath)}&key=${encodeURIComponent(key)}`;
 }
 
@@ -632,4 +641,3 @@ export async function probeServer(base: string): Promise<{ ok: boolean; error?: 
     return { ok: false, error: String(e) };
   }
 }
-

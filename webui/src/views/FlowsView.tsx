@@ -18,7 +18,8 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import { api, assetUrl, downloadUrl, type Channel, type ChannelFlow } from "../api";
-import type { ChatMessage, InboundAttachment } from "../types";
+import type { InboundAttachment } from "../types";
+import { useSessionMessages } from "../hooks/useSessionMessages";
 import { relativeTime } from "../time";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
@@ -56,13 +57,13 @@ export function FlowsView(): React.ReactElement {
   /** 选中的流（右侧呈现其绑定会话） */
   const [selected, setSelected] = useState<ChannelFlow | null>(null);
   /** 选中流的消息流（只读） */
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [msgLoading, setMsgLoading] = useState(false);
+  const { messages, loading: msgLoading } = useSessionMessages(selected?.activeSession, 4000);
   /** 消息流容器：加载/新消息后滚到底（只读页最新消息在底部） */
   const msgBoxRef = useRef<HTMLDivElement | null>(null);
   // 贴底跟随（与对话页同口径）：用户本来就贴底才跟随新消息，中途上翻回看不打断
   const stickRef = useRef(true);
   useEffect(() => {
+    stickRef.current = true;
     const el = msgBoxRef.current;
     if (!el) return;
     const onScroll = () => {
@@ -80,7 +81,8 @@ export function FlowsView(): React.ReactElement {
       // 选中态纠偏：当前选中流不存在（被删）→ 回落；优先选中绑定会话与
       // 全局会话一致的流（跨页跳转 requestNav 落地时右侧直接呈现目标流）
       setSelected((prev) => {
-        if (prev && f.some((x) => x.id === prev.id)) return prev;
+        const updated = prev && f.find((x) => x.id === prev.id);
+        if (updated) return updated;
         const cur = useExm.getState().sessionId;
         return f.find((x) => x.activeSession && x.activeSession === cur) ?? f[0] ?? null;
       });
@@ -104,30 +106,6 @@ export function FlowsView(): React.ReactElement {
 
   /** 选中流变化 → 拉绑定会话消息（只读） */
   const activeSid = selected?.activeSession;
-  useEffect(() => {
-    const sid = activeSid;
-    if (!sid) {
-      setMessages([]);
-      return;
-    }
-    setMsgLoading(true);
-    void api
-      .messages(sid)
-      .then(setMessages)
-      .catch(() => setMessages([]))
-      .finally(() => setMsgLoading(false));
-  }, [activeSid]);
-  /** 绑定会话新轮次收束（run.finished）→ 静默重拉消息（聊天页旁观视角保持实时） */
-  const reloadBound = useCallback((e?: Event) => {
-    const sid = selected?.activeSession;
-    if (!sid) return;
-    if (e && "detail" in e && (e as CustomEvent<string | undefined>).detail && (e as CustomEvent<string | undefined>).detail !== sid) return;
-    void api.messages(sid).then(setMessages).catch(() => undefined);
-  }, [selected?.activeSession]);
-  useEffect(() => {
-    window.addEventListener("exm:bound-refresh", reloadBound as EventListener);
-    return () => window.removeEventListener("exm:bound-refresh", reloadBound as EventListener);
-  }, [reloadBound]);
   /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新；上翻回看时不抢滚动条） */
   // 定位语义：切流后首次拿到「非空消息列表」时瞬时定位到最新（骨架期与空列表不定位——
   // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）。

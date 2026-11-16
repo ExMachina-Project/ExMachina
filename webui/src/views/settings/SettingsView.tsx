@@ -4,21 +4,20 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Alert, Button, Input, InputNumber, message, Select, Switch, Card, Tag } from "antd";
-import { BgColorsOutlined, CloudServerOutlined, DatabaseOutlined, DeleteOutlined, DesktopOutlined, FieldTimeOutlined, GlobalOutlined, IdcardOutlined, NotificationOutlined, PieChartOutlined, RadarChartOutlined, ReloadOutlined, RobotOutlined, SafetyCertificateOutlined, SafetyOutlined, SettingOutlined, ThunderboltOutlined, ToolOutlined, CloudDownloadOutlined } from "@ant-design/icons";
+import { Alert, Button, Input, InputNumber, message, Select, Switch } from "antd";
+import { ReloadOutlined, SettingOutlined } from "@ant-design/icons";
 import { useExm } from "../../store";
 import { useTheme } from "../../theme";
-import { useT, type TKey } from "../../i18n/core";
+import { useT } from "../../i18n/core";
 import { LANGS, useLang } from "../../i18n/core";
 import { PageHeader } from "../../components/PageHeader";
 import { MaskedPasswordInput } from "../../components/MaskedInput";
-import { api, limitsStats, sanitizeStats, type ConfigSchema, type ConfigSchemaField, type GatewayConfig, type LimitsStats } from "../../api";
-import { loadNotifyPrefs, saveNotifyPrefs, type NotifyPrefs } from "../../store";
+import { api, type ConfigSchema } from "../../api";
 import { useSubbarSlot } from "../../components/Subbar";
 import { useIsNarrow } from "../../useIsNarrow";
 
 /** 分组元数据。ui 是本地偏好分区，不属于后端 config schema */
-import { SECTIONS, FIELD_I18N, ENUM_OVERRIDES, listToText, readCurrent } from "./schema";
+import { SECTIONS, FIELD_I18N, ENUM_OVERRIDES, readCurrent } from "./schema";
 import { SanitizeStatsCard, LimitsStatsCard, NotifyPrefsCard, VersionPanel, ExperimentRunsCard } from "./cards";
 
 export function SettingsView(): React.ReactElement {
@@ -83,35 +82,15 @@ export function SettingsView(): React.ReactElement {
     setSaving(true);
     try {
       const body: Record<string, unknown> = {};
-      const nested = ["memory", "security", "automation", "computer", "search", "sandbox", "browser", "hooks", "tools", "trash", "experiments", "identity", "limits", "triggers", "mcpServe", "notify"];
       for (const [k, v] of Object.entries(values)) {
         if (v === undefined) continue;
-        const dot = k.indexOf(".");
-        if (dot < 0) {
-          if (v !== "") body[k] = v;
-          continue;
+        const parts = k.split(".");
+        let target = body;
+        for (const part of parts.slice(0, -1)) {
+          target[part] ??= {};
+          target = target[part] as Record<string, unknown>;
         }
-        const g = k.slice(0, dot);
-        const f = k.slice(dot + 1);
-        if (!nested.includes(g)) {
-          if (v !== "") body[k] = v;
-          continue;
-        }
-        // triggers 两层嵌套（triggers.fileWatch.enabled → { triggers: { fileWatch: { enabled } } }）
-        if (g === "triggers") {
-          const sub = f.slice(0, f.indexOf(".") > 0 ? f.indexOf(".") : undefined);
-          const leaf = f.slice(f.indexOf(".") + 1);
-          const trig = (body.triggers as Record<string, unknown>) ?? {};
-          if (["fileWatch", "eventWebhook"].includes(sub) && leaf) {
-            trig[sub] = { ...((trig[sub] as Record<string, unknown>) ?? {}), [leaf]: v };
-          } else {
-            trig[f] = v;
-          }
-          body.triggers = trig;
-          continue;
-        }
-        // 空串表示「清除该项」（hooks 用空串清列表）；搜索凭据留空 = 沿用旧值，由后端判定
-        body[g] = { ...((body[g] as Record<string, unknown>) ?? {}), [f]: v };
+        target[parts[parts.length - 1]] = v;
       }
       await saveConfig(body);
       dirtyRef.current = false;
@@ -236,8 +215,10 @@ export function SettingsView(): React.ReactElement {
               }).map((f) => {
                 const value = values[f.key];
                 const fi = FIELD_I18N[f.key];
+                const label = fi ? t(fi.label) : f.label;
                 const ctrl = ENUM_OVERRIDES[f.key] ? (
                   <Select
+                    aria-label={label}
                     style={{ width: 220 }}
                     value={String(value ?? f.default)}
                     options={ENUM_OVERRIDES[f.key].map((o) => ({ value: o.value, label: t(o.labelKey) }))}
@@ -245,11 +226,13 @@ export function SettingsView(): React.ReactElement {
                   />
                 ) : f.kind === "boolean" ? (
                   <Switch
+                    aria-label={label}
                     checked={value === undefined ? f.default === "true" : Boolean(value)}
                     onChange={(v) => setField(f.key, v)}
                   />
                 ) : f.kind === "number" ? (
                   <InputNumber
+                    aria-label={label}
                     style={{ width: 180 }}
                     min={f.min}
                     max={f.max}
@@ -258,22 +241,24 @@ export function SettingsView(): React.ReactElement {
                   />
                 ) : f.kind === "password" ? (
                   <MaskedPasswordInput
+                    aria-label={label}
                     style={{ width: 320 }}
                     value={String(value ?? f.default)}
                     onChange={(e) => setField(f.key, e.target.value)}
                   />
                 ) : f.key === "automation.heartbeatPrompt" || f.key === "security.execAllowlist" || f.key === "tools.custom" ? (
                   <Input.TextArea
+                    aria-label={label}
                     style={{ width: 320 }}
                     rows={2}
                     value={String(value ?? f.default)}
                     onChange={(e) => setField(f.key, e.target.value)}
                   />
                 ) : (
-                  <Input style={{ width: 320 }} value={String(value ?? f.default)} onChange={(e) => setField(f.key, e.target.value)} />
+                  <Input aria-label={label} style={{ width: 320 }} value={String(value ?? f.default)} onChange={(e) => setField(f.key, e.target.value)} />
                 );
                 return (
-                  <div className="cfg2-row" key={f.key}>
+                  <div className="cfg2-row" data-config-field={f.key} key={f.key}>
                     <div className="cfg2-label">
                       <div className="cfg2-name">{fi ? t(fi.label) : f.label}</div>
                       <div className="cfg2-help">{fi?.help ? t(fi.help) : f.help}</div>

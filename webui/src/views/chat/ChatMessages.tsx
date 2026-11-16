@@ -46,6 +46,7 @@ export interface ChatMessagesProps {
   onFork: (turn: number) => Promise<void>;
   onDecideApproval: (id: string, ok: boolean, scope?: "once" | "session" | "allowlist") => void;
   onOpenSubSession: (id: string) => void;
+  onUsePrompt: (text: string) => void;
   t: (key: string, params?: Record<string, string>) => string;
   TurnOps: React.ComponentType<TurnOpsProps>;
   TimelineRows: React.ComponentType<{ items: TimelineItem[]; tb: (k: string, v?: Record<string, string>) => string; onOpenSub: (id: string) => void }>;
@@ -56,7 +57,7 @@ export function ChatMessages(p: ChatMessagesProps): React.ReactElement {
     renderMessages, running, target, orchLabel, activeMeta, activeGroup, wsConnected,
     liveOrch, liveThinking, liveUnitEntries, timeline, timelineSession, runToolCalls,
     approvals, sessionId, showBottomBtn, bottomRef, onScrollBottom,
-    onOpenEdit, onUndo, onFork, onDecideApproval, onOpenSubSession, t, TurnOps, TimelineRows,
+    onOpenEdit, onUndo, onFork, onDecideApproval, onOpenSubSession, onUsePrompt, t, TurnOps, TimelineRows,
   } = p;
   return (
     <div className="chat-scroll">
@@ -74,6 +75,14 @@ export function ChatMessages(p: ChatMessagesProps): React.ReactElement {
             {target.mode === "single"
               ? t("chat.acquireDescSingle", { name: orchLabel })
               : t("chat.acquireDesc")}
+          </div>
+          <div className="chat-suggestions" aria-label={t("chat.suggestLabel")}>
+            {["project", "code", "plan"].map((kind) => (
+              <button key={kind} type="button" onClick={() => onUsePrompt(t(`chat.suggest.${kind}.prompt`))}>
+                <span>{t(`chat.suggest.${kind}.title`)}</span>
+                <span className="chat-suggestion-arrow" aria-hidden="true">↗</span>
+              </button>
+            ))}
           </div>
           <div className="chat-acquire-readouts">
             <span className="readout"><span className="k">TGT</span><span className="v">{orchLabel}</span></span>

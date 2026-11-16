@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Dropdown, Input, Modal, Popconfirm, Select, Space, Spin, Tag, message } from "antd";
-import { ApartmentOutlined, ArrowLeftOutlined, ArrowUpOutlined, CheckOutlined, CloudUploadOutlined, CloseOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PauseCircleOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Dropdown, Input, Modal, Select, Spin, message } from "antd";
+import { ApartmentOutlined, ArrowLeftOutlined, CloudUploadOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { createPortal } from "react-dom";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { ChatMessages } from "./chat/ChatMessages";
@@ -10,9 +10,9 @@ import { useChatStream } from "../hooks/useChatStream";
 import { useAttachments } from "../hooks/useAttachments";
 import { useSubbarSlot } from "../components/Subbar";
 
-import { api, type LlmProfile, isDestructiveCommand, assetUrl, downloadUrl } from "../api";
+import { api, type LlmProfile, assetUrl, downloadUrl } from "../api";
 import { agentIdEn } from "../models";
-import { isAutoSessionTitle, isTaskSideTitle } from "../session";
+import { isTaskSideTitle } from "../session";
 import { useExm, type TimelineItem } from "../store";
 import { useT } from "../i18n/core";
 import { relativeTime } from "../time";
@@ -23,17 +23,13 @@ import { PlanCard } from "../components/PlanCard";
 import { TaskGraphDag } from "../components/TaskGraphDag";
 import { Markdown } from "../components/Markdown";
 import { AsciiMeter } from "../components/Ascii";
-import { ToolCallList } from "../components/ToolCall";
-import { FileMentionPopup, mentionCandidates, type MentionState } from "../components/FileMention";
+import { mentionCandidates, type MentionState } from "../components/FileMention";
 import { workbenchTree, type WorkbenchNode } from "../api";
 import { copyText } from "../components/Markdown";
-import { UsageBar } from "../components/UsageBar";
-import { ProcessSteps, MessageProcess } from "../components/ProcessSteps";
+import { MessageProcess } from "../components/ProcessSteps";
 import { TimelineTag } from "../components/TimelineTag";
 import { SkeletonList } from "../components/SkeletonList";
-import { OrbitRings } from "../components/OrbitRings";
 import { TurnOps } from "../components/HistoryOps";
-import { Emblem } from "../components/Emblem";
 
 import type { ChatMessage } from "../types";
 
@@ -173,8 +169,9 @@ export function ChatView(): React.ReactElement {
     spawns, clearSpawns,
     graph,
   } = useExm();
-  const { bottomRef, stickRef, showBottomBtn, usage } = useChatStream(sessionId ?? undefined, messages, running, approvals);
-  const { images, addImage, removeImage, clearImages } = useAttachments();
+  const streamKey = useMemo(() => ({ liveOrch, liveThinking, liveParts, runToolCalls, timeline }), [liveOrch, liveThinking, liveParts, runToolCalls, timeline]);
+  const { bottomRef, stickRef, showBottomBtn, usage } = useChatStream(sessionId ?? undefined, messages, running, approvals, streamKey);
+  const { images, addImage, removeImage, setImages } = useAttachments(sessionId);
 
   // 会话编排图内嵌（graph-inline）：当前会话有编排图时在消息流上方给可折叠卡——
   // 看图不必跳「编排」页（那页保留全局会话切换视角）
@@ -249,12 +246,14 @@ export function ChatView(): React.ReactElement {
   }, [focusMessage, sessionId, messages]);
 
   const [text, setText] = useState("");
+  const sendPendingRef = useRef(false);
   const [expandedSpawns, setExpandedSpawns] = useState<string[]>([]);
   /** `@` 文件提及（对话即编码）：输入 @ 触发候选弹层，选中插入路径 */
   const [mention, setMention] = useState<MentionState>({ open: false, query: "", start: 0 });
   const [mentionIdx, setMentionIdx] = useState(0);
   const [mentionNodes, setMentionNodes] = useState<WorkbenchNode[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
+  const [mentionLoaded, setMentionLoaded] = useState(false);
   const mentionSeqRef = useRef(0);
   const [sessionFilter, setSessionFilter] = useState("");
   /** 竖屏导航 = 列表页 / 会话页 两个独立页面（对标主流移动端）：
@@ -279,11 +278,30 @@ export function ChatView(): React.ReactElement {
   const isSubSession = Boolean(sessions.find((s) => s.id === sessionId)?.title.startsWith("sub:"));
 
   const doSend = () => {
-    if (isSubSession) return;
+    if (isSubSession || sendPendingRef.current) return;
     if (text.trim()) {
-      void send(text, images);
-      setText("");
-      clearImages();
+      const submittedText = text;
+      const submittedImages = [...images];
+      if (sessionId) useExm.getState().setDraft(sessionId, submittedText);
+      sendPendingRef.current = true;
+      void send(submittedText, submittedImages)
+        .then((accepted) => {
+          if (!accepted) return;
+          if (useExm.getState().sessionId === sessionId) {
+            setText((current) => current === submittedText ? "" : current);
+          }
+          setImages((current) => {
+            const remaining = [...current];
+            for (const submitted of submittedImages) {
+              const index = remaining.indexOf(submitted);
+              if (index >= 0) remaining.splice(index, 1);
+            }
+            return remaining;
+          });
+        })
+        .finally(() => {
+          sendPendingRef.current = false;
+        });
     }
   };
 
@@ -292,13 +310,18 @@ export function ChatView(): React.ReactElement {
     if (!sessionId) return;
     setText(useExm.getState().drafts[sessionId] ?? "");
     recallIdxRef.current = null;
+    setMention({ open: false, query: "", start: 0 });
+    mentionSeqRef.current += 1;
+    setMentionNodes([]);
+    setMentionLoaded(false);
+    setMentionLoading(false);
   }, [sessionId]);
 
   /** 检测输入末尾的 `@提及` 片段：光标前最近一个未被空格隔断的 @ 起段即触发 */
   const detectMention = useCallback((value: string, caret: number) => {
     const before = value.slice(0, caret);
     const at = before.lastIndexOf("@");
-    if (at < 0) {
+    if (at < 0 || (at > 0 && !/\s/.test(before[at - 1]))) {
       setMention((m) => ({ ...m, open: false }));
       return;
     }
@@ -311,15 +334,16 @@ export function ChatView(): React.ReactElement {
     setMention({ open: true, query: seg, start: at });
   }, []);
 
-  /** 文件树懒加载：首次触发 @ 时拉取一次（会话期内缓存；深层目录由模型 read 工具承担） */
+  /** Cache an empty tree too; otherwise an open popup repeatedly fetches an empty workspace. */
   useEffect(() => {
-    if (!mention.open || mentionNodes.length > 0 || mentionLoading) return;
+    if (!mention.open || mentionLoaded || mentionLoading) return;
     const seq = ++mentionSeqRef.current;
     setMentionLoading(true);
     void workbenchTree("", 6)
       .then((r) => {
         if (seq !== mentionSeqRef.current) return;
         setMentionNodes(r.nodes);
+        setMentionLoaded(true);
       })
       .catch(() => {
         if (seq === mentionSeqRef.current) setMention((m) => ({ ...m, open: false }));
@@ -327,24 +351,24 @@ export function ChatView(): React.ReactElement {
       .finally(() => {
         if (seq === mentionSeqRef.current) setMentionLoading(false);
       });
-  }, [mention.open, mentionNodes.length, mentionLoading]);
+  }, [mention.open, mentionLoaded, mentionLoading]);
 
   /** 选中候选：把 @片段 替换为 `路径 `（占位插入，路径中的 @/空格风险由过滤端点保证不存在） */
   const applyMention = useCallback((path: string) => {
-    setText((prev) => {
-      const after = prev.slice(mention.start).replace(/@[^\s@]*/, "");
-      return prev.slice(0, mention.start) + path + after + " ";
-    });
+    const after = text.slice(mention.start).replace(/@[^\s@]*/, "");
+    const next = text.slice(0, mention.start) + path + " " + after.replace(/^ /, "");
+    setText(next);
+    if (sessionId) useExm.getState().setDraft(sessionId, next);
     setMention({ open: false, query: "", start: 0 });
     setMentionIdx(0);
     // 焦点回输入框（弹层点击会抢焦点）
     requestAnimationFrame(() => {
-      const el = document.querySelector<HTMLTextAreaElement>(".composer-textarea textarea");
+      const el = document.querySelector<HTMLTextAreaElement>("textarea.composer-textarea, .composer-textarea textarea");
       el?.focus();
       const pos = mention.start + path.length + 1;
       el?.setSelectionRange(pos, pos);
     });
-  }, [mention]);
+  }, [mention, sessionId, text]);
 
   /** 提及弹层键盘导航（textarea onKeyDown 转发）：↑↓ 移动、Enter/Tab 选中、Esc 关闭。
    *  返回 true = 已接管该键，宿主不得再触发发送。 */
@@ -354,7 +378,7 @@ export function ChatView(): React.ReactElement {
       const cands = mentionCandidates(mentionNodes, mention.query);
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setMentionIdx((i) => Math.min(i + 1, cands.length - 1));
+        setMentionIdx((i) => Math.max(0, Math.min(i + 1, cands.length - 1)));
         return true;
       }
       if (e.key === "ArrowUp") {
@@ -794,10 +818,10 @@ export function ChatView(): React.ReactElement {
       <div className="chat-wrap">
         <div className="console-bar">
           <span className="console-title">{t("nav.chat")}</span>
-          <span className="page-en">CHAT</span>
+          <span className="page-en console-en">CHAT</span>
           <span className="console-sep" />
-          <span className="readout"><span className="k">MODE</span> <span className="v">{target.mode === "single" ? "SOLO" : "GROUP"}</span></span>
-          <span className="readout"><span className="k">STATE</span> <span className={`v${running ? " v-live" : ""}`}>{running ? "RUNNING" : "IDLE"}</span></span>
+          <span className="readout console-mode"><span className="k">MODE</span> <span className="v">{target.mode === "single" ? "SOLO" : "GROUP"}</span></span>
+          <span className="readout console-state"><span className="k">STATE</span> <span className={`v${running ? " v-live" : ""}`}>{running ? "RUNNING" : "IDLE"}</span></span>
 
           {usage && (
             <span className="readout console-usage">
@@ -950,6 +974,11 @@ export function ChatView(): React.ReactElement {
           onFork={doFork}
           onDecideApproval={(id, ok, scope) => void decideApproval(id, ok, scope)}
           onOpenSubSession={(id) => void selectSession(id)}
+          onUsePrompt={(prompt) => {
+            setText(prompt);
+            if (sessionId) useExm.getState().setDraft(sessionId, prompt);
+            document.querySelector<HTMLTextAreaElement>("textarea.composer-textarea")?.focus();
+          }}
           t={t}
           TurnOps={TurnOps}
           TimelineRows={TimelineRows}
