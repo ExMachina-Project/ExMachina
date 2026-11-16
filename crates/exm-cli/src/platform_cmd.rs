@@ -255,6 +255,8 @@ pub fn run_model_add(
         api_key: api_key.trim().to_string(),
         api_keys: Vec::new(),
         api_format: String::new(),
+        client_identity: cfg.llm_profiles.iter().find(|p| p.id == id.trim())
+            .map(|p| p.client_identity.clone()).unwrap_or_default(),
         model: model.trim().to_string(),
         models: Vec::new(),
     };
@@ -269,6 +271,7 @@ pub fn run_model_add(
             api_key: profile.api_key,
             api_keys: Vec::new(),
             api_format: profile.api_format.clone(),
+            client_identity: profile.client_identity.clone(),
             model: profile.model,
         };
     }
@@ -293,6 +296,7 @@ pub fn run_model_use(core: &Core, id: &str) -> anyhow::Result<()> {
         api_key: p.api_key,
         api_keys: keys,
         api_format: p.api_format.clone(),
+        client_identity: p.client_identity.clone(),
         model: p.model,
     };
     cfg.use_mock = cfg.use_mock || exm_core::config::mock_enabled_from_env();
@@ -323,6 +327,7 @@ pub fn run_model_remove(core: &Core, id: &str) -> anyhow::Result<()> {
             api_key: first.api_key.clone(),
             api_keys: keys,
             api_format: first.api_format.clone(),
+            client_identity: first.client_identity.clone(),
             model: first.model.clone(),
         };
     }
@@ -348,7 +353,8 @@ pub async fn run_model_test(core: &Core, id: Option<&str>) -> anyhow::Result<()>
         keys.push(p.api_key.clone());
     }
     let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(
-        exm_core::provider::OpenAiCompatibleProvider::new(p.base_url.clone(), keys),
+        exm_core::provider::OpenAiCompatibleProvider::with_format(p.base_url.clone(), keys, &p.api_format)
+            .with_client_identity(&p.client_identity)?,
     );
     let req = exm_core::provider::ChatRequest::new(
         p.model.clone(),

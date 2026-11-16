@@ -547,11 +547,18 @@ export interface ChannelStatus {
   at: string;
 }
 
+export interface ClientIdentity {
+  preset: "default" | "claude-code" | "codex" | "opencode" | "cline" | "custom";
+  userAgent?: string;
+  headers?: Record<string, string>;
+}
+
 export interface LlmProfile {
   id: string;
   name: string;
   baseUrl: string;
   apiFormat?: string;
+  clientIdentity?: ClientIdentity;
   apiKey: string;
   /** 多 Key 池（掩码行 = 沿用旧池同位键） */
   apiKeys?: string[];

@@ -1,5 +1,6 @@
 //! config 域分文件：LLM 配置（ModelEntry/LlmProfile/LlmConfig）。
 
+use super::ClientIdentity;
 use serde::{Deserialize, Serialize};
 
 /// 提供商下的模型条目：能力开关让平台知道该模型支持哪些多模态输入。
@@ -37,6 +38,9 @@ pub struct LlmProfile {
     /// API 协议：openai（默认）| anthropic
     #[serde(default)]
     pub api_format: String,
+    /// 按档案设置客户端标识，默认不增加请求头。
+    #[serde(default, skip_serializing_if = "ClientIdentity::is_default")]
+    pub client_identity: ClientIdentity,
     /// 该提供商的默认模型名（模型清单里勾「默认」的那一个）
     #[serde(default)]
     pub model: String,
@@ -59,6 +63,7 @@ pub struct LlmConfig {
     /// 生效协议：openai（默认）| anthropic
     #[serde(default)]
     pub api_format: String,
+    #[serde(default, skip_serializing_if = "ClientIdentity::is_default")]
+    pub client_identity: ClientIdentity,
     pub model: String,
 }
-

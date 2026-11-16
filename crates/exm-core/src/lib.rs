@@ -1331,11 +1331,14 @@ pub fn build_orchestrator(
                 Arc::new(UnconfiguredProvider::new("全局通道"))
             }
         } else {
-            Arc::new(OpenAiCompatibleProvider::with_format(
-                cfg.llm.base_url.clone(),
-                keys,
-                &cfg.llm.api_format,
-            ))
+            Arc::new(
+                OpenAiCompatibleProvider::with_format(
+                    cfg.llm.base_url.clone(),
+                    keys,
+                    &cfg.llm.api_format,
+                )
+                .with_client_identity(&cfg.llm.client_identity)?,
+            )
         }
     };
     let mcp = mcp.unwrap_or_else(crate::mcp::McpRegistry::shared);
@@ -1400,11 +1403,10 @@ pub fn build_orchestrator(
                     Arc::new(UnconfiguredProvider::new(format!("档案 {}", p.id)))
                 }
             } else {
-                Arc::new(OpenAiCompatibleProvider::with_format(
-                    p.base_url.clone(),
-                    keys,
-                    &p.api_format,
-                ))
+                Arc::new(
+                    OpenAiCompatibleProvider::with_format(p.base_url.clone(), keys, &p.api_format)
+                        .with_client_identity(&p.client_identity)?,
+                )
             };
         pool.insert(p.id.clone(), profile_provider, p.model.clone());
         pool.set_models(p.id.clone(), p.models.clone());
