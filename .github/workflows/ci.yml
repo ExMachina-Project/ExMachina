@@ -30,7 +30,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
+        env:
+          EXM_OPENAPI_CONTRACT_EXCHANGES: ${{ runner.temp }}/openapi-exchanges.json
         run: cargo test --workspace --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: OpenAPI 3.1 contract and examples
+        run: |
+          python -m pip install -r scripts/requirements-openapi.txt
+          cargo run -p exm-cli --bin exm --locked -- openapi --out "$RUNNER_TEMP/openapi.json"
+          python scripts/check-openapi.py "$RUNNER_TEMP/openapi.json" --exchanges "$RUNNER_TEMP/openapi-exchanges.json"
       # 端到端验收（README 的验证入口）：REST 全端点 + 事件流 + 任务图 + 证据/三账/记忆/档案。
       # 它是 example，cargo test 不会跑 —— 曾长期无人执行而悄悄腐烂（编成目录迁移后 36 项飘红）。
       # 端点/档案/记忆开关在进程内覆盖；写入仅落在独立临时目录。

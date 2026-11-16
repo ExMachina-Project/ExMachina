@@ -11,6 +11,8 @@
 
 use serde_json::{json, Value};
 
+mod llm;
+
 /// 单端点描述（清单条目）
 pub struct Endpoint {
     /// 路径（axum 形态，:id 参数）
@@ -33,9 +35,28 @@ impl Endpoint {
         Endpoint { method, path, summary, auth: true, request: None, response: None }
     }
 
-    /// 无鉴权端点（健康检查/版本等公共面）
+    /// 无鉴权端点（契约文档/首启鉴权入口）
     const fn public(method: &'static str, path: &'static str, summary: &'static str) -> Self {
         Endpoint { method, path, summary, auth: false, request: None, response: None }
+    }
+
+    fn json_request(mut self, schema: &str, example: Value) -> Self {
+        self.request = Some(json!({
+            "required": true,
+            "content": { "application/json": {
+                "schema": { "$ref": format!("#/components/schemas/{schema}") },
+                "example": example,
+            } },
+        }));
+        self
+    }
+
+    fn json_response(mut self, schema: &str, example: Value) -> Self {
+        self.response = Some(json!({ "application/json": {
+            "schema": { "$ref": format!("#/components/schemas/{schema}") },
+            "example": example,
+        } }));
+        self
     }
 
     /// operationId：路径转驼峰 + 方法（/api/sessions/:id get → ApiSessionsIdGet）
@@ -67,9 +88,9 @@ pub fn endpoints() -> Vec<Endpoint> {
     vec![
         // ---------------- OpenAPI 自身（公共面：契约文档无需鉴权即可发现）
         Endpoint::public("get", "/api/openapi.json", "OpenAPI 3.1 契约文档"),
-        // ---------------- 系统（公共面：无 authKey 也可见）
-        Endpoint::public("get", "/api/health", "存活探测"),
-        Endpoint::public("get", "/api/version", "版本信息"),
+        // ---------------- 系统（authKey 启用时与其他 API 一致）
+        Endpoint::new("get", "/api/health", "存活探测"),
+        Endpoint::new("get", "/api/version", "版本信息"),
         // ---------------- 会话
         Endpoint::new("get", "/api/sessions", "会话列表（含末条预览）"),
         Endpoint::new("post", "/api/sessions", "新建会话"),
@@ -151,8 +172,8 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("post", "/api/llm/models", "拉取提供商模型列表"),
         Endpoint::new("get", "/api/llm/effort", "思考强度查看"),
         Endpoint::new("put", "/api/llm/effort", "思考强度设置"),
-        Endpoint::new("get", "/api/llm/capabilities", "模型能力探测查看"),
-        Endpoint::new("put", "/api/llm/capabilities", "模型能力探测设置"),
+        Endpoint::new("get", "/api/llm/capabilities", "能力模型槽位查看"),
+        Endpoint::new("put", "/api/llm/capabilities", "能力模型槽位设置"),
         // ---------------- 记忆
         Endpoint::new("get", "/api/memory", "记忆列表"),
         Endpoint::new("post", "/api/memory", "新增记忆"),
@@ -227,10 +248,10 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("post", "/api/identity/codes/purge", "清理过期配对码"),
         Endpoint::new("post", "/api/identity/role", "设置身份角色"),
         Endpoint::new("delete", "/api/identity/:id", "解绑身份"),
-        Endpoint::new("post", "/api/auth/verify", "校验鉴权密钥"),
-        Endpoint::new("get", "/api/auth/status", "鉴权设置状态"),
-        Endpoint::new("post", "/api/auth/snooze", "鉴权提醒延后"),
-        Endpoint::new("post", "/api/auth/dismiss", "鉴权提醒关闭"),
+        Endpoint::public("post", "/api/auth/verify", "校验鉴权密钥"),
+        Endpoint::public("get", "/api/auth/status", "鉴权设置状态"),
+        Endpoint::public("post", "/api/auth/snooze", "鉴权提醒延后"),
+        Endpoint::public("post", "/api/auth/dismiss", "鉴权提醒关闭"),
         // ---------------- 版本升级
         Endpoint::new("get", "/api/version/check", "检查更新"),
         Endpoint::new("post", "/api/version/apply", "应用更新"),
@@ -269,6 +290,26 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/git/overview", "Git 分支与历史"),
         Endpoint::new("post", "/api/git/op", "Git 操作"),
     ]
+    .into_iter()
+    .map(llm::describe)
+    .collect()
+}
+
+fn document_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| match segment.strip_prefix(':') {
+            Some(name) => format!("{{{name}}}"),
+            None => segment.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn error_response(description: &str) -> Value {
+    json!({
+        "description": description,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } },
+    })
 }
 
 /// 生成 OpenAPI 3.1 文档（JSON Value）
@@ -276,10 +317,22 @@ pub fn generate() -> Value {
     let mut paths = serde_json::Map::new();
     for ep in endpoints() {
         let entry = paths
-            .entry(ep.path.to_string())
+            .entry(document_path(ep.path))
             .or_insert_with(|| json!({}));
+        let parameters: Vec<Value> = ep.path
+            .split('/')
+            .filter_map(|segment| {
+                segment.strip_prefix(':').map(|name| json!({
+                    "name": name, "in": "path", "required": true,
+                    "schema": { "type": "string" },
+                }))
+            })
+            .collect();
+        if !parameters.is_empty() {
+            entry["parameters"] = json!(parameters);
+        }
         let security = if ep.auth {
-            json!([{ "authKey": [] }])
+            json!([{ "authKey": [] }, { "bearerAuth": [] }])
         } else {
             json!([])
         };
@@ -289,16 +342,33 @@ pub fn generate() -> Value {
             "security": security,
             "responses": {
                 "200": { "description": "成功" },
-                "401": { "description": "鉴权失败（authKey 启用时）" },
+                "401": error_response("鉴权失败（访问密钥启用时，或校验接口收到错误密钥）"),
             },
         });
+        if matches!(ep.method, "post" | "put" | "patch")
+            || (ep.path == "/api/llm/profiles/:id" && ep.method == "delete")
+        {
+            op["responses"]["400"] = error_response("请求参数或请求体无效");
+        }
+        if ep.path.split('/').any(|segment| segment.starts_with(':'))
+            || matches!(ep.path, "/api/llm/active" | "/api/llm/test" | "/api/llm/models")
+        {
+            op["responses"]["404"] = error_response("指定资源不存在");
+        }
+        if matches!(
+            (ep.method, ep.path),
+            ("post", "/api/llm/profiles") | ("delete", "/api/llm/profiles/:id")
+                | ("put", "/api/llm/active" | "/api/llm/capabilities")
+        ) {
+            op["responses"]["500"] = error_response("配置保存或运行时更新失败");
+        }
         if let Some(req) = ep.request {
             op["requestBody"] = req;
         }
         if let Some(resp) = ep.response {
             op["responses"]["200"]["content"] = resp;
         }
-        entry[ep.method.to_uppercase()] = op;
+        entry[ep.method] = op;
     }
     json!({
         "openapi": "3.1.0",
@@ -306,7 +376,8 @@ pub fn generate() -> Value {
             "title": "EXMACHINA Gateway API",
             "version": env!("CARGO_PKG_VERSION"),
             "description": "多智能体系统网关：会话/智能体/组/通道/记忆/审批/审计 REST 面。\
-                            契约精度：路径/方法/鉴权全覆盖；请求体渐进补；响应 schema informational。",
+                            人读协议见 docs/协议与契约.md。路径/方法/鉴权全覆盖；请求体渐进补；响应 schema informational。\
+                            安全要求在实例启用访问密钥时生效；事件 webhook、通道入站与资产的额外鉴权方式见人读协议。",
         },
         "components": {
             "securitySchemes": {
@@ -314,8 +385,15 @@ pub fn generate() -> Value {
                     "type": "apiKey",
                     "in": "header",
                     "name": "X-Auth-Key",
+                    "description": "启用访问密钥时填写实例访问密钥；也可使用 bearerAuth。",
+                },
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "description": "Authorization: Bearer <实例访问密钥>；与 X-Auth-Key 等价。",
                 }
-            }
+            },
+            "schemas": llm::schemas(),
         },
         "paths": Value::Object(paths),
     })

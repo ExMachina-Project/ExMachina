@@ -19,6 +19,18 @@ All tests passing means you're ready to develop. | 全部测试通过即可开�
 Linux 默认浏览器路径为 `/usr/bin/chromium`，其它平台可用 `CHROMIUM=<浏览器可执行文件路径> npm run test:ui`。
 没有系统 Chromium 时先运行 `npx playwright-core install chromium`，测试会回退到 Playwright 下载的浏览器；CI 自动安装并执行。
 
+模型接口或机器契约变更后，用隔离夹具和标准 OpenAPI 3.1 校验器检查导出文件、示例与真实响应：
+
+```bash
+python3 -m venv .venv-openapi
+.venv-openapi/bin/python -m pip install -r scripts/requirements-openapi.txt
+EXM_OPENAPI_CONTRACT_EXCHANGES="$PWD/target/openapi-exchanges.json" cargo test -p exm-gateway --test openapi_contract --locked
+cargo run -p exm-cli --bin exm --locked -- openapi --out target/openapi.json
+.venv-openapi/bin/python scripts/check-openapi.py target/openapi.json --exchanges target/openapi-exchanges.json
+```
+
+夹具仅在临时目录使用固定测试密钥，不访问真实模型或生产网关；校验器依赖只用于开发与 CI。
+
 ## Code Style | 代码风格
 
 - **Rust**: Standard rustfmt defaults; comments in Chinese or English, whichever expresses the intent best | 标准 rustfmt 默认配置；注释中文英文皆可，以清晰达意为先
