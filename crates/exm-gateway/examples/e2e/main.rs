@@ -49,20 +49,46 @@ fn find_root() -> std::path::PathBuf {
     }
 }
 
+/// Test writes (configuration, roster, files and databases) live under one disposable root.
+struct TestWorkspace(std::path::PathBuf);
+
+impl TestWorkspace {
+    fn new(source: &std::path::Path) -> anyhow::Result<Self> {
+        let workspace = Self(std::env::temp_dir().join(format!("exm-gw-e2e-{}", uuid::Uuid::new_v4())));
+        copy_roster(&source.join("entities"), &workspace.0.join("entities"))?;
+        Ok(workspace)
+    }
+}
+
+impl Drop for TestWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn copy_roster(source: &std::path::Path, target: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("active_") { continue; }
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_roster(&entry.path(), &target.join(name))?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target.join(name))?;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let root = find_root();
+    let workspace = TestWorkspace::new(&find_root())?;
+    let root = workspace.0.clone();
     // 编成目录口径 = entities/（见 ExmConfig::agents_dir）；
     // 迁移前脚本写的是已废弃的 agents/，导致注册表读到空编成 → 个体数 0 → 后续断言全挂。
     let entities = root.join("entities");
-    // 先快照、后动手：验收期间会经 REST 写配置与激活组指针，跑完必须原样还回工作机/工作树
-    // （config.json / active_group / 出厂人格）。快照必须早于任何清理写入，否则会被当成原状。
-    let _guards = [
-        FileGuard::watch(root.join(".exmachina").join("config.json")),
-        FileGuard::watch(entities.join("active_group")),
-        // 出厂人格随项目内容交付：验收可临时改写，但跑完必须原样还回（否则工作树被改脏）
-        FileGuard::watch(entities.join("groups").join("exmachina").join("SOUL.md")),
-    ];
     // 清理上次运行残留（组数据与激活组状态在 entities/ 内持久化）
     let _ = std::fs::remove_dir_all(entities.join("groups").join("product"));
     let _ = std::fs::remove_dir_all(entities.join("groups").join("e2e-chan"));
@@ -87,33 +113,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 开发者本地 config 在验收期间必须原样还回：脚本会经 REST 写配置
-    // （档案、鉴权开关等），跑完不还原就等于把工作机配置改成测试残留。
-    struct FileGuard {
-        path: std::path::PathBuf,
-        original: Option<Vec<u8>>,
-    }
-    impl FileGuard {
-        fn watch(path: std::path::PathBuf) -> Self {
-            let original = std::fs::read(&path).ok();
-            Self { path, original }
-        }
-    }
-    impl Drop for FileGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(bytes) => {
-                    let _ = std::fs::write(&self.path, bytes);
-                }
-                None => {
-                    let _ = std::fs::remove_file(&self.path);
-                }
-            }
-        }
-    }
-
     let mut cfg = ExmConfig::load(&root);
-    cfg.data_dir = std::env::temp_dir().join(format!("exm-gw-e2e-{}", uuid::Uuid::new_v4()));
+    cfg.data_dir = root.join(".exmachina/data");
+    cfg.workspace_root = root.clone();
     cfg.use_mock = true;
     // e2e 环境自持：不随开发者本地配置漂移（本机 config 曾关掉深层记忆导致记忆断言全挂）
     cfg.memory_enabled = true;
@@ -1429,10 +1431,7 @@ async fn main() -> anyhow::Result<()> {
     server.abort();
     println!("\n通过 {}｜失败 {}", c.pass, c.fail);
     if c.fail > 0 {
-        // process::exit 不跑 Drop——FileGuard 快照(config.json/active_group/出厂人格)必须先手动还原，
-        // 否则失败一次就把生产工作树留在改写态（实测：SOUL.md 曾被留在「e2e 临时改写出厂人格」）
-        drop(_guards);
-        std::process::exit(1);
+        anyhow::bail!("e2e: {} 项失败", c.fail);
     }
     println!("e2e 全部通过。");
     Ok(())
@@ -1479,5 +1478,4 @@ struct Env {
     key_stats: std::sync::Arc<Mutex<std::collections::HashMap<String, u32>>>,
     prompt_log: std::sync::Arc<Mutex<Vec<String>>>,
 }
-
 
