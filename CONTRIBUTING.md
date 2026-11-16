@@ -9,9 +9,15 @@ git clone https://github.com/ExMachina-Project/ExMachina.git
 cd ExMachina
 npm install && npm run build:webui
 cargo test --workspace
+npm run test:ui
 ```
 
 All tests passing means you're ready to develop. | 全部测试通过即可开始开发。
+
+`npm run test:ui` 使用 Playwright Core 与本机 Chromium，分别启动两端临时 Vite 服务，通过独立 HTTP/WS 夹具测试 WebUI 和 React 桌面。
+它不连接正在运行的网关、不调用真实模型、不修改用户会话；运行结束关闭浏览器与测试服务。
+Linux 默认浏览器路径为 `/usr/bin/chromium`，其它平台可用 `CHROMIUM=<浏览器可执行文件路径> npm run test:ui`。
+没有系统 Chromium 时先运行 `npx playwright-core install chromium`，测试会回退到 Playwright 下载的浏览器；CI 自动安装并执行。
 
 ## Code Style | 代码风格
 
@@ -34,6 +40,7 @@ crates/exm-core/     # Core runtime (scheduler / contracts / memory / tools) | �
 crates/exm-gateway/   # HTTP/WS gateway (REST API + WebUI hosting) | 网关
 crates/exm-cli/       # CLI (exm / exmachina dual entry) | 命令行工具
 webui/                # WebUI (React 19 + antd 6 + Vite)
+desktop/src/          # 独立桌面编程工作区（React + TypeScript + CodeMirror）
 agents/               # Agent roster data (JSON + Markdown prompts) | 智能体编成数据
 docs/                 # Contract docs (single source of truth) | 契约文档
 scripts/              # Install scripts (interactive: prebuilt or source) | 安装脚本（交互式：预编译或源码）

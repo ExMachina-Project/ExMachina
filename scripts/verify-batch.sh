@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 批次验收：一键回归（long-horizon-iteration 每批次收口必跑）。
-# 串联：clippy（-D warnings）→ workspace 测试 → e2e → webui tsc + 构建。
+# 串联：Rust、隔离 e2e、两端类型与构建、浏览器交互回归。
 # 任一步失败即退出非零；全过打印各步耗时与总计。
 # 用法：scripts/verify-batch.sh [--skip-e2e]   # --skip-e2e 跳过 e2e（无数据库环境时）
 set -euo pipefail
@@ -36,13 +36,17 @@ TOTAL_START=$(date +%s.%N)
 run_step "clippy -D warnings" cargo clippy --workspace --all-targets --locked -- -D warnings
 run_step "workspace 测试" cargo test --workspace --locked
 if [ "$SKIP_E2E" != "--skip-e2e" ]; then
-  run_step "e2e" bash -c 'cargo run -p exm-gateway --example e2e --locked && rm -rf entities/skills/e2e-skill'
+  run_step "e2e" cargo run -p exm-gateway --example e2e --locked
 else
   echo "（--skip-e2e：跳过 e2e）"
 fi
 run_step "webui tsc" bash -c 'cd webui && npx tsc --noEmit'
 run_step "webui eslint（Hooks 顺序防线）" bash -c 'cd webui && npx eslint . --max-warnings 9999'
 run_step "webui 构建" bash -c 'cd webui && npm run build'
+run_step "i18n" npm run check:i18n
+run_step "TypeScript 脚本" npm run check:scripts
+run_step "desktop eslint" npm run lint:desktop-ui
+run_step "desktop 构建与浏览器回归" npm run test:ui
 
 TOTAL_END=$(date +%s.%N)
 TOTAL_DUR=$(echo "$TOTAL_END $TOTAL_START" | awk '{printf "%.0fs", $1-$2}')
