@@ -186,6 +186,7 @@ export interface TaskNode {
   agentIdentifier: string;
   title: string;
   objective: string;
+  modelSelection?: { model: string; purpose: import("./modelRouting").ModelPurpose; reason: string } | null;
   acceptance: string[];
   priority: string;
   dependsOn: string[];
@@ -215,6 +216,7 @@ export interface AgentDefinition {
   whenToCall: string;
   /** 默认模型（"档案ID" 或 "档案ID/模型名"；空 = 跟随所属组/全局） */
   modelHint?: string | null;
+  modelRouting?: import("./modelRouting").ModelRouting | null;
   /** 连结体代理绑定（智能连结网络）：非空 = 该个体是外部连结体的代理，任务转交对端执行 */
   link?: string | null;
 }

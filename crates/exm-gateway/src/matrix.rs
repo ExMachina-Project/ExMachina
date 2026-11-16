@@ -260,6 +260,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                                 text.push_str(
                                                     &crate::channel_util::voice_transcript_note(
                                                         core.as_ref(),
+                                                        &ch,
                                                         bytes,
                                                         &name,
                                                     )

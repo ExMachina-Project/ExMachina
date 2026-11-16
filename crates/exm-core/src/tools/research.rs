@@ -114,8 +114,9 @@ impl ToolGateway {
                 "检索后端不可用：research_report 需要至少一个可用的联网搜索后端（在「模型与搜索」设置里配置）",
             );
         }
-        let Some((provider, model)) = self.research_llm.read().clone() else {
-            return ToolResult::err("研究通道未装配（research_llm 未注入）");
+        let fallback=self.research_llm.read().clone();
+        let (provider,model)=match self.agent_aux_model(crate::model_routing::ModelPurpose::Research,&topic,fallback).await {
+            Ok(value)=>value,Err(e)=>return ToolResult::err(format!("研究模型不可用：{e}")),
         };
         let Some(exec) = self.spawn_executor.read().clone() else {
             return ToolResult::err("spawn 执行器未装配（运行时未就绪）");
@@ -456,6 +457,7 @@ mod research_tool_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
             },
             None,
         );

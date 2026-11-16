@@ -47,6 +47,7 @@ async fn app_with(auth_key: &str) -> (axum::Router, std::path::PathBuf, String) 
         output_schema: Default::default(),
         prompt_file: String::new(),
         model_hint: None,
+        model_routing: None,
         max_steps: None,
     };
     core.registry().upsert_agent("t", def, None).unwrap();

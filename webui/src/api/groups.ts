@@ -1,7 +1,7 @@
 //! api/groups.ts —— 编成域：组/个体/独立智能体、人格、提示词、模板、目标与工作目录（codebase-refactor 7.1 拆分）。纯搬移。
 
 import { req } from "./core";
-import type { AgentDefinition, GroupCapabilities, GroupMeta, GroupOverview, PersonaInfo, TemplateInfo } from "./core";
+import type { AgentDefinition, GroupCapabilities, GroupMeta, GroupOverview, PersonaInfo, TemplateInfo, ModelRouting } from "./core";
 export const apiGroups = {
   agents: () => req<AgentDefinition[]>("/agents"),  groups: () => req<{ active: string; groups: GroupMeta[] }>("/groups"),
 
@@ -72,7 +72,14 @@ export const apiGroups = {
   setTarget: (mode: "group" | "single", id?: string) =>
     req<{ ok: boolean }>("/target", { method: "PUT", body: JSON.stringify({ mode, id }) }),
 
-  listSingles: () => req<{ active?: string; singles: { identifier: string; name: string; description: string; domain: string; modelHint?: string | null }[] }>("/singles"),
+  listSingles: () => req<{ active?: string; singles: { identifier: string; name: string; description: string; domain: string; modelHint?: string | null; modelRouting?: ModelRouting | null }[] }>("/singles"),
+
+  saveSingleRouting: (id: string, body: ModelRouting) => req<{ok: boolean}>(`/singles/${encodeURIComponent(id)}/model-routing`, { method: "PUT", body: JSON.stringify(body) }),
+  saveGroupRouting: (group: string, body: ModelRouting) => req<{ok: boolean}>(`/groups/${encodeURIComponent(group)}/model-routing`, { method: "PUT", body: JSON.stringify(body) }),
+  saveMemberRouting: (group: string, id: string, body: ModelRouting) => req<{ok: boolean}>(`/groups/${encodeURIComponent(group)}/agents/${encodeURIComponent(id)}/model-routing`, { method: "PUT", body: JSON.stringify(body) }),
+  routingPreview: (id: string, group?: string) => req<{policies: import("../modelRouting").RoutingPreview[]}>(group
+    ? `/groups/${encodeURIComponent(group)}/agents/${encodeURIComponent(id)}/model-routing`
+    : `/singles/${encodeURIComponent(id)}/model-routing`),
 
   setAgentModel: (identifier: string, model: string) =>
     req<{ ok: boolean }>(`/agents/${identifier}/model`, {

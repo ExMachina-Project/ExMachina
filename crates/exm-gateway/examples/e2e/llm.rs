@@ -476,12 +476,15 @@ let ks_for_handler = key_stats.clone();
 // 记录每次到达 fake 的 system prompt（单体人设注入验证用）
 let prompt_log = e.prompt_log.clone();
 let pl_for_handler = prompt_log.clone();
+let failed_key = std::sync::Arc::new(Mutex::new(None::<String>));
+let failed_for_handler = failed_key.clone();
 let fake = axum::Router::new().route(
     "/v1/chat/completions",
     axum::routing::post(
         move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
             let ks = ks_for_handler.clone();
             let pl = pl_for_handler.clone();
+            let failed = failed_for_handler.clone();
             async move {
                 let key = headers
                     .get(axum::http::header::AUTHORIZATION)
@@ -502,11 +505,12 @@ let fake = axum::Router::new().route(
                     .unwrap_or_default();
                 pl.lock().push(system_text);
                 let mut seen = ks.lock();
-                let first_time = !seen.contains_key(&key);
+                let first_request = seen.is_empty();
                 *seen.entry(key.clone()).or_insert(0) += 1;
                 drop(seen);
-                // 确定性：每把 Key 的第一次请求返回 429（模拟限额），之后恢复——迫使发起方轮换
-                if first_time {
+                if first_request { *failed.lock() = Some(key.clone()); }
+                // 首个命中 Key 恒限额，另一把可用；不依赖首个粘性键位。
+                if failed.lock().as_deref() == Some(key.as_str()) {
                     (
                         axum::http::StatusCode::TOO_MANY_REQUESTS,
                         Json(json!({ "error": { "message": "rate limit exceeded" } })),
@@ -593,6 +597,8 @@ c.check("Key 池会话 chat 202", pool_chat.status().as_u16() == 202);
 let rotated = tokio::time::timeout(Duration::from_secs(60), collector4).await??;
 c.check("Key 限额后轮换成功（run.finished）", rotated);
 // 第二轮：粘住 k2，不再触碰 k1
+let failed_id = failed_key.lock().clone().unwrap();
+let failed_key_requests = key_stats.lock().get(&failed_id).copied().unwrap_or(0);
 let _ = client
     .post(format!("{base}/sessions/{pool_sid}/chat"))
     .json(&serde_json::json!({ "text": "粘性验证第二轮" }))
@@ -603,8 +609,9 @@ let stats = key_stats.lock().clone();
 println!("    [key stats] {:?}", stats);
 // 首次请求 429 → 轮换到另一把并粘住；第二轮不再触碰首次失败的键位顺序
 c.check(
-    "粘性负载均衡：两把 Key 均参与且首轮各被限额一次",
-    stats.len() == 2 && stats.values().all(|&v| v >= 1),
+    "粘性负载均衡：可用 Key 保持粘性，不重复请求失败 Key",
+    stats.len() == 2 && stats.values().sum::<u32>() >= 3
+        && stats.get(&failed_id).copied().unwrap_or(0) == failed_key_requests,
 );
 
 let _ = client

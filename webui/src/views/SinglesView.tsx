@@ -5,11 +5,13 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Button, Card, Dropdown, Form, Input, Modal, Popconfirm, Select, Space, Spin, Switch, Tag, message } from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
 import { ApiOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, TeamOutlined, UndoOutlined, UserOutlined } from "@ant-design/icons";
-import { api, type GroupMeta, type LlmProfile, type PersonaInfo } from "../api";
+import { api, type GroupMeta, type LlmProfile, type PersonaInfo, type ModelRouting } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { SkeletonList } from "../components/SkeletonList";
 import { GroupDetailPanel } from "./GroupsView";
-import { buildCapabilityOptions, buildModelOptions, groupIdEn, modelLabel } from "../models";
+import { groupIdEn } from "../models";
+import { initialRouting, routingLabel } from "../modelRouting";
+import { ModelRoutingEditor } from "../components/ModelRoutingEditor";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
 
@@ -20,6 +22,7 @@ interface SingleInfo {
   domain: string;
   capabilities?: string[];
   modelHint?: string | null;
+  modelRouting?: ModelRouting | null;
 }
 
 export function SinglesView(): React.ReactElement {
@@ -31,7 +34,9 @@ export function SinglesView(): React.ReactElement {
   const [modal, setModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [modelTarget, setModelTarget] = useState<SingleInfo | null>(null);
-  const [modelDraft, setModelDraft] = useState<string>("");
+  const [modelDraft, setModelDraft] = useState<ModelRouting>({});
+  const [modelSaving, setModelSaving] = useState(false);
+  const [groupRouting, setGroupRouting] = useState<ModelRouting>({});
   const [descTarget, setDescTarget] = useState<SingleInfo | null>(null);
   const [descDraft, setDescDraft] = useState<string>("");
   /** 已进入的组详情（信息架构合并）：非空 = 整页渲染 GroupDetailPanel */
@@ -108,14 +113,15 @@ export function SinglesView(): React.ReactElement {
 
   const saveModel = async () => {
     if (!modelTarget) return;
+    setModelSaving(true);
     try {
-      await api.setAgentModel(modelTarget.identifier, modelDraft);
+      await api.saveSingleRouting(modelTarget.identifier, modelDraft);
       message.success(t("singles.modelUpdated", { name: modelTarget.name }));
       setModelTarget(null);
       await load();
     } catch (e) {
       message.error(t("singles.setFailed", { err: String(e) }));
-    }
+    } finally { setModelSaving(false); }
   };
 
   const saveDesc = async () => {
@@ -185,28 +191,11 @@ export function SinglesView(): React.ReactElement {
       if (workspace !== (groupEditTarget.workspace ?? "").trim()) {
         await api.setGroupWorkspace(targetId, workspace);
       }
-      const model = v.model ?? "";
-      if (model !== (groupEditTarget.model ?? "")) {
-        await api.setGroupModel(targetId, model);
-      }
+      await api.saveGroupRouting(targetId, groupRouting);
       // 自我优化（group-self-optimize）：仅在实际变化时提交（与组详情设置弹窗同口径）
       const selfOpt = v.selfOptimize ?? false;
       if (selfOpt !== (groupEditTarget.selfOptimize ?? false)) {
         await api.setGroupSelfOptimize(targetId, selfOpt);
-      }
-      // 能力覆盖（组级模型槽位）：逐项对比提交，空串 = 清除覆盖回落全局
-      const caps = (v.capabilities ?? {}) as Record<string, string>;
-      const prevCaps = groupEditTarget.capabilities ?? {};
-      const capsChanged = (["speech", "transcribe", "visionRelay", "embedding"] as const).some(
-        (k) => (caps[k] ?? "") !== (prevCaps[k] ?? ""),
-      );
-      if (capsChanged) {
-        await api.setGroupCapabilities(targetId, {
-          speech: caps.speech ?? "",
-          transcribe: caps.transcribe ?? "",
-          visionRelay: caps.visionRelay ?? "",
-          embedding: caps.embedding ?? "",
-        });
       }
       message.success(t("groups.infoSaved", { name: meta.name }));
       setGroupEditTarget(null);
@@ -246,6 +235,7 @@ export function SinglesView(): React.ReactElement {
       label: t("groups.menuEditInfo"),
       onClick: () => {
         setGroupEditTarget(g);
+        setGroupRouting(initialRouting(g.modelRouting, g.model, g.capabilities));
         groupEditForm.setFieldsValue({
           name: g.name,
           identifier: g.id,
@@ -352,7 +342,7 @@ export function SinglesView(): React.ReactElement {
       label: t("singles.menuModel"),
       onClick: () => {
         setModelTarget(s);
-        setModelDraft(s.modelHint ?? "");
+        setModelDraft(initialRouting(s.modelRouting, s.modelHint));
       },
     },
     {
@@ -439,7 +429,8 @@ export function SinglesView(): React.ReactElement {
                   <div className="dim">{s.description}</div>
                   <div className="skill-line">{t("singles.domain", { domain: s.domain || t("singles.solo") })}</div>
                   <div className="skill-line">
-                    {t("singles.model")}<Tag>{modelLabel(s.modelHint, profiles)}</Tag>
+                    {t("singles.model")}<Tag>{routingLabel(s.modelRouting, s.modelHint)}</Tag>
+                    <Button size="small" type="link" onClick={() => { setModelTarget(s); setModelDraft(initialRouting(s.modelRouting, s.modelHint)); }}>{t("routing.title")}</Button>
                   </div>
                 </Card>
               ))}
@@ -507,18 +498,11 @@ export function SinglesView(): React.ReactElement {
         title={t("singles.modelTitle", { name: modelTarget?.name ?? "" })}
         onCancel={() => setModelTarget(null)}
         onOk={() => void saveModel()}
+        confirmLoading={modelSaving}
         okText={t("common.save")}
-        width={480}
+        width={760}
       >
-        <div className="pane-hint" style={{ marginBottom: 12 }}>
-          {t("singles.modelHint")}
-        </div>
-        <Select
-          value={modelDraft}
-          onChange={setModelDraft}
-          style={{ width: "100%" }}
-          options={buildModelOptions(profiles)}
-        />
+        <ModelRoutingEditor value={modelDraft} onChange={setModelDraft} profiles={profiles} />
       </Modal>
 
       {/* 编辑描述（轻量：仅简介字段） */}
@@ -683,6 +667,7 @@ export function SinglesView(): React.ReactElement {
         onCancel={() => setGroupEditTarget(null)}
         onOk={() => void saveGroupEdit()}
         confirmLoading={groupEditSaving}
+        width={760}
         okText={t("common.save")}
         destroyOnHidden
       >
@@ -697,31 +682,13 @@ export function SinglesView(): React.ReactElement {
           <Form.Item name="workspace" label={t("groups.f.workspace")} extra={t("groups.f.workspaceHelp")}>
             <Input placeholder={t("groups.f.wsPh")} />
           </Form.Item>
-          <Form.Item name="model" label={t("groups.f.model")} extra={t("groups.f.modelHelp")}>
-            <Select allowClear options={buildModelOptions(profiles)} placeholder={t("groups.capsFollow")} />
-          </Form.Item>
+          <ModelRoutingEditor value={groupRouting} onChange={setGroupRouting} profiles={profiles} group />
           {/* 自我优化 + 能力覆盖：与组详情设置弹窗同款字段（统一页直接可改，不必进详情） */}
           <Form.Item name="selfOptimize" label={t("groups.selfOptLabel")} help={t("groups.selfOptHint")} style={{ marginBottom: 8 }}>
             <Switch
               checkedChildren={t("common.on")}
               unCheckedChildren={t("common.off")}
             />
-          </Form.Item>
-          <Form.Item label={t("groups.capsTitle")} help={t("groups.capsHint")} style={{ marginBottom: 8 }}>
-            <div className="cap-grid" style={{ gap: "8px 14px" }}>
-              <Form.Item name={["capabilities", "speech"]} noStyle>
-                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capSpeech")} />
-              </Form.Item>
-              <Form.Item name={["capabilities", "transcribe"]} noStyle>
-                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capStt")} />
-              </Form.Item>
-              <Form.Item name={["capabilities", "visionRelay"]} noStyle>
-                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capVisionRelay")} />
-              </Form.Item>
-              <Form.Item name={["capabilities", "embedding"]} noStyle>
-                <Select allowClear showSearch options={buildCapabilityOptions(profiles)} placeholder={t("models.capEmbed")} />
-              </Form.Item>
-            </div>
           </Form.Item>
           <Form.Item
             name="identifier"

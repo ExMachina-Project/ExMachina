@@ -163,6 +163,7 @@ mod history_tests {
             output_schema: Default::default(),
             prompt_file: String::new(),
             model_hint: None,
+            model_routing: None,
         };
         core.registry().upsert_agent("t", def, None).unwrap();
         core.registry().set_primary("t", "hist-orch").unwrap();
@@ -1003,6 +1004,7 @@ mod meta_approval_tests {
                     output_schema: crate::types::AgentIoSchema::default(),
                     prompt_file: String::new(),
                     model_hint: None,
+                    model_routing: None,
                     link: None,
                     max_steps: None,
                 },

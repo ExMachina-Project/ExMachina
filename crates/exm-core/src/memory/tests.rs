@@ -9,6 +9,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedding_models_never_share_vector_space() {
+        let dir=std::env::temp_dir().join(format!("exm-vector-space-{}",uuid::Uuid::new_v4()));
+        let store=MemoryStore::open(&dir).unwrap();
+        let entry=store.remember(&MemoryDraft::new(MemoryKind::Fact,"vector fixture","semantic evidence")).unwrap();
+        store.set_model_embedding(&entry.id,"p/model-a",vec![1.0,0.0]).unwrap();
+        store.set_model_embedding(&entry.id,"p/model-b",vec![0.0,1.0]).unwrap();
+        let query=vec![1.0,0.0];
+        let a=store.recall_with_model(None,"semantic",5,None,Some(("p/model-a",&query))).unwrap();
+        let b=store.recall_with_model(None,"semantic",5,None,Some(("p/model-b",&query))).unwrap();
+        let unknown=store.recall_with_model(None,"semantic",5,None,Some(("p/model-c",&query))).unwrap();
+        assert_eq!(a[0].semantic_score,Some(1.0));assert_eq!(b[0].semantic_score,Some(0.0));assert_eq!(unknown[0].semantic_score,None);
+        assert!(MemoryStore::cosine(&[1.0,0.0],&[1.0]).is_none());
+        store.update(&entry.id,None,Some("new body"),None,None).unwrap();
+        assert!(store.get_entry_public(&entry.id).unwrap().unwrap().model_embeddings.is_empty());
+        let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn 词项切分_中文二元与英文词() {
         let t = tokens("EXMACHINA 记忆系统 memory");
         assert!(t.contains(&"记忆".to_string()));

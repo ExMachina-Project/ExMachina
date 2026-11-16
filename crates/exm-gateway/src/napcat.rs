@@ -681,7 +681,7 @@ async fn on_text(
                 }
                 if kind == "voice" {
                     transcript_note.push_str(
-                        &crate::channel_util::voice_transcript_note(&core, b, &name).await,
+                        &crate::channel_util::voice_transcript_note(&core, &ch, b, &name).await,
                     );
                 }
             }

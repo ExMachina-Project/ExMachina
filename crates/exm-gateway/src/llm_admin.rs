@@ -37,7 +37,7 @@ fn profile_json(p: &LlmProfile) -> Value {
     let models: Vec<Value> = p
         .models
         .iter()
-        .map(|m| json!({ "model": m.model, "vision": m.vision, "audio": m.audio, "contextWindow": m.context_window }))
+        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
         .collect();
     json!({
         "id": p.id, "name": p.name, "baseUrl": p.base_url,
@@ -102,6 +102,14 @@ pub struct ModelEntryBody {
     pub audio: bool,
     #[serde(default)]
     pub context_window: Option<u64>,
+    #[serde(default)]
+    pub purposes: Option<Vec<exm_core::model_routing::ModelPurpose>>,
+    #[serde(default)]
+    pub cost: Option<exm_core::model_routing::ModelCost>,
+    #[serde(default)]
+    pub usage_notes: Option<String>,
+    #[serde(default)]
+    pub auto_eligible: Option<bool>,
 }
 
 /// Key 池条目：结构化提交让「沿用位」携带旧池引用（删行/插行后不串位），纯掩码字符串保持兼容
@@ -185,12 +193,18 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
     let mut models: Vec<ModelEntry> = match &v.models {
         Some(list) => list
             .iter()
-            .map(|m| ModelEntry {
+            .map(|m| {
+                let old = existing.and_then(|p| p.models.iter().find(|entry| entry.model == m.model.trim())).cloned().unwrap_or_default();
+                ModelEntry {
                 model: m.model.trim().to_string(),
                 vision: m.vision,
                 audio: m.audio,
-                context_window: m.context_window.unwrap_or(0),
-            })
+                context_window: m.context_window.unwrap_or(old.context_window),
+                purposes: m.purposes.clone().unwrap_or(old.purposes),
+                cost: m.cost.unwrap_or(old.cost),
+                usage_notes: m.usage_notes.clone().unwrap_or(old.usage_notes),
+                auto_eligible: m.auto_eligible.unwrap_or(old.auto_eligible),
+            }})
             .filter(|m| !m.model.is_empty())
             .collect(),
         None => existing.map(|e| e.models.clone()).unwrap_or_default(),
@@ -210,6 +224,7 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
                 vision: false,
                 audio: false,
                 context_window: 0,
+                ..Default::default()
             },
         );
     }
@@ -273,6 +288,9 @@ pub async fn save_profile(
             Json(json!({ "error": error.to_string() })),
         )
             .into_response();
+    }
+    if profile.models.len() > 1000 || profile.models.iter().any(|m|m.model.len()>256 || m.usage_notes.chars().count()>2000 || m.purposes.len()>11) {
+        return (StatusCode::BAD_REQUEST,Json(json!({"error":"模型目录最多 1000 项，模型名最多 256 字节，适用场景最多 2000 字符，用途最多 11 项"}))).into_response();
     }
     if let Some(slot) = cfg.llm_profiles.iter_mut().find(|p| p.id == profile.id) {
         *slot = profile.clone();

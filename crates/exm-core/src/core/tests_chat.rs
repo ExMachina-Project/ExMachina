@@ -122,3 +122,38 @@ async fn missing_sessions_never_leave_a_running_marker() {
     assert!(f.core.chat_with_agent("missing", "unit", "hi").await.is_err());
     assert!(!round_trace::is_running("missing"));
 }
+
+#[tokio::test]
+async fn im_greetings_require_a_real_provider_response_and_propagate_errors() {
+    for fail in [false, true] {
+        let mut f = Fixture::new(fail);
+        for text in ["在吗", "你好！", "谢谢", "晚安", "OK", "test", "@2511705734 在吗"] {
+            let id = f.core.create_session("im-greeting").unwrap().id;
+            crate::orchestrator::mark_im_session(&id);
+            let mut events = f.core.subscribe();
+            let core = f.core.clone();
+            let sid = id.clone();
+            let task = tokio::spawn(async move { core.chat(&sid, text).await });
+            // The old keyword reply completed without ever entering the provider.
+            f.started().await;
+            f.release.add_permits(1);
+            let result = task.await.unwrap();
+            assert_eq!(result.is_err(), fail);
+            let messages = f.core.store.list_messages(&id, 0).unwrap();
+            let replies: Vec<_> = messages.iter().filter(|m| m.role == crate::types::MessageRole::Orchestrator).collect();
+            if fail {
+                assert!(replies.is_empty(), "A failed model cannot create a successful greeting");
+                assert!(messages.iter().any(|m| m.role == crate::types::MessageRole::System && m.statements.iter().any(|s| s.text.contains("fixture failure"))));
+            } else {
+                assert_eq!(replies.len(), 1);
+                assert_eq!(replies[0].statements[0].text, "done");
+            }
+            let emitted: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+            assert_eq!(emitted.iter().any(|event| event.kind == "run.error"), fail);
+            assert!(!emitted.iter().any(|event| event.payload.get("shortCircuit").is_some()));
+            assert!(!round_trace::is_running(&id));
+            assert_eq!(f.core.store.list_turn_snapshots(&id).unwrap().last().unwrap().status, if fail { "failed" } else { "done" });
+            crate::orchestrator::unmark_im_session(&id);
+        }
+    }
+}

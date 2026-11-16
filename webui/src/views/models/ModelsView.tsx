@@ -1,24 +1,16 @@
-/**
- * 提供商页：API 端点与密钥的唯一下发处。
- *
- * 设计原则：**这一页只回答一件事——这家提供商的端点在哪、密钥是什么。**
- * 模型名只是「连上这个端点后默认用哪个模型」的附注（预设自动填，可改）。
- * 指挥体 / 子个体的模型差异属于编成，在「智能体组」与「子个体」页各自选择；
- * 嵌入模型属于记忆检索，在「记忆」页指定——都**不在这里**出现。
- */
+/** Provider catalogs describe models; assignments edit individual agents and group members. */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Button, Card, Collapse, Form, Input, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch,
+  Alert, Button, Card, Collapse, Form, Input, InputNumber, Modal, Popconfirm, Segmented, Select, Space, Spin, Switch,
   Tag, Tooltip, message,
 } from "antd";
 import { BrandEmpty } from "../../components/BrandEmpty";
 import { MaskedPasswordInput } from "../../components/MaskedInput";
 import {
-  ApiOutlined, AudioOutlined, ClusterOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
+  ApiOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined,
   EyeOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined, SoundOutlined,
 } from "@ant-design/icons";
-import { api, KEY_MASK, KEY_CLEAR, type ClientIdentity, type LlmCapabilities, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../../api";
-import { buildCapabilityOptions } from "../../models";
+import { api, KEY_MASK, KEY_CLEAR, type ClientIdentity, type LlmProfile, type LlmProfilesInfo, type ProfileModel } from "../../api";
 import { getTestRecord, putTestRecord } from "../../testLog";
 import { PageHeader } from "../../components/PageHeader";
 import { useT } from "../../i18n/core";
@@ -27,12 +19,12 @@ import { useT } from "../../i18n/core";
 import { PRESETS, PRESET_LABEL, CUSTOM, API_FORMAT_KEYS, FORMAT_LABEL_KEY, type KeyForm, type Tab, liveRows } from "./presets";
 import { ModelPicker } from "./ModelPicker";
 import { ClientIdentityFields, parseClientIdentity } from "./ClientIdentityFields";
+import { ModelAllocationPanel } from "./ModelAllocationPanel";
+import { MODEL_PURPOSES, costLabel, purposeLabel } from "../../modelRouting";
 
 export function ModelsView(): React.ReactElement {
   const t = useT();
   const [info, setInfo] = useState<LlmProfilesInfo | null>(null);
-  const [caps, setCaps] = useState<LlmCapabilities>({ speech: "", transcribe: "", visionRelay: "", embedding: "" });
-  const [capSaving, setCapSaving] = useState(false);
   /** 页内分页：providers = 提供商与模型清单；caps = 功能分配（能力模型） */
   const [tab, setTab] = useState<Tab>("providers");
   const [loading, setLoading] = useState(false);
@@ -130,7 +122,8 @@ export function ModelsView(): React.ReactElement {
     setLoading(true);
     try {
       setInfo(await api.llmProfiles());
-      setCaps(await api.llmCapabilities());
+    } catch (error) {
+      message.error(String(error));
     } finally {
       setLoading(false);
     }
@@ -164,6 +157,7 @@ export function ModelsView(): React.ReactElement {
       clientIdentity: p.clientIdentity ?? { preset: "default" },
       clientHeaders: Object.keys(p.clientIdentity?.headers ?? {}).length ? JSON.stringify(p.clientIdentity?.headers, null, 2) : "",
       models: rows,
+      model: p.model,
       fallback: p.fallback ?? undefined,
       keys: [...maskRows, ...poolRows],
     });
@@ -262,7 +256,8 @@ export function ModelsView(): React.ReactElement {
         clearKeys,
         models: ((v.models ?? []) as ProfileModel[])
           .filter((m) => m.model && m.model.trim())
-          .map((m) => ({ model: m.model.trim(), vision: !!m.vision, audio: !!m.audio })),
+          .map((m) => ({ ...m, model: m.model.trim(), vision: !!m.vision, audio: !!m.audio })),
+        model: v.model || undefined,
         fallback: v.fallback ?? "",
       });
       message.success(existing ? t("models.savedName", { name: v.name || existing.name }) : t("models.added", { name: v.name }));
@@ -324,54 +319,6 @@ export function ModelsView(): React.ReactElement {
     [profiles, editing],
   );
 
-  /** 能力槽位候选：每个档案的默认模型 + 清单里的每个模型（"档案ID" / "档案ID/模型名"） */
-  const capOptions = useMemo(() => buildCapabilityOptions(profiles), [profiles]);
-
-  const capField = (
-    key: keyof LlmCapabilities,
-    label: string,
-    hint: string,
-    placeholder: string,
-    icon: React.ReactNode,
-  ) => {
-    const val = caps[key] || "";
-    return (
-      <div className="cap-slot" key={key}>
-        <div className="cap-slot-head">
-          <span className="cap-slot-icon">{icon}</span>
-          <span className="cap-slot-name">{label}</span>
-          {val ? (
-            <Tag className="tag-ok cap-slot-set">{t("models.capSet")}</Tag>
-          ) : (
-            <Tag className="cap-slot-unset">{t("models.capUnset")}</Tag>
-          )}
-        </div>
-        <Select
-          allowClear
-          showSearch
-          className="cap-slot-select"
-          value={val || undefined}
-          placeholder={placeholder}
-          options={capOptions}
-          onChange={(v) => setCaps((c) => ({ ...c, [key]: v ?? "" }))}
-        />
-        <div className="cap-hint">{hint}</div>
-      </div>
-    );
-  };
-
-  const saveCaps = async () => {
-    setCapSaving(true);
-    try {
-      setCaps(await api.saveLlmCapabilities(caps));
-      message.success(t("models.capSaved"));
-    } catch (e) {
-      message.error(t("common.saveFailed", { err: String(e) }));
-    } finally {
-      setCapSaving(false);
-    }
-  };
-
   const presetOptions = [
     ...PRESETS.map((p) => ({ value: p.key, label: PRESET_LABEL[p.key] ? t(PRESET_LABEL[p.key]!) : p.name })),
     { value: CUSTOM, label: t("models.customPreset") },
@@ -384,7 +331,7 @@ export function ModelsView(): React.ReactElement {
       <PageHeader
         en="MODELS"
         title={t("nav.models")}
-        desc={tab === "caps" ? t("models.capDesc") : t("models.desc")}
+        desc={tab === "caps" ? t("routing.description") : t("models.desc")}
         actions={
           <>
             {/* 视图切换与动作分组（视觉走查：切换/操作分层，Divider 区隔主次） */}
@@ -394,7 +341,7 @@ export function ModelsView(): React.ReactElement {
                 onChange={(v) => setTab(v as Tab)}
                 options={[
                   { value: "providers", label: t("models.tabProviders") },
-                  { value: "caps", label: t("models.tabCaps") },
+                  { value: "caps", label: t("routing.assignmentTab") },
                 ]}
               />
               {tab === "providers" && (
@@ -407,15 +354,6 @@ export function ModelsView(): React.ReactElement {
                   </Button>
                 </>
               )}
-              {tab === "caps" && (
-                <Button
-                  type="primary"
-                  loading={capSaving}
-                  onClick={() => void saveCaps()}
-                >
-                  {t("common.save")}
-                </Button>
-              )}
               <Button icon={<ReloadOutlined />} onClick={() => void load()}>
                 {t("common.refresh")}
               </Button>
@@ -426,6 +364,7 @@ export function ModelsView(): React.ReactElement {
 
       {tab === "providers" && (
       <Spin spinning={loading}>
+        <Alert type="info" showIcon className="routing-catalog-hint" title={t("routing.catalogHint")} />
         <div className="skill-grid">
           {profiles.map((p) => {
             const keyCount = (p.apiKeys?.length ?? 0) + (p.apiKey ? 1 : 0);
@@ -504,6 +443,11 @@ export function ModelsView(): React.ReactElement {
                   )}
                   {p.fallback ? <Tag>{t("models.fallbackTo", { id: p.fallback })}</Tag> : null}
                 </div>
+                <div className="model-catalog-list">{p.models.map((model) => <div key={model.model} className="model-catalog-entry">
+                  <div><span className="mono">{model.model}</span> <Tag>{costLabel(model.cost)}</Tag>{model.autoEligible && <Tag>{t("routing.autoEligible")}</Tag>}</div>
+                  {!!model.purposes?.length && <div className="dim">{model.purposes.map(purposeLabel).join(" · ")}</div>}
+                  {model.usageNotes && <div className="dim">{model.usageNotes}</div>}
+                </div>)}</div>
               </Card>
             );
           })}
@@ -512,26 +456,7 @@ export function ModelsView(): React.ReactElement {
       </Spin>
       )}
 
-      {tab === "caps" && (
-        <Card
-          size="small"
-          className="hud cap-card"
-          title={t("models.capTitle")}
-          extra={
-            <Button size="small" type="primary" loading={capSaving} onClick={() => void saveCaps()}>
-              {t("common.save")}
-            </Button>
-          }
-        >
-          <div className="dim cap-hint" style={{ marginBottom: 10 }}>{t("models.capGlobalHint")}</div>
-          <div className="cap-grid">
-            {capField("speech", t("models.capSpeech"), t("models.capSpeechHint"), t("models.capUnset"), <SoundOutlined />)}
-            {capField("transcribe", t("models.capStt"), t("models.capSttHint"), t("models.capUnset"), <AudioOutlined />)}
-            {capField("visionRelay", t("models.capVisionRelay"), t("models.capVisionHint"), t("models.capUnset"), <EyeOutlined />)}
-            {capField("embedding", t("models.capEmbed"), t("models.capEmbedHint"), t("models.capEmbedPh"), <ClusterOutlined />)}
-          </div>
-        </Card>
-      )}
+      {tab === "caps" && <ModelAllocationPanel profiles={profiles} />}
 
       <Modal
         open={modal}
@@ -654,7 +579,8 @@ export function ModelsView(): React.ReactElement {
                     {(fields, { add, remove }) => (
                       <>
                         {fields.map(({ key, name, ...rest }) => (
-                          <div key={key} className="model-row">
+                           <div key={key} className="model-catalog-form">
+                           <div className="model-row">
                             <Form.Item
                               {...rest}
                               name={[name, "model"]}
@@ -683,7 +609,25 @@ export function ModelsView(): React.ReactElement {
                               onClick={() => remove(name)}
                               aria-label={t("common.delete")}
                             />
-                          </div>
+                           </div>
+                           <div className="form-grid-2">
+                             <Form.Item {...rest} name={[name, "purposes"]} label={t("routing.purposes")}>
+                               <Select mode="multiple" options={MODEL_PURPOSES.map((purpose) => ({ value: purpose, label: purposeLabel(purpose) }))} />
+                             </Form.Item>
+                             <Form.Item {...rest} name={[name, "cost"]} label={t("routing.cost")} initialValue="unknown">
+                               <Select options={(["unknown", "economy", "balanced", "premium"] as const).map((cost) => ({ value: cost, label: costLabel(cost) }))} />
+                             </Form.Item>
+                             <Form.Item {...rest} name={[name, "contextWindow"]} label={t("routing.contextWindow")}>
+                               <InputNumber min={0} max={100000000} precision={0} style={{ width: "100%" }} />
+                             </Form.Item>
+                             <Form.Item {...rest} name={[name, "autoEligible"]} label={t("routing.autoEligible")} valuePropName="checked" tooltip={t("routing.autoEligibleHint")}>
+                               <Switch />
+                             </Form.Item>
+                           </div>
+                           <Form.Item {...rest} name={[name, "usageNotes"]} label={t("routing.usageNotes")}>
+                             <Input.TextArea rows={2} maxLength={2000} placeholder={t("routing.usageNotesPlaceholder")} />
+                           </Form.Item>
+                           </div>
                         ))}
                         <Button
                           type="dashed"
@@ -699,6 +643,9 @@ export function ModelsView(): React.ReactElement {
                       </>
                     )}
                   </Form.List>
+                  <Form.Item name="model" label={t("routing.providerDefault")} style={{ marginTop: 12 }}>
+                    <Input placeholder={editing?.model || t("models.modelNameRequired")} />
+                  </Form.Item>
                 </Form.Item>
               ),
             }]}

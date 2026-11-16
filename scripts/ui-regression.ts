@@ -180,6 +180,39 @@ async function screenshot(page: Page, name: string): Promise<void> {
 
 try {
   for (const desktop of [false, true]) {
+    await test(`${desktop ? "Desktop" : "WebUI"} model allocation saves the selected agent and capability`, async () => {
+      const f = await fixture(desktop);
+      try {
+        const models = [{ model: "small", vision: false, audio: false, purposes: ["chat", "coding"], cost: "economy", autoEligible: true, usageNotes: "Routine coding and summaries" }];
+        f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", mock: true, profiles: [{ ...profile, models }] }));
+        f.state.overrides.set("/groups/default/agents", (_, fulfill) => fulfill([{ identifier: "member", name: "Member", description: "fixture", tier: "unit", tools: [], capabilities: [] }]));
+        f.state.overrides.set("/singles/machina/model-routing", (route, fulfill) => fulfill(route.request().method() === "PUT" ? { ok: true } : { policies: [] }));
+        if (desktop) {
+          await f.page.getByRole("button", { name: "设置", exact: true }).click();
+          await f.page.getByRole("tab", { name: "模型", exact: true }).click();
+        } else await f.page.evaluate(() => { location.hash = "#/models"; });
+        await f.page.getByText("智能体分配", { exact: true }).click();
+        const subject = f.page.getByRole("combobox", { name: "配置对象", exact: true });
+        await subject.click(); await f.page.locator('.ant-select-item-option').filter({ hasText: "Fixture Agent" }).last().click();
+        const defaultRow = f.page.locator('[data-routing-purpose="default"]');
+        await defaultRow.locator(".routing-mode").click(); await f.page.getByText("由指挥体分配", { exact: true }).last().click();
+        const speechRow = f.page.locator('[data-routing-purpose="speech"]');
+        await speechRow.locator(".routing-mode").click(); await f.page.getByText("关闭此能力", { exact: true }).last().click();
+        await f.page.getByRole("textbox", { name: "给指挥体的分配说明", exact: true }).fill("Routine tasks use the economy model.");
+        await f.page.locator(".routing-save .ant-btn-primary").click();
+        await eventually(() => f.state.requests.some((r) => r.path === "/singles/machina/model-routing" && r.method === "PUT"), "Agent allocation was not saved");
+        const saved = f.state.requests.findLast((r) => r.path === "/singles/machina/model-routing" && r.method === "PUT")!.body as { default: { mode: string }; purposes: { speech: { mode: string } }; instructions: string };
+        assert.equal(saved.default.mode, "auto"); assert.equal(saved.purposes.speech.mode, "disabled"); assert.ok(saved.instructions.includes("economy"));
+        assert.equal(f.state.requests.filter((r) => r.path === "/llm/capabilities" && r.method === "PUT").length, 0);
+        f.state.overrides.set("/groups/default/agents/member/model-routing", (route, fulfill) => fulfill(route.request().method() === "PUT" ? { ok: true } : { policies: [] }));
+        await subject.click(); await f.page.locator('.ant-select-item-option').filter({ hasText: "Default / Member" }).last().click();
+        await speechRow.locator(".routing-mode").click(); await f.page.getByText("关闭此能力", { exact: true }).last().click();
+        await f.page.locator(".routing-save .ant-btn-primary").click();
+        await eventually(() => f.state.requests.some((r) => r.path === "/groups/default/agents/member/model-routing" && r.method === "PUT"), "Group member allocation was not saved");
+        assert.equal(f.state.requests.filter((r) => r.path === "/target" && r.method === "PUT").length, 0);
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-agent-allocation`);
+      } finally { await f.close(); }
+    });
     await test(`${desktop ? "Desktop" : "WebUI"} client identity saves, reloads, validates and resets`, async () => {
       const f = await fixture(desktop);
       try {
@@ -504,7 +537,7 @@ try {
       await f.page.getByRole("button", { name: "设置", exact: true }).click();
       for (const label of ["模型", "智能体", "桌面", "技能", "插件", "会话", "审批", "记忆", "知识", "自动化", "连结", "高级", "审计"]) {
         await f.page.getByRole("tab", { name: label, exact: true }).click();
-        await f.page.getByRole("tabpanel").waitFor({ state: "visible" });
+        await f.page.getByRole("tabpanel").waitFor({ state: "visible", timeout: 30_000 });
         await f.page.waitForFunction(() => !document.querySelector(".desk-settings .ant-spin-spinning"));
         await f.page.waitForLoadState("networkidle");
         assert.ok(await f.page.locator(".desk-statusbar").count());

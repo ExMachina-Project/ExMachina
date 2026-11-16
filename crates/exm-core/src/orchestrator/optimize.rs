@@ -259,7 +259,7 @@ impl Orchestrator {
 {}",
             def.name, def.identifier, def.description, stat_line, lessons_block
         );
-        let (provider, model) = self.resolve_orch_model();
+        let (_,provider,model)=self.resolve_agent_model(&def,crate::model_routing::ModelPurpose::Summary,"根据历史教训提炼智能体改进要点","",None).await?;
         let req = ChatRequest::new(
             model,
             vec![ChatMessage::system(system), ChatMessage::user(user)],

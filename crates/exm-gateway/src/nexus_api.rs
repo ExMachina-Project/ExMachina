@@ -439,6 +439,7 @@ mod tests {
                     output_schema: Default::default(),
                     prompt_file: String::new(),
                     model_hint: None,
+                    model_routing: None,
                     link: Some("lnk1".into()),
                     max_steps: None,
                 },
@@ -504,6 +505,7 @@ mod tests {
             link: None,
             max_steps: None,
             model_hint: None,
+            model_routing: None,
         };
         st.core.registry().upsert_single(def, None).unwrap();
 

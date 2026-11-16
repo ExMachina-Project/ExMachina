@@ -101,6 +101,7 @@ pub async fn list_singles(State(st): State<AppState>) -> impl IntoResponse {
                 "identifier": d.identifier, "name": d.name, "description": d.description,
                 "domain": d.domain, "tier": d.tier, "modelHint": d.model_hint,
                 "capabilities": d.capabilities,
+                "modelRouting": d.model_routing,
             })
         }).collect::<Vec<_>>(),
     }))
@@ -164,6 +165,7 @@ pub async fn create_single(
         output_schema: Default::default(),
         prompt_file: String::new(),
         model_hint: b.model.filter(|s| !s.trim().is_empty()),
+        model_routing: None,
         link,
         max_steps: None,
     };

@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
 pub mod meta;
+pub mod model_routing;
 pub mod nexus;
 
 pub(crate) mod core;
@@ -218,36 +219,8 @@ impl Core {
             None,
             Some(cron.clone()),
         )?);
-        // 语音合成回接（assistant-parity T2）：speech_reply 工具 → orchestrator
-        // speak_audio（能力槽位链：组覆盖 → 全局 → tts-1 兜底）。Weak 防环
-        // （tools 常驻 orchestrator）；orchestrator 重建时在 rebuild 处同款回接。
-        {
-            let weak = Arc::downgrade(&orchestrator);
-            orchestrator.tools.set_speech_synth(Arc::new(move |text| {
-                let weak = weak.clone();
-                Box::pin(async move {
-                    let orch = weak
-                        .upgrade()
-                        .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
-                    orch.speak_audio(&text).await
-                })
-            }));
-        }
-        // 图像生成回接（image-gen）：image_gen 工具 → orchestrator
-        // image_gen_bytes（能力槽位链：组覆盖 → 全局；无兜底模型，未配置即 Err）。
-        // Weak 防环同 speech；重建时在 rebuild 处同款回接。
-        {
-            let weak = Arc::downgrade(&orchestrator);
-            orchestrator.tools.set_image_gen(Arc::new(move |prompt, size| {
-                let weak = weak.clone();
-                Box::pin(async move {
-                    let orch = weak
-                        .upgrade()
-                        .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
-                    orch.image_gen_bytes(&prompt, &size).await
-                })
-            }));
-        }
+        // All auxiliary tools resolve the executing agent's model policy. Weak references avoid cycles.
+        orchestrator.bind_model_tools();
         // 回接：插件声明式工具并入工具网关（custom 执行链全套复用）。
         // ToolGateway 构建在 build_orchestrator 内，此处经 orchestrator.tools 追加。
         {
@@ -367,7 +340,9 @@ impl Core {
         )?;
         // 回接：插件工具面（T1 声明式 + T2 进程运行时）挂到新 orchestrator
         self.rebind_plugin_tools(&orch);
-        *self.orchestrator.write() = Arc::new(orch);
+        let orch=Arc::new(orch);
+        orch.bind_model_tools();
+        *self.orchestrator.write() = orch;
         *self.config.write() = Arc::new(cfg);
         Ok(())
     }
@@ -654,12 +629,16 @@ impl Core {
         crate::registry::round_scope_decl::ROUND_SCOPE
             .scope(ctx, async {
                 let orch = self.orchestrator();
+                let caller_id=agent.map(str::to_string).unwrap_or_else(||orch.orch_id());
+                let caller=crate::model_routing::ModelCaller {agent_id:caller_id,session_id:session_id.to_string()};
+                crate::model_routing::MODEL_CALLER.scope(caller,async {
                 if let Some(agent) = agent {
                     let result = orch.unit_direct_round_origin(session_id, agent, text, origin).await;
                     orch.finalize_round(session_id, result, scope).await
                 } else {
                     orch.handle_user_message_scoped(session_id, text, scope, origin).await
                 }
+                }).await
             })
             .await
     }
@@ -754,6 +733,7 @@ impl Core {
                     acceptance: n.acceptance.clone(),
                     depends_on: n.depends_on.clone(),
                     priority: n.priority,
+                    model_selection: n.model_selection.clone(),
                 })
                 .collect(),
             final_answer: None,
@@ -845,35 +825,9 @@ impl Core {
             Some(self.cron.clone()),
         )?;
         self.rebind_plugin_tools(&orch);
-        // 语音合成回接（T2，与 Core::new 同款）：orchestrator 重建后槽位复位
-        {
-            let orch_arc = Arc::new(orch);
-            let weak = Arc::downgrade(&orch_arc);
-            let tools = orch_arc.tools.clone();
-            tools.set_speech_synth(Arc::new(move |text| {
-                let weak = weak.clone();
-                Box::pin(async move {
-                    let o = weak
-                        .upgrade()
-                        .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
-                    o.speak_audio(&text).await
-                })
-            }));
-            // 图像生成回接（与 Core::new 同款）：重建后槽位复位
-            {
-                let weak2 = Arc::downgrade(&orch_arc);
-                tools.set_image_gen(Arc::new(move |prompt, size| {
-                    let weak = weak2.clone();
-                    Box::pin(async move {
-                        let o = weak
-                            .upgrade()
-                            .ok_or_else(|| anyhow::anyhow!("orchestrator 已释放"))?;
-                        o.image_gen_bytes(&prompt, &size).await
-                    })
-                }));
-            }
-            *self.orchestrator.write() = orch_arc;
-        }
+        let orch = Arc::new(orch);
+        orch.bind_model_tools();
+        *self.orchestrator.write() = orch;
         Ok(())
     }
 
@@ -1444,6 +1398,7 @@ pub fn build_orchestrator(
                     output_schema: Default::default(),
                     prompt_file: String::new(),
                     model_hint: None,
+                    model_routing: None,
                     link: None,
                     max_steps: None,
                 };

@@ -98,6 +98,7 @@ pub fn scope_budget(full: &crate::config::ToolCallBudget, scope: crate::types::T
 }
 
 pub struct ToolGateway {
+    pub(crate) model_router: parking_lot::RwLock<std::sync::Weak<crate::orchestrator::Orchestrator>>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) store: Arc<Store>,
     pub(crate) registry: Arc<LocalRegistry>,
@@ -228,6 +229,7 @@ impl ToolGateway {
             spawn_executor: parking_lot::RwLock::new(None),
             session_send_executor: parking_lot::RwLock::new(None),
             session_grant_probe: parking_lot::RwLock::new(None),
+            model_router: parking_lot::RwLock::new(std::sync::Weak::new()),
             compactor: parking_lot::RwLock::new(None),
             research_llm: parking_lot::RwLock::new(None),
             speech_synth: parking_lot::RwLock::new(None),
@@ -295,6 +297,20 @@ impl ToolGateway {
         *self.compactor.write() = Some((provider, model));
     }
 
+    pub fn set_model_router(&self, router: std::sync::Weak<crate::orchestrator::Orchestrator>) {
+        *self.model_router.write() = router;
+    }
+
+    pub(crate) async fn agent_aux_model(&self, purpose: crate::model_routing::ModelPurpose, task: &str,
+        fallback: Option<(Arc<dyn LlmProvider>,String)>) -> anyhow::Result<(Arc<dyn LlmProvider>,String)> {
+        let router=self.model_router.read().upgrade();
+        match router { Some(router)=>router.caller_model(purpose,task).await, None=>fallback.ok_or_else(||anyhow::anyhow!("模型路由未装配")) }
+    }
+
+    pub(crate) fn agent_purpose_ready(&self, def: &AgentDefinition, purpose: crate::model_routing::ModelPurpose, fallback: bool) -> bool {
+        self.model_router.read().upgrade().map(|r|r.purpose_ready(def,purpose)).unwrap_or(fallback)
+    }
+
     /// 注入深度研究 LLM 通道（research_report 计划与聚合两阶段）
     pub fn set_research_llm(&self, provider: Arc<dyn LlmProvider>, model: String) {
         *self.research_llm.write() = Some((provider, model));
@@ -312,6 +328,9 @@ impl ToolGateway {
 
     /// 图像生成是否装配（决定 image_gen 是否下发：能力未回接不承诺）
     pub fn image_gen_ready(&self) -> bool {
+        if let Some(router) = self.model_router.read().upgrade() {
+            return router.image_gen_ready();
+        }
         self.image_gen.read().is_some()
     }
 
@@ -930,6 +949,12 @@ impl ToolGateway {
         name: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
+        crate::model_routing::MODEL_CALLER.scope(crate::model_routing::ModelCaller {
+            agent_id:agent_id.to_string(),session_id:session_id.to_string(),
+        },self.execute_named_inner(agent_id,session_id,allowlist,name,args)).await
+    }
+
+    async fn execute_named_inner(&self,agent_id:&str,session_id:&str,allowlist:&[ToolName],name:&str,args:&serde_json::Value)->ToolResult {
         let started = Instant::now();
         let call_id = format!("t{}", &crate::types::new_id()[..12]);
         // 工具执行事件（call）：文件操作 / 终端命令 / 截屏对用户全程可见——编程软件式的过程透明

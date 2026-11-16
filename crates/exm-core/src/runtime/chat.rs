@@ -64,8 +64,8 @@ impl AgentRuntime {
             self.tools.search_ready(),
             self.tools.browser_ready(),
             self.tools.computer_ready(),
-            self.tools.speech_ready(),
-            self.tools.image_gen_ready(),
+            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::Speech,self.tools.speech_ready()),
+            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::ImageGen,self.tools.image_gen_ready()),
             self.tools.chart_ready(),
             self.tools.memory_deep(),
         );
@@ -138,8 +138,9 @@ impl AgentRuntime {
                     );
                 }
             }
-            let (text, calls, usage) = match self
+            let (text, calls, usage, used_model) = match self
                 .call_llm(
+                    session_id,
                     &messages,
                     &agent_hint,
                     &chain,
@@ -163,9 +164,7 @@ impl AgentRuntime {
             };
             usage_prompt += usage.0;
             usage_completion += usage.1;
-            if let Some((_, _, m)) = chain.candidates.first() {
-                last_model = m.clone();
-            }
+            last_model = used_model;
 
             // 1a) 原生 function calling：协议级工具调用
             //     只读工具（read/grep/glob/web_fetch/web_search）并发执行；写工具按原顺序串行
@@ -403,7 +402,6 @@ impl AgentRuntime {
         let mut done_tools: Vec<String> = Vec::new();
         let mut usage_prompt: u64 = 0;
         let mut usage_completion: u64 = 0;
-        let mut last_model = String::new();
         // 元认知反思态（每轮一次上限）
         let mut consecutive_failures: u32 = 0;
         let mut reflected = false;
@@ -416,8 +414,8 @@ impl AgentRuntime {
             self.tools.search_ready(),
             self.tools.browser_ready(),
             self.tools.computer_ready(),
-            self.tools.speech_ready(),
-            self.tools.image_gen_ready(),
+            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::Speech,self.tools.speech_ready()),
+            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::ImageGen,self.tools.image_gen_ready()),
             self.tools.chart_ready(),
             self.tools.memory_deep(),
         );
@@ -450,14 +448,12 @@ impl AgentRuntime {
             if crate::round_trace::is_cancelled(session_id) {
                 anyhow::bail!("本轮已被用户停止");
             }
-            let (text, calls, usage) = self
-                .call_llm(&messages, &agent_hint, &chain, &specs, None, &mut on_delta)
+            let (text, calls, usage, used_model) = self
+                .call_llm(session_id, &messages, &agent_hint, &chain, &specs, None, &mut on_delta)
                 .await?;
             usage_prompt += usage.0;
             usage_completion += usage.1;
-            if let Some((_, _, m)) = chain.candidates.first() {
-                last_model = m.clone();
-            }
+            let last_model = used_model;
 
             if crate::round_trace::is_cancelled(session_id) {
                 self.tools.record_usage(session_id, usage_prompt, usage_completion, &last_model);
@@ -557,11 +553,12 @@ impl AgentRuntime {
             "【系统提示】工具调用步数预算已用完。不要再调用任何工具，直接基于已获取的材料给出最终结论。",
         );
         messages.push(wrap_note);
-        let (text, _calls, usage) = self
-            .call_llm(&messages, &agent_hint, &chain, &[], None, &mut on_delta)
+        let (text, _calls, usage, used_model) = self
+            .call_llm(session_id, &messages, &agent_hint, &chain, &[], None, &mut on_delta)
             .await?;
         usage_prompt += usage.0;
         usage_completion += usage.1;
+        let last_model=used_model;
         self.tools
             .record_usage(session_id, usage_prompt, usage_completion, &last_model);
         if !text.trim().is_empty() {
@@ -587,8 +584,9 @@ impl AgentRuntime {
         done_tools: &[String],
     ) -> Option<String> {
         let trace = crate::round_trace::snapshot_tool_trace(session_id);
+        let (provider,model)=self.tools.agent_aux_model(crate::model_routing::ModelPurpose::Review,"工具连续失败后的策略检查",Some((self.provider.clone(),self.model.clone()))).await.ok()?;
         let req = crate::provider::ChatRequest::new(
-            self.model.clone(),
+            model,
             vec![
                 crate::provider::ChatMessage::system(
                     "你是元认知反思器。基于本轮工具轨迹判断策略是否需要调整。只输出 JSON:\n{\"strategy\": \"replan\"|\"redirect\"|\"compact\"|\"continue\", \"note\": \"一句话说明\"}\nreplan=重新分解任务;redirect=换工具/换路径;compact=先压缩上下文;continue=保持现策略",
@@ -598,7 +596,7 @@ impl AgentRuntime {
                 )),
             ],
         );
-        let out = self.provider.chat(req).await.ok()?;
+        let out = provider.chat(req).await.ok()?;
         let trimmed = out.content.trim();
         let start = trimmed.find('{')?;
         let end = trimmed.rfind('}')?;

@@ -16,7 +16,8 @@ fn identity_example() -> Value {
 }
 
 fn model_example() -> Value {
-    json!({ "model": "example-model", "vision": true, "audio": false, "contextWindow": 128000 })
+    json!({ "model": "example-model", "vision": true, "audio": false, "contextWindow": 128000,
+        "purposes":["chat","coding","review","vision"],"cost":"balanced","usageNotes":"适合一般对话与代码检查。","autoEligible":false })
 }
 
 pub(super) fn describe(ep: Endpoint) -> Endpoint {
@@ -138,6 +139,8 @@ pub(super) fn schemas() -> Value {
                 "model": string, "vision": { "type": "boolean", "default": false },
                 "audio": { "type": "boolean", "default": false },
                 "contextWindow": { "type": ["integer", "null"], "minimum": 0, "maximum": u64::MAX },
+                "purposes": {"type":["array","null"],"maxItems":11,"items":reference("ModelPurpose")},
+                "cost":nullable(reference("ModelCost")),"usageNotes":{"type":["string","null"],"maxLength":2000},"autoEligible":{"type":["boolean","null"]},
             },
         },
         "ProfileModel": {
@@ -145,6 +148,7 @@ pub(super) fn schemas() -> Value {
             "properties": {
                 "model": string, "vision": { "type": "boolean" }, "audio": { "type": "boolean" },
                 "contextWindow": { "type": "integer", "minimum": 0, "maximum": u64::MAX },
+                "purposes":{"type":"array","items":reference("ModelPurpose")},"cost":reference("ModelCost"),"usageNotes":{"type":"string","maxLength":2000},"autoEligible":{"type":"boolean"},
             },
         },
         "LlmProfileInput": {

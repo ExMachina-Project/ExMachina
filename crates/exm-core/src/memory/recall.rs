@@ -13,7 +13,7 @@ impl MemoryStore {
         group: Option<&str>,
         qe: Option<&[f32]>,
     ) -> anyhow::Result<Vec<RecallHit>> {
-        self.recall_filtered(query, limit, scope, AgentLayer::SharedOnly, group, qe)
+        self.recall_filtered(query, limit, scope, AgentLayer::SharedOnly, group, qe, None)
     }
 
     /// 全量检索（管理视角：群体 + 所有个体私有；组维度按 `group` 过滤）
@@ -24,7 +24,7 @@ impl MemoryStore {
         group: Option<&str>,
         qe: Option<&[f32]>,
     ) -> anyhow::Result<Vec<RecallHit>> {
-        self.recall_filtered(query, limit, None, AgentLayer::All, group, qe)
+        self.recall_filtered(query, limit, None, AgentLayer::All, group, qe, None)
     }
 
     /// 个体检索：该智能体的私有记忆（agent_id 匹配）+ 群体记忆，个体条目加成
@@ -36,7 +36,14 @@ impl MemoryStore {
         group: Option<&str>,
         qe: Option<&[f32]>,
     ) -> anyhow::Result<Vec<RecallHit>> {
-        self.recall_filtered(query, limit, None, AgentLayer::Agent(agent_id), group, qe)
+        self.recall_filtered(query, limit, None, AgentLayer::Agent(agent_id), group, qe, None)
+    }
+
+    /// Agent-aware retrieval compares vectors only within the same provider/model space.
+    pub fn recall_with_model(&self, agent: Option<&str>, query:&str, limit:usize, group:Option<&str>,
+        embedding:Option<(&str,&[f32])>) -> Result<Vec<RecallHit>> {
+        self.recall_filtered(query,limit,None,agent.map(AgentLayer::Agent).unwrap_or(AgentLayer::SharedOnly),group,
+            embedding.map(|(_,v)|v),embedding.map(|(m,_)|m))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -48,6 +55,7 @@ impl MemoryStore {
         layer: AgentLayer<'_>,
         group: Option<&str>,
         qe: Option<&[f32]>,
+        embedding_model: Option<&str>,
     ) -> Result<Vec<RecallHit>> {
         let q_tokens = tokens(query);
         if q_tokens.is_empty() {
@@ -97,8 +105,7 @@ impl MemoryStore {
                         }
                     }
                     let Some(sim) = e
-                        .embedding
-                        .as_deref()
+                        .vector_for(embedding_model)
                         .and_then(|v| Self::cosine(v, qe.unwrap()))
                     else {
                         continue;
@@ -163,8 +170,7 @@ impl MemoryStore {
 
             // 混合打分：词项信号 + 语义信号（向量与查询均可用时，70/30 融合）
             let sem = entry
-                .embedding
-                .as_deref()
+                .vector_for(embedding_model)
                 .and_then(|v| qe.and_then(|q| Self::cosine(v, q)));
             let score = 3.0 * overlap_ratio
                 + 1.2 * coverage
