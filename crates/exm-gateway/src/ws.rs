@@ -115,6 +115,12 @@ pub(crate) async fn ws_loop(mut socket: WebSocket, core: Arc<Core>, session_filt
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(_)) => break,
+                    // Browser JS cannot observe protocol Pong. A text acknowledgement
+                    // lets clients distinguish an idle connection from a broken receive path.
+                    Some(Ok(Message::Text(text))) if text == "ping"
+                        && socket.send(Message::Text("pong".into())).await.is_err() => {
+                        break;
+                    }
                     _ => {}
                 }
             }

@@ -590,6 +590,30 @@ impl Core {
         scope: crate::types::ToolScope,
         origin: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.chat_round(session_id, text, scope, origin, None).await
+    }
+
+    /// Direct unit conversations share the same lock, budget and cancellation lifecycle.
+    pub async fn chat_with_agent(
+        &self,
+        session_id: &str,
+        agent: &str,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        self.chat_round(session_id, text, crate::types::ToolScope::Computer, None, Some(agent))
+            .await
+    }
+
+    async fn chat_round(
+        &self,
+        session_id: &str,
+        text: &str,
+        scope: crate::types::ToolScope,
+        origin: Option<&str>,
+        agent: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let lock = self.run_lock(session_id);
+        let _guard = lock.lock().await;
         // 预算闸门：估算口径超限即拒绝新轮次（0 = 不限）
         let budget = self.config().max_session_tokens;
         if budget > 0 {
@@ -598,22 +622,11 @@ impl Core {
                 anyhow::bail!("会话 token 预算已耗尽（估算 {used} / {budget}）；请新建会话或上调 maxSessionTokens");
             }
         }
-        let lock = {
-            let mut locks = self.run_locks.lock();
-            locks
-                .entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        let _guard = lock.lock().await;
-        // 轮次生命周期：开始（登记取消令牌）→ 执行 → 结束（移除）
-        crate::round_trace::begin(session_id);
         let session = self
             .store
-            .get_session(session_id)
-            .ok()
-            .flatten()
+            .get_session(session_id)?
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        let _round = crate::round_trace::RoundGuard::begin(session_id);
         // 交互上下文对齐会话归属（路由唯一事实源）：会话 group_id 形如
         // "single:<id>"（单智能体）或组名。WebUI 切换目标 / 通道绑定切换 /
         // 子代理会话并发都可能翻转全局激活态，若不对齐，旧会话会被错误的
@@ -623,15 +636,17 @@ impl Core {
         // （旧实现写全局态再还原，run.finished 事件先于还原到达时会泄漏临时态）。
         // 归属目标已删除 → scope None → 回落全局激活态（轮次不中断）。
         let ctx = crate::core::sessions::parse_session_scope(&self.registry, &session.group_id);
-        let result = crate::registry::round_scope_decl::ROUND_SCOPE
+        crate::registry::round_scope_decl::ROUND_SCOPE
             .scope(ctx, async {
-                self.orchestrator()
-                    .handle_user_message_scoped(session_id, text, scope, origin)
-                    .await
+                let orch = self.orchestrator();
+                if let Some(agent) = agent {
+                    let result = orch.unit_direct_round_origin(session_id, agent, text, origin).await;
+                    orch.finalize_round(session_id, result, scope).await
+                } else {
+                    orch.handle_user_message_scoped(session_id, text, scope, origin).await
+                }
             })
-            .await;
-        crate::round_trace::end(session_id);
-        result
+            .await
     }
 
 

@@ -119,6 +119,23 @@ pub fn begin(session_id: &str) {
     states().lock().entry(session_id.to_string()).or_default();
 }
 
+/// Own the round lifetime so errors, panics and cancelled futures release its state.
+/// The caller must hold the session run lock for the lifetime of this guard.
+pub(crate) struct RoundGuard(String);
+
+impl RoundGuard {
+    pub(crate) fn begin(session_id: &str) -> Self {
+        begin(session_id);
+        Self(session_id.to_owned())
+    }
+}
+
+impl Drop for RoundGuard {
+    fn drop(&mut self) {
+        end(&self.0);
+    }
+}
+
 /// 会话运行结束：移除整个轮次状态（含取消令牌）
 pub fn end(session_id: &str) {
     states().lock().remove(session_id);

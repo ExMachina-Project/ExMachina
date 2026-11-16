@@ -160,7 +160,7 @@ pub(crate) async fn chat(
     tokio::spawn(async move {
         let result = match &agent {
             // 子代理直聊：绕过编排，与该子个体单独对话（用户可见派发任务与传回内容，可直接追问）
-            Some(a) => core.orchestrator().unit_direct_round(&id, a, &text).await,
+            Some(a) => core.chat_with_agent(&id, a, &text).await,
             None => core.chat(&id, &text).await,
         };
         if let Err(e) = result {
@@ -703,7 +703,11 @@ pub(crate) async fn delete_session(State(st): State<AppState>, Path(id): Path<St
 
 pub(crate) async fn get_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match st.core.store.get_session(&id) {
-        Ok(Some(s)) => Json(serde_json::to_value(s).unwrap_or(Value::Null)).into_response(),
+        Ok(Some(s)) => {
+            let mut value = serde_json::to_value(s).unwrap_or(Value::Null);
+            value["running"] = json!(exm_core::round_trace::is_running(&id));
+            Json(value).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "会话不存在" })),
