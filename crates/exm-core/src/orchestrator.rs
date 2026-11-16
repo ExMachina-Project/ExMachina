@@ -848,7 +848,7 @@ impl Orchestrator {
     /// 任务队列收束（draining 标记防递归：出队任务自己也是一轮
     /// handle_user_message_scoped，它收束时不再触发钩子，否则队列串行链
     /// 无限嵌套）。
-    async fn finalize_round(
+    pub(crate) async fn finalize_round(
         self: &Arc<Self>,
         session_id: &str,
         result: anyhow::Result<()>,
@@ -1455,14 +1455,14 @@ impl Orchestrator {
                 em.emit(
                     &sid,
                     "unit.thinking",
-                    serde_json::json!({ "agentId": aid, "delta": t }),
+                    serde_json::json!({ "agentId": aid, "delta": t, "direct": true }),
                 );
             }
             StreamDelta::Text(t) => {
                 em.emit(
                     &sid,
                     "unit.token",
-                    serde_json::json!({ "agentId": aid, "delta": t }),
+                    serde_json::json!({ "agentId": aid, "delta": t, "direct": true }),
                 );
             }
         };
@@ -1498,7 +1498,7 @@ impl Orchestrator {
         self.emit(
             session_id,
             "unit.finished",
-            serde_json::json!({ "agentId": agent_identifier, "statements": statements }),
+            serde_json::json!({ "agentId": agent_identifier, "statements": statements, "direct": true }),
         );
         Ok(())
     }

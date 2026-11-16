@@ -459,6 +459,11 @@ impl AgentRuntime {
                 last_model = m.clone();
             }
 
+            if crate::round_trace::is_cancelled(session_id) {
+                self.tools.record_usage(session_id, usage_prompt, usage_completion, &last_model);
+                anyhow::bail!("本轮已被用户停止");
+            }
+
             // 原生 function calling:只读并发 / 写串行,结果回灌后继续
             if !calls.is_empty() {
                 let mut assistant = ChatMessage::assistant(text.clone());

@@ -36,6 +36,11 @@ impl AgentRuntime {
 
             // 注意：tx 必须被 move 进任务（不能保留原 sender），否则 rx 永不关闭 → 自锁
             let handle = tokio::spawn(async move { stream_provider.stream(req_clone, tx).await });
+            struct AbortStream(tokio::task::AbortHandle);
+            impl Drop for AbortStream {
+                fn drop(&mut self) { self.0.abort(); }
+            }
+            let _stream = AbortStream(handle.abort_handle());
 
             let mut emitted = false;
             // 有界收增量：到点（deadline）或流自然关闭即出循环；超时路径 abort 流任务，

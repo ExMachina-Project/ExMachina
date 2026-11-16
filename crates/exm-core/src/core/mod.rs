@@ -12,3 +12,5 @@ pub(crate) mod skills;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_chat;
