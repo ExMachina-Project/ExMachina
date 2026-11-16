@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc::unbounded_channel, Mutex};
 
 pub const ORCHESTRATOR_ID: &str = "orchestrator";
+mod model_routing;
 
 // ---------------------------------------------------------------- 会话轮次模式（思考模式：直答 / 集群）
 
@@ -71,58 +72,6 @@ pub fn unmark_im_session(session_id: &str) {
 /// 会话是否经 IM 通道交互
 pub fn is_im_session(session_id: &str) -> bool {
     im_sessions().lock().contains(session_id)
-}
-
-/// 探活消息判定（IM 通道短路直答用）：纯问候 / 在线确认 / 简单致谢收尾，
-/// 无任何任务语义——不值得进规划流水线（实证：全量注册表 + 记忆召回注入，
-/// 就为回一句「在」）。规则刻意保守：命中才短路，模糊输入照常走完整轮次。
-pub fn is_probing_message(text: &str) -> bool {
-    probe_reply(text).is_some()
-}
-
-/// 探活消息 → 直答文案（按语义分类，避免「晚安」回「在」的错位）。
-/// None = 非探活（走完整轮次）。
-pub fn probe_reply(text: &str) -> Option<&'static str> {
-    let mut t = text.trim();
-    // @ 前缀剥离（im-probe-at-prefix）：群聊唤醒消息必带「@机器人名/号」前缀，
-    // 不剥就撑过 10 字符上限——探活短路在群聊实际失效（部署实测：「@id 摸摸」
-    // 也要跑 46 步工具循环）。@ 名字/号本身非探活词，从首个非 @ 词起判定：
-    // 剥掉「@名字」记号（连续非空白直到空白或下一个 @），重复直到正文开头。
-    while let Some(rest) = t.strip_prefix('@') {
-        let after = rest.trim_start();
-        // @ 后的名字段：到空白或下一个 @ 为止
-        let end = after
-            .find(|c: char| c.is_whitespace() || c == '@')
-            .unwrap_or(after.len());
-        t = after[end..].trim_start();
-    }
-    if t.is_empty() {
-        // 裸 @（只点名无正文）：在线确认语义
-        return Some("在。有什么需要直接说。");
-    }
-    if t.chars().count() > 10 {
-        return None;
-    }
-    // 标点剥离后的裸词表（问候语常带 ？/～/。/! 等语气修饰）
-    let bare = t
-        .trim_matches(|c: char| !c.is_alphanumeric())
-        .to_lowercase();
-    match bare.as_str() {
-        // 在线确认
-        "在吗" | "在么" | "在不在" | "在" | "吗" => Some("在。有什么需要直接说。"),
-        // 问候（含时段问候——按问候回，不逐时段定制）
-        "你好" | "您好" | "hello" | "hi" | "hey" | "哈喽" | "嗨" | "喂" | "早" | "早上好"
-        | "早安" | "中午好" | "下午好" | "晚上好" => Some("你好，在的。有事直接说。"),
-        // 晚安是收尾语义，不引导继续
-        "晚安" => Some("晚安。"),
-        // 致谢
-        "谢谢" | "多谢" | "感谢" | "thanks" | "thank you" => Some("不客气。"),
-        // 简单确认 / 收到：最短回应
-        "ok" | "okay" | "好的" | "嗯" | "嗯嗯" | "哦" | "收到" => Some("好。"),
-        // 链路测试
-        "测试" | "test" => Some("收到，链路正常。"),
-        _ => None,
-    }
 }
 
 /// IM 通道表达纪律（注入系统提示；与平台消息长度限制协同，
@@ -253,99 +202,49 @@ impl Orchestrator {
         self.config_snapshot.read().clone()
     }
 
-    /// 能力槽位目标（组覆盖优先）：激活组的组级覆盖 → 全局槽位（模型设置页）。
-    /// 返回 None = 该槽位全局与组都未配置（调用方回落出厂默认）。
-    fn capability_target(&self, slot: &str) -> Option<String> {
-        let from_group = self
-            .registry
-            .active_group_meta()
-            .and_then(|m| m.capabilities)
-            .and_then(|c| match slot {
-                "speech" => c.speech,
-                "transcribe" => c.transcribe,
-                "vision_relay" => c.vision_relay,
-                "embedding" => c.embedding,
-                "image_gen" => c.image_gen,
-                _ => None,
-            });
-        let target = from_group.or_else(|| match slot {
-            "speech" => Some(self.speech_target.clone()),
-            "transcribe" => Some(self.stt_target.clone()),
-            "vision_relay" => Some(self.vision_relay_target.clone()),
-            "embedding" => Some(self.memory_semantic_model.clone()),
-            "image_gen" => Some(self.image_gen_target.clone()),
-            _ => None,
-        });
-        target
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
     /// 指挥体身份 = 激活组主智能体 identifier（组感知；内置组即 orchestrator）。
     /// 语音转写：组覆盖 → 全局槽位指定的档案/模型；未配置回落全局生效档案的 whisper-1
     pub async fn transcribe_audio(&self, audio: &[u8], filename: &str) -> anyhow::Result<String> {
-        match self
-            .capability_target("transcribe")
-            .and_then(|t| self.resolve_capability(&t))
-        {
-            Some((provider, model)) => provider.transcribe(&model, audio, filename).await,
-            None => {
-                self.orch_provider
-                    .transcribe("whisper-1", audio, filename)
-                    .await
-            }
-        }
+        let (provider, model) = self.caller_model(crate::model_routing::ModelPurpose::Transcribe, filename).await?;
+        provider.transcribe(&model, audio, filename).await
     }
 
     /// 语音合成：组覆盖 → 全局槽位指定的档案/模型；未配置回落全局生效档案的 tts-1
     pub async fn speak_audio(&self, text: &str) -> anyhow::Result<Vec<u8>> {
-        match self
-            .capability_target("speech")
-            .and_then(|t| self.resolve_capability(&t))
-        {
-            Some((provider, model)) => provider.speak(&model, text).await,
-            None => self.orch_provider.speak("tts-1", text).await,
-        }
+        let (provider, model) = self.caller_model(crate::model_routing::ModelPurpose::Speech, text).await?;
+        provider.speak(&model, text).await
     }
 
     /// 图像生成（image-gen）：能力槽位链（组覆盖 → 全局）。
     /// 与 speak 的「tts-1 兜底」不同：无兜底模型——未配置即 Err（工具面
     /// 按装配状态门控下发，能进到这里说明槽位配置过但解析失败，明确报错）
     pub async fn image_gen_bytes(&self, prompt: &str, size: &str) -> anyhow::Result<Vec<u8>> {
-        let target = self
-            .capability_target("image_gen")
-            .ok_or_else(|| anyhow::anyhow!("图像生成槽位未配置（capabilities.imageGen）"))?;
-        let (provider, model) = self
-            .resolve_capability(&target)
-            .ok_or_else(|| anyhow::anyhow!("图像生成槽位无法解析：{target}"))?;
+        let (provider, model) = self.caller_model(crate::model_routing::ModelPurpose::ImageGen, prompt).await?;
         provider.image_generate(&model, prompt, size).await
     }
 
     /// 图像生成是否装配（image_gen 工具下发门控：未配置不承诺）
     pub fn image_gen_ready(&self) -> bool {
-        self.capability_target("image_gen")
-            .and_then(|t| self.resolve_capability(&t))
-            .is_some()
+        self.registry.primary().is_some_and(|def| self.purpose_ready(&def,crate::model_routing::ModelPurpose::ImageGen))
     }
 
     /// 视觉转述：生效模型未标记支持视觉（清单里明确 vision=false）且配置了转述模型时，
     /// 把图片逐张交给转述模型转成文字描述。返回 None = 无需/无法转述（保持直通或忽略）。
-    async fn relay_images(&self, images: &[String]) -> Option<String> {
+    async fn relay_images(&self, images: &[String], chain:&ModelChain) -> anyhow::Result<Option<String>> {
         if images.is_empty() {
-            return None;
+            return Ok(None);
         }
         // 目标模型视觉能力：链首候选（真正会接这批图片的模型）
-        let vision = self
-            .orch_candidates()
+        let vision = chain.candidates
             .first()
             .and_then(|(pid, _, model)| self.model_pool.capability(pid, model, true));
         match vision {
-            Some(true) | None => return None, // 支持视觉 / 能力未知（保持直通）
+            Some(true) | None => return Ok(None), // 支持视觉 / 能力未知（保持直通）
             Some(false) => {}
         }
-        let (provider, model) = self
-            .capability_target("vision_relay")
-            .and_then(|t| self.resolve_capability(&t))?;
+        let caller=crate::model_routing::caller().and_then(|c|self.routing_agent(&c.agent_id)).or_else(||self.registry.primary());
+        if !caller.as_ref().is_some_and(|d|self.purpose_ready(d,crate::model_routing::ModelPurpose::Vision)) {return Ok(None);}
+        let (provider, model) = self.caller_model(crate::model_routing::ModelPurpose::Vision,"描述用户提供的图片").await?;
         let mut out = String::new();
         for (i, img) in images.iter().enumerate() {
             let mut msg = ChatMessage::user(
@@ -357,14 +256,14 @@ impl Orchestrator {
                 Ok(resp) if !resp.content.trim().is_empty() => {
                     out.push_str(&format!("（图{}）{}\n", i + 1, resp.content.trim()));
                 }
-                Ok(_) => {}
-                Err(e) => eprintln!("[vision-relay] 图片转述失败：{e}"),
+                Ok(_) => anyhow::bail!("视觉转述模型返回空响应"),
+                Err(e) => return Err(e.context("视觉转述失败")),
             }
         }
         if out.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(out)
+            Ok(Some(out))
         }
     }
 
@@ -381,11 +280,12 @@ impl Orchestrator {
             "以下 memory.md 超出上限（{len} 字符 > {max_chars}），请压缩到约 {} 字符以内：\n\n{md}",
             max_chars * 4 / 5
         );
+        let (provider,model)=self.caller_model(crate::model_routing::ModelPurpose::Summary,"压缩长期记忆").await?;
         let req = ChatRequest::new(
-            self.orch_model.clone(),
+            model,
             vec![ChatMessage::system(system), ChatMessage::user(user)],
         );
-        let resp = self.orch_provider.chat(req).await?;
+        let resp = provider.chat(req).await?;
         let compressed = resp.content.trim().to_string();
         anyhow::ensure!(!compressed.is_empty(), "压缩结果为空");
 
@@ -468,7 +368,8 @@ impl Orchestrator {
     where
         F: FnMut(StreamDelta),
     {
-        let chain = self.unit_chain_for(def);
+        let purpose=order.model_selection.as_ref().map(|s|s.purpose).unwrap_or_default();
+        let chain = self.resolve_agent_chain(def,purpose,&order.objective,session_id,order.model_selection.as_ref()).await?;
         // 工作者端本地执行：过程归集键与用量同键（无子会话概念）。
         // 能力边界已在上游裁剪进 order.tool_allowlist，工作者端按完整档执行即可。
         self.unit_runtime
@@ -494,54 +395,16 @@ impl Orchestrator {
 
     // ---------------------------------------------------------- 模型解析
 
-    /// 当前交互目标的模型提示：智能体模式 = 该智能体 model_hint；组模式 = 组默认模型
-    fn target_model_hint(&self) -> Option<String> {
-        if let Some(id) = self.registry.active_single() {
-            return self.registry.single(&id).and_then(|d| d.model_hint);
-        }
-        self.registry.active_group_meta().and_then(|m| m.model)
-    }
-
-    /// 指挥体生效模型：目标提示 → 全局生效档案
-    fn resolve_orch_model(&self) -> (Arc<dyn LlmProvider>, String) {
-        self.orch_candidates()
-            .into_iter()
-            .next()
-            .map(|(_, p, m)| (p, m))
-            .unwrap_or_else(|| (self.orch_provider.clone(), self.orch_model.clone()))
-    }
-
-    /// 回退链展开：起始档案 → fallback 链 → 全局生效档案兜底；冷却中的档案跳过（保底留一个）
-    fn expand_chain(&self, start: &str) -> Vec<(String, Arc<dyn LlmProvider>, String)> {
-        let mut ids = self.model_pool.chain(start);
-        let active = self.model_pool.active_id();
-        if !active.is_empty() && !ids.contains(&active) {
-            ids.push(active);
-        }
-        let total = ids.len();
-        let mut out: Vec<(String, Arc<dyn LlmProvider>, String)> = Vec::new();
-        for (n, id) in ids.into_iter().enumerate() {
-            let Some((provider, model)) = self.model_pool.entry(&id) else {
-                continue;
-            };
-            if !out.is_empty() && n + 1 < total && self.failover.cooling(&id) {
-                continue; // 冷却中且后面还有候选：跳过
-            }
-            out.push((id, provider, model));
-        }
-        out
-    }
-
     /// 写入路径向量回填：本轮新条目批量嵌入（标题+正文），失败静默（词项召回仍可用）
     async fn backfill_embeddings(&self, ids: &[String]) {
         let Some(cfg) = self.semantic_recall() else {
             return;
         };
-        let (provider, model) = cfg;
+        let (reference, provider, model) = cfg;
         let mut pending: Vec<(String, String)> = Vec::new();
         for id in ids {
             if let Ok(Some(e)) = self.memory.get_entry_public(id) {
-                if e.embedding.is_none() {
+                if !e.model_embeddings.contains_key(&reference) {
                     pending.push((id.clone(), format!("{}\n{}", e.title, e.body)));
                 }
             }
@@ -553,7 +416,7 @@ impl Orchestrator {
         match provider.embed(&model, &texts).await {
             Ok(vectors) if vectors.len() == pending.len() => {
                 for ((id, _), v) in pending.iter().zip(vectors) {
-                    let _ = self.memory.set_embedding(id, v);
+                    let _ = self.memory.set_model_embedding(id, &reference, v);
                 }
             }
             Ok(_) => eprintln!("[memory] 嵌入返回数量不符，跳过本轮回填"),
@@ -562,84 +425,35 @@ impl Orchestrator {
     }
 
     /// 查询嵌入（混合记忆检索）：语义检索指向的档案 + 模型，否则 None（纯词项）
-    async fn embed_query(&self, text: &str) -> Option<Vec<f32>> {
-        let (provider, model) = self.semantic_recall()?;
-        provider
+    async fn embed_query(&self, text: &str) -> Option<(String,Vec<f32>)> {
+        let (reference,provider, model) = self.semantic_recall()?;
+        let vector=provider
             .embed(&model, &[text.to_string()])
             .await
             .ok()?
             .into_iter()
-            .next()
+            .next()?;
+        Some((reference,vector))
     }
 
     /// 语义查询向量（记忆检索调试视图 8.4）：REST 检索复用——语义检索启用时
     /// 记忆页搜索与对话内召回同口径（词项 + 语义混合），未启用返回 None
     pub async fn memory_query_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        self.embed_query(text).await.map(|(_,v)|v)
+    }
+
+    pub async fn memory_query_model_embedding(&self,text:&str)->Option<(String,Vec<f32>)> {
         self.embed_query(text).await
     }
 
     /// 解析语义检索目标（组覆盖 → 全局记忆设置指定的档案与模型）；未配置返回 None
-    fn semantic_recall(&self) -> Option<(Arc<dyn LlmProvider>, String)> {
-        let target = self.capability_target("embedding")?;
-        self.resolve_capability(&target)
-            .filter(|(_, m)| !m.is_empty())
-    }
-
-    /// 解析能力槽位目标（"档案ID" 或 "档案ID/模型名"）→ (Provider, 生效模型名)。
-    /// 目标为空或档案不存在返回 None（调用方回落默认行为）。
-    fn resolve_capability(&self, target: &str) -> Option<(Arc<dyn LlmProvider>, String)> {
-        let id = target.trim().to_string();
-        if id.is_empty() {
-            return None;
-        }
-        let (pid, model) = match id.split_once('/') {
-            Some((p, m)) if !m.trim().is_empty() => (p.trim().to_string(), m.trim().to_string()),
-            _ => (id, String::new()),
-        };
-        let (provider, profile_model) = self.model_pool.entry(&pid)?;
-        let model = if model.is_empty() {
-            profile_model
-        } else {
-            model
-        };
-        Some((provider, model))
-    }
-
-    /// 指挥体候选链（目标提示 → 全局 → 回退链）
-    fn orch_candidates(&self) -> Vec<(String, Arc<dyn LlmProvider>, String)> {
-        let start = self
-            .target_model_hint()
-            .and_then(|h| self.model_pool.resolve_full(&h).map(|(id, _, _)| id))
-            .unwrap_or_else(|| self.model_pool.active_id());
-        if start.is_empty() {
-            return Vec::new();
-        }
-        self.expand_chain(&start)
-    }
-
-    /// 子个体候选链（个体 → 组 → 全局 → 回退链）
-    fn unit_candidates(
-        &self,
-        def: &AgentDefinition,
-    ) -> Vec<(String, Arc<dyn LlmProvider>, String)> {
-        let start = def
-            .model_hint
-            .clone()
-            .or_else(|| self.registry.active_group_meta().and_then(|m| m.model))
-            .and_then(|h| self.model_pool.resolve_full(&h).map(|(id, _, _)| id))
-            .unwrap_or_else(|| self.model_pool.active_id());
-        if start.is_empty() {
-            return Vec::new();
-        }
-        self.expand_chain(&start)
-    }
-
-    /// 子个体回退链（run_node → AgentRuntime）
-    fn unit_chain_for(&self, def: &AgentDefinition) -> ModelChain {
-        ModelChain {
-            candidates: self.unit_candidates(def),
-            failover: self.failover.clone(),
-        }
+    fn semantic_recall(&self) -> Option<(String,Arc<dyn LlmProvider>, String)> {
+        let def = crate::model_routing::caller().and_then(|c| self.routing_agent(&c.agent_id)).or_else(||self.registry.primary())?;
+        let preview=self.routing_preview(&def,crate::model_routing::ModelPurpose::Embedding);
+        if preview.assignment.mode != crate::model_routing::AssignmentMode::Fixed { return None; }
+        let target = preview.assignment.model;
+        let (id,provider,model)=self.model_pool.resolve_full(&target)?;
+        (!model.is_empty()).then(||(format!("{id}/{model}"),provider,model))
     }
 
     // ---------------------------------------------------------- 事件
@@ -688,16 +502,15 @@ impl Orchestrator {
 
     /// 上下文压缩（docs/架构与设计.md）：历史超过阈值时，旧消息压成滚动摘要，保留最近窗口原文
     /// 返回 (滚动摘要, 最近窗口消息原文文本)——共享实现见 compaction.rs（单智能体循环同口径复用）
-    async fn ensure_compacted(&self, session_id: &str) -> (Option<String>, String) {
-        let (provider, model) = self.resolve_orch_model();
+    async fn ensure_compacted(&self, session_id: &str) -> anyhow::Result<(Option<String>, String)> {
+        let def=crate::model_routing::caller().and_then(|c|self.routing_agent(&c.agent_id)).or_else(||self.registry.primary()).ok_or_else(||anyhow::anyhow!("当前目标无智能体"))?;
         let cfg = self.config_snapshot.read().clone();
         let sliding = cfg.experiments.sliding_context_window;
         // token 占比判据（compaction-tuning）：规划路径以指挥体生效模型窗口为基数
         let budget_ratio = self.tools.context_budget_ratio();
-        let budget_chars = self
-            .orch_candidates()
-            .first()
-            .and_then(|(pid, _, model)| self.model_pool.context_window(pid, model))
+        let preview=self.routing_preview(&def,crate::model_routing::ModelPurpose::Planning);
+        let budget_chars = self.model_pool.resolve_full(&preview.assignment.model)
+            .and_then(|(pid, _, model)| self.model_pool.context_window(&pid, &model))
             .map(|w| (w as f64 * budget_ratio).floor() as usize * crate::budget::CHARS_PER_TOKEN);
         let params = crate::compaction::CompactParams {
             sliding,
@@ -705,10 +518,8 @@ impl Orchestrator {
             budget_chars,
             ..Default::default()
         };
-        let c =
-            crate::compaction::ensure_compacted(&self.store, &provider, &model, session_id, params)
-                .await;
-        (c.summary, c.recent)
+        let c=self.compact_for_agent(&def,session_id,params).await?;
+        Ok((c.summary, c.recent))
     }
 
     pub async fn handle_user_message(
@@ -727,8 +538,8 @@ impl Orchestrator {
     /// `origin`：消息来源标记，落入消息 agent_id——"auto:xxx" 系统自动内容、
     /// "im:名字(id)" 群聊发送者（展示层消息头署名）、None = 真人输入。
     ///
-    /// 五阶段编排（codebase-refactor D3 提取，行为零变更）：
-    /// ingest（落库+附件回填）→ probe（IM 探活短路）→ merge（goal 合并/排队）
+    /// 轮次编排：
+    /// ingest（落库+附件回填）→ merge（goal 合并/排队）
     /// → dispatch（run_round 路由派发）→ finalize（钩子/事件/快照/队列收束）。
     pub async fn handle_user_message_scoped(
         self: &Arc<Self>,
@@ -742,9 +553,6 @@ impl Orchestrator {
             anyhow::bail!("会话不存在: {session_id}");
         }
         self.ingest_user_message(session_id, text, origin).await?;
-        if self.probe_shortcircuit(session_id, text).await? {
-            return Ok(());
-        }
         let goal = self.merge_or_enqueue(session_id, text)?;
         let result = self.dispatch_round(session_id, &goal, scope).await;
         self.finalize_round(session_id, result, scope).await
@@ -772,47 +580,6 @@ impl Orchestrator {
                 .attach_inbound(session_id, &user_msg.id, inbound);
         }
         Ok(())
-    }
-
-    /// 阶段二 probe：IM 探活短路（纯问候/在线确认零 LLM 直答——这类输入无任务
-    /// 语义，进规划流水线纯属浪费）。命中 → 直答落库 + run.finished + 快照，
-    /// 返回 true（调用方早收束）。短路在 collect 之前：探活不并入排队窗口的
-    /// goal 合并。
-    async fn probe_shortcircuit(
-        self: &Arc<Self>,
-        session_id: &str,
-        text: &str,
-    ) -> anyhow::Result<bool> {
-        if !is_im_session(session_id) {
-            return Ok(false);
-        }
-        let Some(reply) = probe_reply(text) else {
-            return Ok(false);
-        };
-        let statements = vec![Statement::new(SpeechTag::肯定, reply)];
-        let (thinking, tool_calls, steps) = crate::round_trace::drain(session_id);
-        self.store.add_message_full(
-            session_id,
-            MessageRole::Orchestrator,
-            Some(self.orch_id().as_str()),
-            statements.clone(),
-            thinking,
-            tool_calls,
-            steps,
-        )?;
-        self.emit(
-            session_id,
-            "run.finished",
-            serde_json::json!({
-                "routeLevel": "L0",
-                "shortCircuit": "probe",
-                "agentId": self.orch_id(),
-                "statements": statements,
-                "artifacts": []
-            }),
-        );
-        self.record_turn_snapshot(session_id, "done");
-        Ok(true)
     }
 
     /// 阶段三 merge：collect 语义——「上一条非 user 消息之后到达的全部用户输入」
@@ -1047,6 +814,7 @@ impl Orchestrator {
             .ok_or_else(|| anyhow::anyhow!("智能体模式未配置交互目标"))?;
         // 轮次模式消费:direct/full 在智能体下无差异(工具循环自主决策),取走避免跨轮残留
         let _forced = take_session_mode(session_id);
+        let chain=self.resolve_agent_chain(&def,crate::model_routing::ModelPurpose::Chat,text,session_id,None).await?;
 
         let mut system_prompt = self
             .registry
@@ -1083,19 +851,15 @@ impl Orchestrator {
         let sliding = cfg_now.experiments.sliding_context_window;
         // token 占比判据基数（compaction-tuning）：模型窗口 × contextBudgetRatio（字符当量）
         let budget_ratio_for_compact = self.tools.context_budget_ratio();
-        let window_for_compact = self
-            .unit_chain_for(&def)
-            .candidates
+        let window_for_compact = chain.candidates
             .first()
             .and_then(|(pid, _, model)| self.model_pool.context_window(pid, model));
         let budget_chars_for_compact = window_for_compact.map(|w| {
             (w as f64 * budget_ratio_for_compact).floor() as usize
                 * crate::budget::CHARS_PER_TOKEN
         });
-        let compacted = crate::compaction::ensure_compacted(
-            &self.store,
-            &self.orch_provider,
-            &self.orch_model,
+        let compacted = self.compact_for_agent(
+            &def,
             session_id,
             crate::compaction::CompactParams {
                 trigger: 40,
@@ -1105,15 +869,13 @@ impl Orchestrator {
                 sliding,
             },
         )
-        .await;
+        .await?;
 
         // ---- token 预算软着陆（budget.rs，D7）----
         // 估算口径 ~4 字符/token；仅当生效模型的 contextWindow 已登记时判定。
         // 超线时多级裁剪（滚动摘要收窄 → 旧消息截短），每次裁剪发 context.trim 事件留痕。
         let budget_ratio = self.tools.context_budget_ratio();
-        let window_tokens = self
-            .unit_chain_for(&def)
-            .candidates
+        let window_tokens = chain.candidates
             .first()
             .and_then(|(pid, _, model)| self.model_pool.context_window(pid, model));
         let mut summary_opt = compacted.summary.clone();
@@ -1204,7 +966,7 @@ impl Orchestrator {
         let images = crate::image_stash::take(session_id);
         if !images.is_empty() {
             let last = history.last_mut();
-            match self.relay_images(&images).await {
+            match self.relay_images(&images,&chain).await? {
                 Some(desc) => {
                     if let Some(m) = last {
                         m.content.push_str(&format!(
@@ -1213,9 +975,7 @@ impl Orchestrator {
                     }
                 }
                 None => {
-                    let vision = self
-                        .unit_chain_for(&def)
-                        .candidates
+                    let vision = chain.candidates
                         .first()
                         .and_then(|(pid, _, model)| self.model_pool.capability(pid, model, true));
                     if vision == Some(false) {
@@ -1252,7 +1012,6 @@ impl Orchestrator {
             }
         };
 
-        let chain = self.unit_chain_for(&def);
         let final_text = self
             .unit_runtime
             .chat_execute(
@@ -1425,11 +1184,12 @@ impl Orchestrator {
             history.push(ChatMessage::user(text.to_string()));
         }
 
+        let chain=self.resolve_agent_chain(&def,crate::model_routing::ModelPurpose::Chat,text,session_id,None).await?;
         // 多模态：视觉转述可用则转写注入，否则原图直附（能力不可用并注记忽略）
         let images = crate::image_stash::take(session_id);
         if !images.is_empty() {
             let last = history.last_mut();
-            match self.relay_images(&images).await {
+            match self.relay_images(&images,&chain).await? {
                 Some(desc) => {
                     if let Some(m) = last {
                         m.content.push_str(&format!(
@@ -1467,7 +1227,6 @@ impl Orchestrator {
             }
         };
 
-        let chain = self.unit_chain_for(&def);
         let final_text = self
             .unit_runtime
             .chat_execute(
@@ -1650,8 +1409,14 @@ impl Orchestrator {
                 // 语义向量后台回填（混合记忆检索；无嵌入模型时静默跳过）
                 if !ids.is_empty() {
                     let o = self.clone();
+                    let context = Some((self.registry.active_group(), self.registry.active_single()));
+                    let caller = crate::model_routing::ModelCaller {
+                        agent_id: self.orch_id(),
+                        session_id: session_id.to_string(),
+                    };
                     tokio::spawn(async move {
-                        o.backfill_embeddings(&ids).await;
+                        crate::registry::round_scope_decl::ROUND_SCOPE.scope(context,
+                            crate::model_routing::MODEL_CALLER.scope(caller, o.backfill_embeddings(&ids))).await;
                     });
                 }
             }
@@ -1666,7 +1431,10 @@ impl Orchestrator {
                 agent_ids.sort();
                 agent_ids.dedup();
                 let o = self.clone();
-                tokio::spawn(async move { o.auto_adapt(&agent_ids).await });
+                let context = Some((self.registry.active_group(), self.registry.active_single()));
+                tokio::spawn(async move {
+                    crate::registry::round_scope_decl::ROUND_SCOPE.scope(context, o.auto_adapt(&agent_ids)).await;
+                });
             }
         }
 
@@ -1846,6 +1614,14 @@ pub struct ExecCtx {
 
 impl ExecCtx {
     pub async fn run_node(&self, node: TaskNode) -> NodeOutcome {
+        let context=self.orchestrator.store.get_session(&self.session_id).ok().flatten()
+            .and_then(|s|crate::core::sessions::parse_session_scope(&self.orchestrator.registry,&s.group_id));
+        let caller=crate::model_routing::ModelCaller {agent_id:node.agent_identifier.clone(),session_id:self.session_id.clone()};
+        crate::registry::round_scope_decl::ROUND_SCOPE.scope(context,
+            crate::model_routing::MODEL_CALLER.scope(caller,self.run_node_scoped(node))).await
+    }
+
+    async fn run_node_scoped(&self, node: TaskNode) -> NodeOutcome {
         // 停止检查点：已请求停止的会话，剩余节点快速失败（不再派发 LLM/工具）
         if crate::round_trace::is_cancelled(&self.session_id) {
             return NodeOutcome::failed(node.id.clone(), String::from("本轮已被用户停止"));
@@ -1978,12 +1754,13 @@ impl ExecCtx {
                 if o.memory_enabled {
                     let query = format!("{} {} {}", def.name, def.identifier, node.title);
                     let memory_group = o.memory_group_for_session(&self.session_id);
-                    if let Ok(hits) = o.memory.recall_for_agent(
-                        &def.identifier,
+                    let embedding=o.embed_query(&query).await;
+                    if let Ok(hits) = o.memory.recall_with_model(
+                        Some(&def.identifier),
                         &query,
                         3,
                         Some(&memory_group),
-                        o.embed_query(&query).await.as_deref(),
+                        embedding.as_ref().map(|(m,v)|(m.as_str(),v.as_slice())),
                     ) {
                         if !hits.is_empty() {
                             let summary = hits
@@ -2039,7 +1816,7 @@ impl ExecCtx {
                 // 携带组主会话的滚动摘要 + 最近对话窗口——子个体不再只有 objective 孤岛视角。
                 // 摘要与窗口同源规划路径（ensure_compacted），口径一致。
                 if o.config_snapshot.read().experiments.group_shared_context {
-                    let (summary, recent) = o.ensure_compacted(&self.session_id).await;
+                    let (summary, recent) = o.ensure_compacted(&self.session_id).await.unwrap_or((None,String::new()));
                     if let Some(ctx) = shared_context_input(summary, recent) {
                         inputs.push(ctx);
                     }
@@ -2078,6 +1855,7 @@ impl ExecCtx {
                 timeout_ms: (o.max_unit_steps as u64).max(3) * 30_000,
             },
             report_format: "SyncReport".into(),
+            model_selection: node.model_selection.clone(),
         };
 
         // 子会话（派发运行台账）：子个体的过程流（思考/工具/输出）与最终消息落在子会话里，
@@ -2171,9 +1949,12 @@ impl ExecCtx {
         // 回流收束（含远程/本地执行全程）；token 取子会话 usage_total。
         let dispatch_started = std::time::Instant::now();
         // 视觉能力检测：候选链首个模型明确标记不支持视觉时不回灌截图（computer use 降级为“盲操作”）
+        let purpose=node.model_selection.as_ref().map(|s|s.purpose).unwrap_or_default();
+        let chain=match o.resolve_agent_chain(&def,purpose,&node.objective,&self.session_id,node.model_selection.as_ref()).await {
+            Ok(chain)=>chain,Err(e)=>return NodeOutcome::failed(node.id.clone(),e.to_string()),
+        };
         let attach_images = {
-            let vision = o
-                .unit_candidates(&def)
+            let vision = chain.candidates
                 .first()
                 .and_then(|(pid, _, model)| o.model_pool.capability(pid, model, true));
             vision != Some(false)
@@ -2227,7 +2008,6 @@ impl ExecCtx {
                             session_id: self.session_id.clone(),
                             payload: serde_json::json!({ "agentId": def.identifier, "reason": e.to_string() }),
                         });
-                        let chain = orch.unit_chain_for(&def);
                         // 回落本地执行：思考增量照常挂到 trace（与本地直连路径一致），
                         // 否则回落轮的子会话过程轨迹缺失
                         orch.unit_runtime
@@ -2245,7 +2025,6 @@ impl ExecCtx {
                     }
                 }
             } else {
-                let chain = orch.unit_chain_for(&def);
                 let sid_for_usage = self.session_id.clone();
                 orch.unit_runtime
                     .execute(

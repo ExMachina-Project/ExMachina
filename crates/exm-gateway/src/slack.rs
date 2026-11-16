@@ -390,7 +390,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                 }
                                 if kind == "voice" {
                                     transcript_note.push_str(
-                                        &voice_transcript_note(&core, bytes, &name).await,
+                                        &voice_transcript_note(&core, &ch2, bytes, &name).await,
                                     );
                                 }
                             }

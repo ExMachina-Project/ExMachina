@@ -203,8 +203,9 @@ impl ToolGateway {
         session_id: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
-        let Some((provider, model)) = self.compactor.read().clone() else {
-            return ToolResult::err("压缩器未装配（运行时未就绪）");
+        let fallback=self.compactor.read().clone();
+        let (provider,model)=match self.agent_aux_model(crate::model_routing::ModelPurpose::Summary,"压缩会话历史",fallback).await {
+            Ok(value)=>value,Err(e)=>return ToolResult::err(format!("压缩模型不可用：{e}")),
         };
         let keep = args
             .get("keepRecent")

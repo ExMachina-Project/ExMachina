@@ -12,6 +12,7 @@ const TL_COLOR: Record<string, string | undefined> = {
   arbitration: "purple",
   memory: undefined,
   cron: undefined,
+  model: undefined,
   error: "red",
 };
 

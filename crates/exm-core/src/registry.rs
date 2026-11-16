@@ -75,6 +75,7 @@ impl AgentPatch {
         }
         if let Some(v) = self.model_hint.as_deref() {
             let t = v.trim();
+            if let Some(routing)=&mut def.model_routing {routing.set_default_model(t);}
             def.model_hint = if t.is_empty() {
                 None
             } else {
@@ -141,6 +142,7 @@ impl LocalRegistry {
                 primary: Some("orchestrator".into()),
                 workspace: None,
                 model: None,
+                model_routing: None,
                 capabilities: None,
                 self_optimize: None,
                 builtin: true,

@@ -77,6 +77,9 @@ impl Orchestrator {
         match self.call_orch_stream(session_id, &messages, true).await {
             Ok(text) => Ok(text),
             Err(e) => {
+                if !reports.values().any(|report|matches!(report.status,SyncStatus::Done)) {
+                    return Err(e.context("收束失败，且没有已完成的节点结果"));
+                }
                 // 降级路径：候选链耗尽 / 网络断等导致收束 LLM 不可用时，不把本轮直接判死——
                 // 各节点已回流的真实成果（摘要 / 阻塞项 / 状态）改用确定性聚合收口，
                 // 失败原因显式注入残余未知段，用户仍能拿到可执行的结构化结论。

@@ -22,6 +22,7 @@ pub(super) async fn stage_body_limit(e: &Env, c: &mut Checker) -> anyhow::Result
     let big_rej: reqwest::Response = client
         .post(format!("{base}/sessions"))
         .header("x-auth-key", "e2e-secret")
+        .header(reqwest::header::CONNECTION, "close")
         .json(&serde_json::json!({"title": "x".repeat(3 * 1024 * 1024)}))
         .send()
         .await?;

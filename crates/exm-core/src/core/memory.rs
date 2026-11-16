@@ -60,17 +60,13 @@ impl Core {
         limit: Option<usize>,
         agent: Option<&str>,
     ) -> anyhow::Result<Vec<RecallHit>> {
-        let qe = self
-            .orchestrator()
-            .memory_query_embedding(query)
-            .await;
+        let caller=crate::model_routing::ModelCaller {agent_id:agent.map(str::to_string).unwrap_or_else(||self.orchestrator().orch_id()),session_id:String::new()};
+        let router = self.orchestrator();
+        let qe=crate::model_routing::MODEL_CALLER.scope(caller,router.memory_query_model_embedding(query)).await;
         let gid = self.registry.active_group();
         let cfg = self.config();
         let limit = limit.unwrap_or(cfg.memory_recall_limit);
-        match agent {
-            Some(id) => self.memory.recall_for_agent(id, query, limit, Some(&gid), qe.as_deref()),
-            None => self.memory.recall(query, limit, None, Some(&gid), qe.as_deref()),
-        }
+        self.memory.recall_with_model(agent,query,limit,Some(&gid),qe.as_ref().map(|(m,v)|(m.as_str(),v.as_slice())))
     }
     /// 个体检索：该智能体私有 + 群体共享（范围 = 激活组 + 全局条目）
     pub fn memory_recall_for_agent(
@@ -204,6 +200,11 @@ impl Core {
         let orch = self.orchestrator();
         orch.transcribe_audio(audio, filename).await
     }
+
+    pub async fn transcribe_for_target(&self,target:Option<&str>,audio:&[u8],filename:&str)->anyhow::Result<String> {
+        let (provider,model)=self.orchestrator().target_model(target,crate::model_routing::ModelPurpose::Transcribe,filename).await?;
+        provider.transcribe(&model,audio,filename).await
+    }
     /// 语音合成（全局生效档案，tts 系模型；文本 → mp3 字节）
     pub async fn speak(&self, text: &str) -> anyhow::Result<Vec<u8>> {
         let orch = self.orchestrator();
@@ -262,8 +263,10 @@ impl Core {
             .join("\n");
 
         let orch = self.orchestrator();
+        let session=self.store.get_session(session_id).ok().flatten()?;
+        let (provider,model)=orch.target_model(Some(&session.group_id),crate::model_routing::ModelPurpose::Summary,"总结会话中的长期事实与经验").await.ok()?;
         let req = crate::provider::ChatRequest::new(
-            orch.orch_model.clone(),
+            model,
             vec![
                 crate::provider::ChatMessage::system(DIGEST_SYSTEM_PROMPT),
                 crate::provider::ChatMessage::user(format!(
@@ -271,7 +274,7 @@ impl Core {
                 )),
             ],
         );
-        let output = match orch.orch_provider.chat(req).await {
+        let output = match provider.chat(req).await {
             Ok(r) => r.content,
             Err(e) => {
                 orch.emit(

@@ -14,10 +14,11 @@ import type {
 } from "./types";
 import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type QueuedTaskItem, type RecallHit, type SpawnBgItem, type TodoItem } from "./api";
 import { tr } from "./i18n/core";
+import { purposeLabel, type ModelPurpose } from "./modelRouting";
 import { accessKey } from "./api/core";
 
 export interface TimelineItem {
-  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron" | "budget";
+  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron" | "budget" | "model";
   agentId?: string;
   nodeId?: string;
   /** 派发对应的子会话（可点击跳转查看子个体过程流） */
@@ -862,6 +863,16 @@ export const useExm = create<ExmState>((set, get) => ({
     }
     if (evt.sessionId !== get().sessionId) return;
     switch (evt.type) {
+      case "model.selected":
+      case "model.used": {
+        const model = [p.profile, p.model].filter(Boolean).join("/");
+        const text = evt.type === "model.used" ? tr("routing.used", { agent: String(p.agentId ?? ""), model }) : tr("routing.selected", {
+          agent: String(p.agentId ?? ""), purpose: purposeLabel(String(p.purpose ?? "chat") as ModelPurpose), model,
+          reason: String(p.reason || tr("routing.manualReason")),
+        });
+        set({ timelineSession: evt.sessionId, timeline: [...get().timeline, { kind: "model", agentId: String(p.agentId ?? ""), text }] });
+        break;
+      }
       case "orchestrator.token":
         set({ running: true, liveOrch: get().liveOrch + String(p.delta ?? "") });
         break;

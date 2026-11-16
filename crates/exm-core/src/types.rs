@@ -600,6 +600,8 @@ pub struct GroupMeta {
     /// 组内未显式指定模型的个体随组）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<crate::model_routing::ModelRouting>,
     /// 组级能力模型覆盖：每组可用不同模型栈；缺省字段跟随全局槽位
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<GroupCapabilities>,
@@ -662,6 +664,8 @@ pub struct AgentDefinition {
     pub prompt_file: String,
     #[serde(default)]
     pub model_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<crate::model_routing::ModelRouting>,
     /// 连结体代理声明（智能连结网络，实验性）：该个体是外部连结体的代理——
     /// 派发到此个体的任务节点转交连结体执行，其回报作为本节点回流。
     /// 值 = nexus.links 中的连结体 id。
@@ -902,6 +906,8 @@ pub struct TaskNode {
     pub agent_identifier: String,
     pub title: String,
     pub objective: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<crate::model_routing::ModelSelection>,
     pub acceptance: Vec<String>,
     pub priority: Priority,
     pub depends_on: Vec<String>,
@@ -964,6 +970,8 @@ pub struct DispatchOrder {
     pub tool_allowlist: Vec<ToolName>,
     pub constraints: DispatchConstraints,
     pub report_format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<crate::model_routing::ModelSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1060,6 +1068,8 @@ pub struct PlanNode {
     #[serde(default)]
     pub depends_on: Vec<String>,
     pub priority: Priority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<crate::model_routing::ModelSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

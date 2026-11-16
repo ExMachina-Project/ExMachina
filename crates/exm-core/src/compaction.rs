@@ -227,7 +227,7 @@ pub async fn ensure_compacted(
 /// 双判据触发判定（纯函数，单测口径）：
 /// token 占比（估算字符 > budget_chars × trigger_ratio）先到 → token-ratio；
 /// 条数超 trigger 兜底 → count-fallback；都不满足 → 不压缩。
-fn compact_trigger(msgs: &[ChatMessage], params: &CompactParams) -> (bool, &'static str) {
+pub(crate) fn compact_trigger(msgs: &[ChatMessage], params: &CompactParams) -> (bool, &'static str) {
     // token 判据（0 或无预算基数 = 关闭）
     if let Some(budget) = params.budget_chars {
         if params.trigger_ratio > 0.0 {

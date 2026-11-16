@@ -883,6 +883,7 @@ fn temp_registry(tag: &str) -> exm_core::registry::LocalRegistry {
         primary: None,
         workspace: None,
         model: None,
+        model_routing: None,
         capabilities: None,
         self_optimize: None,
         builtin: true,
@@ -2686,6 +2687,7 @@ async fn 工具面声明_白名单裁剪与未声明全量() {
         link: None,
         max_steps: None,
         model_hint: None,
+        model_routing: None,
     };
     core.registry()
         .upsert_single(new_def, None)

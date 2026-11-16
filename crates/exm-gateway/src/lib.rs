@@ -23,6 +23,7 @@ pub mod discord;
 pub mod identity;
 pub mod limits;
 pub mod llm_admin;
+mod model_routing;
 pub mod matrix;
 pub mod napcat;
 pub mod napcat_tools;
@@ -338,6 +339,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .merge(platform::routes())
         .merge(editor::routes())
         .merge(llm_admin::routes())
+        .merge(model_routing::routes())
         .merge(plugin_admin::routes())
         .merge(identity::routes())
         .merge(limits::routes())

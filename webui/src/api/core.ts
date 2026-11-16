@@ -6,6 +6,8 @@
 export type { AgentDefinition, ChatMessage, EvidenceItem, Session, SessionSearchHit, SessionSnapshot, TaskGraph } from "../types";
 import { tr } from "../i18n/core";
 import "../desktop";
+import type { ModelCost, ModelPurpose, ModelRouting } from "../modelRouting";
+export type { ModelCost, ModelPurpose, ModelRouting, ModelAssignment } from "../modelRouting";
 
 /** 密钥掩码哨兵（与后端 llm_admin::KEY_MASK / 通道脱敏同一契约）：提交时收到此值 = 沿用服务端旧值 */
 export const KEY_MASK = "***已配置***";
@@ -269,6 +271,7 @@ export interface GroupCapabilities {
   transcribe?: string;
   visionRelay?: string;
   embedding?: string;
+  imageGen?: string;
 }
 
 export interface TemplateInfo {
@@ -287,6 +290,7 @@ export interface GroupMeta {
   workspace?: string;
   /** 组默认模型（"档案ID" 或 "档案ID/模型名"；空 = 跟随全局生效档案） */
   model?: string;
+  modelRouting?: ModelRouting | null;
   /** 组级能力模型覆盖；缺省字段跟随「模型设置」页的全局槽位 */
   capabilities?: GroupCapabilities | null;
   /** 自我优化开关（group-self-optimize）：true = 主智能体可自行增删改子个体 */
@@ -575,6 +579,11 @@ export interface ProfileModel {
   model: string;
   vision: boolean;
   audio: boolean;
+  contextWindow?: number;
+  purposes?: ModelPurpose[];
+  cost?: ModelCost;
+  usageNotes?: string;
+  autoEligible?: boolean;
 }
 
 /** 能力模型槽位："档案ID" 或 "档案ID/模型名"；空 = 全局档案默认（TTS tts-1 / STT whisper-1 / 仅词项召回） */

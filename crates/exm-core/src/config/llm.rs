@@ -19,6 +19,16 @@ pub struct ModelEntry {
     /// 上下文窗口（token 数；0/缺省 = 未知，预算软着陆跳过判定）
     #[serde(default)]
     pub context_window: u64,
+    /// Declared suitability; empty means unknown, not support for every capability.
+    #[serde(default)]
+    pub purposes: Vec<crate::model_routing::ModelPurpose>,
+    #[serde(default)]
+    pub cost: crate::model_routing::ModelCost,
+    #[serde(default)]
+    pub usage_notes: String,
+    /// Automatic model allocation is opt-in; existing catalogs do not add spending choices.
+    #[serde(default)]
+    pub auto_eligible: bool,
 }
 
 /// 厂商模型档案：一条 OpenAI 兼容端点（OpenAI/DeepSeek/通义/Kimi/智谱/Ollama/vLLM …）。

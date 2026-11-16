@@ -2,14 +2,13 @@
 //!
 //! 动机：群聊里「仅 @ 触发」是最保守的口径——没被点名时哪怕话题正中
 //! 擅长领域也只能沉默。主动回复让模型参与群聊，但每条群消息都进完整
-//! 轮次不可承受（成本 + 刷屏），所以决策链是三级漏斗：
+//! 轮次不可承受（成本 + 刷屏），所以先调用轻量模型决策：
 //!
 //! ① 回复率采样（零成本，软权重）：不再硬拦截——采样决定决策口径松紧，
 //!    命中走标准口径，未命中走保守口径（仅高价值消息回）；
-//! ② 探活词表短路（零成本）：在吗/晚安这类不该被抢答；
-//! ③ 决策模型（一次轻量调用）：看最近群聊上下文判断值不值得回应。
+//! ② 决策模型（一次轻量调用）：看最近群聊上下文判断值不值得回应。
 //!
-//! ②③ 过后才放行进完整轮次（与 @ 消息同链路）。决策失败保守忽略——
+//! 模型放行后才进完整轮次（与 @ 消息同链路）。决策失败保守忽略——
 //! 主动回复是增益不是义务，宁可漏不可吵。
 
 use exm_core::Core;
@@ -78,11 +77,17 @@ pub(crate) async fn decide(
     user.push_str(&format!("\n最新消息（未 @ 本集群）：{who} 说：{}\n\n判断是否回应。", ctx.text.trim()));
 
     let orch = core.orchestrator();
+    let (provider,model)=match orch.target_model(ch.group.as_deref(),exm_core::model_routing::ModelPurpose::Planning,&user).await {
+        Ok(target)=>target,Err(e)=>{
+            core.emit_sanitize_finding(serde_json::json!({"kind":"proactive.evalError","channel":ch.id,"error":e.to_string()}));
+            return false;
+        }
+    };
     let req = ChatRequest::new(
-        orch.orch_model.clone(),
+        model,
         vec![ChatMessage::system(system), ChatMessage::user(user)],
     );
-    let output = match orch.orch_provider.chat(req).await {
+    let output = match provider.chat(req).await {
         Ok(r) => r.content,
         Err(e) => {
             core.emit_sanitize_finding(serde_json::json!({
@@ -141,7 +146,7 @@ fn extract_why(output: &str) -> String {
         .unwrap_or_else(|| output.chars().take(80).collect())
 }
 
-/// 三级漏斗入口：群聊未 @ 消息是否主动回应。
+/// 群聊未 @ 消息是否主动回应：语义判断交给模型，不按问候词表过滤。
 /// 调用前提：通道开了 proactive_reply 且唤醒门控拦截了本条。
 /// 返回 true = 放行（进完整轮次）；false = 忽略。
 pub(crate) async fn should_proactively_reply(
@@ -156,11 +161,7 @@ pub(crate) async fn should_proactively_reply(
         let rate = ch.proactive_rate_pct();
         rate == 100 || (rate > 0 && rate_hit(rate))
     };
-    // ② 探活词表：在吗/晚安这类不该被主动抢答（用户没 @，抢答「在」是噪音）
-    if exm_core::orchestrator::probe_reply(ctx.text).is_some() {
-        return false;
-    }
-    // ③ 决策模型：带最近群聊上下文判断（口径随采样软权重收紧/放宽）
+    // ② 决策模型：带最近群聊上下文判断（口径随采样软权重收紧/放宽）
     let recent = recent_group_lines(core, ch, ctx);
     decide(core, ch, ctx, &recent, sampled).await
 }
@@ -264,12 +265,10 @@ mod tests {
         rate_hit(rate)
     }
 
-    /// 漏斗零成本级的端到端判定（不触 LLM）：
-    /// rate=0 恒拒；探活词表恒拒（在吗不该被主动抢答）；
-    /// 决策模型不可用（mock 之外的 provider 全断）时保守拒。
+    /// 决策模型不可用时不主动插话，问候与普通消息都由模型判断。
     /// 走完整 should_proactively_reply 链路（含 InboundCtx 构造）。
     #[tokio::test]
-    async fn 主动回复漏斗_零成本级保守拒() {
+    async fn 主动回复_模型不可用时保守拒() {
         let dir = std::env::temp_dir().join(format!("exm-proactive-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("agents")).unwrap();
         let core = exm_core::Core::create(&dir).expect("创建 Core 失败");
@@ -309,7 +308,7 @@ mod tests {
         // 不再是「全不回」（软权重化后每条消息都保证过一次决策模型）。
         assert!(!should_proactively_reply(&core, &ch, &ctx).await);
 
-        // ② 探活词表：rate=100 但消息是探活——不该被主动抢答
+        // 问候同样到达模型；本环境未配置模型，因此拒绝主动回应。
         let ch_full = Channel { proactive_rate: Some(100), ..ch };
         let probe = String::from("在吗");
         let probe_ctx = InboundCtx { text: &probe, ..ctx };

@@ -37,6 +37,13 @@ function describe(e: StoredEvent, t: ReturnType<typeof useT>): { tag: string; co
   const kind = String(p.type ?? p.kind ?? e.type ?? e.kind ?? "event");
   let text: string;
   switch (kind) {
+    case "model.selected":
+      text = t("routing.selected", { agent: String(inner.agentId ?? ""), purpose: String(inner.purpose ?? "chat"),
+        model: [inner.profile, inner.model].filter(Boolean).join("/"), reason: String(inner.reason || t("routing.manualReason")) });
+      break;
+    case "model.used":
+      text = t("routing.used", { agent: String(inner.agentId ?? ""), model: [inner.profile, inner.model].filter(Boolean).join("/") });
+      break;
     case "dispatch":
       text = t("activity.dispatch", {
         agent: String(p.agentIdentifier ?? ""),

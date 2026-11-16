@@ -222,13 +222,14 @@ pub(crate) fn classify_attachment(mimetype: &str) -> &'static str {
 /// 转写属尽力而为：失败不拦截消息，语音文件本体仍以附件注记进入会话，模型还能按路径自行处理。
 pub(crate) async fn voice_transcript_note(
     core: &exm_core::Core,
+    channel: &Channel,
     bytes: Vec<u8>,
     name: &str,
 ) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    match core.transcribe(&bytes, name).await {
+    match core.transcribe_for_target(channel.group.as_deref(),&bytes, name).await {
         Ok(t) if !t.trim().is_empty() => format!("\n（语音转写：{}）", t.trim()),
         _ => String::new(),
     }

@@ -726,6 +726,7 @@ mod skills_dir_tests {
             output_schema: Default::default(),
             prompt_file: String::new(),
             model_hint: None,
+            model_routing: None,
         }, None)
         .unwrap();
 

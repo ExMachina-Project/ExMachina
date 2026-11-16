@@ -39,6 +39,7 @@ mod knowledge_tool_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
             },
             None,
         );
@@ -236,6 +237,7 @@ mod image_gen_tool_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
             },
             None,
         );
@@ -364,6 +366,7 @@ mod chart_tool_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
             },
             None,
         );
@@ -519,6 +522,7 @@ mod memory_tool_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
             },
             None,
         );
@@ -682,6 +686,7 @@ mod memory_tool_tests {
             output_schema: Default::default(),
             prompt_file: String::new(),
             model_hint: None,
+            model_routing: None,
         }
     }
 
@@ -693,6 +698,7 @@ mod memory_tool_tests {
             primary: Some(primary.into()),
             workspace: None,
             model: None,
+            model_routing: None,
             capabilities: None,
             self_optimize: None,
             builtin,
@@ -3088,6 +3094,7 @@ mod schedule_tool_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
             },
             None,
         );
@@ -3224,6 +3231,7 @@ mod speech_tool_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
             },
             None,
         );

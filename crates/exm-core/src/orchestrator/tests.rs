@@ -159,59 +159,6 @@ mod statement_parse_tests {
         assert_eq!(stmts[0].text, "通道受限。");
     }
 
-    /// 探活短路词表：命中形态（裸词/带语气标点/大小写）与不命中形态（有任务
-    /// 语义、超长、模糊碎片）——规则刻意保守，模糊输入照常走完整轮次。
-    #[test]
-    fn 探活判定_词表边界() {
-        // 命中：裸词
-        assert!(is_probing_message("在吗"));
-        assert!(is_probing_message("在"));
-        // 命中：语气标点修饰
-        assert!(is_probing_message("在吗？"));
-        assert!(is_probing_message("你好！"));
-        assert!(is_probing_message("  hi~  "));
-        // 命中：大小写归一
-        assert!(is_probing_message("Hello"));
-        assert!(is_probing_message("OK"));
-        // 不命中：有任务语义
-        assert!(!is_probing_message("你好，帮我查下明天的天气"));
-        assert!(!is_probing_message("测试一下发送消息功能"));
-        // 不命中：超长（>10 字符，问候不会这么长）
-        assert!(!is_probing_message("在吗在吗在吗在吗在吗在吗在吗"));
-        // 不命中：模糊碎片（交规划器 L0 澄清，不武断短路）
-        assert!(!is_probing_message("对应"));
-        assert!(!is_probing_message("？？？"));
-    }
-
-    /// 探活直答按语义分类：晚安不回「在」、致谢回「不客气」、确认回最短。
-    #[test]
-    fn 探活直答_按语义分类() {
-        assert_eq!(probe_reply("在吗？"), Some("在。有什么需要直接说。"));
-        assert_eq!(probe_reply("你好"), Some("你好，在的。有事直接说。"));
-        // 晚安是收尾语义——回「在」是错位
-        assert_eq!(probe_reply("晚安"), Some("晚安。"));
-        assert_eq!(probe_reply("谢谢！"), Some("不客气。"));
-        assert_eq!(probe_reply("ok"), Some("好。"));
-        assert_eq!(probe_reply("test"), Some("收到，链路正常。"));
-        // 非探活
-        assert_eq!(probe_reply("对应"), None);
-    }
-
-    /// @ 前缀剥离（im-probe-at-prefix）：群聊唤醒必带 @机器人 前缀，不剥就
-    /// 撑过 10 字符上限，短路在群聊失效（部署实测「@id 摸摸」跑了 46 步工具循环）。
-    #[test]
-    fn 探活直答_群聊at前缀剥离() {
-        assert_eq!(probe_reply("@2511705734 在吗"), Some("在。有什么需要直接说。"));
-        assert_eq!(probe_reply("@黑星 晚安～"), Some("晚安。"));
-        assert_eq!(probe_reply("@2511705734"), Some("在。有什么需要直接说。"));
-        // 连 @（@甲 @乙 问候）
-        assert_eq!(probe_reply("@甲 @乙 早"), Some("你好，在的。有事直接说。"));
-        // 带任务语义的 @ 消息不短路（探活只认裸探活词；「摸摸」等聊天语
-        // 走规划 L0，不在此武断短路）
-        assert!(probe_reply("@黑星 帮我查下明天的天气").is_none());
-        assert!(probe_reply("@2511705734 摸摸").is_none());
-    }
-
     #[test]
     fn 陈述解析_空输出兜底() {
         assert_eq!(text_to_statements("").len(), 1);
@@ -521,13 +468,10 @@ mod pending_inputs_tests {
     }
 }
 
-// ---------------------------------------------------------------- 五阶段提取冒烟（5.2）
-// 行为零变更验证：探活短路 / 排队合并 / steer 中断三路径经提取后的
-// handle_user_message_scoped 编排（ingest→probe→merge→dispatch→finalize）。
+// ---------------------------------------------------------------- 轮次编排冒烟
 
 mod five_stage_smoke {
     use super::*;
-    use crate::orchestrator::mark_im_session;
 
     fn core() -> crate::Core {
         let dir = std::env::temp_dir().join(format!("exm-5st-{}", uuid::Uuid::new_v4()));
@@ -538,42 +482,7 @@ mod five_stage_smoke {
         crate::Core::with_config(cfg).expect("创建 Core 失败")
     }
 
-    /// 探活短路：IM 会话纯问候零 LLM 直答——run.finished 带 shortCircuit=probe，
-    /// 不进 merge 的台账 goal 改写（goal 保持上轮值/空）。
-    #[tokio::test]
-    async fn 探活短路_直答收束不进规划() {
-        let core = core();
-        let sid = core.create_session("smoke-probe").unwrap().id;
-        mark_im_session(&sid);
-        // 订阅事件验证收束
-        let mut rx = core.subscribe();
-        core.chat(&sid, "在吗").await.unwrap();
-        let mut saw_probe = false;
-        // 事件已在广播环里，drain 验证
-        while let Ok(evt) = rx.try_recv() {
-            if evt.kind == "run.finished"
-                && evt
-                    .payload
-                    .get("shortCircuit")
-                    .and_then(|v| v.as_str())
-                    == Some("probe")
-            {
-                saw_probe = true;
-            }
-        }
-        assert!(saw_probe, "探活短路应发 shortCircuit=probe 的 run.finished");
-        // 直答已落库（orchestrator 角色）
-        let msgs = core.store.list_messages(&sid, 10).unwrap();
-        assert!(
-            msgs.iter()
-                .any(|m| m.role == crate::types::MessageRole::Orchestrator),
-            "短路直答应落库"
-        );
-        let ws = core.config().workspace_root.clone();
-        let _ = std::fs::remove_dir_all(&ws);
-    }
-
-    /// 排队窗口合并：非 IM 探活路径下，连续两条用户输入合并为一轮目标
+    /// 排队窗口合并：连续两条用户输入合并为一轮目标
     ///（collect_pending_inputs 尾部连续 user 扫描）。
     #[tokio::test]
     async fn 排队窗口_连续输入合并单轮() {

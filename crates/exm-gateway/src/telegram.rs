@@ -204,7 +204,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             );
                             match download_voice(&api, file_id).await {
                                 Ok(bytes) if !bytes.is_empty() => {
-                                    match core.transcribe(&bytes, "voice.ogg").await {
+                                    match core.transcribe_for_target(ch.group.as_deref(),&bytes, "voice.ogg").await {
                                         Ok(t) if !t.trim().is_empty() => Some(t),
                                         Ok(_) => None,
                                         Err(e) => {

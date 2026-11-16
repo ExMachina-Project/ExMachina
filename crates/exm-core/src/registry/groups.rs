@@ -349,6 +349,7 @@ impl LocalRegistry {
             primary: None,
             workspace: None,
             model: None,
+            model_routing: None,
             capabilities: None,
             self_optimize: None,
             builtin: false,

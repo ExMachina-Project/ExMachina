@@ -35,6 +35,7 @@ mod heartbeat_tests {
                 output_schema: Default::default(),
                 prompt_file: String::new(),
                 model_hint: None,
+                model_routing: None,
                 max_steps: None,
             }
         };

@@ -87,6 +87,7 @@ mod timeout_tests {
             primary: None,
             workspace: None,
             model: None,
+            model_routing: None,
             capabilities: None,
             self_optimize: None,
             builtin: true,
@@ -139,6 +140,7 @@ mod timeout_tests {
                 timeout_ms,
             },
             report_format: "SyncReport".into(),
+            model_selection: None,
         }
     }
 
@@ -386,6 +388,7 @@ mod tool_loop_tests {
             primary: None,
             workspace: None,
             model: None,
+            model_routing: None,
             capabilities: None,
             self_optimize: None,
             builtin: true,
@@ -448,6 +451,7 @@ mod tool_loop_tests {
                 timeout_ms: 0,
             },
             report_format: "SyncReport".into(),
+            model_selection: None,
         }
     }
 
@@ -664,6 +668,7 @@ mod soft_landing_tests {
             primary: None,
             workspace: None,
             model: None,
+            model_routing: None,
             capabilities: None,
             self_optimize: None,
             builtin: true,
@@ -802,6 +807,7 @@ mod search_discipline_tests {
             primary: None,
             workspace: None,
             model: None,
+            model_routing: None,
             capabilities: None,
             self_optimize: None,
             builtin: true,
@@ -963,6 +969,7 @@ mod report_rejected_tests {
             primary: None,
             workspace: None,
             model: None,
+            model_routing: None,
             capabilities: None,
             self_optimize: None,
             builtin: true,
@@ -1002,6 +1009,7 @@ mod report_rejected_tests {
             tool_allowlist: vec![],
             constraints: DispatchConstraints { max_steps: 6, timeout_ms: 600_000 },
             report_format: "SyncReport".into(),
+            model_selection: None,
         }
     }
 

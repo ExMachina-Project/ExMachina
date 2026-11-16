@@ -116,6 +116,19 @@ pub struct MemoryEntry {
     /// 语义向量（混合记忆检索；None = 未嵌入，仅参与词项召回）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
+    /// Model-qualified vectors coexist when agents use different embedding models.
+    /// Unqualified legacy vectors remain available only to legacy callers.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_embeddings: std::collections::BTreeMap<String, Vec<f32>>,
+}
+
+impl MemoryEntry {
+    fn vector_for(&self, model: Option<&str>) -> Option<&[f32]> {
+        match model {
+            Some(model) => self.model_embeddings.get(model).map(Vec::as_slice),
+            None => self.embedding.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

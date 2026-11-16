@@ -12,6 +12,7 @@
 use serde_json::{json, Value};
 
 mod llm;
+mod model_routing;
 
 /// 单端点描述（清单条目）
 pub struct Endpoint {
@@ -174,6 +175,12 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("put", "/api/llm/effort", "思考强度设置"),
         Endpoint::new("get", "/api/llm/capabilities", "能力模型槽位查看"),
         Endpoint::new("put", "/api/llm/capabilities", "能力模型槽位设置"),
+        Endpoint::new("get", "/api/llm/catalog", "模型用途与成本目录"),
+        Endpoint::new("get", "/api/singles/:id/model-routing", "独立智能体模型分配与生效来源"),
+        Endpoint::new("put", "/api/singles/:id/model-routing", "保存独立智能体模型分配"),
+        Endpoint::new("put", "/api/groups/:id/model-routing", "保存组默认模型分配"),
+        Endpoint::new("get", "/api/groups/:gid/agents/:identifier/model-routing", "组内成员模型分配与生效来源"),
+        Endpoint::new("put", "/api/groups/:gid/agents/:identifier/model-routing", "保存组内成员模型分配"),
         // ---------------- 记忆
         Endpoint::new("get", "/api/memory", "记忆列表"),
         Endpoint::new("post", "/api/memory", "新增记忆"),
@@ -292,6 +299,7 @@ pub fn endpoints() -> Vec<Endpoint> {
     ]
     .into_iter()
     .map(llm::describe)
+    .map(model_routing::describe)
     .collect()
 }
 
@@ -314,6 +322,8 @@ fn error_response(description: &str) -> Value {
 
 /// 生成 OpenAPI 3.1 文档（JSON Value）
 pub fn generate() -> Value {
+    let mut schemas=llm::schemas();
+    schemas.as_object_mut().unwrap().extend(model_routing::schemas().as_object().unwrap().clone());
     let mut paths = serde_json::Map::new();
     for ep in endpoints() {
         let entry = paths
@@ -393,7 +403,7 @@ pub fn generate() -> Value {
                     "description": "Authorization: Bearer <实例访问密钥>；与 X-Auth-Key 等价。",
                 }
             },
-            "schemas": llm::schemas(),
+            "schemas": schemas,
         },
         "paths": Value::Object(paths),
     })

@@ -5,15 +5,17 @@ use super::*;
 impl AgentRuntime {
     /// `deadline` = 派发时限（Some = execute 路径按 DispatchOrder 预算收口；None = 不限时）。
     /// 挂死的 SSE 连接在剩余预算内等不到收尾时：abort 流任务并报可诊断错误，节点不被无限拖住。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call_llm<F>(
         &self,
+        session_id: &str,
         messages: &[ChatMessage],
         hint: &Option<String>,
         chain: &crate::provider::ModelChain,
         tools: &[crate::provider::ToolSpec],
         deadline: Option<std::time::Instant>,
         on_delta: &mut F,
-    ) -> anyhow::Result<(String, Vec<ToolCall>, (u64, u64))>
+    ) -> anyhow::Result<(String, Vec<ToolCall>, (u64, u64), String)>
     where
         F: FnMut(StreamDelta),
     {
@@ -73,15 +75,24 @@ impl AgentRuntime {
                     if resp.content.trim().is_empty() && resp.tool_calls.is_empty() {
                         // 流式空响应退化非流式
                         let fallback = provider.chat(req).await?;
+                        anyhow::ensure!(!fallback.content.trim().is_empty() || !fallback.tool_calls.is_empty(),"模型返回空响应：{pid}/{model}");
+                        self.tools.emit_and_persist(crate::types::CoreEvent {
+                            kind:"model.used".into(),session_id:session_id.to_string(),
+                            payload:serde_json::json!({"profile":pid,"model":model,"agentId":hint}),
+                        });
                         if !fallback.reasoning.is_empty() {
                             on_delta(StreamDelta::Thinking(fallback.reasoning.clone()));
                         }
                         on_delta(StreamDelta::Text(fallback.content.clone()));
                         let usage = (fallback.prompt_tokens, fallback.completion_tokens);
-                        return Ok((fallback.content, fallback.tool_calls, usage));
+                        return Ok((fallback.content, fallback.tool_calls, usage, model));
                     }
+                    self.tools.emit_and_persist(crate::types::CoreEvent {
+                        kind:"model.used".into(),session_id:session_id.to_string(),
+                        payload:serde_json::json!({"profile":pid,"model":model,"agentId":hint}),
+                    });
                     let usage = (resp.prompt_tokens, resp.completion_tokens);
-                    return Ok((resp.content, resp.tool_calls, usage));
+                    return Ok((resp.content, resp.tool_calls, usage, model));
                 }
                 Ok(Err(e)) => {
                     // 已发出 token 的流不再重试（避免重复输出）；Mock 守卫错误直抛

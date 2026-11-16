@@ -48,6 +48,32 @@
   --tel-h: 26px;
 }
 
+/* Model catalogs and owner-scoped allocation use the console's existing panel tokens. */
+.model-routing-editor { display: grid; gap: 14px; margin: 14px 0 20px; min-width: 0; }
+.routing-field { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(170px, 1fr); gap: 8px 12px; align-items: center; padding: 10px 0; }
+.routing-field + .routing-field { border-top: 1px solid var(--line); }
+.routing-field > .ant-select:not(.routing-mode), .routing-field-help { grid-column: 1 / -1; }
+.routing-field .ant-select { min-width: 0; width: 100%; }
+.routing-field-label { font-weight: 500; }
+.routing-field-help { font-size: 12px; line-height: 1.6; }
+.routing-instructions, .routing-subject { display: grid; gap: 8px; min-width: 0; }
+.routing-subject { margin: 10px 0 18px; }
+.routing-subject .ant-select { width: 100%; }
+.routing-save { margin-top: 8px; }
+.routing-preview { margin: 10px 0; }
+.routing-preview-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; }
+.routing-catalog-hint { margin-bottom: 16px; }
+.allocation-card { max-width: 1000px; }
+.model-catalog-form { border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; }
+.model-catalog-form .model-row { margin-bottom: 12px; }
+.model-catalog-form .ant-form-item { margin-bottom: 12px; }
+.model-catalog-list { display: grid; gap: 10px; margin-top: 12px; }
+.model-catalog-entry { border-top: 1px solid var(--line); padding-top: 10px; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .routing-field { grid-template-columns: 1fr; }
+  .model-catalog-form .form-grid-2 { grid-template-columns: 1fr; }
+}
+
 /* ============ 品牌工具类（spec: ui-visual-language，资产语汇） ============ */
 
 /* 卡片头统一注入资产区块头语汇（// SWARM MANIFEST）：

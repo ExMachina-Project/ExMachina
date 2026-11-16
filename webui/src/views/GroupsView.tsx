@@ -11,10 +11,12 @@ import {
   ApiOutlined, ArrowLeftOutlined, DeleteOutlined, EditOutlined, FormOutlined, PlusOutlined,
   SettingOutlined, UsergroupDeleteOutlined, UserOutlined,
 } from "@ant-design/icons";
-import { api, type GroupCapabilities, type GroupMeta, type GroupOverview, type LlmProfile, type TemplateInfo } from "../api";
+import { api, type GroupMeta, type GroupOverview, type LlmProfile, type TemplateInfo, type ModelRouting } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import type { AgentDefinition } from "../types";
-import { buildCapabilityOptions, buildModelOptions, groupIdEn, modelLabel } from "../models";
+import { groupIdEn } from "../models";
+import { initialRouting, routingLabel } from "../modelRouting";
+import { ModelRoutingEditor } from "../components/ModelRoutingEditor";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
 
@@ -35,18 +37,19 @@ export function GroupDetailPanel({
   const [loading, setLoading] = useState(false);
   const [overview, setOverview] = useState<GroupOverview | null>(null);
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
-  const [modelDraft, setModelDraft] = useState<string>("");
+  const [routingDraft, setRoutingDraft] = useState<ModelRouting>({});
+  const [memberRouting, setMemberRouting] = useState<ModelRouting>({});
+  const [routingMember, setRoutingMember] = useState<AgentDefinition | null>(null);
+  const [routingSaving, setRoutingSaving] = useState(false);
   const [agentModal, setAgentModal] = useState(false);
   const [saving, setSaving] = useState<"" | "agent" | "edit">("");
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [wsDraft, setWsDraft] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [capsDraft, setCapsDraft] = useState<GroupCapabilities>({});
   const [agentForm] = Form.useForm();
   // 成员编辑 / 人设（原「子个体」页能力并入组详情）
   const [editing, setEditing] = useState<AgentDefinition | null>(null);
   const [editForm] = Form.useForm();
-  const [editFormProfiles, setEditFormProfiles] = useState<LlmProfile[]>([]);
   const [promptLoading, setPromptLoading] = useState(false);
   // 连结体代理绑定（智能连结网络）：编辑表单下拉数据源
   const [nexusLinks, setNexusLinks] = useState<import("../api").NexusLink[]>([]);
@@ -100,7 +103,6 @@ export function GroupDetailPanel({
       try {
         const p = (await api.llmProfiles()).profiles;
         setProfiles(p);
-        setEditFormProfiles(p);
       } catch { /* noop */ }
     })();
     void (async () => {
@@ -166,8 +168,7 @@ export function GroupDetailPanel({
   const openSettings = () => {
     setNameDraft(meta?.name ?? "");
     setWsDraft(meta?.workspace ?? "");
-    setModelDraft(meta?.model ?? "");
-    setCapsDraft(meta?.capabilities ?? {});
+    setRoutingDraft(initialRouting(meta?.modelRouting, meta?.model, meta?.capabilities));
     setSelfOptDraft(meta?.selfOptimize ?? false);
     setSettingsOpen(true);
   };
@@ -183,8 +184,7 @@ export function GroupDetailPanel({
       // 组名随设置弹窗一并保存（group-rename 修复：此前组名无处可改）
       await api.updateGroup(meta.id, { name });
       await api.setGroupWorkspace(meta.id, wsDraft.trim());
-      await api.setGroupModel(meta.id, modelDraft);
-      await api.setGroupCapabilities(meta.id, capsDraft);
+      await api.saveGroupRouting(meta.id, routingDraft);
       if (selfOptDraft !== (meta.selfOptimize ?? false)) {
         await api.setGroupSelfOptimize(meta.id, selfOptDraft);
       }
@@ -196,20 +196,6 @@ export function GroupDetailPanel({
       message.error(t("common.saveFailed", { err: String(e) }));
     }
   };
-
-  const capField = (key: keyof GroupCapabilities, label: string) => (
-    <div className="cap-row" key={key}>
-      <div className="cap-label">{label}</div>
-      <Select
-        allowClear
-        showSearch
-        value={capsDraft[key] || undefined}
-        options={buildCapabilityOptions(profiles)}
-        placeholder={t("groups.capsFollow")}
-        onChange={(v) => setCapsDraft((c) => ({ ...c, [key]: v ?? "" }))}
-      />
-    </div>
-  );
 
   // ---- 成员编辑 / 人设（并入原「子个体」页能力） ----
   const openPersona = async (a: AgentDefinition) => {
@@ -281,7 +267,6 @@ export function GroupDetailPanel({
       await api.updateAgent(editing.identifier, {
         name: v.name,
         description: v.description,
-        modelHint: v.modelHint ?? "",
         link: v.link ?? "",
       });
       if ((v.prompt ?? "").trim()) {
@@ -296,6 +281,23 @@ export function GroupDetailPanel({
     } finally {
       setSaving("");
     }
+  };
+
+  const openMemberRouting = (agent: AgentDefinition) => {
+    setRoutingMember(agent);
+    setMemberRouting(initialRouting(agent.modelRouting, agent.modelHint));
+  };
+  const saveMemberRouting = async () => {
+    if (!meta || !routingMember) return;
+    setRoutingSaving(true);
+    try {
+      await api.saveMemberRouting(meta.id, routingMember.identifier, memberRouting);
+      message.success(t("routing.saved"));
+      setRoutingMember(null);
+      await loadMembers(meta.id);
+      await refreshAgents();
+    } catch (error) { message.error(t("common.saveFailed", { err: String(error) })); }
+    finally { setRoutingSaving(false); }
   };
 
   // 在途个体（编排图运行中）：成员表状态列
@@ -409,10 +411,11 @@ export function GroupDetailPanel({
             <div className="primary-panel">
               <div className="primary-desc dim">{primaryAgent.description}</div>
               <div className="skill-line">
-                {t("singles.model")}<Tag>{modelLabel(primaryAgent.modelHint, profiles)}</Tag>
+                {t("singles.model")}<Tag>{routingLabel(primaryAgent.modelRouting, primaryAgent.modelHint)}</Tag>
                 <span className="dim" style={{ marginLeft: 12 }}>{t("groups.primaryHint")}</span>
               </div>
               <Space style={{ marginTop: 10 }}>
+                <Button size="small" onClick={() => openMemberRouting(primaryAgent)}>{t("routing.title")}</Button>
                 <Button size="small" icon={<FormOutlined />} onClick={() => void openEdit(primaryAgent)}>
                   {t("agents.edit")}
                 </Button>
@@ -447,6 +450,8 @@ export function GroupDetailPanel({
                   ),
                 },
                 { title: t("agents.colDuty"), dataIndex: "description", key: "desc", ellipsis: true },
+                { title: t("routing.title"), key: "model", width: 210,
+                  render: (_, a: AgentDefinition) => <Button size="small" type="link" onClick={() => openMemberRouting(a)}>{routingLabel(a.modelRouting, a.modelHint)}</Button> },
                 {
                   title: t("agents.colTools"),
                   dataIndex: "tools",
@@ -538,7 +543,7 @@ export function GroupDetailPanel({
         confirmLoading={saving === "edit"}
         okText={t("common.save")}
         destroyOnHidden
-        width={620}
+        width={760}
       >
         <Form form={editForm} layout="vertical" onFinish={() => void submitEdit()}>
           <Form.Item name="name" label={t("agents.f.name")} rules={[{ required: true }]}>
@@ -557,15 +562,6 @@ export function GroupDetailPanel({
               <Input.TextArea rows={12} className="prompt-editor" spellCheck={false} />
             </Form.Item>
           </Spin>
-          <Form.Item name="modelHint" label={t("agents.f.model")} extra={t("agents.f.modelExtra")}>
-            <Select
-              allowClear
-              showSearch
-              style={{ width: "100%" }}
-              options={buildModelOptions(editFormProfiles)}
-              placeholder={t("agents.f.modelPh")}
-            />
-          </Form.Item>
           <Form.Item name="link" label={t("agents.f.link")} extra={t("agents.f.linkExtra")}>
             <Select
               allowClear
@@ -579,6 +575,12 @@ export function GroupDetailPanel({
       </Modal>
 
       {/* 成员 SOUL.md 编辑弹窗 */}
+      <Modal open={routingMember !== null} title={`${routingMember?.name ?? ""} · ${t("routing.title")}`}
+        onCancel={() => setRoutingMember(null)} onOk={() => void saveMemberRouting()} confirmLoading={routingSaving}
+        okText={t("common.save")} width={760}>
+        <ModelRoutingEditor value={memberRouting} onChange={setMemberRouting} profiles={profiles} />
+      </Modal>
+
       <Modal
         open={personaOf !== null}
         title={personaOf ? t("agents.soulTitle", { name: personaOf.name }) : ""}
@@ -622,7 +624,7 @@ export function GroupDetailPanel({
         onCancel={() => setSettingsOpen(false)}
         onOk={() => void saveSettings()}
         okText={t("common.save")}
-        width={520}
+        width={760}
       >
         <Form layout="vertical">
           <Form.Item label={t("groups.f.name")} help={t("groups.f.nameHelp")} style={{ marginBottom: 12 }}>
@@ -631,22 +633,12 @@ export function GroupDetailPanel({
           <Form.Item label={t("groups.f.workspace")} help={t("groups.f.workspaceHelp")}>
             <Input value={wsDraft} onChange={(e) => setWsDraft(e.target.value)} placeholder={t("groups.f.wsPh")} />
           </Form.Item>
-          <Form.Item label={t("groups.f.model")} help={t("groups.f.modelHelp")}>
-            <Select value={modelDraft || undefined} onChange={setModelDraft} options={buildModelOptions(profiles)} allowClear />
-          </Form.Item>
+          <ModelRoutingEditor value={routingDraft} onChange={setRoutingDraft} profiles={profiles} group />
           <Form.Item label={t("groups.selfOptLabel")} help={t("groups.selfOptHint")} style={{ marginBottom: 8 }}>
             <Space align="center">
               <Switch checked={selfOptDraft} onChange={setSelfOptDraft} />
               <span className="dim">{selfOptDraft ? t("common.on") : t("common.off")}</span>
             </Space>
-          </Form.Item>
-          <Form.Item label={t("groups.capsTitle")} help={t("groups.capsHint")} style={{ marginBottom: 8 }}>
-            <div className="cap-grid" style={{ gap: "8px 14px" }}>
-              {capField("speech", t("models.capSpeech"))}
-              {capField("transcribe", t("models.capStt"))}
-              {capField("visionRelay", t("models.capVisionRelay"))}
-              {capField("embedding", t("models.capEmbed"))}
-            </div>
           </Form.Item>
         </Form>
       </Modal>

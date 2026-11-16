@@ -369,7 +369,7 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                                                         saved.push((kind.clone(), p, name.clone()));
                                                     }
                                                     if kind == "voice" {
-                                                        transcript_note.push_str(&voice_transcript_note(&core, bytes, &name).await);
+                                                        transcript_note.push_str(&voice_transcript_note(&core, &ch2, bytes, &name).await);
                                                     }
                                                 }
                                             }

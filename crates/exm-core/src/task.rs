@@ -95,6 +95,7 @@ impl TaskGraphModel {
                 Some(n.id.clone()),
                 &n.depends_on,
             );
+            if let Some(node)=g.nodes.get_mut(&n.id) { node.model_selection=n.model_selection.clone(); }
         }
         g
     }
@@ -108,6 +109,7 @@ impl TaskGraphModel {
             agent_identifier: spec.agent_identifier,
             title: spec.title,
             objective: spec.objective,
+            model_selection: None,
             acceptance: spec.acceptance,
             priority: spec.priority,
             depends_on: depends_on.to_vec(),

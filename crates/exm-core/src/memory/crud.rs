@@ -67,6 +67,7 @@ impl MemoryStore {
             last_accessed_at: None,
             access_count: 0,
             embedding: None,
+            model_embeddings: Default::default(),
         };
         self.save_entry(&entry)?;
         self.db
@@ -181,6 +182,8 @@ impl MemoryStore {
         // 内容变更：哈希迁移 + 倒排重索引（先删后建，与 forget+remember 同口径）
         let new_hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
         if new_hash != old_hash {
+            e.embedding = None;
+            e.model_embeddings.clear();
             // 与其它条目撞内容哈希时拒绝：覆盖会让对方失去去重索引，remember 语义随之漂移
             if let Some(other) = self.hash_lookup(&new_hash)? {
                 if other != id {
@@ -303,9 +306,18 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub fn set_model_embedding(&self, id: &str, model: &str, vector: Vec<f32>) -> Result<()> {
+        let _guard = self.write_lock.lock();
+        if let Some(mut entry) = self.db.get::<MemoryEntry>(ENTRIES, id)? {
+            entry.model_embeddings.insert(model.to_string(), vector);
+            self.save_entry(&entry)?;
+        }
+        Ok(())
+    }
+
     /// 余弦相似度（任一为空返回 None）
     pub(crate) fn cosine(a: &[f32], b: &[f32]) -> Option<f64> {
-        if a.is_empty() || b.is_empty() {
+        if a.is_empty() || b.is_empty() || a.len() != b.len() {
             return None;
         }
         let n = a.len().min(b.len());

@@ -98,6 +98,7 @@ async fn 场景2_工作台改代码与回滚() {
         output_schema: Default::default(),
         prompt_file: String::new(),
         model_hint: None,
+        model_routing: None,
         max_steps: None,
     };
     core.registry().upsert_agent("t", orch_def, None).unwrap();
@@ -139,6 +140,12 @@ async fn 场景2_工作台改代码与回滚() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn 场景3_spawn派生检索子任务() {
     let core = core();
+    let caller = serde_json::from_value(serde_json::json!({
+        "identifier": "a1", "name": "检索主智能体", "description": "派生检索测试",
+        "domain": "测试", "tier": "unit"
+    })).unwrap();
+    core.registry().upsert_single(caller, None).unwrap();
+    core.registry().set_active_single(Some("a1")).unwrap();
     let s = core.create_session("派生").unwrap();
     // 准备检索目标文件
     std::fs::write(

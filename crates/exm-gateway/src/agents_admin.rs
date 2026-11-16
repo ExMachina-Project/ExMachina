@@ -132,6 +132,7 @@ pub(crate) async fn create_agent(
         output_schema: Default::default(),
         prompt_file: String::new(),
         model_hint: b.model.filter(|s| !s.trim().is_empty()),
+        model_routing: None,
         link: None,
         max_steps: None,
     };
