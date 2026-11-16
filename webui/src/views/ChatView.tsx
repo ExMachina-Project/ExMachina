@@ -974,11 +974,6 @@ export function ChatView(): React.ReactElement {
           onFork={doFork}
           onDecideApproval={(id, ok, scope) => void decideApproval(id, ok, scope)}
           onOpenSubSession={(id) => void selectSession(id)}
-          onUsePrompt={(prompt) => {
-            setText(prompt);
-            if (sessionId) useExm.getState().setDraft(sessionId, prompt);
-            document.querySelector<HTMLTextAreaElement>("textarea.composer-textarea")?.focus();
-          }}
           t={t}
           TurnOps={TurnOps}
           TimelineRows={TimelineRows}

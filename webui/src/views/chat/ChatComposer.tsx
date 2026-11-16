@@ -84,7 +84,6 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
       <Input.TextArea
         className="composer-textarea"
         value={text}
-        placeholder={t("chat.inputPlaceholder")}
         aria-label={t("chat.messageLabel")}
         disabled={isSubSession}
         onChange={(e) => {
@@ -93,7 +92,7 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
           if (sessionId) setDraft(sessionId, e.target.value);
         }}
         onBlur={onBlurMention}
-        autoSize={{ minRows: 2, maxRows: 6 }}
+        autoSize={{ minRows: 1, maxRows: 6 }}
         onPressEnter={(e) => {
           if (e.nativeEvent.isComposing || e.repeat || e.keyCode === 229) return;
           if (mention.open) return; // 提及弹层接管 Enter
