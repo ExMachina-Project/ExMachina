@@ -38,6 +38,7 @@ export type Tab = "providers" | "caps";
 /** API 协议选项的显示名走 i18n（值为协议标识，与后端契约） */
 export const API_FORMAT_KEYS: { value: string; key: TKey }[] = [
   { value: "openai", key: "models.fmt.openai" },
+  { value: "responses", key: "models.fmt.responses" },
   { value: "anthropic", key: "models.fmt.anthropic" },
   { value: "gemini", key: "models.fmt.gemini" },
   { value: "azure", key: "models.fmt.azure" },
@@ -48,6 +49,7 @@ export const API_FORMAT_KEYS: { value: string; key: TKey }[] = [
 /** 协议短标签（卡片上的 Tag 用），显示名走 i18n */
 export const FORMAT_LABEL_KEY: Record<string, TKey> = {
   openai: "models.fmtShort.openai",
+  responses: "models.fmtShort.responses",
   anthropic: "models.fmtShort.anthropic",
   gemini: "models.fmtShort.gemini",
   azure: "models.fmtShort.azure",
@@ -64,4 +66,3 @@ export function liveRows(rows: KeyForm["keys"]): { value: string; keep?: number 
     .filter((r) => (r?.value ?? "").trim() !== "")
     .map((r) => ({ value: (r?.value ?? "").trim(), keep: r?.keep }));
 }
-

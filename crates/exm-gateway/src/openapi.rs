@@ -170,6 +170,7 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("delete", "/api/llm/profiles/:id", "删除模型档案"),
         Endpoint::new("put", "/api/llm/active", "激活模型档案"),
         Endpoint::new("post", "/api/llm/test", "模型通道测试"),
+        Endpoint::new("post", "/api/llm/identity", "预览客户端生效协议与标识"),
         Endpoint::new("post", "/api/llm/models", "拉取提供商模型列表"),
         Endpoint::new("get", "/api/llm/effort", "思考强度查看"),
         Endpoint::new("put", "/api/llm/effort", "思考强度设置"),
@@ -361,7 +362,7 @@ pub fn generate() -> Value {
             op["responses"]["400"] = error_response("请求参数或请求体无效");
         }
         if ep.path.split('/').any(|segment| segment.starts_with(':'))
-            || matches!(ep.path, "/api/llm/active" | "/api/llm/test" | "/api/llm/models")
+            || matches!(ep.path, "/api/llm/active" | "/api/llm/test" | "/api/llm/models" | "/api/llm/identity")
         {
             op["responses"]["404"] = error_response("指定资源不存在");
         }

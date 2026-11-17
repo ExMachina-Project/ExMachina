@@ -9,6 +9,7 @@ import { chromium, type Page, type Route, type WebSocketRoute } from "playwright
 import { createServer } from "vite";
 import type {} from "../webui/src/desktop";
 import type { ChatMessage, Session } from "../webui/src/types";
+import type { ClientIdentity, ClientIdentityPreview } from "../webui/src/api/core";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const screenshotDir = process.env.UI_SCREENSHOT_DIR;
@@ -216,7 +217,7 @@ try {
     await test(`${desktop ? "Desktop" : "WebUI"} client identity saves, reloads, validates and resets`, async () => {
       const f = await fixture(desktop);
       try {
-        let saved = { ...profile, clientIdentity: { preset: "default", userAgent: "", headers: {} } };
+        let saved = { ...profile, clientIdentity: { preset: "default", userAgent: "", headers: {} } as ClientIdentity };
         f.state.overrides.set("/llm/profiles", (route, fulfill) => {
           if (route.request().method() === "POST") {
             saved = { ...saved, ...route.request().postDataJSON() };
@@ -224,6 +225,15 @@ try {
           }
           return fulfill({ active: profile.id, mock: true, profiles: [saved] });
         });
+        const preview = (body: { clientIdentity: ClientIdentity; apiFormat?: string }): ClientIdentityPreview => ({
+          preset: body.clientIdentity.preset, version: body.clientIdentity.version ?? "0.169.0", requestMode: body.clientIdentity.requestMode ?? "native",
+          configuredFormat: body.apiFormat ?? "openai", effectiveFormat: body.clientIdentity.requestMode === "headers" ? "openai" : body.clientIdentity.preset === "codex" ? "responses" : "anthropic",
+          path: body.clientIdentity.requestMode === "headers" ? "/chat/completions" : body.clientIdentity.preset === "codex" ? "/responses" : "/v1/messages",
+          headers: { "user-agent": `${body.clientIdentity.preset === "codex" ? "codex_cli_rs" : "claude-cli"}/${body.clientIdentity.version || "0.169.0"}`, originator: "codex_cli_rs" },
+          metadata: body.clientIdentity.preset === "claude-code", nativeCompatible: body.clientIdentity.requestMode !== "headers", upstreamVerified: false,
+        });
+        f.state.overrides.set("/llm/identity", (route, fulfill) => fulfill(preview(route.request().postDataJSON())));
+        f.state.overrides.set("/llm/test", (route, fulfill) => fulfill({ ok: true, status: 200, identity: preview(route.request().postDataJSON()) }));
         if (desktop) {
           await f.page.getByRole("button", { name: "设置", exact: true }).click();
           await f.page.getByRole("tab", { name: "模型", exact: true }).click();
@@ -236,26 +246,54 @@ try {
         await modal.getByText("客户端伪装", { exact: true }).first().click();
         await modal.getByTestId("client-identity-preset").click();
         await f.page.getByText("Claude Code", { exact: true }).last().click();
+        await modal.getByTestId("client-identity-version").fill("2.1.326");
         await modal.getByTestId("client-identity-user-agent").fill("fixture-cli/1.2");
         const headers = modal.getByTestId("client-identity-headers");
         await headers.fill('{"Authorization":"forbidden"}');
         await f.page.locator(".ant-modal-footer .ant-btn-primary").last().click();
         await modal.getByText(/请输入最多 32 项的 JSON 对象/).waitFor();
         assert.equal(f.state.requests.filter((r) => r.path === "/llm/profiles" && r.method === "POST").length, 0);
-        await headers.fill('{"x-client-name":"fixture"}');
+        await headers.fill('{"x-client-name":"fixture","version":"2.1.326","X-OpenRouter-Title":"Fixture"}');
         await f.page.locator(".ant-modal-footer .ant-btn-primary").last().click();
         await eventually(() => saved.clientIdentity.preset === "claude-code", "Client identity was not saved");
-        assert.deepEqual(saved.clientIdentity, { preset: "claude-code", userAgent: "fixture-cli/1.2", headers: { "x-client-name": "fixture" } });
+        assert.deepEqual(saved.clientIdentity, { preset: "claude-code", version: "2.1.326", requestMode: "native", userAgent: "fixture-cli/1.2", headers: { "x-client-name": "fixture", version: "2.1.326", "X-OpenRouter-Title": "Fixture" } });
         await modal.waitFor({ state: "hidden" });
         await f.page.locator(".model-card .anticon-edit").first().click();
         await modal.getByText("客户端伪装", { exact: true }).first().click();
         assert.equal(await modal.getByTestId("client-identity-user-agent").inputValue(), "fixture-cli/1.2");
         assert.ok((await headers.inputValue()).includes("x-client-name"));
+        assert.equal(await modal.getByTestId("client-identity-version").inputValue(), "2.1.326");
+        await modal.getByTestId("client-identity-preset").click();
+        await f.page.getByText("Codex CLI", { exact: true }).last().click();
+        assert.equal(await modal.getByTestId("client-identity-user-agent").inputValue(), "");
+        assert.equal(await headers.inputValue(), "");
+        assert.equal(await modal.getByTestId("client-identity-version").inputValue(), "");
+        await modal.getByTestId("client-identity-version").fill("0.169.0");
+        await modal.getByTestId("client-identity-preview-button").click();
+        await modal.getByTestId("client-identity-preview").getByText("/responses", { exact: true }).waitFor();
+        const previewText = await modal.getByTestId("client-identity-preview").textContent();
+        assert.ok(previewText?.includes("codex_cli_rs/0.169.0"), JSON.stringify({previewText, request: f.state.requests.findLast((r) => r.path === "/llm/identity")}));
+        await modal.getByTestId("client-identity-version").fill("0.170.0");
+        await modal.getByTestId("client-identity-preview").waitFor({ state: "hidden" });
+        await modal.getByTestId("client-identity-test-button").click();
+        await modal.getByTestId("client-identity-preview").getByText("/responses", { exact: true }).waitFor();
+        const tested = f.state.requests.findLast((r) => r.path === "/llm/test")!.body as { id: string; clientIdentity: ClientIdentity };
+        assert.equal(tested.id, "test"); assert.equal(tested.clientIdentity.version, "0.170.0");
+        assert.equal(saved.clientIdentity.preset, "claude-code", "Draft probes must not save changes");
+        await modal.getByTestId("client-identity-mode").click();
+        await f.page.getByText("仅覆盖请求头", { exact: true }).last().click();
+        await modal.getByTestId("client-identity-preview-button").click();
+        await modal.getByTestId("client-identity-preview").getByText("/chat/completions", { exact: true }).waitFor();
+        assert.ok((await modal.getByTestId("client-identity-preview").innerText()).includes("当前协议与所选客户端不同"));
         await screenshot(f.page, `${desktop ? "desktop" : "webui"}-client-identity`);
         await modal.getByRole("button", { name: "恢复默认身份", exact: true }).click();
         await f.page.locator(".ant-modal-footer .ant-btn-primary").last().click();
         await eventually(() => saved.clientIdentity.preset === "default", "Client identity was not disabled");
         assert.deepEqual(saved.clientIdentity, { preset: "default" });
+      } catch (error) {
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-client-identity-failure`);
+        if (screenshotDir) await fs.writeFile(path.join(screenshotDir, `${desktop ? "desktop" : "webui"}-client-identity-failure.txt`), await f.page.locator("body").innerText());
+        throw error;
       } finally { await f.close(); }
     });
   }

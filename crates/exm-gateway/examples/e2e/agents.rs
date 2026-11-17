@@ -229,7 +229,7 @@ c.check(
     Ok(())
 }
 
-/// 单体人设注入（追加）：plan 与 converge 两个拼装点的 system prompt 均须含 single_persona
+/// 单体直连每轮使用当前人设；按轮次等待完成，不混入其他会话的旧请求。
 pub(super) async fn stage_single_persona(e: &Env, c: &mut Checker) -> anyhow::Result<()> {
     let fake_port = e.fake_port.get().copied().unwrap_or(0);
     let prompt_log = &e.prompt_log;
@@ -278,27 +278,30 @@ let soul_session: serde_json::Value = client
     .json()
     .await?;
 let soul_sid = soul_session["id"].as_str().unwrap_or_default().to_string();
-// 第一轮：消耗 sk-orch 的首次 429（handler 仍会记录 system prompt）
-let _ = client
-    .post(format!("{base}/sessions/{soul_sid}/chat"))
-    .json(&serde_json::json!({ "text": "人设注入第一轮（消耗首次限额）" }))
-    .send()
-    .await?;
-tokio::time::sleep(Duration::from_millis(2000)).await;
-// 第二轮：plan 与 converge 均成功，各记录一段 system prompt
-let _ = client
-    .post(format!("{base}/sessions/{soul_sid}/chat"))
-    .json(&serde_json::json!({ "text": "人设注入第二轮" }))
-    .send()
-    .await?;
-tokio::time::sleep(Duration::from_millis(2500)).await;
+async fn turn(e: &Env, sid: &str, text: &str) -> anyhow::Result<()> {
+    let mut events = e.core.subscribe();
+    let response = e.client.post(format!("{}/sessions/{sid}/chat",e.base))
+        .json(&serde_json::json!({"text":text})).send().await?;
+    anyhow::ensure!(response.status().as_u16()==202,"单体对话应受理");
+    tokio::time::timeout(Duration::from_secs(20),async {
+        loop {
+            let event=events.recv().await?;
+            if event.session_id != sid {continue;}
+            if event.kind=="run.error" {anyhow::bail!("单体对话失败");}
+            if event.kind=="run.finished" {return Ok::<_,anyhow::Error>(());}
+        }
+    }).await??;
+    Ok(())
+}
+prompt_log.lock().clear();
+turn(e,&soul_sid,"人设注入第一轮").await?;
+turn(e,&soul_sid,"人设注入第二轮").await?;
 {
     let pl = prompt_log.lock().clone();
-    let tail = pl.iter().rev().take(3).cloned().collect::<Vec<_>>();
     c.check(
-        "单体人设注入：plan/converge 的 system prompt 均含人设文本",
-        tail.len() >= 3
-            && tail
+        "单体人设注入：两轮直连 system prompt 均含人设文本",
+        pl.len() >= 2
+            && pl
                 .iter()
                 .all(|s| s.contains("e2e 灵魂标记 XYZQ") && s.contains("## SOUL（人格）")),
     );
@@ -309,19 +312,14 @@ let _soul_reset2: serde_json::Value = client
     .await?
     .json()
     .await?;
-let _ = client
-    .post(format!("{base}/sessions/{soul_sid}/chat"))
-    .json(&serde_json::json!({ "text": "人设重置后回落默认" }))
-    .send()
-    .await?;
-tokio::time::sleep(Duration::from_millis(2500)).await;
+prompt_log.lock().clear();
+turn(e,&soul_sid,"人设重置后回落默认").await?;
 {
     let pl = prompt_log.lock().clone();
-    let tail = pl.iter().rev().take(2).cloned().collect::<Vec<_>>();
     c.check(
         "单体人设重置：回落默认人设且不再含自定义文本",
-        tail.len() >= 2
-            && tail
+        !pl.is_empty()
+            && pl
                 .iter()
                 .all(|s| s.contains("智械体") && !s.contains("e2e 灵魂标记 XYZQ")),
     );

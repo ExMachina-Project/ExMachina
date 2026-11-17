@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use exm_core::config::{ClientIdentity, LlmProfile, ModelEntry};
+use exm_core::provider::{ChatMessage, ChatRequest, OpenAiCompatibleProvider};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -44,6 +45,7 @@ fn profile_json(p: &LlmProfile) -> Value {
         "apiKey": mask_key(&p.api_key),
         "apiKeys": keys,
         "apiFormat": if p.api_format.is_empty() { "openai" } else { &p.api_format },
+        "effectiveApiFormat": p.client_identity.effective_format(&p.api_format),
         "clientIdentity": p.client_identity,
         "model": p.model,
         "models": models,
@@ -194,17 +196,21 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
         Some(list) => list
             .iter()
             .map(|m| {
-                let old = existing.and_then(|p| p.models.iter().find(|entry| entry.model == m.model.trim())).cloned().unwrap_or_default();
+                let old = existing
+                    .and_then(|p| p.models.iter().find(|entry| entry.model == m.model.trim()))
+                    .cloned()
+                    .unwrap_or_default();
                 ModelEntry {
-                model: m.model.trim().to_string(),
-                vision: m.vision,
-                audio: m.audio,
-                context_window: m.context_window.unwrap_or(old.context_window),
-                purposes: m.purposes.clone().unwrap_or(old.purposes),
-                cost: m.cost.unwrap_or(old.cost),
-                usage_notes: m.usage_notes.clone().unwrap_or(old.usage_notes),
-                auto_eligible: m.auto_eligible.unwrap_or(old.auto_eligible),
-            }})
+                    model: m.model.trim().to_string(),
+                    vision: m.vision,
+                    audio: m.audio,
+                    context_window: m.context_window.unwrap_or(old.context_window),
+                    purposes: m.purposes.clone().unwrap_or(old.purposes),
+                    cost: m.cost.unwrap_or(old.cost),
+                    usage_notes: m.usage_notes.clone().unwrap_or(old.usage_notes),
+                    auto_eligible: m.auto_eligible.unwrap_or(old.auto_eligible),
+                }
+            })
             .filter(|m| !m.model.is_empty())
             .collect(),
         None => existing.map(|e| e.models.clone()).unwrap_or_default(),
@@ -249,10 +255,11 @@ fn resolve_profile_input(existing: Option<&LlmProfile>, v: &LlmProfileBody) -> L
             .api_format
             .clone()
             .unwrap_or_else(|| existing.map(|e| e.api_format.clone()).unwrap_or_default()),
-        client_identity: v
-            .client_identity
-            .clone()
-            .unwrap_or_else(|| existing.map(|e| e.client_identity.clone()).unwrap_or_default()),
+        client_identity: v.client_identity.clone().unwrap_or_else(|| {
+            existing
+                .map(|e| e.client_identity.clone())
+                .unwrap_or_default()
+        }),
         model: model_name,
         fallback: match v.fallback.as_deref() {
             None => existing.and_then(|e| e.fallback.clone()),
@@ -289,7 +296,11 @@ pub async fn save_profile(
         )
             .into_response();
     }
-    if profile.models.len() > 1000 || profile.models.iter().any(|m|m.model.len()>256 || m.usage_notes.chars().count()>2000 || m.purposes.len()>11) {
+    if profile.models.len() > 1000
+        || profile.models.iter().any(|m| {
+            m.model.len() > 256 || m.usage_notes.chars().count() > 2000 || m.purposes.len() > 11
+        })
+    {
         return (StatusCode::BAD_REQUEST,Json(json!({"error":"模型目录最多 1000 项，模型名最多 256 字节，适用场景最多 2000 字符，用途最多 11 项"}))).into_response();
     }
     if let Some(slot) = cfg.llm_profiles.iter_mut().find(|p| p.id == profile.id) {
@@ -419,7 +430,7 @@ pub async fn activate_profile(
     }
 }
 
-/// 连通测试：向端点发一条 1-token 请求（真实网络，10s 超时）
+/// 连通测试：复用真实请求与响应解析（16 token，30s 超时），草稿不落盘。
 pub async fn test_profile(
     State(st): State<AppState>,
     Json(b): Json<LlmProfileBody>,
@@ -440,13 +451,14 @@ pub async fn test_profile(
             fallback: None,
         }),
     };
-    let Some(p) = profile else {
+    let Some(saved) = profile else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "档案不存在" })),
         )
             .into_response();
     };
+    let p = resolve_profile_input(Some(&saved), &b);
     // 探针密钥：主 Key 优先，为空则回落 Key 池首键（与连通测试对齐已配置的键）
     let probe_key = if p.api_key.trim().is_empty() {
         p.api_keys.first().cloned().unwrap_or_default()
@@ -459,17 +471,10 @@ pub async fn test_profile(
         )
         .into_response();
     }
-    // 按档案协议构造 1-token 探针（URL / 鉴权头 / 请求体各不相同）
-    let base = p.base_url.trim_end_matches('/');
-    let model = p.model.as_str();
-    let fmt = if p.api_format.is_empty() {
-        "openai"
-    } else {
-        p.api_format.as_str()
-    };
-    let client = reqwest::Client::new();
-    let identity_headers = match p.client_identity.request_headers() {
-        Ok(headers) => headers,
+    let provider = match OpenAiCompatibleProvider::with_format(&p.base_url, vec![], &p.api_format)
+        .with_client_identity(&p.client_identity)
+    {
+        Ok(provider) => provider,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -478,59 +483,60 @@ pub async fn test_profile(
                 .into_response()
         }
     };
-    let rb = match fmt {
-        "anthropic" => client
-            .post(format!("{base}/v1/messages"))
-            .header("x-api-key", &probe_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&json!({
-                "model": model, "max_tokens": 1,
-                "messages": [{ "role": "user", "content": "ping" }],
-            })),
-        "azure" => client
-            .post(format!(
-                "{base}/openai/deployments/{model}/chat/completions?api-version=2024-10-21"
-            ))
-            .header("api-key", &probe_key)
-            .json(&json!({
-                "messages": [{ "role": "user", "content": "ping" }], "max_tokens": 1,
-            })),
-        "gemini" => client
-            .post(format!("{base}/v1beta/models/{model}:generateContent"))
-            .header("x-goog-api-key", &probe_key)
-            .json(&json!({
-                "contents": [{ "role": "user", "parts": [{ "text": "ping" }] }],
-                "generationConfig": { "maxOutputTokens": 1 },
-            })),
-        _ => client
-            .post(format!("{base}/chat/completions"))
-            .bearer_auth(&probe_key)
-            .json(&json!({
-                "model": model,
-                "messages": [{ "role": "user", "content": "ping" }],
-                "max_tokens": 1,
-            })),
-    };
+    let mut request = ChatRequest::new(&p.model, vec![ChatMessage::user("ping")]);
+    request.max_tokens = Some(16);
+    let stream = provider.chat_uses_stream();
+    let rb = provider.chat_http_request(&probe_key, &request, stream);
+    let preview = provider.identity_preview(&p.model);
     let t0 = std::time::Instant::now();
-    let resp = rb
-        .headers(identity_headers)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
-    let latency_ms = t0.elapsed().as_millis() as u64;
+    let resp = rb.timeout(std::time::Duration::from_secs(30)).send().await;
     match resp {
         Ok(r) => {
             let status = r.status().as_u16();
-            let body = r.text().await.unwrap_or_default();
+            let result = if (200..300).contains(&status) {
+                provider.parse_chat_http_response(r, stream).await.map(|_| ())
+                    .map_err(|_| anyhow::anyhow!("上游响应无效、未完成或包含错误事件"))
+            } else {
+                let body = r.text().await.unwrap_or_default();
+                Err(anyhow::anyhow!(OpenAiCompatibleProvider::rejected_request_summary(status, &body)))
+            };
+            let latency_ms = t0.elapsed().as_millis() as u64;
             Json(json!({
-                "ok": (200..300).contains(&status),
+                "ok": result.is_ok(),
                 "status": status,
                 "latencyMs": latency_ms,
-                "snippet": body.chars().take(300).collect::<String>(),
+                "identity": preview,
+                "error": result.err().map(|error| error.to_string()),
             }))
             .into_response()
         }
-        Err(e) => Json(json!({ "ok": false, "latencyMs": latency_ms, "error": e.to_string() })).into_response(),
+        Err(_) => Json(json!({ "ok": false, "latencyMs": t0.elapsed().as_millis() as u64, "identity":preview,"error": "模型服务连接失败或超时" })).into_response(),
+    }
+}
+
+/// A local preview never contacts the upstream or returns authentication headers.
+pub async fn preview_identity(
+    State(st): State<AppState>,
+    Json(body): Json<LlmProfileBody>,
+) -> axum::response::Response {
+    let config = st.core.config();
+    let existing = body
+        .id
+        .as_ref()
+        .and_then(|id| config.llm_profiles.iter().find(|profile| &profile.id == id));
+    if body.id.is_some() && existing.is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({"error":"档案不存在"}))).into_response();
+    }
+    let profile = resolve_profile_input(existing, &body);
+    match OpenAiCompatibleProvider::with_format(&profile.base_url, vec![], &profile.api_format)
+        .with_client_identity(&profile.client_identity)
+    {
+        Ok(provider) => Json(provider.identity_preview(&profile.model)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -609,6 +615,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/llm/active", axum::routing::put(activate_profile))
         .route("/api/llm/test", post(test_profile))
+        .route("/api/llm/identity", post(preview_identity))
         .route("/api/llm/models", post(list_provider_models))
         .route(
             "/api/llm/capabilities",
@@ -687,8 +694,10 @@ pub async fn list_provider_models(
             b.client_identity.clone().unwrap_or_default(),
         )
     };
-    let identity_headers = match identity.request_headers() {
-        Ok(headers) => headers,
+    let provider = match OpenAiCompatibleProvider::with_format(&base, vec![], &fmt)
+        .with_client_identity(&identity)
+    {
+        Ok(provider) => provider,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -697,12 +706,19 @@ pub async fn list_provider_models(
                 .into_response()
         }
     };
+    let identity_headers = provider.request_identity_headers();
+    let base = provider.api_base();
+    let fmt = identity.effective_format(&fmt);
     if probe_key.trim().is_empty() {
         return Json(json!({ "ok": false, "configured": false, "models": [], "message": "尚未配置 API Key" }))
             .into_response();
     }
     let client = reqwest::Client::new();
-    let rb = match fmt.as_str() {
+    let rb = match fmt {
+        "anthropic" if base.ends_with("/v1") => client
+            .get(format!("{base}/models"))
+            .header("x-api-key", &probe_key)
+            .header("anthropic-version", "2023-06-01"),
         "anthropic" => client
             .get(format!("{base}/v1/models"))
             .header("x-api-key", &probe_key)

@@ -386,6 +386,8 @@ mod compat;
 mod effort;
 mod mock;
 mod pool;
+mod responses;
+mod identity;
 mod stream;
 
 pub use compat::*;
