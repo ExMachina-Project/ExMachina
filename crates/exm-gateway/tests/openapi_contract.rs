@@ -309,6 +309,16 @@ async fn published_model_examples_work_with_the_real_handlers_and_mask_keys() {
     assert_eq!(profile["clientIdentity"], input["clientIdentity"]);
     assert_eq!(profile["apiKey"], "");
     assert_eq!(profile["models"][0]["contextWindow"], 128000);
+    let identity = f
+        .authorized(
+            Method::POST,
+            "/api/llm/identity",
+            request("/api/llm/identity", "post"),
+        )
+        .await;
+    assert_eq!(identity["effectiveFormat"], "responses");
+    assert_eq!(identity["path"], "/v1/responses");
+    assert_eq!(identity["upstreamVerified"], false);
     for path in ["/api/llm/test", "/api/llm/models"] {
         let result = f
             .authorized(Method::POST, path, request(path, "post"))
@@ -334,7 +344,12 @@ async fn published_model_examples_work_with_the_real_handlers_and_mask_keys() {
         .authorized(Method::GET, "/api/llm/profiles", Value::Null)
         .await;
     assert!(!profiles.to_string().contains("private-fixture-key"));
-    for path in ["/api/llm/test", "/api/llm/models", "/api/llm/active"] {
+    for path in [
+        "/api/llm/test",
+        "/api/llm/models",
+        "/api/llm/active",
+        "/api/llm/identity",
+    ] {
         let method = if path.ends_with("active") {
             Method::PUT
         } else {

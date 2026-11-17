@@ -553,8 +553,23 @@ export interface ChannelStatus {
 
 export interface ClientIdentity {
   preset: "default" | "claude-code" | "codex" | "opencode" | "cline" | "custom";
+  version?: string;
+  requestMode?: "native" | "headers";
   userAgent?: string;
   headers?: Record<string, string>;
+}
+
+export interface ClientIdentityPreview {
+  preset: ClientIdentity["preset"];
+  version: string;
+  requestMode: "native" | "headers";
+  configuredFormat: string;
+  effectiveFormat: string;
+  path: string;
+  headers: Record<string, string>;
+  metadata: boolean;
+  nativeCompatible: boolean;
+  upstreamVerified: false;
 }
 
 export interface LlmProfile {
@@ -562,6 +577,7 @@ export interface LlmProfile {
   name: string;
   baseUrl: string;
   apiFormat?: string;
+  effectiveApiFormat?: string;
   clientIdentity?: ClientIdentity;
   apiKey: string;
   /** 多 Key 池（掩码行 = 沿用旧池同位键） */

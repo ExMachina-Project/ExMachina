@@ -61,6 +61,8 @@
 .routing-subject .ant-select { width: 100%; }
 .routing-save { margin-top: 8px; }
 .routing-preview { margin: 10px 0; }
+.client-identity-preview { margin-top: 14px; }
+.client-identity-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin: 8px 0; }
 .routing-preview-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; }
 .routing-catalog-hint { margin-bottom: 16px; }
 .allocation-card { max-width: 1000px; }

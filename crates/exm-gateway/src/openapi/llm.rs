@@ -47,6 +47,8 @@ pub(super) fn describe(ep: Endpoint) -> Endpoint {
         ("post", "/api/llm/test") => ep
             .json_request("LlmTestInput", json!({ "id": "primary" }))
             .json_response("LlmTestResult", json!({ "ok": true, "status": 200, "latencyMs": 120, "snippet": "upstream response" })),
+        ("post", "/api/llm/identity") => ep.json_request("LlmIdentityInput", json!({"id":"primary","clientIdentity":{"preset":"codex"}}))
+            .json_response("ClientIdentityPreview",json!({"preset":"codex","version":"0.169.0","requestMode":"native","configuredFormat":"openai","effectiveFormat":"responses","path":"/v1/responses","headers":{"user-agent":"codex_cli_rs/0.169.0 (linux; x86_64)","originator":"codex_cli_rs"},"metadata":false,"nativeCompatible":true,"upstreamVerified":false})),
         ("post", "/api/llm/models") => ep
             .json_request("LlmModelsInput", json!({ "id": "primary", "clientIdentity": identity_example() }))
             .json_response("LlmModelsResult", json!({ "ok": true, "models": ["example-model"] })),
@@ -67,14 +69,28 @@ pub(super) fn describe(ep: Endpoint) -> Endpoint {
 fn header_name_pattern() -> String {
     let names = [
         "originator",
+        "version",
         "x-app",
         "x-title",
+        "x-openrouter-title",
+        "x-openrouter-categories",
         "http-referer",
         "editor-version",
         "editor-plugin-version",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "x-claude-code-session-id",
+        "x-session-id",
+        "x-session-affinity",
+        "session_id",
+        "x-task-id",
+        "x-is-multiroot",
+        "x-platform",
+        "x-platform-version",
+        "x-core-version",
     ];
     let mut patterns: Vec<String> = names.iter().map(|name| case_insensitive(name)).collect();
-    for prefix in ["x-client-", "x-stainless-"] {
+    for prefix in ["x-client-", "x-stainless-", "x-opencode-"] {
         patterns.push(format!(
             "{}[!#$%&'*+.^_`|~0-9A-Za-z-]+",
             case_insensitive(prefix)
@@ -100,7 +116,7 @@ pub(super) fn schemas() -> Value {
     let string = json!({ "type": "string" });
     let optional_string = nullable(string.clone());
     let format = json!({
-        "type": "string", "examples": ["openai", "anthropic", "azure", "gemini"],
+        "type": "string", "examples": ["openai", "responses", "anthropic", "azure", "gemini"],
         "description": "API 协议；空值或未识别字符串按 OpenAI 兼容协议处理。",
     });
     let ascii = json!({ "type": "string", "maxLength": 2048, "not": { "pattern": "[^ -~]" } });
@@ -123,6 +139,8 @@ pub(super) fn schemas() -> Value {
             "properties": {
                 "preset": { "type": "string", "enum": ["default", "claude-code", "codex", "opencode", "cline", "custom"], "default": "default" },
                 "userAgent": ascii,
+                "version":{"type":"string","maxLength":64,"pattern":"^[A-Za-z0-9._+-]*$","default":""},
+                "requestMode":{"type":"string","enum":["native","headers"],"default":"native"},
                 "headers": {
                     "type": "object", "maxProperties": 32,
                     "propertyNames": { "pattern": header_name_pattern(), "not": { "pattern": "[^!#$%&'*+.^_`|~0-9A-Za-z-]" } },
@@ -130,9 +148,14 @@ pub(super) fn schemas() -> Value {
                 },
             },
             "if": { "properties": { "preset": { "const": "default" } } },
-            "then": { "properties": { "userAgent": { "maxLength": 0 }, "headers": { "maxProperties": 0 } } },
+            "then": { "properties": { "userAgent": { "maxLength": 0 }, "headers": { "maxProperties": 0 },"version":{"maxLength":0} } },
             "examples": [{ "preset": "default" }, identity_example()],
         },
+        "ClientIdentityPreview":{"type":"object","required":["preset","version","requestMode","configuredFormat","effectiveFormat","path","headers","metadata","nativeCompatible","upstreamVerified"],"properties":{
+            "preset":{"type":"string"},"version":{"type":"string"},"requestMode":{"enum":["native","headers"]},"configuredFormat":string,"effectiveFormat":string,"path":string,
+            "headers":{"type":"object","additionalProperties":{"type":"string"}},"metadata":{"type":"boolean"},"nativeCompatible":{"type":"boolean"},"upstreamVerified":{"const":false}
+        }},
+        "LlmIdentityInput":{"type":"object","properties":{"id":optional_string,"baseUrl":optional_string,"apiFormat":nullable(format.clone()),"model":optional_string,"clientIdentity":nullable(reference("ClientIdentity"))}},
         "ProfileModelInput": {
             "type": "object", "required": ["model"],
             "properties": {
@@ -177,7 +200,7 @@ pub(super) fn schemas() -> Value {
                 "id": string, "name": string, "baseUrl": string, "apiFormat": format,
                 "apiKey": { "type": "string", "enum": ["", "***已配置***"] },
                 "apiKeys": { "type": "array", "items": { "type": "string", "enum": ["", "***已配置***"] } },
-                "model": string, "models": { "type": "array", "items": reference("ProfileModel") },
+                "model": string, "models": { "type": "array", "items": reference("ProfileModel") },"effectiveApiFormat":format.clone(),
                 "fallback": optional_string, "clientIdentity": reference("ClientIdentity"),
             },
         },
@@ -195,13 +218,14 @@ pub(super) fn schemas() -> Value {
         "LlmProfileDeleted": { "type": "object", "required": ["ok"], "properties": {
             "ok": { "const": true }, "active": string,
         } },
-        "LlmTestInput": { "type": "object", "properties": { "id": optional_string },
-            "description": "id 省略/null 测试当前配置，否则测试该已保存档案；其他连接字段不覆盖档案。" },
+        "LlmTestInput": { "type": "object", "properties": { "id": optional_string,"baseUrl":optional_string,"model":optional_string,"apiFormat":nullable(format.clone()),"clientIdentity":nullable(reference("ClientIdentity")) },
+            "description": "id 省略/null 测试当前配置，否则测试已保存档案；草稿字段可覆盖，服务端保留未提交的密钥。测试不保存。" },
         "LlmTestResult": { "type": "object", "required": ["ok"], "properties": {
             "ok": { "type": "boolean" }, "configured": { "const": false },
             "status": { "type": "integer", "minimum": 100, "maximum": 599 },
             "latencyMs": { "type": "integer", "minimum": 0 }, "snippet": { "type": "string", "maxLength": 300 },
-            "message": string, "error": string,
+            "message": string, "error": nullable(string.clone()),
+            "identity":reference("ClientIdentityPreview"),
         }, "description": "上游非 2xx 或网络失败以 HTTP 200 / ok:false 返回；status 表示上游状态码。" },
         "LlmModelsInput": { "type": "object", "properties": {
             "id": optional_string, "baseUrl": optional_string, "apiKey": { "type": ["string", "null"], "writeOnly": true },

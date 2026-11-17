@@ -45,7 +45,7 @@ pub struct LlmProfile {
     /// 该提供商的多把 API Key：按发起方粘性负载均衡，仅限额时切换（docs/11 §1）
     #[serde(default)]
     pub api_keys: Vec<String>,
-    /// API 协议：openai（默认）| anthropic
+    /// API 协议：openai（默认）| responses | anthropic | azure | gemini。
     #[serde(default)]
     pub api_format: String,
     /// 按档案设置客户端标识，默认不增加请求头。
@@ -70,7 +70,7 @@ pub struct LlmConfig {
     /// 生效 Key 池（粘性负载均衡）；空 = 仅用 api_key 单键
     #[serde(default)]
     pub api_keys: Vec<String>,
-    /// 生效协议：openai（默认）| anthropic
+    /// 配置协议；客户端原生请求模式可解析出 Responses / Messages。
     #[serde(default)]
     pub api_format: String,
     #[serde(default, skip_serializing_if = "ClientIdentity::is_default")]

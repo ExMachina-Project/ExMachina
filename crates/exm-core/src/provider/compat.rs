@@ -3,13 +3,16 @@
 use super::*;
 pub struct OpenAiCompatibleProvider {
     base_url: String,
-    /// API 协议：openai（默认，/chat/completions）| anthropic（/v1/messages）
+    /// 实际推理协议；原生身份模式可覆盖配置协议。
     pub(crate) api_format: String,
+    configured_format: String,
     /// Key 池：多把 Key 负载均衡——按发起方粘性选键，仅限额时前进（保留端点侧 KV 缓存）
     keys: Vec<String>,
     sticky: Mutex<std::collections::HashMap<String, usize>>,
     client: reqwest::Client,
-    identity_headers: reqwest::header::HeaderMap,
+    pub(super) identity_headers: reqwest::header::HeaderMap,
+    pub(super) identity: crate::config::ClientIdentity,
+    pub(super) identity_session: String,
 }
 
 impl OpenAiCompatibleProvider {
@@ -19,15 +22,18 @@ impl OpenAiCompatibleProvider {
 
     pub fn with_format(base_url: impl Into<String>, keys: Vec<String>, api_format: &str) -> Self {
         let fmt = match api_format {
-            "anthropic" | "azure" | "gemini" => api_format,
+            "anthropic" | "azure" | "gemini" | "responses" => api_format,
             _ => "openai",
         };
         OpenAiCompatibleProvider {
             base_url: base_url.into(),
             api_format: fmt.into(),
+            configured_format: fmt.into(),
             keys: keys.into_iter().filter(|k| !k.trim().is_empty()).collect(),
             sticky: Mutex::new(std::collections::HashMap::new()),
             identity_headers: reqwest::header::HeaderMap::new(),
+            identity: Default::default(),
+            identity_session: uuid::Uuid::new_v4().to_string(),
             // 全局请求超时（审计 错误处理 P1-1）：端点 TCP 建连后僵死（代理半开/服务商挂起）
             // 时 reqwest 默认无总超时 → chat/embed 永久阻塞 → run 永不收束、run_lock 永久持有。
             // 300s = 非流式调用的宽上限（对比 transcribe/speak 已有的 120s）；
@@ -46,13 +52,27 @@ impl OpenAiCompatibleProvider {
         identity: &crate::config::ClientIdentity,
     ) -> anyhow::Result<Self> {
         self.identity_headers = identity.request_headers()?;
+        self.api_format = identity
+            .effective_format(&self.configured_format)
+            .to_string();
+        self.identity = identity.clone();
         Ok(self)
     }
 
-    fn url(&self, model: &str, stream: bool) -> String {
-        let base = self.base_url.trim_end_matches('/');
+    pub fn api_base(&self) -> &str {
+        self.base_url
+            .trim_end_matches('/')
+            .trim_end_matches("/chat/completions")
+            .trim_end_matches("/responses")
+            .trim_end_matches("/messages")
+    }
+
+    pub fn endpoint(&self, model: &str, stream: bool) -> String {
+        let base = self.api_base();
         match self.api_format.as_str() {
+            "anthropic" if base.ends_with("/v1") => format!("{base}/messages"),
             "anthropic" => format!("{base}/v1/messages"),
+            "responses" => format!("{base}/responses"),
             // Azure：部署名入 URL，鉴权用 api-key 头
             "azure" => {
                 format!("{base}/openai/deployments/{model}/chat/completions?api-version=2024-10-21")
@@ -70,9 +90,16 @@ impl OpenAiCompatibleProvider {
         &self,
         key: &str,
     ) -> (reqwest::header::HeaderName, reqwest::header::HeaderValue) {
+        Self::auth_header_for(&self.api_format, key)
+    }
+
+    fn auth_header_for(
+        format: &str,
+        key: &str,
+    ) -> (reqwest::header::HeaderName, reqwest::header::HeaderValue) {
         let val = reqwest::header::HeaderValue::from_str(key)
             .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(""));
-        match self.api_format.as_str() {
+        match format {
             "anthropic" => (reqwest::header::HeaderName::from_static("x-api-key"), val),
             "azure" => (reqwest::header::HeaderName::from_static("api-key"), val),
             "gemini" => (
@@ -87,6 +114,14 @@ impl OpenAiCompatibleProvider {
         }
     }
 
+    fn auxiliary_format(&self) -> &str {
+        if self.configured_format == "responses" {
+            "openai"
+        } else {
+            &self.configured_format
+        }
+    }
+
     fn build_request(
         &self,
         key: &str,
@@ -97,9 +132,17 @@ impl OpenAiCompatibleProvider {
         let (name, value) = self.auth_header(key);
         let rb = self
             .client
-            .post(self.url(model, stream))
-            .headers(self.identity_headers.clone())
-            .header(name, value);
+            .post(self.endpoint(model, stream))
+            .headers(self.request_identity_headers())
+            .header(name, value)
+            .header(
+                reqwest::header::ACCEPT,
+                if stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            );
         // 流式请求覆盖总超时为 600s 宽上限：SSE 长回答合法超过 client 的 300s
         // 非流式上限；帧间卡死由收流侧 idle deadline 兜底（见 call_orch_stream）
         let rb = if stream {
@@ -111,6 +154,104 @@ impl OpenAiCompatibleProvider {
             "anthropic" => rb.header("anthropic-version", "2023-06-01").json(&body),
             _ => rb.json(&body),
         }
+    }
+
+    pub fn identity_preview(&self, model: &str) -> serde_json::Value {
+        let headers: std::collections::BTreeMap<_, _> = self
+            .request_identity_headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let endpoint = self.endpoint(model, true);
+        // Expose only the path: configured URLs may carry credentials in user-info/query.
+        let path = reqwest::Url::parse(&endpoint)
+            .map(|u| u.path().to_string())
+            .unwrap_or_default();
+        serde_json::json!({"preset":self.identity.preset,"version":self.identity.client_version(),"requestMode":self.identity.request_mode,
+            "configuredFormat":self.configured_format,"effectiveFormat":self.api_format,"path":path,"headers":headers,
+            "metadata":self.claude_metadata_enabled(),
+            "nativeCompatible":self.native_identity_compatible(),
+            "upstreamVerified":false})
+    }
+
+    /// Admin probes use exactly the same protocol, headers and payload mapping as live calls.
+    pub fn chat_http_request(
+        &self,
+        key: &str,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> reqwest::RequestBuilder {
+        self.build_request(key, &request.model, stream, self.body(request, stream))
+    }
+
+    pub fn chat_uses_stream(&self) -> bool {
+        self.api_format == "responses"
+            && self.identity.preset == crate::config::ClientIdentityPreset::Codex
+    }
+
+    pub async fn parse_chat_http_response(
+        &self,
+        response: reqwest::Response,
+        stream: bool,
+    ) -> anyhow::Result<ChatResponse> {
+        let result = if stream {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            self.read_stream(response, tx).await?
+        } else {
+            let parsed: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|_| anyhow::anyhow!("模型响应不是有效 JSON"))?;
+            self.parse_json_response(&parsed)?
+        };
+        anyhow::ensure!(
+            !result.content.trim().is_empty() || !result.tool_calls.is_empty(),
+            "模型服务返回空响应"
+        );
+        Ok(result)
+    }
+
+    fn parse_json_response(&self, parsed: &serde_json::Value) -> anyhow::Result<ChatResponse> {
+        anyhow::ensure!(
+            parsed.get("error").is_none_or(serde_json::Value::is_null),
+            "模型响应包含上游错误"
+        );
+        let result = if self.api_format == "responses" {
+            responses::parse(parsed)?
+        } else {
+            let usage = parsed.get("usage");
+            ChatResponse {
+                content: self.parse_response(parsed).unwrap_or_default(),
+                reasoning: self.parse_reasoning(parsed).unwrap_or_default(),
+                tool_calls: self.parse_tool_calls(parsed),
+                prompt_tokens: usage
+                    .and_then(|u| {
+                        u.get("input_tokens")
+                            .or_else(|| u.get("prompt_tokens"))
+                            .or_else(|| u.get("promptTokenCount"))
+                    })
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                completion_tokens: usage
+                    .and_then(|u| {
+                        u.get("output_tokens")
+                            .or_else(|| u.get("completion_tokens"))
+                            .or_else(|| u.get("candidatesTokenCount"))
+                    })
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            }
+        };
+        anyhow::ensure!(
+            !result.content.trim().is_empty() || !result.tool_calls.is_empty(),
+            "模型服务返回空响应"
+        );
+        Ok(result)
     }
 
     /// 嵌入用键：直接取第一把（无发起方粘性语义）
@@ -139,6 +280,9 @@ impl OpenAiCompatibleProvider {
 
     /// 限额类失败判定（429/402/403 或配额、限流文案）
     fn is_quota_failure(status: u16, body: &str) -> bool {
+        if Self::is_client_rejection(body) {
+            return false;
+        }
         let low = body.to_lowercase();
         [429, 402].contains(&status)
             || status == 403
@@ -147,6 +291,26 @@ impl OpenAiCompatibleProvider {
             || low.contains("insufficient")
             || low.contains("too many requests")
             || low.contains("resource_exhausted")
+    }
+
+    fn is_client_rejection(body: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/code")
+                    .and_then(|code| code.as_str())
+                    .map(str::to_string)
+            })
+            .is_some_and(|code| code == "client_not_allowed")
+    }
+
+    pub fn rejected_request_summary(status: u16, body: &str) -> String {
+        if Self::is_client_rejection(body) {
+            format!("上游拒绝当前客户端（HTTP {status}，client_not_allowed）。请核对服务商允许的客户端及实际请求协议和标识")
+        } else {
+            format!("模型服务拒绝请求（HTTP {status}）")
+        }
     }
 
     /// 限额/配额错误 → 固定话术（IM 可读性）。各家上游 429 载荷格式不一
@@ -175,6 +339,9 @@ impl OpenAiCompatibleProvider {
     }
 
     pub(crate) fn body(&self, req: &ChatRequest, stream: bool) -> serde_json::Value {
+        if self.api_format == "responses" {
+            return responses::body(req, stream);
+        }
         let mut base = match self.api_format.as_str() {
             "anthropic" => {
                 let system: String = req
@@ -261,11 +428,9 @@ impl OpenAiCompatibleProvider {
         let openai_compat = self.api_format.is_empty() || self.api_format == "openai";
         if openai_compat {
             // 下限 1024 只作用于自动值（安全网/进程级），不抬显式请求值
-            let cap = req.max_tokens.or_else(|| {
-                reasoning_token_cap()
-                    .or(Some(16_384))
-                    .map(|v| v.max(1024))
-            });
+            let cap = req
+                .max_tokens
+                .or_else(|| reasoning_token_cap().or(Some(16_384)).map(|v| v.max(1024)));
             base["max_tokens"] = serde_json::json!(cap);
         }
         // 模型思考强度：请求级显式值优先，否则回落进程级设置；None = 端点默认不下发
@@ -330,6 +495,9 @@ impl OpenAiCompatibleProvider {
                     base["tool_choice"] = serde_json::json!("auto");
                 }
             }
+        }
+        if self.claude_metadata_enabled() {
+            base["metadata"] = self.claude_metadata();
         }
         base
     }
@@ -665,22 +833,22 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if self.keys.is_empty() {
             anyhow::bail!("未配置 API Key（嵌入不可用）");
         }
-        let fmt = self.api_format.as_str();
+        let fmt = self.auxiliary_format();
         if fmt != "openai" && fmt != "azure" {
             anyhow::bail!("协议 {fmt} 暂不支持 /embeddings 端点");
         }
-        let base = self.base_url.trim_end_matches('/');
+        let base = self.api_base();
         let url = if fmt == "azure" {
             format!("{base}/openai/deployments/{model}/embeddings?api-version=2024-10-21")
         } else {
             format!("{base}/embeddings")
         };
         let key = self.key_hint_texts();
-        let (name, value) = self.auth_header(&key);
+        let (name, value) = Self::auth_header_for(fmt, &key);
         let resp = self
             .client
             .post(&url)
-            .headers(self.identity_headers.clone())
+            .headers(self.request_identity_headers())
             .header(name, value)
             .json(&serde_json::json!({ "model": model, "input": texts }))
             .send()
@@ -729,18 +897,18 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if self.keys.is_empty() {
             anyhow::bail!("未配置 API Key（转写不可用）");
         }
-        let fmt = self.api_format.as_str();
+        let fmt = self.auxiliary_format();
         if fmt != "openai" && fmt != "azure" {
             anyhow::bail!("协议 {fmt} 暂不支持语音转写");
         }
-        let base = self.base_url.trim_end_matches('/');
+        let base = self.api_base();
         let url = if fmt == "azure" {
             format!("{base}/openai/deployments/{model}/audio/transcriptions?api-version=2024-10-21")
         } else {
             format!("{base}/audio/transcriptions")
         };
         let key = self.key_hint_texts();
-        let (name, value) = self.auth_header(&key);
+        let (name, value) = Self::auth_header_for(fmt, &key);
         let part = reqwest::multipart::Part::bytes(audio.to_vec())
             .file_name(filename.to_string())
             .mime_str(if filename.ends_with(".mp3") {
@@ -756,7 +924,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let resp = self
             .client
             .post(&url)
-            .headers(self.identity_headers.clone())
+            .headers(self.request_identity_headers())
             .header(name, value)
             .multipart(form)
             .timeout(std::time::Duration::from_secs(120))
@@ -783,22 +951,22 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if self.keys.is_empty() {
             anyhow::bail!("未配置 API Key（合成不可用）");
         }
-        let fmt = self.api_format.as_str();
+        let fmt = self.auxiliary_format();
         if fmt != "openai" && fmt != "azure" {
             anyhow::bail!("协议 {fmt} 暂不支持语音合成");
         }
-        let base = self.base_url.trim_end_matches('/');
+        let base = self.api_base();
         let url = if fmt == "azure" {
             format!("{base}/openai/deployments/{model}/audio/speech?api-version=2024-10-21")
         } else {
             format!("{base}/audio/speech")
         };
         let key = self.key_hint_texts();
-        let (name, value) = self.auth_header(&key);
+        let (name, value) = Self::auth_header_for(fmt, &key);
         let resp = self
             .client
             .post(&url)
-            .headers(self.identity_headers.clone())
+            .headers(self.request_identity_headers())
             .header(name, value)
             .json(&serde_json::json!({
                 "model": model, "input": text, "voice": "alloy", "response_format": "mp3",
@@ -824,22 +992,27 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
     /// 图像生成：openai /images/generations（b64_json 优先，URL 回落下载）。
     /// 返回图片原始字节（服务端产出什么格式就返回什么，工具层魔数嗅探校验）
-    async fn image_generate(&self, model: &str, prompt: &str, size: &str) -> anyhow::Result<Vec<u8>> {
+    async fn image_generate(
+        &self,
+        model: &str,
+        prompt: &str,
+        size: &str,
+    ) -> anyhow::Result<Vec<u8>> {
         if self.keys.is_empty() {
             anyhow::bail!("未配置 API Key（生图不可用）");
         }
-        let fmt = self.api_format.as_str();
+        let fmt = self.auxiliary_format();
         if fmt != "openai" {
             anyhow::bail!("协议 {fmt} 暂不支持图像生成");
         }
-        let base = self.base_url.trim_end_matches('/');
+        let base = self.api_base();
         let url = format!("{base}/images/generations");
         let key = self.key_hint_texts();
-        let (name, value) = self.auth_header(&key);
+        let (name, value) = Self::auth_header_for(fmt, &key);
         let resp = self
             .client
             .post(&url)
-            .headers(self.identity_headers.clone())
+            .headers(self.request_identity_headers())
             .header(name, value)
             .json(&serde_json::json!({
                 "model": model, "prompt": prompt, "size": size,
@@ -902,11 +1075,16 @@ impl LlmProvider for OpenAiCompatibleProvider {
             "anthropic" => "anthropic",
             "azure" => "azure-openai",
             "gemini" => "google-gemini",
+            "responses" => "openai-responses",
             _ => "openai-compatible",
         }
     }
 
     async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
+        if self.chat_uses_stream() {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            return self.stream(req, tx).await;
+        }
         let hint = req.key_hint.clone().unwrap_or_default();
         if self.keys.is_empty() {
             anyhow::bail!("未配置 API Key（Mock 通道不应使用真实 Provider）");
@@ -922,6 +1100,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
             let status = resp.status().as_u16();
             if !(200..300).contains(&status) {
                 let text = resp.text().await.unwrap_or_default();
+                if Self::is_client_rejection(&text) {
+                    anyhow::bail!("{}", Self::rejected_request_summary(status, &text));
+                }
                 if Self::is_quota_failure(status, &text) && self.keys.len() > 1 {
                     last_err = format!("Key#{p} 限额（{status}）", p = self.pick_index(&hint));
                     self.rotate_index(&hint);
@@ -936,34 +1117,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     text.chars().take(300).collect::<String>()
                 );
             }
-            let parsed: serde_json::Value = resp.json().await?;
-            let content = self.parse_response(&parsed).unwrap_or_default();
-            let reasoning = self.parse_reasoning(&parsed).unwrap_or_default();
-            let tool_calls = self.parse_tool_calls(&parsed);
-            let usage = parsed.get("usage");
-            let pt = usage
-                .and_then(|u| {
-                    u.get("input_tokens")
-                        .or_else(|| u.get("prompt_tokens"))
-                        .or_else(|| u.get("promptTokenCount"))
-                })
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let ct = usage
-                .and_then(|u| {
-                    u.get("output_tokens")
-                        .or_else(|| u.get("completion_tokens"))
-                        .or_else(|| u.get("candidatesTokenCount"))
-                })
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            return Ok(ChatResponse {
-                content,
-                reasoning,
-                prompt_tokens: pt,
-                completion_tokens: ct,
-                tool_calls,
-            });
+            return self.parse_chat_http_response(resp, false).await;
         }
         anyhow::bail!("全部 API Key 均不可用：{last_err}")
     }
@@ -996,6 +1150,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     break;
                 }
                 let text = r.text().await.unwrap_or_default();
+                if Self::is_client_rejection(&text) {
+                    anyhow::bail!("{}", Self::rejected_request_summary(status, &text));
+                }
                 if Self::is_quota_failure(status, &text) && self.keys.len() > 1 {
                     last_quota = Some(status);
                     self.rotate_index(&hint);
@@ -1019,8 +1176,38 @@ impl LlmProvider for OpenAiCompatibleProvider {
             }
         };
 
+        self.read_stream(resp, tx).await
+    }
+}
+
+impl OpenAiCompatibleProvider {
+    async fn read_stream(
+        &self,
+        resp: reqwest::Response,
+        tx: UnboundedSender<StreamDelta>,
+    ) -> anyhow::Result<ChatResponse> {
+        if resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+        {
+            let parsed: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|_| anyhow::anyhow!("模型响应不是有效 JSON"))?;
+            let response = self.parse_json_response(&parsed)?;
+            if !response.reasoning.is_empty() {
+                let _ = tx.send(StreamDelta::Thinking(response.reasoning.clone()));
+            }
+            if !response.content.is_empty() {
+                let _ = tx.send(StreamDelta::Text(response.content.clone()));
+            }
+            return Ok(response);
+        }
         // 流组装：逐帧解析状态收拢在 StreamAssembler，主循环只负责「读字节 → 出完整行」
         let mut asm = StreamAssembler::new(self);
+        let mut response_stream = responses::ResponsesStream::default();
         let mut sse = SseLineDecoder::new();
         let mut done = false;
         let mut stream = resp.bytes_stream();
@@ -1041,7 +1228,24 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     break;
                 }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                    asm.frame(&v, &tx);
+                    anyhow::ensure!(
+                        v.get("error").is_none_or(serde_json::Value::is_null),
+                        "模型流内返回错误"
+                    );
+                    if self.api_format == "responses" {
+                        response_stream.frame(&v, &tx)?;
+                    } else {
+                        asm.frame(&v, &tx);
+                    }
+                    if self.api_format == "responses"
+                        && matches!(
+                            v["type"].as_str(),
+                            Some("response.completed" | "response.done")
+                        )
+                    {
+                        done = true;
+                        break;
+                    }
                 }
                 // 异常帧（非 JSON）静默跳过：SSE 流中允许注释/心跳，解析失败不应中断整条流
             }
@@ -1053,12 +1257,29 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     let payload = line.trim_start_matches("data:").trim();
                     if payload != "[DONE]" {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                            asm.frame(&v, &tx);
+                            anyhow::ensure!(
+                                v.get("error").is_none_or(serde_json::Value::is_null),
+                                "模型流内返回错误"
+                            );
+                            if self.api_format == "responses" {
+                                response_stream.frame(&v, &tx)?;
+                            } else {
+                                asm.frame(&v, &tx);
+                            }
                         }
                     }
                 }
             }
         }
-        Ok(asm.finish(&tx))
+        let result = if self.api_format == "responses" {
+            response_stream.finish()?
+        } else {
+            asm.finish(&tx)
+        };
+        anyhow::ensure!(
+            !result.content.trim().is_empty() || !result.tool_calls.is_empty(),
+            "模型服务返回空响应"
+        );
+        Ok(result)
     }
 }

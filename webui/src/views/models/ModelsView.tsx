@@ -136,7 +136,7 @@ export function ModelsView(): React.ReactElement {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
-    form.setFieldsValue({ preset: "openai", apiFormat: "openai", clientIdentity: { preset: "default" }, clientHeaders: "", keys: [{ value: "" }], models: [] });
+    form.setFieldsValue({ preset: "openai", apiFormat: "openai", clientIdentity: { preset: "default", requestMode: "native" }, clientHeaders: "", keys: [{ value: "" }], models: [] });
     setModal(true);
   };
 
@@ -154,7 +154,7 @@ export function ModelsView(): React.ReactElement {
       name: p.name,
       baseUrl: p.baseUrl,
       apiFormat: p.apiFormat || "openai",
-      clientIdentity: p.clientIdentity ?? { preset: "default" },
+      clientIdentity: { requestMode: "native", ...(p.clientIdentity ?? { preset: "default" }) },
       clientHeaders: Object.keys(p.clientIdentity?.headers ?? {}).length ? JSON.stringify(p.clientIdentity?.headers, null, 2) : "",
       models: rows,
       model: p.model,
@@ -428,7 +428,7 @@ export function ModelsView(): React.ReactElement {
                 <div className="model-kv">
                   <span className="k">{t("models.endpoint")}</span>
                   <span className="mono">{p.baseUrl}</span>
-                  <Tag>{t(FORMAT_LABEL_KEY[p.apiFormat || "openai"] ?? "models.fmtShort.openai")}</Tag>
+                  <Tag>{t(FORMAT_LABEL_KEY[p.effectiveApiFormat || p.apiFormat || "openai"] ?? "models.fmtShort.openai")}</Tag>
                   {p.clientIdentity && p.clientIdentity.preset !== "default" && (
                     <Tag>{t("models.clientIdentity")}: {p.clientIdentity.preset}</Tag>
                   )}
@@ -500,7 +500,7 @@ export function ModelsView(): React.ReactElement {
             key: "clientIdentity",
             label: t("models.clientIdentity"),
             forceRender: true,
-            children: <ClientIdentityFields />,
+            children: <ClientIdentityFields profileId={editing?.id} />,
           }]} />
 
           {/* 密钥池独立小节（增删/掩码/三态语义说明） */}
