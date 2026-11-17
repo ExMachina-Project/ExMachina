@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Alert, Button, Input, InputNumber, message, Select, Switch } from "antd";
-import { ReloadOutlined, SettingOutlined } from "@ant-design/icons";
+import { ReloadOutlined, SearchOutlined, SettingOutlined } from "@ant-design/icons";
 import { useExm } from "../../store";
 import { useTheme } from "../../theme";
 import { useT } from "../../i18n/core";
@@ -15,6 +15,8 @@ import { MaskedPasswordInput } from "../../components/MaskedInput";
 import { api, type ConfigSchema } from "../../api";
 import { useSubbarSlot } from "../../components/Subbar";
 import { useIsNarrow } from "../../useIsNarrow";
+import { SettingsSaveBar } from "../../components/SettingsDialog";
+import { useUnsavedChanges } from "../../settingsNavigation";
 
 /** 分组元数据。ui 是本地偏好分区，不属于后端 config schema */
 import { SECTIONS, FIELD_I18N, ENUM_OVERRIDES, readCurrent } from "./schema";
@@ -32,6 +34,9 @@ export function SettingsView(): React.ReactElement {
   const narrow = useIsNarrow();
   const [schema, setSchema] = useState<ConfigSchema | null>(null);
   const [values, setValues] = useState<Record<string, unknown>>({});
+  const [baseline, setBaseline] = useState<Record<string, unknown>>({});
+  const [query, setQuery] = useState("");
+  const [focusField, setFocusField] = useState("");
   const [selected, setSelected] = useState<string>("ui");
   const [saving, setSaving] = useState(false);
   /** schema 载入态：未就绪时分类导航只剩「界面/版本更新」，面板空白，
@@ -40,6 +45,8 @@ export function SettingsView(): React.ReactElement {
   const [schemaLoading, setSchemaLoading] = useState(true);
   /** 有未保存改动时，config 变化不再回填表单（避免把用户正在编辑的值冲掉） */
   const dirtyRef = useRef(false);
+  const dirty = Object.keys(values).some((key) => JSON.stringify(values[key]) !== JSON.stringify(baseline[key]));
+  useUnsavedChanges(dirty);
 
   /** 只拉一次 schema（配置项清单是静态元数据，不必随 config 重取） */
   const reloadSchema = useCallback(async () => {
@@ -67,6 +74,7 @@ export function SettingsView(): React.ReactElement {
       for (const f of g.fields) init[f.key] = readCurrent(config ?? null, f.key);
     }
     setValues(init);
+    setBaseline(init);
   }, [schema, config]);
 
   const groups = useMemo(() => schema?.groups ?? [], [schema]);
@@ -74,16 +82,28 @@ export function SettingsView(): React.ReactElement {
   const meta = current ? SECTIONS[current.key] : undefined;
 
   const setField = (key: string, v: unknown) => {
-    dirtyRef.current = true;
-    setValues((p) => ({ ...p, [key]: v }));
+    const next = { ...values, [key]: v };
+    dirtyRef.current = Object.keys(next).some((field) => JSON.stringify(next[field]) !== JSON.stringify(baseline[field]));
+    setValues(next);
   };
+  useEffect(() => {
+    if (focusField) document.querySelector(`[data-config-field="${focusField}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [focusField, selected]);
+  const searchResults = query.trim() ? groups.flatMap((group) => group.fields.flatMap((field) => {
+    const label = FIELD_I18N[field.key];
+    const name = label ? t(label.label) : field.label;
+    const help = label?.help ? t(label.help) : field.help;
+    return `${name} ${help} ${field.key}`.toLowerCase().includes(query.trim().toLowerCase()) ? [{ group, field, name }] : [];
+  })) : [];
 
   const save = async () => {
     setSaving(true);
     try {
       const body: Record<string, unknown> = {};
+      const changedRoots = new Set(Object.keys(values).filter((key) => JSON.stringify(values[key]) !== JSON.stringify(baseline[key])).map((key) => key.split(".")[0]));
       for (const [k, v] of Object.entries(values)) {
-        if (v === undefined) continue;
+        const root = k.split(".")[0];
+        if (v === undefined || !changedRoots.has(root) || (JSON.stringify(v) === JSON.stringify(baseline[k]) && !["search", "sandbox", "browser"].includes(root))) continue;
         const parts = k.split(".");
         let target = body;
         for (const part of parts.slice(0, -1)) {
@@ -92,8 +112,18 @@ export function SettingsView(): React.ReactElement {
         }
         target[parts[parts.length - 1]] = v;
       }
+      // These three endpoints replace a whole section. Preserve fields outside the schema;
+      // search backend credentials stay server-side by omitting the masked backend array.
+      for (const root of ["search", "sandbox", "browser"] as const) if (changedRoots.has(root)) {
+        const complete: Record<string, unknown> = { ...config?.[root], ...body[root] as Record<string, unknown> };
+        if (root === "search") delete complete.backends;
+        body[root] = complete;
+      }
       await saveConfig(body);
       dirtyRef.current = false;
+      const latest: Record<string, unknown> = {};
+      for (const group of groups) for (const field of group.fields) latest[field.key] = readCurrent(useExm.getState().config, field.key);
+      setValues(latest); setBaseline(latest);
       message.success(t("settings.savedToast"));
     } catch (e) {
       message.error(t("common.saveFailed", { err: String(e) }));
@@ -103,8 +133,13 @@ export function SettingsView(): React.ReactElement {
   };
 
   return (
-    <div className="pane-wrap">
-      <PageHeader en="CONFIG" title={t("settings.title")} />
+    <div className="pane-wrap settings-page general-settings-page">
+      <PageHeader en="CONFIG" title={t("settings.title")} desc={t("ux.settingsDescription")} />
+      <div className="settings-directory-toolbar"><Input prefix={<SearchOutlined />} aria-label={t("ux.searchSettings")} placeholder={t("ux.searchSettings")} value={query} onChange={(event) => setQuery(event.target.value)} allowClear /></div>
+      {query.trim() && <div className="settings-search-results">
+        {searchResults.map(({ group, field, name }) => <button type="button" className="settings-search-result" key={field.key} onClick={() => { setSelected(group.key); setQuery(""); setFocusField(field.key); }}><strong>{name}</strong><small>{SECTIONS[group.key] ? t(SECTIONS[group.key]!.titleKey) : group.label}</small></button>)}
+        {!searchResults.length && <p className="settings-list-empty">{t("ux.noResults")}</p>}
+      </div>}
       <div className="settings2">
         {/* 分类导航：桌面端 portal 到右栏（subbar-rail，与对话/聊天/任务页同机制）；
             窄屏回落页内顶部（settings2 变纵排）。「界面」本地偏好置顶 + 后端
@@ -202,7 +237,7 @@ export function SettingsView(): React.ReactElement {
             {current.key === "limits" && <LimitsStatsCard />}
             {current.key === "security" && <SanitizeStatsCard />}
             {current.key === "experiments" && <ExperimentRunsCard />}
-            <div className="cfg-list">
+            <fieldset className="settings-edit-fields" disabled={saving}><div className="cfg-list">
               {current.fields.filter((f) => {
                 // 条件显示（showIf）：依赖字段当前值不匹配则整行隐藏。
                 // 值取表单态（用户开了开关、未保存也立即显示配套参数——所见即所编）
@@ -267,18 +302,14 @@ export function SettingsView(): React.ReactElement {
                   </div>
                 );
               })}
-            </div>
-            <div className="cfg2-foot">
-              <Button type="primary" loading={saving} onClick={save}>
-                {t("settings.save")}
-              </Button>
-            </div>
+            </div></fieldset>
           </>
         ) : (
           <div className="pane-loading"><i /></div>
         )}
         </section>
       </div>
+      {dirty && <div className="settings-savebar-global"><SettingsSaveBar dirty={dirty} saving={saving} label={t("settings.save")} onSave={() => void save()} onReset={() => { setValues({ ...baseline }); dirtyRef.current = false; }} scope={t("ux.changedFields", { n: Object.keys(values).filter((key) => JSON.stringify(values[key]) !== JSON.stringify(baseline[key])).length })} /></div>}
       {/* 分类导航的右栏 portal 版：与页内 .cfg-nav 完全同构（200px 卡片原样），仅位置不同 */}
       {!narrow && subbarSlot && createPortal(
         <nav className="cfg-nav">

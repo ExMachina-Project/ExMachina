@@ -1,6 +1,6 @@
 // models 域文件：模型选择器（自 ModelsView.tsx 拆出）。
 import React, { useState } from "react";
-import { Button, Input, Select, Space } from "antd";
+import { Button, Input, Space } from "antd";
 import { useT } from "../../i18n/core";
 export function ModelPicker({ models, selected, onChange }: {
   models: string[];

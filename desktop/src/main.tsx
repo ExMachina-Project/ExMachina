@@ -5,6 +5,7 @@ import zhCN from "antd/locale/zh_CN";
 import { DesktopApp } from "./DesktopApp";
 import "../../webui/src/styles.css";
 import "./styles.css";
+import "../../webui/src/settings.css";
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

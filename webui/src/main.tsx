@@ -6,6 +6,7 @@ import App from "./App";
 import { accentColor, themeOf, useTheme, type ThemeKey } from "./theme";
 import { installViewportFix } from "./viewport";
 import "./styles.css";
+import "./settings.css";
 
 // 移动端键盘遮挡兜底：iOS Safari 键盘弹出时 100dvh 不缩，需 visualViewport 实时高
 installViewportFix();

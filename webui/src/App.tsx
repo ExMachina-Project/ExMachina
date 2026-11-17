@@ -1,5 +1,5 @@
 /** 主框架：纯导航侧栏——组切换在对话页内，组管理独立成页 */
-import React, { lazy, Suspense, useEffect, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { message, Menu, Tag } from "antd";
 import {
   ApartmentOutlined,
@@ -23,6 +23,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { api } from "./api";
+import { canLeaveSettings } from "./settingsNavigation";
 import { isTaskSideTitle } from "./session";
 import { SubbarSlotContext } from "./components/Subbar";
 import { useExm } from "./store";
@@ -178,25 +179,29 @@ export default function App(): React.ReactElement {
   const setPreset = useTheme((s) => s.setPreset);
   const initial = parseHash();
   const [view, setViewState] = useState<ViewKey>(initial.view);
+  const currentView = useRef(view);
+  currentView.current = view;
+  const acceptedHash = useRef(location.hash);
   /** 切视图并同步 hash（app-shell-routing）
    *  保留 `#/chat/<sessionId>` 的会话段：此前三元恒为空串，深链进来第一跳就被抹平，
    *  移动端无法判断「是否深链直入会话页」，只能一律落在列表页。 */
-  const setView = (v: ViewKey) => {
+  const setView = useCallback((v: ViewKey, confirmed = false) => {
+    if (!confirmed && v !== currentView.current && !canLeaveSettings()) return false;
     setViewState(v);
     const seg = location.hash.startsWith("#/chat/") ? location.hash.slice("#/chat/".length) : "";
     const target = "#/" + v + (v === "chat" && seg ? "/" + seg : "");
     if (location.hash !== target) {
       history.replaceState(null, "", target);
     }
-  };
+    acceptedHash.current = location.hash;
+    return true;
+  }, []);
   // 二级侧边栏（上下文）：当前 view 有页面侧栏内容才提供入口
   const ctxKind = view === "chat" ? "chat" : view === "flows" ? "flows" : view === "tasks" ? "tasks" : view === "settings" ? "settings" : null;
-  const ctxTitleKey = ctxKind === "chat" ? "ctx.chat" : ctxKind === "flows" ? "ctx.flows" : ctxKind === "settings" ? "nav.settings" : "ctx.tasks";
-  /** 当前页在 NAV_ITEMS 中的条目（页面手风琴行尾显示当前页名） */
-  const currentNav = NAV_ITEMS.find((it) => it.key === view) ?? NAV_ITEMS[0];
   const navRequest = useExm((st) => st.navRequest);
   useEffect(() => {
     if (!navRequest) return;
+    if (!canLeaveSettings()) { useExm.setState({ navRequest: null }); return; }
     if (navRequest.view === "chat" && navRequest.sessionId) {
       // 路由感知（信息架构 2026-11）：目标会话若不是用户直连会话，落到对应页——
       // 通道流会话 → 「聊天」页；任务会话（job-* / 心跳巡检）→ 「任务」页。
@@ -210,19 +215,21 @@ export default function App(): React.ReactElement {
             : isTaskSideTitle(s.title)
               ? "tasks"
               : "chat";
-          setView(dest as ViewKey);
+          setView(dest as ViewKey, true);
         })
-        .catch(() => setView("chat"));
+        .catch(() => setView("chat", true));
       void useExm.getState().selectSession(sid);
     } else {
-      setView(navRequest.view as ViewKey);
+      setView(navRequest.view as ViewKey, true);
     }
     useExm.setState({ navRequest: null });
-  }, [navRequest]);
+  }, [navRequest, setView]);
   // hashchange：前进/后退导航（hashchange 时不回写 hash，避免回环）
   useEffect(() => {
     const onHash = () => {
       const { view: v } = parseHash();
+      if (!canLeaveSettings()) { history.replaceState(null, "", acceptedHash.current || "#/chat"); return; }
+      acceptedHash.current = location.hash;
       setViewState(v);
     };
     window.addEventListener("hashchange", onHash);
@@ -260,16 +267,15 @@ export default function App(): React.ReactElement {
       const key = e.key.toLowerCase();
       const dest = /^[1-9]$/.test(key) ? order[Number(key) - 1] : goMap[key];
       if (dest && dest !== view) {
+        if (!canLeaveSettings()) return;
         setViewState(dest);
         history.replaceState(null, "", "#/" + dest);
+        acceptedHash.current = location.hash;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [view]);
-  /** 页面导航：全量平铺（2026-11 三次调整：手风琴展开收起被指多余，直接平铺）。
-   *  二级侧边栏已彻底迁至右栏常驻，与左栏无关。 */
-  const navMenuOpen = true;
   /** 二级侧边栏插槽节点（页面侧栏 portal 目标） */
   const [subbarSlot, setSubbarSlot] = useState<HTMLElement | null>(null);
   /** 底部主题手风琴（预设 + 强调色合并入口）：独立开关 */
@@ -419,9 +425,7 @@ export default function App(): React.ReactElement {
                 ),
               }))}
               onClick={({ key }) => {
-                setView(key as ViewKey);
-                history.replaceState(null, "", "#/" + key);
-                setNavOpen(false);
+                if (setView(key as ViewKey)) setNavOpen(false);
               }}
             />
           </div>

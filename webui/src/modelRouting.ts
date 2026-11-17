@@ -26,6 +26,11 @@ export function routingLabel(routing: ModelRouting | null | undefined, legacy?: 
   if (binding?.mode === "auto") return tr("routing.auto");
   return binding?.mode === "fixed" ? binding.model || tr("routing.chooseModel") : (!routing && legacy) || tr("routing.inherit");
 }
+export function routingValidation(routing: ModelRouting): string | undefined {
+  const entries = [[undefined, routing.default], ...Object.entries(routing.purposes || {})] as [ModelPurpose | undefined, ModelAssignment | undefined][];
+  const missing = entries.find(([, assignment]) => assignment?.mode === "fixed" && !assignment.model?.trim());
+  return missing ? tr("ux.modelRequired", { purpose: missing[0] ? purposeLabel(missing[0]) : tr("routing.default") }) : undefined;
+}
 export function routingOptions(profiles: LlmProfile[], purpose?: ModelPurpose) {
   return profiles.flatMap((profile) => profile.models.length ? profile.models.map((model) => ({
     value: `${profile.id}/${model.model}`,
