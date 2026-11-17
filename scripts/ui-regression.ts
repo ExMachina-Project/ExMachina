@@ -10,6 +10,7 @@ import { createServer } from "vite";
 import type {} from "../webui/src/desktop";
 import type { ChatMessage, Session } from "../webui/src/types";
 import type { ClientIdentity, ClientIdentityPreview } from "../webui/src/api/core";
+import type { ModelRouting } from "../webui/src/modelRouting";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const screenshotDir = process.env.UI_SCREENSHOT_DIR;
@@ -121,6 +122,7 @@ async function fixture(desktop = false, viewport = { width: 1440, height: 900 },
       "/plugins": { plugins: [] }, "/skills": [], "/cron": [], "/cron/runs": [], "/memory/stats": { memory: { total: 0, pinned: 0, byKind: {} }, agentStats: [] }, "/memory": [], "/knowledge": { items: [], total: 0 }, "/channels": [], "/channels/flows": [],
       "/plugins/index": { entries: [], indexUrl: "" },
       "/nexus/links": { links: [] }, "/nexus/edges": { edges: [] }, "/nexus/status": { links: [], edges: [] },
+      "/templates": { templates: [] },
       "/nexus/graph": { nodes: [], edges: [] },
       "/identity/list": { identities: [], codes: [], identityRequired: false },
     };
@@ -176,10 +178,331 @@ const selectSession = (page: Page, id: string) => page.evaluate(async ({ url, id
   const { useExm } = await import(url) as typeof import("../webui/src/store"); await useExm.getState().selectSession(id);
 }, { url: storeUrl(page), id });
 async function screenshot(page: Page, name: string): Promise<void> {
-  if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, `${name}.png`) });
+  if (!screenshotDir) return;
+  if (name.includes("settings") || name.includes("allocation")) await page.waitForFunction(() =>
+    !Array.from(document.querySelectorAll(".settings-dialog .ant-btn-loading, .settings-page .ant-btn-loading, .settings-page .ant-spin-spinning"))
+      .some((element) => element.getClientRects().length));
+  await page.screenshot({ path: path.join(screenshotDir, `${name}.png`), animations: "disabled" });
+}
+async function openSettings(page: Page, desktop: boolean, section: "模型" | "智能体" | "高级") {
+  if (desktop) {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("tab", { name: section, exact: true }).click();
+  } else await page.evaluate((hash) => { location.hash = hash; }, `#/${section === "模型" ? "models" : section === "智能体" ? "agent" : "settings"}`);
+}
+async function settingsSection(page: Page, name: string) {
+  await page.locator(".settings-dialog-nav button").filter({ hasText: name }).click();
+}
+async function waitForSettingsSave(page: Page) {
+  await page.waitForFunction(() => !Array.from(document.querySelectorAll(".settings-dialog .ant-btn-loading, .settings-page .ant-btn-loading, .settings-page .ant-spin-spinning"))
+    .some((element) => element.getClientRects().length));
+}
+async function selectRoutingMode(page: Page, purpose: string, mode: string) {
+  await page.locator(`[data-routing-purpose="${purpose}"]:visible .routing-mode`).click();
+  await page.locator(".ant-select-dropdown:visible").getByText(mode, { exact: true }).click();
 }
 
 try {
+  for (const desktop of [false, true]) {
+    const client = desktop ? "Desktop" : "WebUI";
+    await test(`${client} settings UX preserves multi-section agent drafts and retries failed saves`, async () => {
+      const f = await fixture(desktop);
+      try {
+        const agent = { identifier: "machina", name: "Fixture Agent", description: "Handles product questions", domain: "support", modelRouting: null as ModelRouting | null };
+        let prompt = "Follow the project instructions.";
+        let persona = "Clear, thoughtful, and precise.";
+        let rejectPrompt = true;
+        f.state.overrides.set("/singles", (_, fulfill) => fulfill({ singles: [agent] }));
+        f.state.overrides.set("/singles/machina", (route, fulfill) => { Object.assign(agent, route.request().postDataJSON()); return fulfill(agent); });
+        f.state.overrides.set("/singles/machina/model-routing", (route, fulfill) => {
+          if (route.request().method() === "PUT") agent.modelRouting = route.request().postDataJSON() as ModelRouting;
+          return fulfill({ ok: true, policies: [] });
+        });
+        f.state.overrides.set("/singles/machina/prompt", (route, fulfill) => {
+          if (route.request().method() === "PUT") {
+            if (rejectPrompt) return fulfill({ error: "fixture prompt temporarily unavailable" }, 503);
+            prompt = (route.request().postDataJSON() as { prompt: string }).prompt;
+          }
+          return fulfill({ prompt });
+        });
+        f.state.overrides.set("/singles/machina/persona", (route, fulfill) => {
+          if (route.request().method() === "PUT") persona = (route.request().postDataJSON() as { persona: string }).persona;
+          return fulfill({ persona, custom: true });
+        });
+        f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", profiles: [{ ...profile, models: [{ model: "small", vision: false, audio: false, cost: "economy" }] }] }));
+        await openSettings(f.page, desktop, "智能体");
+        await f.page.locator(".agent-directory-card").filter({ hasText: "Fixture Agent" }).getByRole("button", { name: /配置智能体/ }).click();
+        const dialog = f.page.locator(".settings-dialog");
+        await dialog.getByRole("textbox", { name: "名称", exact: true }).fill("Product Assistant");
+        await settingsSection(f.page, "系统提示词");
+        await dialog.getByRole("textbox", { name: "系统提示词", exact: true }).fill("Updated instructions kept between sections.");
+        await settingsSection(f.page, "模型与能力");
+        await selectRoutingMode(f.page, "default", "手动指定");
+        await dialog.getByRole("combobox", { name: "默认对话与任务 模型", exact: true }).click();
+        await f.page.locator(".ant-select-dropdown:visible .ant-select-item-option").filter({ hasText: "Fixture / small" }).click();
+        await settingsSection(f.page, "基本资料");
+        assert.equal(await dialog.getByRole("textbox", { name: "名称", exact: true }).inputValue(), "Product Assistant");
+        await dialog.locator(".ant-modal-close").click();
+        await f.page.getByRole("button", { name: "继续编辑", exact: true }).click();
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
+        await dialog.getByRole("alert").filter({ hasText: "fixture prompt temporarily unavailable" }).waitFor();
+        assert.equal(agent.name, "Product Assistant");
+        assert.equal(agent.modelRouting?.default?.model, "test/small");
+        assert.equal(prompt, "Follow the project instructions.");
+        await settingsSection(f.page, "系统提示词");
+        assert.equal(await dialog.getByRole("textbox", { name: "系统提示词", exact: true }).inputValue(), "Updated instructions kept between sections.");
+        rejectPrompt = false;
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
+        await eventually(() => prompt.startsWith("Updated instructions"), "Prompt retry was not saved");
+        await eventually(async () => dialog.getByRole("button", { name: "保存", exact: true }).isDisabled(), "Successful save did not clear dirty state");
+        assert.equal(f.state.requests.filter((request) => request.path === "/singles/machina" && request.method === "PUT").length, 1, "Retry must not repeat completed sections");
+        assert.equal(f.state.requests.filter((request) => request.path === "/singles/machina/model-routing" && request.method === "PUT").length, 1);
+        await settingsSection(f.page, "人设与语气");
+        await dialog.getByRole("textbox", { name: "人设与语气", exact: true }).fill("Warm and concise.");
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
+        await eventually(() => persona === "Warm and concise.", "Persona was not saved");
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-settings-agent`);
+        assert.equal(f.state.requests.filter((request) => request.path === "/target" && request.method === "PUT").length, 0);
+      } finally { await f.close(); }
+    });
+    await test(`${client} settings UX protects allocation drafts and keeps global capabilities independent`, async () => {
+      const f = await fixture(desktop);
+      try {
+        f.state.overrides.set("/groups/default/agents", (_, fulfill) => fulfill([{ identifier: "member", name: "Member", description: "Reviews code", tools: [], capabilities: [] }]));
+        f.state.overrides.set("/singles/machina/model-routing", (_, fulfill) => fulfill({ policies: [] }));
+        f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", profiles: [{ ...profile, models: [{ model: "small", purposes: ["speech"], vision: false, audio: true }] }] }));
+        let capabilities = { speech: "", transcribe: "", visionRelay: "", embedding: "" };
+        f.state.overrides.set("/llm/capabilities", (route, fulfill) => {
+          if (route.request().method() === "PUT") capabilities = route.request().postDataJSON() as typeof capabilities;
+          return fulfill(capabilities);
+        });
+        await openSettings(f.page, desktop, "模型");
+        await f.page.getByRole("tab", { name: "智能体分配", exact: true }).click();
+        await selectRoutingMode(f.page, "default", "由指挥体分配");
+        await f.page.locator(".allocation-workspace .settings-object-list button").filter({ hasText: "Default / Member" }).click();
+        await f.page.getByRole("button", { name: "继续编辑", exact: true }).click();
+        assert.ok((await f.page.locator('[data-routing-purpose="default"] .routing-mode').innerText()).includes("由指挥体分配"));
+        await f.page.locator(".allocation-workspace .settings-object-list button").filter({ hasText: "Default / Member" }).click();
+        await f.page.getByRole("button", { name: "放弃修改", exact: true }).click();
+        await f.page.locator(".allocation-workspace h3").filter({ hasText: "Default / Member" }).waitFor();
+        await f.page.getByRole("tab", { name: "全局能力", exact: true }).click();
+        await f.page.getByRole("combobox", { name: "语音合成（TTS）", exact: true }).click();
+        await f.page.locator(".ant-select-dropdown:visible .ant-select-item-option").filter({ hasText: "Fixture / small" }).click();
+        await f.page.locator(".global-cap-workspace").getByRole("button", { name: "保存", exact: true }).click();
+        await eventually(() => capabilities.speech === "test/small", "Global capability did not save");
+        assert.equal(f.state.requests.filter((request) => request.path.includes("model-routing") && request.method === "PUT").length, 0);
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-settings-global-capabilities`);
+      } finally { await f.close(); }
+    });
+    await test(`${client} settings UX preserves key indexes and catalog metadata when editing a provider`, async () => {
+      const f = await fixture(desktop);
+      try {
+        const mask = "***已配置***";
+        let saved = { ...profile, apiKey: mask, apiKeys: [mask, mask, mask],
+          models: [{ model: "small", vision: true, audio: false, cost: "economy", autoEligible: true, purposes: ["chat"], usageNotes: "Fast everyday tasks", contextWindow: 128000 }] };
+        const originalModels = structuredClone(saved.models);
+        let posted: { apiKey: string; apiKeys: (string | { keep: number })[]; clearKeys: boolean; models: typeof saved.models } | undefined;
+        f.state.overrides.set("/llm/profiles", (route, fulfill) => {
+          if (route.request().method() === "POST") {
+            posted = route.request().postDataJSON() as typeof posted;
+            saved = { ...saved, ...posted, apiKey: mask, apiKeys: [mask, mask] };
+            return fulfill({ ok: true, id: "test" });
+          }
+          return fulfill({ active: "test", profiles: [saved] });
+        });
+        await openSettings(f.page, desktop, "模型");
+        await f.page.locator(".provider-workspace .settings-detail-actions").getByRole("button", { name: "编辑", exact: true }).click();
+        let dialog = f.page.locator(".settings-dialog");
+        assert.ok(await dialog.getByRole("button", { name: "保存", exact: true }).isDisabled(), "Opening a saved profile must not mark it dirty");
+        await dialog.locator(".key-row").nth(2).getByRole("button", { name: "移除这把密钥", exact: true }).click();
+        await dialog.getByRole("button", { name: /添加密钥/ }).click();
+        await dialog.locator(".key-row").last().getByRole("textbox").fill("fixture-new-key");
+        await settingsSection(f.page, "模型清单");
+        await dialog.getByRole("textbox", { name: "模型 1", exact: true }).fill("small");
+        await settingsSection(f.page, "连接与密钥");
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
+        await dialog.waitFor({ state: "hidden" });
+        assert.ok(posted);
+        assert.equal(posted.apiKey, mask);
+        assert.deepEqual(posted.apiKeys, [{ keep: 0 }, "__CLEAR__", { keep: 2 }, "fixture-new-key"]);
+        assert.equal(posted.clearKeys, false);
+        assert.deepEqual(posted.models, originalModels, "Collapsed metadata must survive edits");
+        await f.page.locator(".provider-workspace .settings-detail-actions").getByRole("button", { name: "编辑", exact: true }).click();
+        dialog = f.page.locator(".settings-dialog");
+        while (await dialog.locator(".key-row").count()) await dialog.locator(".key-row").first().getByRole("button", { name: "移除这把密钥", exact: true }).click();
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
+        await dialog.waitFor({ state: "hidden" });
+        assert.equal(posted.clearKeys, true);
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-settings-provider`);
+      } finally { await f.close(); }
+    });
+    await test(`${client} settings UX keeps group defaults and member capabilities in their own scope`, async () => {
+      const f = await fixture(desktop);
+      try {
+        const group = { id: "default", name: "Engineering", builtin: true, primary: "chief", description: "Review and implementation", createdAt: "", workspace: "", selfOptimize: true, modelRouting: null as ModelRouting | null };
+        const member = { identifier: "reviewer", name: "Reviewer", description: "Review code changes", domain: "review", tier: "unit", tools: ["read", "grep"], capabilities: [], modelRouting: null as ModelRouting | null };
+        const chief = { ...member, identifier: "chief", name: "Lead", description: "Coordinate the engineering group" };
+        f.state.overrides.set("/groups", (_, fulfill) => fulfill({ active: "default", groups: [group] }));
+        f.state.overrides.set("/groups/default", (route, fulfill) => { Object.assign(group, route.request().postDataJSON()); return fulfill(group); });
+        f.state.overrides.set("/groups/default/agents", (_, fulfill) => fulfill([chief, member]));
+        f.state.overrides.set("/groups/default/overview", (_, fulfill) => fulfill({ agents: 2, sessions: 3, playbooks: 1, memory: { group: 2, shared: 1 }, agentStats: [] }));
+        f.state.overrides.set("/groups/default/workspace", (route, fulfill) => { group.workspace = (route.request().postDataJSON() as { workspace: string }).workspace; return fulfill({ ok: true }); });
+        f.state.overrides.set("/groups/default/model-routing", (route, fulfill) => { group.modelRouting = route.request().postDataJSON() as ModelRouting; return fulfill({ ok: true }); });
+        f.state.overrides.set("/groups/default/self-optimize", (route, fulfill) => { group.selfOptimize = (route.request().postDataJSON() as { enabled: boolean }).enabled; return fulfill({ ok: true }); });
+        f.state.overrides.set("/groups/default/agents/reviewer/model-routing", (route, fulfill) => {
+          if (route.request().method() === "PUT") member.modelRouting = route.request().postDataJSON() as ModelRouting;
+          return fulfill({ ok: true, policies: [] });
+        });
+        f.state.overrides.set("/groups/default/agents/reviewer/prompt", (_, fulfill) => fulfill({ prompt: "Review the code carefully." }));
+        f.state.overrides.set("/agents/reviewer/persona", (_, fulfill) => fulfill({ persona: "Precise reviewer", custom: true }));
+        f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", profiles: [{ ...profile, models: [{ model: "small", vision: true, audio: false, cost: "economy" }] }] }));
+        await openSettings(f.page, desktop, "智能体");
+        await f.page.locator(".group-card").getByRole("button", { name: /组设置/ }).click();
+        let dialog = f.page.locator(".settings-dialog");
+        await dialog.getByRole("textbox", { name: "组名", exact: true }).fill("Engineering Studio");
+        await dialog.getByRole("textbox", { name: "工作区", exact: true }).fill("/fixture/engineering");
+        assert.ok(await dialog.getByRole("textbox", { name: "组 ID", exact: true }).isDisabled());
+        await settingsSection(f.page, "模型与能力");
+        await selectRoutingMode(f.page, "default", "手动指定");
+        await dialog.getByRole("combobox", { name: "默认对话与任务 模型", exact: true }).click();
+        await f.page.locator(".ant-select-dropdown:visible .ant-select-item-option").filter({ hasText: "Fixture / small" }).click();
+        await settingsSection(f.page, "协作与自我优化");
+        await dialog.getByRole("switch", { name: "自我优化", exact: true }).click();
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
+        await eventually(async () => dialog.getByRole("button", { name: "保存", exact: true }).isDisabled(), "Group save did not finish");
+        assert.equal(group.selfOptimize, false); assert.equal(group.workspace, "/fixture/engineering"); assert.equal(group.modelRouting?.default?.model, "test/small");
+        await dialog.locator(".ant-modal-close").click();
+        await f.page.locator(".group-card").getByRole("button", { name: /管理成员/ }).click();
+        await f.page.locator(".group-member-row").filter({ hasText: "Reviewer" }).getByRole("button", { name: /配置智能体/ }).click();
+        dialog = f.page.locator(".settings-dialog");
+        await settingsSection(f.page, "模型与能力");
+        await dialog.getByRole("tab", { name: /多模态与检索/ }).click();
+        await selectRoutingMode(f.page, "speech", "关闭此能力");
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
+        await eventually(async () => dialog.getByRole("button", { name: "保存", exact: true }).isDisabled(), "Member save did not finish");
+        assert.equal(member.modelRouting?.purposes?.speech?.mode, "disabled");
+        assert.equal(group.modelRouting?.purposes?.speech, undefined);
+        await settingsSection(f.page, "人设与语气");
+        assert.ok(await dialog.getByRole("button", { name: /恢复默认/ }).isDisabled(), "Factory persona protection must remain visible");
+        assert.equal(f.state.requests.filter((request) => request.path === "/target" && request.method === "PUT").length, 0);
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-settings-group-member`);
+      } finally { await f.close(); }
+    });
+  }
+  await test("WebUI settings UX searches across sections and protects unsaved navigation", async () => {
+    const f = await fixture();
+    try {
+      await openSettings(f.page, false, "高级");
+      const search = f.page.getByRole("textbox", { name: "搜索所有设置…", exact: true });
+      await search.fill("子个体并发数");
+      await f.page.locator(".settings-search-result").filter({ hasText: "子个体并发数" }).click();
+      const concurrency = f.page.locator('[data-config-field="maxConcurrency"]').getByRole("spinbutton");
+      await concurrency.fill("4");
+      f.page.once("dialog", (dialog) => { void dialog.dismiss(); });
+      await f.page.locator(".nav-menu").getByText("模型", { exact: true }).click();
+      assert.ok(f.page.url().endsWith("#/settings"));
+      assert.equal(await concurrency.inputValue(), "4");
+      await f.page.locator(".settings-savebar-global").getByRole("button", { name: "保存设置", exact: true }).click();
+      await f.page.locator(".settings-savebar-global").waitFor({ state: "hidden" });
+      const update = f.state.requests.findLast((request) => request.path === "/config" && request.method === "PUT")!.body;
+      assert.deepEqual(update, { maxConcurrency: 4 });
+      await f.page.locator(".nav-menu").getByText("模型", { exact: true }).click();
+      await f.page.locator(".provider-workspace").waitFor();
+    } finally { await f.close(); }
+  });
+  await test("Desktop settings UX refreshes saved rules across tabs while retaining unsaved drafts", async () => {
+    const f = await fixture(true);
+    try {
+      const agent = { identifier: "machina", name: "Fixture Agent", description: "Product assistant", domain: "", modelRouting: null as ModelRouting | null };
+      f.state.overrides.set("/singles", (_, fulfill) => fulfill({ singles: [agent] }));
+      f.state.overrides.set("/singles/machina/model-routing", (route, fulfill) => {
+        if (route.request().method() === "PUT") agent.modelRouting = route.request().postDataJSON() as ModelRouting;
+        return fulfill({ policies: [] });
+      });
+      f.state.overrides.set("/singles/machina/prompt", (_, fulfill) => fulfill({ prompt: "Help the user." }));
+      f.state.overrides.set("/singles/machina/persona", (_, fulfill) => fulfill({ persona: "Friendly", custom: false }));
+      f.state.overrides.set("/groups/default/agents", (_, fulfill) => fulfill([]));
+      await openSettings(f.page, true, "模型");
+      await f.page.getByRole("tab", { name: "智能体分配", exact: true }).click();
+      await selectRoutingMode(f.page, "default", "由指挥体分配");
+      await f.page.getByRole("tab", { name: "智能体", exact: true }).click();
+      await f.page.getByRole("tab", { name: "模型", exact: true }).click();
+      assert.ok((await f.page.locator('[data-routing-purpose="default"]:visible .routing-mode').innerText()).includes("由指挥体分配"));
+      await f.page.locator(".routing-save").getByRole("button", { name: "保存", exact: true }).click();
+      await waitForSettingsSave(f.page);
+      await f.page.getByRole("tab", { name: "智能体", exact: true }).click();
+      await f.page.locator(".agent-directory-card").filter({ hasText: "Fixture Agent" }).getByRole("button", { name: /模型与能力/ }).click();
+      await selectRoutingMode(f.page, "default", "继承默认配置");
+      await f.page.locator(".settings-dialog").getByRole("button", { name: "保存", exact: true }).click();
+      await waitForSettingsSave(f.page);
+      await f.page.locator(".settings-dialog .ant-modal-close").click();
+      await f.page.getByRole("tab", { name: "模型", exact: true }).click();
+      await waitForSettingsSave(f.page);
+      await eventually(async () => (await f.page.locator('[data-routing-purpose="default"]:visible .routing-mode').innerText()).includes("继承默认配置"), "Returning to allocation should refresh saved rules");
+      assert.equal(f.state.requests.filter((request) => request.path === "/target" && request.method === "PUT").length, 0);
+    } finally { await f.close(); }
+  });
+  await test("WebUI settings directory searches model catalogs and agent profiles", async () => {
+    const f = await fixture();
+    try {
+      const models = [
+        { model: "gpt-6.1", vision: true, audio: false, cost: "premium", purposes: ["planning", "coding", "review"], usageNotes: "复杂规划、代码实施与高风险审查", autoEligible: true },
+        { model: "gpt-6-mini", vision: true, audio: false, cost: "economy", purposes: ["chat", "summary"], usageNotes: "日常对话、摘要与轻量整理", autoEligible: true },
+        { model: "text-embedding-3-small", vision: false, audio: false, cost: "economy", purposes: ["embedding"], usageNotes: "记忆向量与语义检索", autoEligible: false },
+      ];
+      f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "primary", profiles: [
+        { ...profile, id: "primary", name: "OpenAI", baseUrl: "https://api.example.com/v1", apiKey: "***已配置***", model: "gpt-6.1", models },
+        { ...profile, id: "local", name: "本地推理", baseUrl: "http://localhost:11434/v1", models: [{ ...models[1], model: "local-model" }] },
+      ] }));
+      await openSettings(f.page, false, "模型");
+      const search = f.page.getByRole("textbox", { name: "搜索提供商或模型…", exact: true });
+      await search.fill("gpt-6-mini");
+      assert.equal(await f.page.locator(".provider-workspace .settings-object-list button").count(), 1);
+      await search.fill("");
+      await f.page.locator(".provider-workspace .settings-detail-head h3").getByText("OpenAI", { exact: true }).waitFor();
+      await screenshot(f.page, "webui-settings-provider-catalog");
+      await f.page.locator(".provider-workspace .settings-detail-actions").getByRole("button", { name: "编辑", exact: true }).click();
+      await settingsSection(f.page, "模型清单");
+      await f.page.locator(".provider-model-field").first().locator(".ant-collapse-header").click();
+      await screenshot(f.page, "webui-settings-model-catalog-editor");
+      await f.page.locator(".settings-dialog .ant-modal-close").click();
+      f.state.overrides.set("/singles", (_, fulfill) => fulfill({ singles: [
+        { identifier: "assistant", name: "工作助理", description: "日常问答、资料整理与内容总结", domain: "general", modelHint: "primary/gpt-6-mini" },
+        { identifier: "reviewer", name: "代码审查", description: "审查代码质量、验证改动与分析风险", domain: "review", modelHint: "primary/gpt-6.1" },
+      ] }));
+      await openSettings(f.page, false, "智能体");
+      await f.page.getByRole("textbox", { name: "搜索智能体、组或标识…", exact: true }).fill("审查");
+      assert.equal(await f.page.locator(".agent-directory-card").count(), 1);
+      await f.page.getByRole("textbox", { name: "搜索智能体、组或标识…", exact: true }).fill("");
+      await screenshot(f.page, "webui-settings-agent-directory");
+    } finally { await f.close(); }
+  });
+  for (const desktop of [false, true]) for (const viewport of [{ width: 1440, height: 900 }, { width: 420, height: 820 }, { width: 420, height: 480 }]) {
+    await test(`${desktop ? "Desktop" : "WebUI"} settings layout keeps fields and save actions reachable ${viewport.width}x${viewport.height}`, async () => {
+      const f = await fixture(desktop, viewport);
+      try {
+        f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", profiles: [{ ...profile, apiKey: "***已配置***", models: [{ model: "small", vision: true, audio: false, cost: "economy", autoEligible: true, purposes: ["chat", "coding"], usageNotes: "Fast routine tasks" }] }] }));
+        await openSettings(f.page, desktop, "模型");
+        await f.page.locator(".provider-workspace .settings-detail-actions").getByRole("button", { name: "编辑", exact: true }).click();
+        const dialog = f.page.locator(".settings-dialog");
+        for (const section of ["连接与密钥", "模型清单", "客户端伪装", "高级（回退与覆盖）"]) {
+          await settingsSection(f.page, section);
+          const save = await dialog.getByRole("button", { name: "保存", exact: true }).boundingBox();
+          assert.ok(save && save.x >= 0 && save.y >= 0 && save.x + save.width <= viewport.width + 1 && save.y + save.height <= viewport.height + 1, `${section} save action outside viewport: ${JSON.stringify(save)}`);
+          const fits = await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
+          assert.ok(fits, `${section} has horizontal overflow`);
+        }
+        await settingsSection(f.page, "客户端伪装");
+        await dialog.getByTestId("client-identity-preset").click();
+        await f.page.locator(".ant-select-dropdown:visible").getByText("Codex CLI", { exact: true }).click();
+        await dialog.getByTestId("client-identity-headers").fill('{"x-client-name":"fixture"}');
+        await dialog.getByTestId("client-identity-preview-button").scrollIntoViewIfNeeded();
+        const content = await dialog.locator(".settings-dialog-content").evaluate((element) => ({ scrollHeight: element.scrollHeight, clientHeight: element.clientHeight, scrollTop: element.scrollTop }));
+        assert.ok(content.clientHeight > 50, JSON.stringify(content));
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-settings-${viewport.width}x${viewport.height}`);
+      } finally { await f.close(); }
+    });
+  }
   for (const desktop of [false, true]) {
     await test(`${desktop ? "Desktop" : "WebUI"} model allocation saves the selected agent and capability`, async () => {
       const f = await fixture(desktop);
@@ -193,12 +516,13 @@ try {
           await f.page.getByRole("tab", { name: "模型", exact: true }).click();
         } else await f.page.evaluate(() => { location.hash = "#/models"; });
         await f.page.getByText("智能体分配", { exact: true }).click();
-        const subject = f.page.getByRole("combobox", { name: "配置对象", exact: true });
-        await subject.click(); await f.page.locator('.ant-select-item-option').filter({ hasText: "Fixture Agent" }).last().click();
+        await f.page.locator('.allocation-workspace .settings-object-list button').filter({ hasText: "Fixture Agent" }).click();
         const defaultRow = f.page.locator('[data-routing-purpose="default"]');
         await defaultRow.locator(".routing-mode").click(); await f.page.getByText("由指挥体分配", { exact: true }).last().click();
         const speechRow = f.page.locator('[data-routing-purpose="speech"]');
+        await f.page.getByRole("tab", { name: /多模态与检索/ }).click();
         await speechRow.locator(".routing-mode").click(); await f.page.getByText("关闭此能力", { exact: true }).last().click();
+        await f.page.locator(".routing-purpose-tabs .ant-tabs-tab").nth(2).click();
         await f.page.getByRole("textbox", { name: "给指挥体的分配说明", exact: true }).fill("Routine tasks use the economy model.");
         await f.page.locator(".routing-save .ant-btn-primary").click();
         await eventually(() => f.state.requests.some((r) => r.path === "/singles/machina/model-routing" && r.method === "PUT"), "Agent allocation was not saved");
@@ -206,7 +530,8 @@ try {
         assert.equal(saved.default.mode, "auto"); assert.equal(saved.purposes.speech.mode, "disabled"); assert.ok(saved.instructions.includes("economy"));
         assert.equal(f.state.requests.filter((r) => r.path === "/llm/capabilities" && r.method === "PUT").length, 0);
         f.state.overrides.set("/groups/default/agents/member/model-routing", (route, fulfill) => fulfill(route.request().method() === "PUT" ? { ok: true } : { policies: [] }));
-        await subject.click(); await f.page.locator('.ant-select-item-option').filter({ hasText: "Default / Member" }).last().click();
+        await f.page.locator('.allocation-workspace .settings-object-list button').filter({ hasText: "Default / Member" }).click();
+        await f.page.getByRole("tab", { name: /多模态与检索/ }).click();
         await speechRow.locator(".routing-mode").click(); await f.page.getByText("关闭此能力", { exact: true }).last().click();
         await f.page.locator(".routing-save .ant-btn-primary").click();
         await eventually(() => f.state.requests.some((r) => r.path === "/groups/default/agents/member/model-routing" && r.method === "PUT"), "Group member allocation was not saved");
@@ -241,7 +566,7 @@ try {
           await f.page.evaluate(() => { location.hash = "#/models"; });
         }
         await f.page.locator(".model-card").first().waitFor();
-        await f.page.locator(".model-card .anticon-edit").first().click();
+        await f.page.locator(".provider-workspace .settings-detail-actions").getByRole("button", { name: "编辑", exact: true }).click();
         const modal = f.page.locator(".ant-modal:not(.desk-settings)").last();
         await modal.getByText("客户端伪装", { exact: true }).first().click();
         await modal.getByTestId("client-identity-preset").click();
@@ -258,7 +583,7 @@ try {
         await eventually(() => saved.clientIdentity.preset === "claude-code", "Client identity was not saved");
         assert.deepEqual(saved.clientIdentity, { preset: "claude-code", version: "2.1.326", requestMode: "native", userAgent: "fixture-cli/1.2", headers: { "x-client-name": "fixture", version: "2.1.326", "X-OpenRouter-Title": "Fixture" } });
         await modal.waitFor({ state: "hidden" });
-        await f.page.locator(".model-card .anticon-edit").first().click();
+        await f.page.locator(".provider-workspace .settings-detail-actions").getByRole("button", { name: "编辑", exact: true }).click();
         await modal.getByText("客户端伪装", { exact: true }).first().click();
         assert.equal(await modal.getByTestId("client-identity-user-agent").inputValue(), "fixture-cli/1.2");
         assert.ok((await headers.inputValue()).includes("x-client-name"));
@@ -575,8 +900,8 @@ try {
       await f.page.getByRole("button", { name: "设置", exact: true }).click();
       for (const label of ["模型", "智能体", "桌面", "技能", "插件", "会话", "审批", "记忆", "知识", "自动化", "连结", "高级", "审计"]) {
         await f.page.getByRole("tab", { name: label, exact: true }).click();
-        await f.page.getByRole("tabpanel").waitFor({ state: "visible", timeout: 30_000 });
-        await f.page.waitForFunction(() => !document.querySelector(".desk-settings .ant-spin-spinning"));
+        await f.page.getByRole("tabpanel", { name: label, exact: true }).waitFor({ state: "visible", timeout: 30_000 });
+        await f.page.waitForFunction(() => !Array.from(document.querySelectorAll(".desk-settings .ant-spin-spinning")).some((element) => element.getClientRects().length));
         await f.page.waitForLoadState("networkidle");
         assert.ok(await f.page.locator(".desk-statusbar").count());
       }
@@ -621,7 +946,7 @@ try {
       await f.page.locator(".cfg-nav-item").filter({ hasText: "运行" }).first().click();
       const row = f.page.locator('[data-config-field="compaction.triggerRatio"]');
       await row.getByRole("spinbutton").fill("0.72");
-      await f.page.locator(".cfg2-foot .ant-btn-primary").click();
+      await f.page.locator(".settings-savebar-global .ant-btn-primary").click();
       await eventually(() => f.state.requests.some((request) => request.path === "/config" && request.method === "PUT"), "Settings update missing");
       const update = f.state.requests.findLast((request) => request.path === "/config" && request.method === "PUT")!.body as { compaction: { triggerRatio: number } };
       assert.equal(update.compaction.triggerRatio, 0.72); assert.ok(!Object.hasOwn(update, "compaction.triggerRatio"));

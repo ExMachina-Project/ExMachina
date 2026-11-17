@@ -508,7 +508,6 @@ async fn on_text(
     }
     // 事件管道自检打点：message 事件到达 = 事件面活着（连结后零事件会 degraded）
     note_event(&ch.id);
-    let group_id = v.get("group_id").and_then(|x| x.as_i64());
     let user_id = v.get("user_id").and_then(|x| x.as_i64());
     // 机器人自己的消息不回环处理（NapCat 开启 reportSelfMessage 时会上报自己说的话）
     if user_id.is_some() && v.get("self_id").and_then(|x| x.as_i64()) == user_id {
@@ -522,28 +521,54 @@ async fn on_text(
     if !first_seen(&format!("napcat:{}", ch.id), &msg_id) {
         return;
     }
+    // get_msg / get_group_member_info return on this same socket. Keep the reader
+    // available to dispatch their echo responses while the message is prepared.
+    tokio::spawn(process_message(core.clone(), ch, tx.clone(), v));
+}
+
+async fn process_message(
+    core: Arc<Core>,
+    ch: Channel,
+    tx: mpsc::UnboundedSender<serde_json::Value>,
+    raw: serde_json::Value,
+) {
+    let v = &raw;
+    let group_id = v.get("group_id").and_then(|x| x.as_i64());
+    let user_id = v.get("user_id").and_then(|x| x.as_i64());
+    let peer = group_id
+        .map(|g| g.to_string())
+        .or(user_id.map(|u| u.to_string()));
+    if !ch.allowed_chats.is_empty()
+        && !peer
+            .as_ref()
+            .is_some_and(|peer| ch.allowed_chats.contains(peer))
+    {
+        eprintln!("[napcat:{}] {peer:?} 不在白名单，已忽略", ch.id);
+        return;
+    }
     let mut text = extract_text(v.get("message").unwrap_or(&serde_json::Value::Null));
     // @ 名字回查（流显示可读性）：extract_text 是纯同步转换，at 段缺
     // data.name 时只能落 `@QQ号` 占位——群名片/昵称回查是异步 API 调用
     // （get_group_member_info），在拿到文本后补：把 `@数字` 换回真名。
     // 失败静默保留占位（名字是增益不是义务）。
-    text = resolve_at_names(&ch.id, group_id, &v, &text).await;
+    text = resolve_at_names(&ch.id, group_id, v, &text).await;
+    let command = is_reply_command(&text).then(|| text.clone());
     // 引用消息回查（get_msg）：reply 段的 id 换回原文——「回复图片：这是什么」
     // 若不带原文，模型只看到「这是什么」三个字，引用语义整个丢失。
-    // 注记拼在正文头（【回复 某人：…】），尽力而为：回查失败不阻塞主链。
+    // 注记拼在正文头（【回复 某人：…】），引用附件复用当前消息的媒体处理链。
     let reply_ids = reply_para_ids(v.get("message").unwrap_or(&serde_json::Value::Null));
-    let ch_id_for_reply = ch.id.clone();
     // 引用回查（get_msg，单次）：注记拼正文头（【回复 某人：…】）+ 是否指向
     // 机器人本体（判提及）一并提取——尽力而为，回查失败不阻塞主链。
     let mut reply_hits = false;
+    let mut media = collect_media(v.get("message").unwrap_or(&serde_json::Value::Null));
     if !reply_ids.is_empty() {
-        let (quote, hits) = reply_quote_note(&ch_id_for_reply, &reply_ids, v_self_id(&v)).await;
-        text = format!("{quote}{text}");
-        reply_hits = hits;
+        let quote = reply_quote_note(&ch.id, &reply_ids, v_self_id(v)).await;
+        text = format!("{}{text}", quote.text);
+        reply_hits = quote.hits_self;
+        media.extend(quote.media);
     }
     // 入站媒体段（组 6.4）：先盘类型，纯媒体消息给占位正文——
     // 曾在文本为空时直接 return，「只发一张图」被整体丢弃
-    let media = collect_media(v.get("message").unwrap_or(&serde_json::Value::Null));
     if text.trim().is_empty() {
         let kinds: Vec<&str> = media.iter().map(|(k, _)| k.as_str()).collect();
         text = media_placeholder(&kinds);
@@ -551,10 +576,6 @@ async fn on_text(
     if text.trim().is_empty() {
         return;
     }
-    // 会话白名单：非空时仅放行清单内的群号 / QQ 号
-    let peer = group_id
-        .map(|g| g.to_string())
-        .or(user_id.map(|u| u.to_string()));
     // 旁听媒体预下载（ambient-media-attach）：**未被 @** 的群媒体在闸门**前**
     // 下载入窗——@ 轮次 take 注入模型的窗口先于闸门就绪（旧序曾致旁听图片
     // 丢窗）。仅未提及消息预下载：@ 轮次走主链自行下载注入，预下载会造成
@@ -562,17 +583,12 @@ async fn on_text(
     // 下载结果同时随任务带入闸门（InboundCtx.media）——旁听占位消息的附件
     // 回填只挂本条消息自带的媒体，不再读窗口快照（曾致每条旁听消息复读
     // 窗口内全部近期图片）。
-    // 已知小瑕疵：此处提及判定只查 at 段（同步纯函数）——「引用回复机器人
-    // + 带图」的消息在闸门侧经 get_msg 回查判提及（mentioned=true 走完整
-    // 轮次），但预下载已先行入窗。主链 take 后同图再下载一次，由同轮指纹
-    // 去重（seen_fp）+ 指纹文件名落盘兜底：磁盘仍只一份、注入不重复。
-    // 不提前做引用回查：get_msg 是 8s 超时 API 调用，放预下载前会阻塞
-    // 纯旁听链路（高频路径），一次偶发冗余下载可接受。
     let will_be_ambient = group_id.is_some()
         && !media.is_empty()
+        && !reply_hits
         && !is_mentioned(
             v.get("message").unwrap_or(&serde_json::Value::Null),
-            v_self_id(&v),
+            v_self_id(v),
         );
     let mut prewindowed: Vec<(String, String, String)> = Vec::new();
     if will_be_ambient {
@@ -587,170 +603,147 @@ async fn on_text(
                 crate::platform::download_bytes(src).await
             };
             if let Some(b) = bytes {
-                if let Some(p) = crate::platform::save_inbound_media(core, &ch, &name, b).await {
+                if let Some(p) = crate::platform::save_inbound_media(&core, &ch, &name, b).await {
                     prewindowed.push((kind.clone(), p, name));
                 }
             }
         }
         ambient_media::push(&ch.id, peer.as_deref().unwrap_or(""), prewindowed.clone());
     }
-    if !ch.allowed_chats.is_empty() {
-        let ok = peer
-            .as_deref()
-            .map(|p| ch.allowed_chats.iter().any(|a| a == p))
-            .unwrap_or(false);
-        if !ok {
-            eprintln!("[napcat:{}] {peer:?} 不在白名单，已忽略", ch.id);
-            return;
-        }
+    // 流展示名：群聊取事件 group_name，私聊取对端昵称。
+    let flow_name: Option<String> = raw
+        .pointer("/group_name")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            raw.pointer("/sender/nickname")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && group_id.is_none())
+        });
+    let Some((external_id, text, sender_mark, proactive)) = napcat_gate(
+        &core,
+        &ch,
+        &tx,
+        group_id,
+        user_id,
+        &raw,
+        command.as_deref().unwrap_or(&text),
+        &prewindowed,
+        reply_hits,
+    )
+    .await
+    else {
+        // 旁听媒体已在闸门前预下载，record_ambient 回填本条消息的附件。
+        return;
+    };
+    // Command replies do not need quoted media. In particular, a voice transcript
+    // must not turn an approval directive into an ordinary model request.
+    let peer = group_id
+        .map(|g| g.to_string())
+        .or_else(|| user_id.map(|u| u.to_string()))
+        .unwrap_or_default();
+    if let Some(reply) = builtin_command(&core, &ch, &peer, &text).await {
+        send_text(&tx, group_id, user_id, &reply);
+        return;
     }
-    let core = core.clone();
-    let ch = ch.clone();
-    let tx = tx.clone();
-    let raw = v.clone();
-    let prewindowed = prewindowed; // 闸门前已下载的旁听媒体（随 ctx 带给 record_ambient 回填附件）
-    let reply_hits = reply_hits; // 引用判提及（主链单次回查的结果，闸门复用）
-    tokio::spawn(async move {
-        // 流展示名（会话管理可用性修复）：群聊取事件自带 group_name，私聊取
-        // 对端昵称——流列表显示「萝莉领主二群」而非裸群号。解析不到则 None
-        // （建流缺名回落 chat_key，后续消息到达再补）。
-        let flow_name: Option<String> = raw
-            .pointer("/group_name")
-            .and_then(|x| x.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                raw.pointer("/sender/nickname")
-                    .and_then(|x| x.as_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty() && group_id.is_none())
-            });
-        let Some((external_id, text, sender_mark, proactive)) =
-            napcat_gate(&core, &ch, &tx, group_id, user_id, &raw, &text, &prewindowed, reply_hits).await
-        else {
-            // 闸门拦截（忽略 / 已回复）：旁听媒体已在闸门前预下载，且已随
-            // InboundCtx.media 带入闸门——record_ambient 落占位消息时用它回填
-            // 本条消息的附件元数据；这里无需再下载。
-            return;
-        };
-        // 入站媒体（组 6.4）：下载或本地 file:// 复制 → 注入（段清单已在闸门前盘好）；
-        // 语音段（record/voice）顺带转写为文本注记——telegram 同款能力，
-        // QQ 语音是高频输入形态，只存路径等于让用户对着机器人说了一堆「已保存的噪音」
-        // 引用 / @ 轮次一并取走旁听媒体窗口（先发图后 @ 问的图在这里并入注入）。
-        let peer = group_id
-            .map(|g| g.to_string())
-            .or_else(|| user_id.map(|u| u.to_string()))
-            .unwrap_or_default();
-        let mut saved: Vec<(String, String, String)> = ambient_media::take(&ch.id, &peer);
-        let mut transcript_note = String::new();
-        // 同轮指纹去重（inbound-media-dedup）：同消息重复段/旁听窗口回灌的
-        // 同字节媒体按指纹只留首个；跨消息重推由指纹文件名天然复用（磁盘一份）
-        let mut seen_fp: std::collections::HashSet<String> =
-            saved.iter().map(|(_, p, _)| {
-                std::path::Path::new(p)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            }).collect();
-        for (kind, src) in media {
-            let name = format!(
-                "napcat-{}.{}",
-                exm_core::types::now_ms(),
-                if kind == "image" {
-                    "png"
-                } else if kind == "voice" {
-                    "ogg"
-                } else {
-                    "bin"
-                }
-            );
-            let bytes = if let Some(local) = src.strip_prefix("file://") {
-                std::fs::read(local).ok()
+    if crate::platform::is_quick_directive(&text) {
+        let sid = core.flow_active_session(&ch.id, &peer);
+        let reply = crate::platform::quick_directive_reply(
+            &core,
+            sid.as_deref(),
+            Some(&external_id),
+            &text,
+        )
+        .await
+        .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
+        send_text(&tx, group_id, user_id, &reply);
+        return;
+    }
+    // 入站和引用的媒体共用下载、语音转写及去重逻辑。
+    let mut saved: Vec<(String, String, String)> = ambient_media::take(&ch.id, &peer);
+    let mut transcript_note = String::new();
+    let mut seen_fp: std::collections::HashSet<String> = saved
+        .iter()
+        .map(|(_, p, _)| {
+            std::path::Path::new(p)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    for (kind, src) in media {
+        let name = format!(
+            "napcat-{}.{}",
+            exm_core::types::now_ms(),
+            if kind == "image" {
+                "png"
+            } else if kind == "voice" {
+                "ogg"
             } else {
-                crate::platform::download_bytes(&src).await
-            };
-            if let Some(b) = bytes {
-                let fp = crate::platform::media_fingerprint(&b);
-                if !seen_fp.insert(fp) {
-                    continue; // 同轮重复：静默丢弃
-                }
-                if let Some(p) =
-                    crate::platform::save_inbound_media(&core, &ch, &name, b.clone()).await
-                {
-                    saved.push((kind.clone(), p, name.clone()));
-                }
-                if kind == "voice" {
-                    transcript_note.push_str(
-                        &crate::channel_util::voice_transcript_note(&core, &ch, b, &name).await,
-                    );
-                }
+                "bin"
+            }
+        );
+        let bytes = if let Some(local) = src.strip_prefix("file://") {
+            std::fs::read(local).ok()
+        } else {
+            crate::platform::download_bytes(&src).await
+        };
+        if let Some(b) = bytes {
+            let fp = crate::platform::media_fingerprint(&b);
+            if !seen_fp.insert(fp) {
+                continue;
+            }
+            if let Some(p) = crate::platform::save_inbound_media(&core, &ch, &name, b.clone()).await
+            {
+                saved.push((kind.clone(), p, name.clone()));
+            }
+            if kind == "voice" {
+                transcript_note.push_str(
+                    &crate::channel_util::voice_transcript_note(&core, &ch, b, &name).await,
+                );
             }
         }
-        let text = if transcript_note.is_empty() {
-            text
-        } else {
-            format!("{text}{transcript_note}")
-        };
-        // 内置命令（/new /status）：闸门放行后、进入会话执行前拦截
-        // 会话键与 handle_message 同口径：群号优先，私聊为用户 id
-        let peer = group_id
-            .map(|g| g.to_string())
-            .or_else(|| user_id.map(|u| u.to_string()))
-            .unwrap_or_default();
-        if let Some(reply) = builtin_command(&core, &ch, &peer, &text).await {
-            let action = match group_id {
-                Some(g) => serde_json::json!({
-                    "action": "send_group_msg",
-                    "params": { "group_id": g, "message": [{ "type": "text", "data": { "text": reply } }] },
-                }),
-                None => serde_json::json!({
-                    "action": "send_private_msg",
-                    "params": { "user_id": user_id.unwrap_or(0), "message": [{ "type": "text", "data": { "text": reply } }] },
-                }),
-            };
-            let _ = tx.send(action);
-            return;
-        }
-        // 审批/计划快捷指令直裁（approval-ergonomics）：在 begin/回帖任务之前处理，
-        // 避免原轮次审批等待中新建回帖任务造成重复投递与最终答复丢失。
-        if crate::platform::is_quick_directive(&text) {
-            let sid = core.flow_active_session(&ch.id, &peer);
-            let reply = crate::platform::quick_directive_reply(
-                &core,
-                sid.as_deref(),
-                Some(&external_id),
-                &text,
-            )
-            .await
-            .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
-            let action = match group_id {
-                Some(g) => serde_json::json!({
-                    "action": "send_group_msg",
-                    "params": { "group_id": g, "message": [{ "type": "text", "data": { "text": reply } }] },
-                }),
-                None => serde_json::json!({
-                    "action": "send_private_msg",
-                    "params": { "user_id": user_id.unwrap_or(0), "message": [{ "type": "text", "data": { "text": reply } }] },
-                }),
-            };
-            let _ = tx.send(action);
-            return;
-        }
-        handle_message(
-            &core,
-            &ch,
-            &tx,
-            group_id,
-            user_id,
-            &external_id,
-            saved,
-            &text,
-            sender_mark.as_deref(),
-            flow_name.as_deref(),
-            proactive,
-        )
-        .await;
-    });
+    }
+    let text = if transcript_note.is_empty() {
+        text
+    } else {
+        format!("{text}{transcript_note}")
+    };
+    handle_message(
+        &core,
+        &ch,
+        &tx,
+        group_id,
+        user_id,
+        &external_id,
+        saved,
+        &text,
+        sender_mark.as_deref(),
+        flow_name.as_deref(),
+        proactive,
+    )
+    .await;
+}
+
+fn send_text(
+    tx: &mpsc::UnboundedSender<serde_json::Value>,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    text: &str,
+) {
+    let action = match group_id {
+        Some(group_id) => serde_json::json!({
+            "action": "send_group_msg",
+            "params": { "group_id": group_id, "message": [{ "type": "text", "data": { "text": text } }] },
+        }),
+        None => serde_json::json!({
+            "action": "send_private_msg",
+            "params": { "user_id": user_id.unwrap_or(0), "message": [{ "type": "text", "data": { "text": text } }] },
+        }),
+    };
+    let _ = tx.send(action);
 }
 
 /// OneBot 消息体 → 附件段清单 (kind, 来源)：kind ∈ image | file | voice（record 归一为 voice）；
@@ -1053,12 +1046,22 @@ fn apply_at_names(text: &str, names: &std::collections::HashMap<String, String>)
 /// 引用语义在 IM 高频出现（「回复图片：这是什么」），id 是回查原文的唯一钥匙。
 fn reply_para_ids(m: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
+    let mut add = |id: String| {
+        let id = id.trim();
+        if !id.is_empty() && !out.iter().any(|old| old == id) {
+            out.push(id.to_string());
+        }
+    };
     if let Some(arr) = m.as_array() {
         for seg in arr {
             if seg.get("type").and_then(|t| t.as_str()) == Some("reply") {
-                if let Some(id) = seg.pointer("/data/id").and_then(|x| x.as_str()) {
-                    if !id.trim().is_empty() {
-                        out.push(id.to_string());
+                if let Some(id) = seg.pointer("/data/id") {
+                    match id {
+                        serde_json::Value::String(id) => add(id.clone()),
+                        serde_json::Value::Number(id) if id.is_i64() || id.is_u64() => {
+                            add(id.to_string());
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1070,10 +1073,7 @@ fn reply_para_ids(m: &serde_json::Value) -> Vec<String> {
                 for kv in rest.split(',') {
                     let mut it = kv.splitn(2, '=');
                     if it.next() == Some("id") {
-                        let id = it.next().unwrap_or("").trim();
-                        if !id.is_empty() {
-                            out.push(id.to_string());
-                        }
+                        add(it.next().unwrap_or("").to_string());
                     }
                 }
             }
@@ -1082,61 +1082,101 @@ fn reply_para_ids(m: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// 回查引用原文（get_msg）：返回 `（注记前缀, 是否指向机器人本体）`。
-/// 一次回查同时提取原文摘要（注记）与 sender.user_id（比对 self_id）——
-/// 引用判提及与原文注记共用结果，避免同 id 双查。
-/// 失败/超时返回空注记（引用链路是尽力而为，不阻塞消息）——模型侧拿到
-/// 「【回复 某人：…】正文」即知用户在回应哪条消息。
-async fn reply_quote_note(
-    ch_id: &str,
-    msg_ids: &[String],
-    self_id: Option<i64>,
-) -> (String, bool) {
-    let mut notes = Vec::new();
-    let mut hits_self = false;
+/// Only the current message can invoke a channel command. A recovered quote
+/// must neither hide a reply to an approval prompt nor become a command itself.
+fn is_reply_command(text: &str) -> bool {
+    let text = text.trim();
+    matches!(text, "/stop" | "/reset" | "/status")
+        || ["/new", "/sessions", "/use"]
+            .iter()
+            .any(|command| text == *command || text.starts_with(&format!("{command} ")))
+        || text
+            .strip_prefix("/pair ")
+            .is_some_and(|code| !code.trim().is_empty())
+        || crate::platform::is_quick_directive(text)
+}
+
+#[derive(Default)]
+struct ReplyQuote {
+    text: String,
+    hits_self: bool,
+    media: Vec<(String, String)>,
+}
+
+const MAX_REPLY_TEXT_CHARS: usize = 8_000;
+
+/// Parse the message body, not the surrounding get_msg data object. Quoted media
+/// follows the same download/staging path as attachments in the current message.
+fn parse_reply_quote(data: &serde_json::Value, self_id: Option<i64>) -> ReplyQuote {
+    let sender_id = data
+        .pointer("/sender/user_id")
+        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
+    let sender = ["/sender/card", "/sender/nickname"]
+        .iter()
+        .find_map(|path| {
+            data.pointer(path)?
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        })
+        .map(str::to_string)
+        .or_else(|| sender_id.map(|id| id.to_string()))
+        .unwrap_or_else(|| "未知".into());
+    let message = data.get("message").filter(|value| !value.is_null());
+    let media = message.map(collect_media).unwrap_or_default();
+    let mut body = message.map(extract_text).unwrap_or_default();
+    if body.trim().is_empty() {
+        body = data
+            .get("raw_message")
+            .map(extract_text)
+            .unwrap_or_default();
+    }
+    if !media.is_empty() {
+        let kinds: Vec<_> = media.iter().map(|(kind, _)| kind.as_str()).collect();
+        body.push_str(&media_placeholder(&kinds));
+    }
+    if body.trim().is_empty() {
+        body = "（原消息无可读取的文本或附件）".into();
+    }
+    let mut chars = body.trim().chars();
+    let mut body: String = chars.by_ref().take(MAX_REPLY_TEXT_CHARS).collect();
+    if chars.next().is_some() {
+        body.push_str("…（引用内容过长，已截断）");
+    }
+    ReplyQuote {
+        text: format!("【回复 {sender}：{body}】\n"),
+        hits_self: self_id.is_some() && sender_id == self_id,
+        media,
+    }
+}
+
+/// Resolve a reply once for its text, sender and attachments. Failed lookups
+/// remain explicit in the model context instead of silently losing the quote.
+async fn reply_quote_note(ch_id: &str, msg_ids: &[String], self_id: Option<i64>) -> ReplyQuote {
+    let mut quote = ReplyQuote::default();
     for id in msg_ids.iter().take(3) {
-        let Some(resp) = api_call(ch_id, "get_msg", serde_json::json!({ "message_id": id })).await
+        let message_id = id
+            .parse::<i64>()
+            .map(serde_json::Value::from)
+            .unwrap_or_else(|_| serde_json::Value::String(id.clone()));
+        let Some(resp) = api_call(
+            ch_id,
+            "get_msg",
+            serde_json::json!({ "message_id": message_id }),
+        )
+        .await
         else {
+            quote
+                .text
+                .push_str(&format!("【引用消息 {id}：原消息读取失败，内容不可用】\n"));
             continue;
         };
-        if resp.pointer("/data/sender/user_id").and_then(|x| x.as_i64()) == self_id {
-            hits_self = true;
-        }
-        let sender = resp
-            .pointer("/data/sender/card")
-            .or_else(|| resp.pointer("/data/sender/nickname"))
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                resp.pointer("/data/sender/user_id")
-                    .and_then(|x| x.as_i64())
-                    .map(|u| u.to_string())
-            })
-            .unwrap_or_else(|| "未知".into());
-        // 引用原文的文本段（数组 or CQ 字符串）；图片/文件段给占位说明
-        let raw = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
-        let mut body = extract_text(&raw);
-        let segs = raw.get("message").cloned().unwrap_or(serde_json::Value::Null);
-        if body.trim().is_empty() {
-            // get_msg 的 data.message 是消息体本体；文本为空说明纯媒体——盘段型
-            let media = collect_media(&segs);
-            let kinds = media
-                .iter()
-                .map(|(k, _)| k.as_str())
-                .collect::<Vec<_>>();
-            body = media_placeholder(&kinds);
-        }
-        let body = body.trim().chars().take(200).collect::<String>();
-        notes.push(format!("【回复 {sender}：{body}】"));
+        let note = parse_reply_quote(&resp["data"], self_id);
+        quote.text.push_str(&note.text);
+        quote.hits_self |= note.hits_self;
+        quote.media.extend(note.media);
     }
-    let prefix = if notes.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", notes.join(" "))
-    };
-    (prefix, hits_self)
+    quote
 }
 
 /// 取上报事件里的机器人自身 QQ（self_id 字段；数组段提及判定的比对基准）
@@ -1685,3 +1725,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "napcat_reply_tests.rs"]
+mod reply_tests;

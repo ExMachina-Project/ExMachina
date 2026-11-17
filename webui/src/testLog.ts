@@ -10,13 +10,15 @@ export interface TestRecord {
   ok: boolean;
   latencyMs?: number;
   reason?: string;
+  lastSuccess?: { at: string; latencyMs?: number };
 }
 
 const KEY = "exm.testLog";
 
 function readAll(): Record<string, TestRecord> {
   try {
-    return JSON.parse(localStorage.getItem(KEY) ?? "{}") as Record<string, TestRecord>;
+    const value: unknown = JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, TestRecord> : {};
   } catch {
     return {};
   }
@@ -26,10 +28,12 @@ export function getTestRecord(id: string): TestRecord | undefined {
   return readAll()[id];
 }
 
-/** 记录一次测试结果（失败不带历史覆盖语义：只记当次；展示层负责合并上次成功） */
+/** Retain the last successful observation alongside the latest failure. */
 export function putTestRecord(id: string, r: TestRecord): void {
   const all = readAll();
-  all[id] = r;
+  const previous = all[id];
+  all[id] = { ...r, lastSuccess: r.ok ? { at: r.at, latencyMs: r.latencyMs }
+    : previous?.ok ? { at: previous.at, latencyMs: previous.latencyMs } : previous?.lastSuccess };
   try {
     localStorage.setItem(KEY, JSON.stringify(all));
   } catch {

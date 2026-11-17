@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Alert, App, Button, Form, Input, Modal, Spin, Switch, Tabs } from "antd";
 import { desktopInvoke, type DesktopConfig } from "../../webui/src/desktop";
+import { canLeaveSettings } from "../../webui/src/settingsNavigation";
 const Models = lazy(() => import("../../webui/src/views/models/ModelsView").then((m) => ({ default: m.ModelsView })));
 const Agents = lazy(() => import("../../webui/src/views/SinglesView").then((m) => ({ default: m.SinglesView })));
 const Channels = lazy(() => import("../../webui/src/views/channels/ChannelsView").then((m) => ({ default: m.ChannelsView })));
@@ -38,10 +39,11 @@ function NativeSettings() {
   </Form>;
 }
 export function DesktopSettings({ open, onClose }: { open: boolean; onClose: () => void }) {
-  return <Modal open={open} onCancel={onClose} footer={null} title="工作区设置" width={1040} className="desk-settings" destroyOnHidden>
-    <Suspense fallback={<Spin />}><Tabs destroyOnHidden items={[
-      { key: "model", label: "模型", children: <Models /> },
-      { key: "agent", label: "智能体", children: <Agents /> },
+  const [active, setActive] = useState("model");
+  return <Modal open={open} onCancel={() => { if (canLeaveSettings()) onClose(); }} footer={null} title="工作区设置" width={1180} className="desk-settings" destroyOnHidden>
+    <Suspense fallback={<Spin />}><Tabs activeKey={active} onChange={setActive} items={[
+      { key: "model", label: "模型", children: <Models active={active === "model"} /> },
+      { key: "agent", label: "智能体", children: <Agents active={active === "agent"} /> },
       { key: "native", label: "桌面", children: <NativeSettings /> },
       { key: "skills", label: "技能", children: <Skills /> },
       { key: "plugins", label: "插件", children: <Plugins /> },
