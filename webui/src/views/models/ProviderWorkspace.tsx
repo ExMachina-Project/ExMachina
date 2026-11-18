@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Alert, Button, Input, Popconfirm, Select, Tag } from "antd";
-import { ApiOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons";
+import { ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined } from "@ant-design/icons";
 import type { LlmProfile } from "../../api";
 import { BrandEmpty } from "../../components/BrandEmpty";
 import { costLabel, purposeLabel } from "../../modelRouting";
@@ -8,10 +8,10 @@ import { getTestRecord } from "../../testLog";
 import { useT } from "../../i18n/core";
 import { FORMAT_LABEL_KEY } from "./presets";
 
-export function ProviderWorkspace({ profiles, active, testing, onEdit, onTest, onDelete, onCreate, onAllocate }: {
+export function ProviderWorkspace({ profiles, active, testing, onEdit, onTest, onDelete, onCreate }: {
   profiles: LlmProfile[]; active?: string; testing: string;
   onEdit: (profile: LlmProfile, section?: string) => void; onTest: (id: string) => void;
-  onDelete: (id: string) => void; onCreate: () => void; onAllocate: () => void;
+  onDelete: (id: string) => void; onCreate: () => void;
 }) {
   const t = useT();
   const [selected, setSelected] = useState("");
@@ -49,8 +49,12 @@ export function ProviderWorkspace({ profiles, active, testing, onEdit, onTest, o
         <div><span>{t("routing.providerDefault")}</span><strong className="mono">{current.model || t("models.capUnset")}</strong></div>
       </div>
       {!keys && <Alert type="warning" showIcon title={t("ux.missingKeyTitle")} action={<Button size="small" onClick={() => onEdit(current, "connection")}>{t("common.edit")}</Button>} />}
-      {record && <Alert className="provider-test-result" type={record.ok ? "success" : "error"} showIcon title={record.ok ? t("models.lastTestOk", { ms: record.latencyMs ?? "?" }) : t("models.lastTestFail", { reason: record.reason || "?" })}
-        description={<span>{new Date(record.at).toLocaleString()}{!record.ok && record.lastSuccess && <> · {t("ux.lastSuccess", { time: new Date(record.lastSuccess.at).toLocaleString(), ms: record.lastSuccess.latencyMs ?? "?" })}</>}</span>} />}
+      {record && <div className={`provider-test-result ${record.ok ? "is-ok" : "is-error"}`} role="status">
+        {record.ok ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
+        <span>{record.ok ? t("models.lastTestOk", { ms: record.latencyMs ?? "?" }) : t("models.lastTestFail", { reason: record.reason || "?" })}</span>
+        <time dateTime={record.at}>{new Date(record.at).toLocaleString()}</time>
+        {!record.ok && record.lastSuccess && <small>{t("ux.lastSuccess", { time: new Date(record.lastSuccess.at).toLocaleString(), ms: record.lastSuccess.latencyMs ?? "?" })}</small>}
+      </div>}
       {!record && <p className="settings-context-note">{t("ux.notTested")}</p>}
       <div className="settings-section-title"><div><h3>{t("routing.catalog")} <span className="settings-count">{current.models.length}</span></h3><p>{t("ux.catalogDescription")}</p></div><Button size="small" onClick={() => onEdit(current, "catalog")}>{t("ux.manageModels")}</Button></div>
       {!!current.models.length && <Input prefix={<SearchOutlined />} allowClear value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder={t("models.pickerSearch")} aria-label={t("models.pickerSearch")} />}
@@ -60,9 +64,10 @@ export function ProviderWorkspace({ profiles, active, testing, onEdit, onTest, o
       </div>)}</div>
       {!!current.models.length && !modelMatches.length && <p className="settings-list-empty">{t("models.pickerEmpty")}</p>}
       {!current.models.length && <div className="settings-list-empty"><p>{t("ux.noCatalog")}</p><Button icon={<PlusOutlined />} onClick={() => onEdit(current, "catalog")}>{t("models.addModel")}</Button></div>}
-      <div className="provider-detail-foot"><span className="dim">{current.id === active && <Tag>{t("ux.systemDefault")}</Tag>}{current.fallback && t("models.fallbackTo", { id: current.fallback })}</span><Button onClick={onAllocate}>{t("ux.assignModels")}</Button>
+      <div className="provider-detail-foot"><span className="dim">{current.id === active && <Tag>{t("ux.systemDefault")}</Tag>}{current.fallback && t("models.fallbackTo", { id: current.fallback })}</span>
         {profiles.length > 1 && <Popconfirm title={t("common.confirmDelete", { name: current.name })} onConfirm={() => onDelete(current.id)}><Button type="text" danger icon={<DeleteOutlined />} aria-label={t("common.delete")} /></Popconfirm>}
       </div>
+      <p className="provider-owner-hint">{t("ux.modelSettingsOwner")}</p>
     </section>}
   </div>;
 }

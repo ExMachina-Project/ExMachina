@@ -42,7 +42,7 @@ export function TelemetryBar(): React.ReactElement {
         <span className="tbar-k">SESS</span>
         <span className="tbar-v">{String(sessions.length).padStart(2, "0")}</span>
       </span>
-      <span className="tbar-seg">
+      <span className="tbar-seg tbar-model">
         <span className="tbar-k">MODEL</span>
         <span className={`tbar-v ${llmReady ? "" : "warn"}`}>{model}</span>
       </span>

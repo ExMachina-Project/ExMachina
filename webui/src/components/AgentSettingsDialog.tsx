@@ -104,7 +104,7 @@ export function AgentSettingsDialog({ agent, profiles, groupId, groupName, perso
     sections={[
       { key: "general", label: t("ux.agentGeneral"), description: t(groupId ? "ux.memberScope" : "ux.singleScope"), icon: <UserOutlined />, content: <>
         <Form.Item label={t("singles.f.name")} required><Input aria-label={t("singles.f.name")} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Form.Item>
-        <Form.Item label={t("singles.f.desc")}><Input.TextArea aria-label={t("singles.f.desc")} rows={3} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></Form.Item>
+        <Form.Item label={t("singles.f.desc")}><Input.TextArea aria-label={t("singles.f.desc")} rows={2} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></Form.Item>
         <Form.Item label={t("ux.agentDomain")}><Input value={draft.domain} aria-label={t("ux.agentDomain")} onChange={(event) => setDraft({ ...draft, domain: event.target.value })} /></Form.Item>
         {groupId && <Form.Item label={t("agents.f.link")} extra={t("agents.f.linkExtra")}><Select allowClear aria-label={t("agents.f.link")} value={draft.link || undefined} onChange={(link) => setDraft({ ...draft, link: link || "" })}
           options={links.map((link) => ({ value: link.id, label: `${link.name} (${link.id})`, disabled: !link.enabled }))} placeholder={t("agents.f.linkPh")} /></Form.Item>}
@@ -113,7 +113,7 @@ export function AgentSettingsDialog({ agent, profiles, groupId, groupName, perso
       { key: "routing", label: t("ux.modelsAndCapabilities"), description: t("ux.agentModelsDescription"), icon: <ApiOutlined />, content:
         <fieldset className="settings-edit-fields" disabled={saving}><ModelRoutingEditor value={draft.routing} onChange={(routing) => setDraft({ ...draft, routing })} profiles={profiles} inheritedLabel={t(groupId ? "ux.inheritGroup" : "ux.inheritSystem")} /></fieldset> },
       { key: "prompt", label: t("ux.agentPrompt"), description: t("ux.promptDescription"), icon: <FileTextOutlined />, content: <Spin spinning={loading}>
-        {readErrors.prompt ? <Alert type="error" title={t("common.loadFailed", { err: readErrors.prompt })} /> : <Input.TextArea aria-label={t("ux.agentPrompt")} rows={18} className="prompt-editor" spellCheck={false} value={draft.prompt || ""} disabled={loading || saving} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} />}
+         {readErrors.prompt ? <Alert type="error" title={t("common.loadFailed", { err: readErrors.prompt })} /> : <Input.TextArea aria-label={t("ux.agentPrompt")} rows={12} className="prompt-editor" spellCheck={false} value={draft.prompt || ""} disabled={loading || saving} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} />}
       </Spin> },
       { key: "persona", label: t("ux.agentPersona"), description: t("ux.personaDescription"), icon: <SmileOutlined />, content: <Spin spinning={loading}>
         {readErrors.persona ? <Alert type="error" title={t("common.loadFailed", { err: readErrors.persona })} /> : <>
@@ -123,7 +123,7 @@ export function AgentSettingsDialog({ agent, profiles, groupId, groupName, perso
             </Popconfirm>
           </div>
           {personaProtected && <p className="settings-context-note">{t("agents.soulProtectedHint")}</p>}
-          <Input.TextArea aria-label={t("ux.agentPersona")} rows={14} className="prompt-editor" spellCheck={false} value={draft.persona || ""} disabled={loading || saving} onChange={(event) => setDraft({ ...draft, persona: event.target.value })} />
+           <Input.TextArea aria-label={t("ux.agentPersona")} rows={9} className="prompt-editor" spellCheck={false} value={draft.persona || ""} disabled={loading || saving} onChange={(event) => setDraft({ ...draft, persona: event.target.value })} />
         </>}
       </Spin> },
     ]} />;

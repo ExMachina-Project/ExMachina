@@ -7,6 +7,7 @@ import { accentColor, themeOf, useTheme, type ThemeKey } from "./theme";
 import { installViewportFix } from "./viewport";
 import "./styles.css";
 import "./settings.css";
+import "./console.css";
 
 // 移动端键盘遮挡兜底：iOS Safari 键盘弹出时 100dvh 不缩，需 visualViewport 实时高
 installViewportFix();
@@ -73,6 +74,10 @@ function Root(): React.ReactElement {
           colorPrimary: color,
           colorInfo: color,
           colorLink: color,
+          fontSize: 13,
+          fontSizeSM: 12,
+          controlHeight: 28,
+          controlHeightSM: 24,
           ...tokens,
           // 圆角纪律：智械直角风——结构圆角全部归零（LED/头像等圆形走组件内定制）
           borderRadius: 0,

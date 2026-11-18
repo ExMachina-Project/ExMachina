@@ -117,7 +117,7 @@ export function SkillsView(): React.ReactElement {
                 {t("skills.usage", { used: s.useCount ?? 0, ok: s.successCount ?? 0 })}
                 {s.source && s.source !== "manual" ? ` · ${s.source}` : ""}
               </div>
-              <div className="skill-instructions">{s.instructions}</div>
+              <details className="skill-details"><summary>{t("skills.f.instructions")}</summary><div className="skill-instructions">{s.instructions}</div></details>
             </Card>
           ))}
         </div>

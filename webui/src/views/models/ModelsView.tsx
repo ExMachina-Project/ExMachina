@@ -1,4 +1,4 @@
-/** Provider catalogs describe models; assignments edit individual agents and group members. */
+/** Instance-level connections and capabilities. Agent rules live in agent settings. */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button, Form, Input, Modal, Select, Spin, Tabs, message,
@@ -17,7 +17,6 @@ import { useT } from "../../i18n/core";
 import { PRESETS, PRESET_LABEL, CUSTOM, API_FORMAT_KEYS, type KeyForm, type Tab, liveRows } from "./presets";
 import { ModelPicker } from "./ModelPicker";
 import { ClientIdentityFields, parseClientIdentity } from "./ClientIdentityFields";
-import { ModelAllocationPanel } from "./ModelAllocationPanel";
 import { ProviderCatalogFields } from "./ProviderCatalogFields";
 import { ProviderWorkspace } from "./ProviderWorkspace";
 import { GlobalCapabilityPanel } from "./GlobalCapabilityPanel";
@@ -25,7 +24,7 @@ import { GlobalCapabilityPanel } from "./GlobalCapabilityPanel";
 export function ModelsView({ active = true }: { active?: boolean } = {}): React.ReactElement {
   const t = useT();
   const [info, setInfo] = useState<LlmProfilesInfo | null>(null);
-  /** 页内分页：providers = 提供商与模型清单；caps = 功能分配（能力模型） */
+  /** Agent/group assignments are edited with their owner, not in a second directory. */
   const [tab, setTab] = useState<Tab>("providers");
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(false);
@@ -324,8 +323,7 @@ export function ModelsView({ active = true }: { active?: boolean } = {}): React.
       <Tabs className="settings-page-tabs" activeKey={tab} onChange={(next) => setTab(next as Tab)} items={[
         { key: "providers", label: <>{t("models.tabProviders")} <span className="settings-count">{profiles.length}</span></>, children:
           <Spin spinning={loading}><ProviderWorkspace profiles={profiles} active={info?.active} testing={testing} onEdit={openEdit}
-            onTest={(id) => void test(id)} onDelete={(id) => void remove(id)} onCreate={openCreate} onAllocate={() => setTab("caps")} /></Spin> },
-        { key: "caps", label: t("routing.assignmentTab"), children: <ModelAllocationPanel profiles={profiles} active={active && tab === "caps"} /> },
+             onTest={(id) => void test(id)} onDelete={(id) => void remove(id)} onCreate={openCreate} /></Spin> },
         { key: "global", label: t("ux.globalCapabilities"), children: <GlobalCapabilityPanel profiles={profiles} active={active && tab === "global"} /> },
       ]} />
       {modal && <SettingsDialog title={editing ? t("models.editTitle", { name: editing.name }) : t("models.add")} subtitle={editing?.id || t("ux.newConnection")}

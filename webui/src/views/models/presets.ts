@@ -32,8 +32,8 @@ export const PRESET_LABEL: Partial<Record<string, TKey>> = {
 
 export const CUSTOM = "__custom__";
 
-/** 页内分页：提供商 ↔ 功能分配（能力模型拆开，两件事不再混排一页） */
-export type Tab = "providers" | "caps" | "global";
+/** Instance-level configuration only. */
+export type Tab = "providers" | "global";
 
 /** API 协议选项的显示名走 i18n（值为协议标识，与后端契约） */
 export const API_FORMAT_KEYS: { value: string; key: TKey }[] = [
