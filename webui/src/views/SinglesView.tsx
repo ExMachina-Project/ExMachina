@@ -82,7 +82,6 @@ export function SinglesView({ active = true }: { active?: boolean } = {}) {
   const shownGroups = groupList.filter((group) => matches(group.name, group.id, group.description || ""));
   const singleMenu = (agent: SettingsAgent) => [
     { key: "general", label: t("ux.agentGeneral"), onClick: () => setTarget({ agent, section: "general" }) },
-    { key: "routing", label: t("ux.modelsAndCapabilities"), onClick: () => setTarget({ agent, section: "routing" }) },
     { key: "prompt", label: t("ux.agentPrompt"), onClick: () => setTarget({ agent, section: "prompt" }) },
     { key: "persona", label: t("ux.agentPersona"), onClick: () => setTarget({ agent, section: "persona" }) },
     { type: "divider" as const },
@@ -110,7 +109,7 @@ export function SinglesView({ active = true }: { active?: boolean } = {}) {
             <div className="agent-directory-heading"><span className="settings-object-icon"><UserOutlined /></span><div><h3>{agent.name}</h3><code>{agent.identifier}</code></div><Dropdown menu={{ items: singleMenu(agent) }} trigger={["click"]}><Button type="text" icon={<MoreOutlined />} aria-label={t("singles.cardMenu")} /></Dropdown></div>
             <p className="agent-directory-description">{agent.description || t("ux.noDescription")}</p>
             <div className="agent-model-summary"><span>{t("routing.default")}</span><strong>{routingLabel(agent.modelRouting, agent.modelHint)}</strong></div>
-            <div className="agent-directory-actions"><Button type="primary" ghost icon={<SettingOutlined />} onClick={() => setTarget({ agent, section: "general" })}>{t("ux.configureAgent")}</Button><Button type="text" onClick={() => setTarget({ agent, section: "routing" })}>{t("ux.modelsAndCapabilities")}</Button></div>
+             <div className="agent-directory-actions"><Button type="primary" ghost icon={<SettingOutlined />} onClick={() => setTarget({ agent, section: "general" })}>{t("ux.configureAgent")}</Button></div>
           </Card>)}</div>
           {!shownSingles.length && <BrandEmpty description={query ? t("ux.noResults") : t("singles.empty")} />}
         </section>}
@@ -118,8 +117,7 @@ export function SinglesView({ active = true }: { active?: boolean } = {}) {
           <div className="agent-directory">{shownGroups.map((group) => <Card key={group.id} size="small" className="hud agent-directory-card group-card">
             <div className="agent-directory-heading"><span className="settings-object-icon"><TeamOutlined /></span><div><h3>{group.name}</h3><code>{group.id}</code></div><Dropdown trigger={["click"]} menu={{ items: [
               { key: "general", label: t("groups.menuEditInfo"), onClick: () => setGroupTarget({ group, section: "general" }) },
-              { key: "routing", label: t("ux.modelsAndCapabilities"), onClick: () => setGroupTarget({ group, section: "routing" }) },
-              { key: "behavior", label: t("groups.menuSelfOpt"), onClick: () => setGroupTarget({ group, section: "behavior" }) },
+               { key: "behavior", label: t("groups.menuSelfOpt"), onClick: () => setGroupTarget({ group, section: "behavior" }) },
             ] }}><Button type="text" icon={<MoreOutlined />} aria-label={t("singles.cardMenu")} /></Dropdown></div>
             <p className="agent-directory-description">{group.description || t("ux.noDescription")}</p>
             <div className="agent-model-summary"><span>{t("routing.groupDefault")}</span><strong>{routingLabel(group.modelRouting, group.model)}</strong></div>

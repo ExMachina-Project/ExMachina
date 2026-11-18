@@ -84,7 +84,7 @@ export function GroupDetailPanel({ groupId, onBack, onDeleted, active = true }: 
     <Spin spinning={loading}>
       {primary && <Card size="small" className="hud group-primary-card">
         <div className="settings-section-title"><div><span className="settings-eyebrow">{t("groups.primaryTitle")}</span><h3><UserOutlined /> {primary.name}</h3><p>{t("groups.primaryHint")}</p></div><Tag>{routingLabel(primary.modelRouting, primary.modelHint)}</Tag></div>
-        <p>{primary.description}</p><div className="settings-detail-actions"><Button type="primary" ghost icon={<SettingOutlined />} onClick={() => setTarget({ agent: primary, section: "general" })}>{t("ux.configureAgent")}</Button><Button onClick={() => setTarget({ agent: primary, section: "routing" })}>{t("ux.modelsAndCapabilities")}</Button><Button type="text" onClick={() => setTarget({ agent: primary, section: "persona" })}>{t("ux.agentPersona")}</Button></div>
+       <p>{primary.description}</p><div className="settings-detail-actions"><Button type="primary" ghost icon={<SettingOutlined />} onClick={() => setTarget({ agent: primary, section: "general" })}>{t("ux.configureAgent")}</Button></div>
       </Card>}
       <div className="settings-section-title"><div><h3>{t("groups.unitsTitle")} <span className="settings-count">{members.filter((agent) => agent.identifier !== meta.primary).length}</span></h3><p>{t("ux.memberListHint")}</p></div></div>
       <div className="settings-directory-toolbar"><Input prefix={<SearchOutlined />} aria-label={t("ux.searchMembers")} placeholder={t("ux.searchMembers")} allowClear value={query} onChange={(event) => setQuery(event.target.value)} /></div>

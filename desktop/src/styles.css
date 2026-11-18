@@ -176,3 +176,38 @@ button, textarea, input { font: inherit; }
   .desk-composer-tools .ant-select { max-width: 100%; flex: 1 1 28%; }
   .desk-welcome h1 { font-size: 21px; }
 }
+
+/* Compact workstation layout: preserve all panes while reclaiming space from chrome. */
+.desk-app { min-width: 0; min-height: 0; grid-template-rows: 34px 32px minmax(0, 1fr); }
+.desk-titlebar { padding-inline: 10px 6px; }
+.desk-statusbar { gap: 2px; }
+.desk-sessions { width: 218px; min-width: 218px; padding: 8px; gap: 6px; }
+.desk-context { width: 205px; }
+.desk-context section { padding: 8px 10px; }
+.desk-stream { padding-top: 12px; padding-bottom: 10px; }
+.desk-welcome { min-height: min(48vh, 390px); }
+.desk-welcome h1 { font-size: 23px; }
+.desk-welcome .suggest { max-width: 440px; gap: 5px; margin-bottom: 14px; }
+.desk-welcome .suggest button { min-height: 34px; padding: 7px 10px; }
+.desk-message { margin-bottom: 14px; }
+.desk-message.user { padding: 8px 11px; }
+.desk-composer { margin-bottom: 10px; }
+.desk-composer textarea { padding: 8px 10px 4px !important; }
+.desk-settings { width: min(1180px, calc(100vw - 28px)) !important; max-width: calc(100vw - 28px); }
+.desk-settings .ant-modal-container, .desk-settings .ant-modal-content { display: flex; flex-direction: column; max-height: calc(100dvh - 40px); }
+.desk-settings .ant-modal-body { min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.desk-settings .ant-tabs-content-holder { min-height: 0; max-height: none; overflow: auto; }
+.desk-settings .page-head { position: static; padding-top: 6px; }
+.desk-settings .page-head-ascii { display: none; }
+@media (max-width: 1000px) {
+  .desk-sessions { width: 196px; min-width: 196px; }
+  .desk-context { width: min(240px, 40vw); }
+}
+@media (max-width: 760px) {
+  .desk-statusbar { overflow-x: auto; }
+  .desk-statusbar > .ant-btn { max-width: 108px; }
+  .desk-statusbar > .desk-workspace-button { max-width: 78px; }
+  .desk-stream { padding-inline: 10px; }
+  .desk-sessions { width: min(270px, 84vw); min-width: min(270px, 84vw); }
+  .desk-settings { margin: 12px auto !important; width: calc(100vw - 16px) !important; }
+}

@@ -193,10 +193,6 @@ async function openSettings(page: Page, desktop: boolean, section: "模型" | "�
 async function settingsSection(page: Page, name: string) {
   await page.locator(".settings-dialog-nav button").filter({ hasText: name }).click();
 }
-async function waitForSettingsSave(page: Page) {
-  await page.waitForFunction(() => !Array.from(document.querySelectorAll(".settings-dialog .ant-btn-loading, .settings-page .ant-btn-loading, .settings-page .ant-spin-spinning"))
-    .some((element) => element.getClientRects().length));
-}
 async function selectRoutingMode(page: Page, purpose: string, mode: string) {
   await page.locator(`[data-routing-purpose="${purpose}"]:visible .routing-mode`).click();
   await page.locator(".ant-select-dropdown:visible").getByText(mode, { exact: true }).click();
@@ -265,11 +261,9 @@ try {
         assert.equal(f.state.requests.filter((request) => request.path === "/target" && request.method === "PUT").length, 0);
       } finally { await f.close(); }
     });
-    await test(`${client} settings UX protects allocation drafts and keeps global capabilities independent`, async () => {
+    await test(`${client} model page stays instance-scoped and saves only global capabilities`, async () => {
       const f = await fixture(desktop);
       try {
-        f.state.overrides.set("/groups/default/agents", (_, fulfill) => fulfill([{ identifier: "member", name: "Member", description: "Reviews code", tools: [], capabilities: [] }]));
-        f.state.overrides.set("/singles/machina/model-routing", (_, fulfill) => fulfill({ policies: [] }));
         f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", profiles: [{ ...profile, models: [{ model: "small", purposes: ["speech"], vision: false, audio: true }] }] }));
         let capabilities = { speech: "", transcribe: "", visionRelay: "", embedding: "" };
         f.state.overrides.set("/llm/capabilities", (route, fulfill) => {
@@ -277,14 +271,8 @@ try {
           return fulfill(capabilities);
         });
         await openSettings(f.page, desktop, "模型");
-        await f.page.getByRole("tab", { name: "智能体分配", exact: true }).click();
-        await selectRoutingMode(f.page, "default", "由指挥体分配");
-        await f.page.locator(".allocation-workspace .settings-object-list button").filter({ hasText: "Default / Member" }).click();
-        await f.page.getByRole("button", { name: "继续编辑", exact: true }).click();
-        assert.ok((await f.page.locator('[data-routing-purpose="default"] .routing-mode').innerText()).includes("由指挥体分配"));
-        await f.page.locator(".allocation-workspace .settings-object-list button").filter({ hasText: "Default / Member" }).click();
-        await f.page.getByRole("button", { name: "放弃修改", exact: true }).click();
-        await f.page.locator(".allocation-workspace h3").filter({ hasText: "Default / Member" }).waitFor();
+        assert.equal(await f.page.getByRole("tab", { name: "智能体分配", exact: true }).count(), 0);
+        assert.equal(await f.page.locator(".allocation-workspace").count(), 0);
         await f.page.getByRole("tab", { name: "全局能力", exact: true }).click();
         await f.page.getByRole("combobox", { name: "语音合成（TTS）", exact: true }).click();
         await f.page.locator(".ant-select-dropdown:visible .ant-select-item-option").filter({ hasText: "Fixture / small" }).click();
@@ -410,38 +398,6 @@ try {
       await f.page.locator(".provider-workspace").waitFor();
     } finally { await f.close(); }
   });
-  await test("Desktop settings UX refreshes saved rules across tabs while retaining unsaved drafts", async () => {
-    const f = await fixture(true);
-    try {
-      const agent = { identifier: "machina", name: "Fixture Agent", description: "Product assistant", domain: "", modelRouting: null as ModelRouting | null };
-      f.state.overrides.set("/singles", (_, fulfill) => fulfill({ singles: [agent] }));
-      f.state.overrides.set("/singles/machina/model-routing", (route, fulfill) => {
-        if (route.request().method() === "PUT") agent.modelRouting = route.request().postDataJSON() as ModelRouting;
-        return fulfill({ policies: [] });
-      });
-      f.state.overrides.set("/singles/machina/prompt", (_, fulfill) => fulfill({ prompt: "Help the user." }));
-      f.state.overrides.set("/singles/machina/persona", (_, fulfill) => fulfill({ persona: "Friendly", custom: false }));
-      f.state.overrides.set("/groups/default/agents", (_, fulfill) => fulfill([]));
-      await openSettings(f.page, true, "模型");
-      await f.page.getByRole("tab", { name: "智能体分配", exact: true }).click();
-      await selectRoutingMode(f.page, "default", "由指挥体分配");
-      await f.page.getByRole("tab", { name: "智能体", exact: true }).click();
-      await f.page.getByRole("tab", { name: "模型", exact: true }).click();
-      assert.ok((await f.page.locator('[data-routing-purpose="default"]:visible .routing-mode').innerText()).includes("由指挥体分配"));
-      await f.page.locator(".routing-save").getByRole("button", { name: "保存", exact: true }).click();
-      await waitForSettingsSave(f.page);
-      await f.page.getByRole("tab", { name: "智能体", exact: true }).click();
-      await f.page.locator(".agent-directory-card").filter({ hasText: "Fixture Agent" }).getByRole("button", { name: /模型与能力/ }).click();
-      await selectRoutingMode(f.page, "default", "继承默认配置");
-      await f.page.locator(".settings-dialog").getByRole("button", { name: "保存", exact: true }).click();
-      await waitForSettingsSave(f.page);
-      await f.page.locator(".settings-dialog .ant-modal-close").click();
-      await f.page.getByRole("tab", { name: "模型", exact: true }).click();
-      await waitForSettingsSave(f.page);
-      await eventually(async () => (await f.page.locator('[data-routing-purpose="default"]:visible .routing-mode').innerText()).includes("继承默认配置"), "Returning to allocation should refresh saved rules");
-      assert.equal(f.state.requests.filter((request) => request.path === "/target" && request.method === "PUT").length, 0);
-    } finally { await f.close(); }
-  });
   await test("WebUI settings directory searches model catalogs and agent profiles", async () => {
     const f = await fixture();
     try {
@@ -477,6 +433,79 @@ try {
       await screenshot(f.page, "webui-settings-agent-directory");
     } finally { await f.close(); }
   });
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 420, height: 820 }, { width: 420, height: 480 }]) {
+    await test(`WebUI console keeps every route inside a compact viewport ${viewport.width}x${viewport.height}`, async () => {
+      const f = await fixture(false, viewport);
+      try {
+        f.state.sessions.push(...Array.from({ length: 18 }, (_, index) => makeSession(`layout-${index}`)),
+          { ...makeSession("layout-job"), title: "job-layout" });
+        f.state.overrides.set("/singles", (_, fulfill) => fulfill({ active: "machina", singles: Array.from({ length: 12 }, (_, index) => ({
+          identifier: `agent-${index}`, name: `Fixture Agent ${index}`, description: "Compact layout fixture",
+          domain: "test", modelHint: "test/small", modelRouting: null,
+        })) }));
+        f.state.overrides.set("/groups", (_, fulfill) => fulfill({ active: "default", groups: [{ id: "default", name: "Default", builtin: true, description: "Fixture group" }] }));
+        f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", mock: true, profiles: [{ ...profile, models: [{ model: "small", vision: true, audio: false, cost: "economy" }] }] }));
+        f.state.overrides.set("/memory/md", (_, fulfill) => fulfill({ content: "fixture memory", path: "/fixture/memory.md" }));
+        f.state.overrides.set("/memory", (_, fulfill) => fulfill(Array.from({ length: 12 }, (_, index) => ({
+          id: `memory-${index}`, kind: index % 2 ? "fact" : "decision", scope: "group", title: `Long fixture memory ${index} — compact display check`,
+          body: "A dense but readable memory entry with enough text to verify that content wraps within its table cell instead of widening the console. ".repeat(2),
+          tags: ["fixture", "layout"], importance: 0.8, confidence: 0.9, pinned: index === 0, createdAt: "2026-11-18T00:00:00Z", updatedAt: "2026-11-18T00:00:00Z", accessCount: index,
+        }))));
+        f.state.overrides.set("/memory/stats", (_, fulfill) => fulfill({ memory: { total: 24, pinned: 3, individual: 14, shared: 10, terms: 30, byKind: {}, dbPath: "/fixture/memory.sqlite" }, agentStats: [{ agentId: "fixture-agent-with-a-long-name", runs: 18, done: 13, blocked: 2, failed: 3, avgConfidence: 0.83, updatedAt: "2026-11-18T00:00:00Z" }] }));
+        f.state.overrides.set("/knowledge", (_, fulfill) => fulfill({ total: 12, items: Array.from({ length: 8 }, (_, index) => ({
+          id: `knowledge-${index}`, title: `Long fixture knowledge item ${index}`, body: "Shared knowledge content that should wrap within a compact list row. ".repeat(2), tags: ["fixture", "reference"], sourceAgent: "fixture-agent-with-a-long-name", hits: 8, createdAt: "2026-11-18T00:00:00Z", updatedAt: "2026-11-18T00:00:00Z",
+        })) }));
+        f.state.overrides.set("/skills", (_, fulfill) => fulfill(Array.from({ length: 9 }, (_, index) => ({
+          id: `skill-${index}`, name: `Long fixture skill ${index}`, description: "A short skill description for checking card density.", triggers: ["review", "verify"], instructions: "Detailed skill steps remain collapsed until requested.\n".repeat(8), agents: [], createdAt: "2026-11-18T00:00:00Z", useCount: 14, successCount: 12,
+        }))));
+        f.state.overrides.set("/plugins", (_, fulfill) => fulfill({ plugins: Array.from({ length: 8 }, (_, index) => ({ id: `plugin-${index}`, name: `Long fixture plugin ${index}`, version: "1.0.0", description: "A plugin summary that should stay compact in a responsive card grid.", form: "declarative", enabled: true, capabilities: { tools: 2, watch: false, resources: 0, process: false } })) }));
+        f.state.overrides.set("/plugins/index", (_, fulfill) => fulfill({ entries: Array.from({ length: 8 }, (_, index) => ({ id: `catalog-${index}`, name: `Catalog fixture ${index}`, version: "1.0.0", description: "Plugin catalog description wraps inside its table cell.", status: "available" })), indexUrl: "fixture" }));
+        f.state.overrides.set("/cron", (_, fulfill) => fulfill(Array.from({ length: 8 }, (_, index) => ({ id: `cron-${index}`, name: `Long scheduled task ${index}`, prompt: "Fixture task prompt", kind: "cron", cron: "0 9 * * *", group: "default", enabled: true, createdAt: "2026-11-18T00:00:00Z", nextRunAt: "2026-11-19T09:00:00Z", lastStatus: "done" }))));
+        f.state.overrides.set("/audit", (_, fulfill) => fulfill({ items: Array.from({ length: 12 }, (_, index) => ({ id: `audit-${index}`, callId: `call-${index}`, tool: `tool-${index}`, agentId: "fixture-agent-with-a-long-name", ok: index % 4 !== 0, summary: "Fixture audit summary containing enough information to wrap safely on narrow displays.", args: { path: "/fixture/a-very-long-file-name.rs" }, createdAt: "2026-11-18T00:00:00Z", durationMs: 240 })) }));
+        f.state.overrides.set("/nexus/links", (_, fulfill) => fulfill({ links: Array.from({ length: 6 }, (_, index) => ({ id: `nexus-${index}`, name: `External connection ${index}`, kind: "custom", command: "external-agent --run", enabled: true })) }));
+        f.state.overrides.set("/nexus/graph", (_, fulfill) => fulfill({ nodes: Array.from({ length: 8 }, (_, index) => ({ id: `nexus-${index}`, name: `External agent ${index}`, kind: "custom", enabled: true })), edges: Array.from({ length: 8 }, (_, index) => ({ agentId: `agent-${index}`, agentName: `Long fixture agent name ${index}`, linkId: `nexus-${index}` })) }));
+        f.state.overrides.set("/nexus/status", (_, fulfill) => fulfill({ links: [], edges: [] }));
+        f.state.overrides.set("/identity/list", (_, fulfill) => fulfill({ identityRequired: true, identities: Array.from({ length: 6 }, (_, index) => ({ id: `identity-${index}`, channel: `channel-${index}`, externalId: `external-id-${index}`, displayName: `Long paired user name ${index}`, role: "member", pairedAt: "2026-11-18T00:00:00Z", note: "fixture" })), codes: Array.from({ length: 6 }, (_, index) => ({ code: `pair-${index}`, note: `Long fixture pairing note ${index}`, platform: "napcat", createdAt: "2026-11-18T00:00:00Z", expiresAtMs: Date.now() + 60_000, expired: false, role: "member" })) }));
+        f.state.approvals = Array.from({ length: 8 }, (_, index) => ({ id: `approval-${index}`, sessionId: "a", agentId: `fixture-agent-${index}`, command: `cargo test --package fixture-crate --test a-very-long-test-name-${index} -- --nocapture`, status: "pending" }));
+        f.state.overrides.set("/channels", (_, fulfill) => fulfill(Array.from({ length: 5 }, (_, index) => ({ id: `channel-${index}`, type: "napcat", enabled: true, account: `Fixture account ${index}`, group: "default", capability: "chat", createdAt: "2026-11-18T00:00:00Z" }))));
+        f.state.overrides.set("/channels/status", (_, fulfill) => fulfill(Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`channel-${index}`, { state: "ok", detail: "Fixture channel online", at: "2026-11-18T00:00:00Z" }]))));
+        f.state.overrides.set("/channels/flows", (_, fulfill) => fulfill(Array.from({ length: 8 }, (_, index) => ({ id: `flow-${index}`, channelId: `channel-${index % 5}`, chatKey: `group-${index}`, displayName: `Long external conversation ${index}`, isGroup: true, activeSession: `layout-${index}`, unread: index, lastMessage: "A compact preview of a long fixture conversation.", lastActiveAt: "2026-11-18T00:00:00Z", createdAt: "2026-11-18T00:00:00Z" }))));
+        await f.page.evaluate(async (url) => {
+          const { useExm } = await import(url) as typeof import("../webui/src/store");
+          const current = useExm.getState().config;
+          if (current) useExm.setState({ config: { ...current, memory: { ...current.memory, enabled: true } } });
+        }, storeUrl(f.page));
+        const routes = ["chat", "flows", "tasks", "agent", "nexus", "sessions", "graph", "automations", "skills", "plugins", "models", "approvals", "ledger", "memory", "knowledge", "activity", "settings"];
+        const contentSelectors: Record<string, string> = {
+          chat: ".chat-shell", flows: ".flows-rail .flow-item", tasks: ".flows-rail .flow-item", agent: ".agent-directory-card",
+          nexus: ".ant-table", sessions: ".sessions-tr", graph: ".graph-empty", automations: ".ant-table-tbody > .ant-table-row",
+          skills: ".skill-card", plugins: ".card-grid .ant-card", models: ".provider-model-entry", approvals: ".ant-table-tbody > .ant-table-row",
+          ledger: ".ledger-wrap .ant-card", memory: ".memory-stats", knowledge: ".memory-hits .ant-list-item", activity: ".event-stream", settings: ".cfg-panel",
+        };
+        for (const route of routes) {
+          await f.page.evaluate((next) => { location.hash = `#/${next}`; }, route);
+          await f.page.waitForFunction((expected) => document.querySelector(".app-shell")?.getAttribute("data-view") === expected, route);
+          await f.page.waitForFunction(() => !document.querySelector(".view-loading"));
+          await f.page.locator(contentSelectors[route]).first().waitFor({ state: route === "flows" ? "attached" : "visible", timeout: 10_000 });
+          const layout = await f.page.evaluate(() => {
+            const shell = document.querySelector<HTMLElement>(".app-shell")!;
+            const content = document.querySelector<HTMLElement>(".app-content")!;
+            const main = content.getBoundingClientRect();
+            return {
+              shellOverflow: shell.scrollWidth > innerWidth + 1,
+              contentOverflow: content.scrollWidth > content.clientWidth + 1,
+              mainOutsideViewport: main.left < -1 || main.right > innerWidth + 1 || main.bottom > innerHeight + 1,
+              hiddenByFooter: !!document.querySelector(".telemetry-bar") && getComputedStyle(document.querySelector(".telemetry-bar")!).display !== "none" && main.bottom > document.querySelector(".telemetry-bar")!.getBoundingClientRect().top + 1,
+            };
+          });
+          assert.equal(layout.shellOverflow, false, `${route} overflows shell: ${JSON.stringify(layout)}`);
+          assert.equal(layout.contentOverflow, false, `${route} overflows content: ${JSON.stringify(layout)}`);
+          assert.equal(layout.mainOutsideViewport, false, `${route} escapes viewport: ${JSON.stringify(layout)}`);
+          assert.equal(layout.hiddenByFooter, false, `${route} is obscured by telemetry: ${JSON.stringify(layout)}`);
+        }
+      } finally { await f.close(); }
+    });
+  }
   for (const desktop of [false, true]) for (const viewport of [{ width: 1440, height: 900 }, { width: 420, height: 820 }, { width: 420, height: 480 }]) {
     await test(`${desktop ? "Desktop" : "WebUI"} settings layout keeps fields and save actions reachable ${viewport.width}x${viewport.height}`, async () => {
       const f = await fixture(desktop, viewport);
@@ -504,39 +533,40 @@ try {
     });
   }
   for (const desktop of [false, true]) {
-    await test(`${desktop ? "Desktop" : "WebUI"} model allocation saves the selected agent and capability`, async () => {
+    await test(`${desktop ? "Desktop" : "WebUI"} model rules are configured inside the agent's own settings`, async () => {
       const f = await fixture(desktop);
       try {
+        const agent = { identifier: "machina", name: "Fixture Agent", description: "fixture", domain: "test", modelRouting: null as ModelRouting | null };
         const models = [{ model: "small", vision: false, audio: false, purposes: ["chat", "coding"], cost: "economy", autoEligible: true, usageNotes: "Routine coding and summaries" }];
         f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", mock: true, profiles: [{ ...profile, models }] }));
-        f.state.overrides.set("/groups/default/agents", (_, fulfill) => fulfill([{ identifier: "member", name: "Member", description: "fixture", tier: "unit", tools: [], capabilities: [] }]));
-        f.state.overrides.set("/singles/machina/model-routing", (route, fulfill) => fulfill(route.request().method() === "PUT" ? { ok: true } : { policies: [] }));
+        f.state.overrides.set("/singles", (_, fulfill) => fulfill({ active: "machina", singles: [agent] }));
+        f.state.overrides.set("/singles/machina/model-routing", (route, fulfill) => {
+          if (route.request().method() === "PUT") agent.modelRouting = route.request().postDataJSON() as ModelRouting;
+          return fulfill({ ...(route.request().method() === "PUT" ? { ok: true } : {}), policies: [] });
+        });
+        f.state.overrides.set("/singles/machina/prompt", (_, fulfill) => fulfill({ prompt: "Help the user." }));
+        f.state.overrides.set("/singles/machina/persona", (_, fulfill) => fulfill({ persona: "Friendly", custom: false }));
         if (desktop) {
           await f.page.getByRole("button", { name: "设置", exact: true }).click();
-          await f.page.getByRole("tab", { name: "模型", exact: true }).click();
-        } else await f.page.evaluate(() => { location.hash = "#/models"; });
-        await f.page.getByText("智能体分配", { exact: true }).click();
-        await f.page.locator('.allocation-workspace .settings-object-list button').filter({ hasText: "Fixture Agent" }).click();
-        const defaultRow = f.page.locator('[data-routing-purpose="default"]');
+          await f.page.getByRole("tab", { name: "智能体", exact: true }).click();
+        } else await f.page.evaluate(() => { location.hash = "#/agent"; });
+        await f.page.locator(".agent-directory-card").filter({ hasText: "Fixture Agent" }).getByRole("button", { name: /配置智能体/ }).click();
+        const dialog = f.page.locator(".settings-dialog");
+        await settingsSection(f.page, "模型与能力");
+        const defaultRow = dialog.locator('[data-routing-purpose="default"]');
         await defaultRow.locator(".routing-mode").click(); await f.page.getByText("由指挥体分配", { exact: true }).last().click();
-        const speechRow = f.page.locator('[data-routing-purpose="speech"]');
-        await f.page.getByRole("tab", { name: /多模态与检索/ }).click();
+        await dialog.getByRole("tab", { name: /多模态与检索/ }).click();
+        const speechRow = dialog.locator('[data-routing-purpose="speech"]');
         await speechRow.locator(".routing-mode").click(); await f.page.getByText("关闭此能力", { exact: true }).last().click();
-        await f.page.locator(".routing-purpose-tabs .ant-tabs-tab").nth(2).click();
-        await f.page.getByRole("textbox", { name: "给指挥体的分配说明", exact: true }).fill("Routine tasks use the economy model.");
-        await f.page.locator(".routing-save .ant-btn-primary").click();
+        await dialog.locator(".routing-purpose-tabs .ant-tabs-tab").nth(2).click();
+        await dialog.getByRole("textbox", { name: "给指挥体的分配说明", exact: true }).fill("Routine tasks use the economy model.");
+        await dialog.getByRole("button", { name: "保存", exact: true }).click();
         await eventually(() => f.state.requests.some((r) => r.path === "/singles/machina/model-routing" && r.method === "PUT"), "Agent allocation was not saved");
         const saved = f.state.requests.findLast((r) => r.path === "/singles/machina/model-routing" && r.method === "PUT")!.body as { default: { mode: string }; purposes: { speech: { mode: string } }; instructions: string };
         assert.equal(saved.default.mode, "auto"); assert.equal(saved.purposes.speech.mode, "disabled"); assert.ok(saved.instructions.includes("economy"));
         assert.equal(f.state.requests.filter((r) => r.path === "/llm/capabilities" && r.method === "PUT").length, 0);
-        f.state.overrides.set("/groups/default/agents/member/model-routing", (route, fulfill) => fulfill(route.request().method() === "PUT" ? { ok: true } : { policies: [] }));
-        await f.page.locator('.allocation-workspace .settings-object-list button').filter({ hasText: "Default / Member" }).click();
-        await f.page.getByRole("tab", { name: /多模态与检索/ }).click();
-        await speechRow.locator(".routing-mode").click(); await f.page.getByText("关闭此能力", { exact: true }).last().click();
-        await f.page.locator(".routing-save .ant-btn-primary").click();
-        await eventually(() => f.state.requests.some((r) => r.path === "/groups/default/agents/member/model-routing" && r.method === "PUT"), "Group member allocation was not saved");
         assert.equal(f.state.requests.filter((r) => r.path === "/target" && r.method === "PUT").length, 0);
-        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-agent-allocation`);
+        await screenshot(f.page, `${desktop ? "desktop" : "webui"}-agent-owned-model-settings`);
       } finally { await f.close(); }
     });
     await test(`${desktop ? "Desktop" : "WebUI"} client identity saves, reloads, validates and resets`, async () => {

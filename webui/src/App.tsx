@@ -382,13 +382,16 @@ export default function App(): React.ReactElement {
 
   return (
     <SubbarSlotContext.Provider value={subbarSlot}>
-      <div className="app-shell">
-      {/* 移动端抽屉开关（桌面隐藏） */}
-      <button className="mobile-nav-btn" onClick={() => setNavOpen(!navOpen)} aria-label="menu">
+      <div className="app-shell" data-view={view}>
+      <header className="mobile-appbar">
+      <button className="mobile-nav-btn" onClick={() => setNavOpen(!navOpen)} aria-label="menu" aria-expanded={navOpen} aria-controls="app-navigation">
         {navOpen ? <CloseOutlined /> : <MenuOutlined />}
       </button>
+      <span>{t(NAV_ITEMS.find((item) => item.key === view)!.labelKey)}</span>
+      <span className="mobile-appbar-brand">EX·MACHINA</span>
+      </header>
       {navOpen && <div className="nav-mask" onClick={() => setNavOpen(false)} />}
-      <aside className={`app-sider ${navOpen ? "open" : ""} top-open`}>
+      <aside id="app-navigation" className={`app-sider ${navOpen ? "open" : ""} top-open`}>
         {/* 字符流放在侧栏背景里（见 styles.css 的层级说明） */}
         <CharStream />
         {/* 品牌区：LED + 名称一行，副标语保留独立第二行（2026-11 回退：
@@ -519,7 +522,7 @@ export default function App(): React.ReactElement {
           <div className="sider-subpanel" ref={setSubbarSlot} />
         </aside>
       )}
-      {/* 底边遥测条：position:fixed 通栏贴窗口底，不参与 .app-shell 的 flex 布局 */}
+      {/* Telemetry occupies its own grid row, never overlays content. */}
       <TelemetryBar />
       {/* 全局会话速查（Ctrl/Cmd+K）：Modal 自带 portal，挂根部即可 */}
       <CommandPalette />

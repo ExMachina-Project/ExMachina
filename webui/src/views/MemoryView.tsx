@@ -7,17 +7,14 @@ import {
   Button,
   Card,
   Checkbox,
-  Col,
   Descriptions,
   Input,
   List,
   message,
   Modal,
   Popconfirm,
-  Row,
   Select,
   Space,
-  Statistic,
   Table,
   Tag,
   Tooltip,
@@ -33,7 +30,7 @@ import {
 import { api, type LlmProfile, type MemoryEntry, type MemoryStats, type RecallHit } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { useExm } from "../store";
-import { useT } from "../i18n/core";
+import { tr, useT } from "../i18n/core";
 
 function MdEditor(): React.ReactElement {
   const t = useT();
@@ -49,11 +46,13 @@ function MdEditor(): React.ReactElement {
         const resp = await fetch("/api/memory/md", {
           headers: key ? { "X-Auth-Key": key } : {},
         });
-        const data = (await resp.json()) as { content: string; path: string; deepEnabled?: boolean };
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = (await resp.json()) as { content?: string; path?: string; deepEnabled?: boolean };
+        if (typeof data.content !== "string") throw new Error("Invalid memory response");
         setContent(data.content);
-        setPath(data.path);
+        setPath(typeof data.path === "string" ? data.path : "");
       } catch (e) {
-        message.error(t("memory.mdReadFailed", { err: String(e) }));
+        message.error(tr("memory.mdReadFailed", { err: String(e) }));
       }
     })();
   }, []);
@@ -229,28 +228,14 @@ export function MemoryView(): React.ReactElement {
         title={t("nav.memory")}
         desc={t("memory.desc")}
       />
-      <Row gutter={[16, 16]} align="stretch">
-        <Col xs={12} md={6}>
-          <Card size="small" className="memory-stat">
-            <Statistic title={t("memory.statTotal")} value={stats?.memory?.total ?? 0} />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" className="memory-stat">
-            <Statistic title={t("memory.statShared")} value={stats?.memory?.shared ?? 0} />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" className="memory-stat">
-            <Statistic title={t("memory.statIndividual")} value={stats?.memory?.individual ?? 0} />
-          </Card>
-        </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" className="memory-stat">
-            <Statistic title={t("memory.statPinned")} value={stats?.memory?.pinned ?? 0} />
-          </Card>
-        </Col>
-      </Row>
+      <div className="memory-stats" aria-label={t("memory.statTotal")}>
+        {[
+          [t("memory.statTotal"), stats?.memory?.total ?? 0],
+          [t("memory.statShared"), stats?.memory?.shared ?? 0],
+          [t("memory.statIndividual"), stats?.memory?.individual ?? 0],
+          [t("memory.statPinned"), stats?.memory?.pinned ?? 0],
+        ].map(([label, value]) => <div className="memory-stat-item" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+      </div>
 
       <Card
         size="small"
