@@ -16,7 +16,7 @@ impl ToolGateway {
         args: &serde_json::Value,
     ) -> ToolResult {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let root = self.effective_root();
+        let root = self.workspace_for_session(session_id);
         // 工作区仓库检测：.git 目录或文件（worktree）存在才可用
         if !root.join(".git").exists() {
             return ToolResult::err(format!(

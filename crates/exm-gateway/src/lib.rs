@@ -246,6 +246,9 @@ async fn auth_middleware(
     }
 }
 
+mod project_scope;
+mod collaborations;
+
 
 pub fn build_router(core: Arc<Core>) -> Router {
     let state = AppState { core: core.clone() };
@@ -338,6 +341,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         )
         .merge(platform::routes())
         .merge(editor::routes())
+        .merge(collaborations::routes())
         .merge(llm_admin::routes())
         .merge(model_routing::routes())
         .merge(plugin_admin::routes())
@@ -378,6 +382,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         // 工作区资产（截图 / 工具输出落盘）：沙箱内只读，聊天工具卡内联预览
         .route("/api/asset", get(get_asset))
         .route("/api/asset/download", get(download_asset))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), project_scope::scope))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

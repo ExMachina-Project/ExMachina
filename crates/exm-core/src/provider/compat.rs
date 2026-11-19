@@ -189,6 +189,49 @@ impl OpenAiCompatibleProvider {
         self.build_request(key, &request.model, stream, self.body(request, stream))
     }
 
+    /// Preserve typed causes, but never expose credential-bearing request URLs.
+    /// Detailed transport diagnostics go to the gateway log, not the public message.
+    pub fn transport_error(context: &str, error: reqwest::Error) -> anyhow::Error {
+        let category = if error.is_timeout() {
+            "请求超时，请稍后重试"
+        } else if error.is_connect() {
+            "连接失败，请检查 DNS、网络、代理或 TLS"
+        } else {
+            "传输失败，请稍后重试"
+        };
+        let error = anyhow::Error::new(error.without_url());
+        eprintln!("[llm-provider] {context}: {error:#}");
+        error.context(format!("{context}：{category}（详情见网关日志）"))
+    }
+
+    pub(super) async fn send_with_connect_retry(
+        request: reqwest::RequestBuilder,
+        context: &str,
+    ) -> anyhow::Result<reqwest::Response> {
+        // Clone once so a retry cannot change the key, model, protocol, identity or body.
+        // Only connection establishment failures qualify: a timeout/transmission error
+        // after sending may mean the upstream already processed the POST. Never replay it.
+        let retry = request.try_clone();
+        match request.send().await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let is_connect = error.is_connect();
+                let error = Self::transport_error(context, error);
+                if is_connect {
+                    if let Some(retry) = retry {
+                        eprintln!("[llm-provider] {context}: 连接失败，250ms 后重试一次");
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        return retry
+                            .send()
+                            .await
+                            .map_err(|error| Self::transport_error(context, error));
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn chat_uses_stream(&self) -> bool {
         self.api_format == "responses"
             && self.identity.preset == crate::config::ClientIdentityPreset::Codex
@@ -1092,11 +1135,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let mut last_err = String::new();
         for _ in 0..self.keys.len() {
             let key = self.key_for(&hint);
-            let resp = self
-                .build_request(&key, &req.model, false, self.body(&req, false))
-                .send()
-                .await
-                .map_err(|e| anyhow::anyhow!("LLM 请求失败: {e}"))?;
+            let resp = Self::send_with_connect_retry(
+                self.chat_http_request(&key, &req, false),
+                "LLM 请求失败",
+            )
+            .await?;
             let status = resp.status().as_u16();
             if !(200..300).contains(&status) {
                 let text = resp.text().await.unwrap_or_default();
@@ -1139,11 +1182,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
             let mut ok: Option<reqwest::Response> = None;
             for _ in 0..self.keys.len().max(1) {
                 let key = self.key_for(&hint);
-                let r = self
-                    .build_request(&key, &req.model, true, self.body(&req, true))
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("LLM 流式请求失败: {e}"))?;
+                let r = Self::send_with_connect_retry(
+                    self.chat_http_request(&key, &req, true),
+                    "LLM 流式请求失败",
+                )
+                .await?;
                 let status = r.status().as_u16();
                 if (200..300).contains(&status) {
                     ok = Some(r);
@@ -1215,7 +1258,8 @@ impl OpenAiCompatibleProvider {
             let Some(chunk) = stream.next().await else {
                 break;
             };
-            let bytes = chunk?;
+            let bytes =
+                chunk.map_err(|error| Self::transport_error("LLM 流式响应读取失败", error))?;
             for line in sse.feed(&bytes) {
                 if !line.starts_with("data:") {
                     continue;

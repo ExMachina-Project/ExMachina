@@ -68,7 +68,7 @@ cargo run -p exm-cli --release --bin exm -- agents
 > Docker：`docker compose up --build`（编成与状态卷持久化，详见 [docker-compose.yml](./docker-compose.yml)）。
 
 > **桌面端**（Tauri 壳，自带本地网关 / `--remote` 远程直连）：对话与全部管理均为原生界面，零 webui 依赖——见 [desktop/README.md](./desktop/README.md)。
-> **移动端**：无需单独 App——手机浏览器 / PWA 打开网关地址（服务器部署的网关同端口托管 WebUI / API / WS）即为同源客户端。
+> **客户端边界**：浏览器访问网关地址进入当前实例的 WebUI 管理台；桌面和移动应用使用独立界面，通过 IP/域名与访问密钥连接实例后端。独立移动应用仍在开发中，WebUI/PWA 不等同于移动客户端。
 
 ## 人设自由：理性或感性，都只是一份 SOUL
 

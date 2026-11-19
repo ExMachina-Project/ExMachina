@@ -132,6 +132,10 @@ pub struct BrowserSession {
 }
 
 impl BrowserSession {
+    pub fn belongs_to(&self, workspace_root: &Path) -> bool {
+        self.user_data_dir == workspace_root.join(".exmachina").join("browser")
+    }
+
     /// 拉起浏览器并连上第一个页面目标
     pub async fn launch(cfg: &BrowserConfig, workspace_root: &Path) -> anyhow::Result<Self> {
         let exe = find_browser(&cfg.executable).context(

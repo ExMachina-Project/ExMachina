@@ -17,9 +17,13 @@ impl ToolGateway {
                 None => ToolResult::ok("浏览器未启动"),
             };
         }
+        let root = self.workspace_for_session(session_id);
         let mut guard = self.browser.lock().await;
+        if guard.as_ref().is_some_and(|session| !session.belongs_to(&root)) {
+            if let Some(mut previous) = guard.take() { previous.shutdown(); }
+        }
         if guard.is_none() {
-            match crate::browser::BrowserSession::launch(&self.browser_cfg, &self.workspace_root)
+            match crate::browser::BrowserSession::launch(&self.browser_cfg, &root)
                 .await
             {
                 Ok(s) => *guard = Some(s),
@@ -79,7 +83,7 @@ impl ToolGateway {
             }
             "screenshot" => {
                 let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                match session.screenshot(&self.workspace_root, name).await {
+                match session.screenshot(&root, name).await {
                     Ok(rel) => {
                         // 产物登记（D12）：截图自动进入会话 outbox，通道投递
                         let _ = self

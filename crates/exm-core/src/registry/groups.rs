@@ -150,6 +150,9 @@ impl LocalRegistry {
 
     /// 生效工作区根：显式工作目录 > 激活组声明 > 全局根（相对路径相对全局根解析）
     pub fn effective_workspace(&self, global_root: &std::path::Path) -> std::path::PathBuf {
+        if let Some(root) = crate::workspace::current() {
+            return root;
+        }
         let resolve = |ws: Option<String>| -> Option<PathBuf> {
             let rel = ws?;
             let trimmed = rel.trim();

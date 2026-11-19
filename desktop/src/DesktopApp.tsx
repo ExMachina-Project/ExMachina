@@ -2,18 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, App, Button, Dropdown, Input, Modal, Skeleton, Tooltip } from "antd";
 import {
   BranchesOutlined, CloseOutlined, CodeOutlined, FolderOpenOutlined, MenuFoldOutlined,
-  MenuUnfoldOutlined, MinusOutlined, PlusOutlined, SettingOutlined, MessageOutlined, BorderOutlined,
+  MenuUnfoldOutlined, MinusOutlined, PlusOutlined, SettingOutlined, MessageOutlined, BorderOutlined, UnorderedListOutlined, TeamOutlined,
 } from "@ant-design/icons";
-import { open as openDirectory } from "@tauri-apps/plugin-dialog";
-import { useExm } from "../../webui/src/store";
-import { api } from "../../webui/src/api";
-import { editorApi } from "../../webui/src/api/editor";
-import { desktopInvoke, type DesktopConfig } from "../../webui/src/desktop";
-import { isTaskSideTitle } from "../../webui/src/session";
+import { desktopInvoke } from "./native";
+import { isTaskSideTitle } from "../../client/src/session";
+import { useProjectClient, type Project } from "./projects";
 import { DesktopChat } from "./DesktopChat";
-import { DesktopSettings } from "./DesktopSettings";
+import { DesktopCollaboration } from "./DesktopCollaboration";
 import { CodeEditor, ProjectPanel, type OpenFile, type ProjectTab } from "./CodeWorkspace";
-import type { Session } from "../../webui/src/types";
+import type { Session } from "../../client/src/types";
+import { ProjectSessionsDrawer } from "./ProjectSessionsDrawer";
+import { AgentWorkDrawer } from "../../client/src/components/AgentWorkDrawer";
 
 const fileView = (path: string) => `file:${path}`;
 
@@ -32,13 +31,15 @@ function TitleBar({ onSettings }: { onSettings: () => void }) {
   </header>;
 }
 
-function SessionSidebar({ collapsed, onToggle, onSelected }: { collapsed: boolean; onToggle: () => void; onSelected: () => void }) {
+function SessionSidebar({ active, collapsed, onToggle, onSelected }: { active: boolean; collapsed: boolean; onToggle: () => void; onSelected: () => void }) {
+  const { store: useExm, client: { api } } = useProjectClient();
   const { sessions, sessionId, selectSession, newSession, running } = useExm();
   const { message, modal } = App.useApp();
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<Session | null>(null);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
+  const [managerOpen, setManagerOpen] = useState(false);
   const filtered = sessions.filter((session) => !session.archivedAt && !session.title.startsWith("channel:") && !isTaskSideTitle(session.title)
     && session.title.toLowerCase().includes(query.toLowerCase()));
   const select = async (id: string) => {
@@ -68,7 +69,7 @@ function SessionSidebar({ collapsed, onToggle, onSelected }: { collapsed: boolea
     },
   });
   return <aside className={`desk-sessions ${collapsed ? "collapsed" : ""}`} aria-label="会话列表">
-    <div className="desk-sessions-head"><b>会话</b><Tooltip title="收起会话栏"><Button type="text" size="small" aria-label="收起会话栏" icon={<MenuFoldOutlined />} onClick={onToggle} /></Tooltip></div>
+    <div className="desk-sessions-head"><b>会话</b><span><Tooltip title="管理会话"><Button type="text" size="small" aria-label="管理会话" icon={<UnorderedListOutlined />} onClick={() => setManagerOpen(true)} /></Tooltip><Tooltip title="收起会话栏"><Button type="text" size="small" aria-label="收起会话栏" icon={<MenuFoldOutlined />} onClick={onToggle} /></Tooltip></span></div>
     <Button className="desk-new-session" icon={<PlusOutlined />} onClick={() => void newSession().then(onSelected).catch((error: unknown) => message.error(String(error)))}>新任务</Button>
     <Input.Search allowClear placeholder="搜索会话" value={query} onChange={(event) => setQuery(event.target.value)} />
     <nav>{filtered.map((session) => <div key={session.id} className={`desk-session ${session.id === sessionId ? "active" : ""}`}>
@@ -85,36 +86,41 @@ function SessionSidebar({ collapsed, onToggle, onSelected }: { collapsed: boolea
         <Button className="desk-session-menu" type="text" size="small" aria-label={`${session.title} 的操作`}>···</Button>
       </Dropdown>
     </div>)}</nav>
-    <Modal open={!!renaming} title="重命名会话" confirmLoading={saving} onCancel={() => setRenaming(null)} onOk={() => void rename()}>
+    <Modal open={active && !!renaming} title="重命名会话" confirmLoading={saving} onCancel={() => setRenaming(null)} onOk={() => void rename()}>
       <Input autoFocus aria-label="会话名称" value={title} onChange={(event) => setTitle(event.target.value)} onPressEnter={() => void rename()} />
     </Modal>
+    {active && managerOpen && <ProjectSessionsDrawer onClose={() => setManagerOpen(false)} onSelected={onSelected} />}
   </aside>;
 }
 
-function ContextRail({ onClose }: { onClose: () => void }) {
-  const { sessions, sessionId, messages, running, graph, runToolCalls, ledger, todo, timeline } = useExm();
+function ContextRail({ active, onClose }: { active: boolean; onClose: () => void }) {
+  const { store: useExm } = useProjectClient();
+  const state = useExm();
+  const { sessions, sessionId, messages, running, graph, runToolCalls, ledger, todo, timeline, liveParts, agents, activeGroup } = state;
+  const [agentWorkOpen, setAgentWorkOpen] = useState(false);
   const session = sessions.find((item) => item.id === sessionId);
   return <aside className="desk-context" aria-label="执行上下文">
-    <header><b>执行过程</b><Button type="text" size="small" icon={<MenuUnfoldOutlined />} aria-label="收起右栏" onClick={onClose} /></header>
+    <header><b>执行过程</b><span><Button type="text" size="small" icon={<UnorderedListOutlined />} aria-label="Agent 工作态势" title="Agent 工作态势" disabled={!sessionId} onClick={() => setAgentWorkOpen(true)} /><Button type="text" size="small" icon={<MenuUnfoldOutlined />} aria-label="收起右栏" onClick={onClose} /></span></header>
     <section><small>当前任务</small><p>{session?.title || "未选择会话"}</p>{running && <em>执行中</em>}</section>
     <section><small>本轮</small><dl><dt>消息</dt><dd>{messages.length}</dd><dt>工具调用</dt><dd>{runToolCalls.length}</dd><dt>任务节点</dt><dd>{graph?.nodes.length ?? 0}</dd></dl></section>
     {ledger?.task.goal && <section><small>目标</small><p>{ledger.task.goal}</p></section>}
     {!!todo?.items.length && <section><small>任务清单 · {todo.doneCount}/{todo.count}</small>{todo.items.map((item) => <p key={item.id}>{item.status === "done" ? "✓" : "○"} {item.content}</p>)}</section>}
     {!!runToolCalls.length && <section><small>工具</small>{runToolCalls.map((call) => <p key={call.callId}>{call.status === "running" ? "◌" : call.status === "ok" ? "✓" : "×"} {call.tool}</p>)}</section>}
     {!!timeline.length && <section><small>最近事件</small>{timeline.slice(-6).map((item, index) => <p key={index}>{item.text}</p>)}</section>}
+    {active && agentWorkOpen && <AgentWorkDrawer open onClose={() => setAgentWorkOpen(false)} sessionId={sessionId} sessionTitle={session?.title ?? ""}
+      running={running} graph={graph} liveParts={liveParts} toolCalls={runToolCalls} messages={messages} timeline={timeline} agents={agents} targetLabel={session?.groupId ?? activeGroup} />}
   </aside>;
 }
 
-export function DesktopApp() {
+export function ProjectWorkspace({ active, projects, onSettings, onOpenProject, onDirty }: { active: boolean; projects: Project[]; onSettings: () => void; onOpenProject: () => void; onDirty: (id: string, count: number) => void }) {
+  const { project, local, store: useExm, client: { api, editorApi } } = useProjectClient();
   const { message, modal } = App.useApp();
   const [booting, setBooting] = useState(true);
   const [bootError, setBootError] = useState("");
-  const [settings, setSettings] = useState(false);
   const [center, setCenter] = useState("chat");
+  const [collaborationOpened, setCollaborationOpened] = useState(false);
   const [files, setFiles] = useState<Record<string, OpenFile>>({});
-  const [workspace, setWorkspace] = useState("");
-  const [projectInput, setProjectInput] = useState<string | null>(null);
-  const [projectBusy, setProjectBusy] = useState(false);
+  const workspace = project.workspace;
   const [sessionsCollapsed, setSessionsCollapsed] = useState(() => window.innerWidth < 960);
   const [context, setContext] = useState(() => window.innerWidth >= 1100);
   const [projectTab, setProjectTab] = useState<ProjectTab>("files");
@@ -125,27 +131,25 @@ export function DesktopApp() {
   const navRequest = useExm((state) => state.navRequest);
   const fileState = useRef(files);
   fileState.current = files;
-  const workspaceGeneration = useRef(0);
   const fileRequest = useRef(0);
   const started = useRef(false);
   const dirtyFiles = Object.values(files).filter((file) => file.content !== file.draft);
+  useEffect(() => { onDirty(project.id, dirtyFiles.length); }, [project.id, dirtyFiles.length, onDirty]);
 
   const initialize = useCallback(async () => {
     setBooting(true); setBootError("");
     try {
       await useExm.getState().init();
-      const result = await editorApi.workspace();
-      setWorkspace(result.workspace);
     } catch (error) { setBootError(String(error)); }
     finally { setBooting(false); }
-  }, []);
+  }, [useExm]);
   useEffect(() => {
     if (started.current) return;
     started.current = true;
     void initialize();
   }, [initialize]);
   useEffect(() => {
-    if (!window.__TAURI__) return;
+    if (!window.__TAURI__ || !local) return;
     let disposed = false;
     const stops: (() => void)[] = [];
     const listen = async (event: string, callback: () => void) => {
@@ -155,10 +159,11 @@ export function DesktopApp() {
       } catch (error) { if (!disposed) message.error(String(error)); }
     };
     void listen("gateway://down", () => setGatewayDown(true));
-    void listen("gateway://up", () => { setGatewayDown(false); void useExm.getState().refreshPendingApprovals(); });
+    void listen("gateway://up", () => { setGatewayDown(false); useExm.reconnect(); });
     return () => { disposed = true; stops.forEach((stop) => stop()); };
-  }, [message]);
+  }, [message, local, useExm]);
   useEffect(() => {
+    if (!active || booting || bootError) return;
     const timer = window.setInterval(() => {
       setRefresh((value) => value + 1);
       void useExm.getState().refreshPendingApprovals();
@@ -172,73 +177,34 @@ export function DesktopApp() {
       window.removeEventListener("exm:approvals-refresh", approvalsChanged);
       window.removeEventListener("exm:flows-refresh", sessionsChanged);
     };
-  }, []);
+    void useExm.getState().refreshPendingApprovals();
+  }, [active, api, useExm, booting, bootError]);
   useEffect(() => {
     if (!navRequest) return;
     useExm.setState({ navRequest: null });
     if (navRequest.sessionId) void useExm.getState().selectSession(navRequest.sessionId).catch((error: unknown) => message.error(String(error)));
     setCenter("chat");
-    setSettings(false);
-  }, [navRequest, message]);
+  }, [navRequest, message, useExm]);
   useEffect(() => {
     if (!dirtyFiles.length) return;
     const protect = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
-    window.addEventListener("beforeunload", protect);
+    if (active) window.addEventListener("beforeunload", protect);
     return () => window.removeEventListener("beforeunload", protect);
-  }, [dirtyFiles.length]);
-  useEffect(() => {
-    if (!window.__TAURI__ || !dirtyFiles.length) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
-      const currentWindow = getCurrentWindow();
-      const stop = await currentWindow.onCloseRequested(async (event) => {
-        event.preventDefault();
-        const config = await desktopInvoke<DesktopConfig>("get_desktop_config");
-        if (!config.exitOnClose) { await desktopInvoke("hide_window"); return; }
-        modal.confirm({ title: "退出前丢弃未保存修改？", content: "文件中的本地修改尚未保存。", okText: "丢弃并退出", cancelText: "继续编辑", onOk: () => currentWindow.destroy() });
-      });
-      if (disposed) stop(); else unlisten = stop;
-    }).catch((error: unknown) => message.error(String(error)));
-    return () => { disposed = true; unlisten?.(); };
-  }, [dirtyFiles.length, message, modal]);
+  }, [dirtyFiles.length, active]);
 
   const confirmDiscard = (title: string) => new Promise<boolean>((resolve) => modal.confirm({
     title, content: "未保存的文件修改将被丢弃。", okText: "丢弃修改", cancelText: "继续编辑", okButtonProps: { danger: true },
     onOk: () => resolve(true), onCancel: () => resolve(false),
   }));
-  const changeWorkspace = async (path: string) => {
-    if (!path.trim() || projectBusy) return;
-    if (path === workspace) { setProjectInput(null); return; }
-    if (useExm.getState().running) { message.info("请先停止当前任务，再切换项目。"); return; }
-    if (dirtyFiles.length && !await confirmDiscard("切换项目前丢弃未保存修改？")) return;
-    setProjectBusy(true);
-    workspaceGeneration.current += 1;
-    fileRequest.current += 1;
-    try {
-      const result = await editorApi.setWorkspace(path.trim());
-      setWorkspace(result.workspace); setFiles({}); setCenter("project"); setProjectTab("files");
-      setProjectInput(null); setRefresh((value) => value + 1);
-    } catch (error) { message.error(String(error)); }
-    finally { setProjectBusy(false); }
-  };
-  const chooseWorkspace = async () => {
-    if (!window.__TAURI__ || window.__EXM_GATEWAY__?.remote) { setProjectInput(workspace); return; }
-    try {
-      const path = await openDirectory({ directory: true, multiple: false, title: "打开项目" });
-      if (typeof path === "string") await changeWorkspace(path);
-    } catch (error) { message.error(String(error)); }
-  };
+  const chooseWorkspace = onOpenProject;
   const openFile = async (path: string) => {
     const request = ++fileRequest.current;
-    const generation = workspaceGeneration.current;
     if (fileState.current[path]) { setCenter(fileView(path)); return; }
     try {
       const file = await editorApi.read(path);
-      if (generation !== workspaceGeneration.current) return;
       setFiles((current) => current[path] ? current : { ...current, [path]: { ...file, workspace: file.workspace ?? workspace, draft: file.content } });
       if (request === fileRequest.current) setCenter(fileView(path));
-    } catch (error) { if (generation === workspaceGeneration.current) message.error(String(error)); }
+    } catch (error) { message.error(String(error)); }
   };
   const closeFile = async (path: string) => {
     const file = fileState.current[path];
@@ -248,10 +214,10 @@ export function DesktopApp() {
   };
   const reloadFile = async (path: string) => {
     if (fileState.current[path]?.draft !== fileState.current[path]?.content && !await confirmDiscard(`重新加载 ${path}？`)) return;
-    const generation = workspaceGeneration.current;
+    const original = fileState.current[path];
     try {
       const file = await editorApi.read(path);
-      if (generation === workspaceGeneration.current) setFiles((current) => ({ ...current, [path]: { ...file, workspace: file.workspace ?? workspace, draft: file.content } }));
+      setFiles((current) => current[path] === original ? { ...current, [path]: { ...file, workspace: file.workspace ?? workspace, draft: file.content } } : current);
     } catch (error) { message.error(String(error)); }
   };
   const showProject = (tab: ProjectTab) => { fileRequest.current += 1; setProjectTab(tab); setCenter("project"); };
@@ -259,7 +225,7 @@ export function DesktopApp() {
   if (booting) return <div className="desk-boot"><Skeleton active paragraph={{ rows: 5 }} /><span>正在连接工作区…</span></div>;
   if (bootError) return <div className="desk-boot"><Alert type="error" title="无法连接网关" description={bootError} /><Button onClick={() => void initialize()}>重新连接</Button></div>;
   return <div className="desk-app">
-    <TitleBar onSettings={() => setSettings(true)} />
+    <TitleBar onSettings={onSettings} />
     <div className="desk-statusbar">
       <Button type="text" size="small" icon={sessionsCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} aria-label={sessionsCollapsed ? "显示会话" : "隐藏会话"} onClick={() => setSessionsCollapsed(!sessionsCollapsed)} />
       <Tooltip title={wsConnected ? "网关已连接" : "连接中，自动重试"}><span className={`desk-led ${wsConnected ? "ok" : "bad"}`} /></Tooltip>
@@ -268,26 +234,30 @@ export function DesktopApp() {
       <Button type="text" size="small" aria-label="查看对话" icon={<MessageOutlined />} onClick={() => { fileRequest.current += 1; setCenter("chat"); }}>对话{pendingApprovals ? ` · ${pendingApprovals}` : ""}</Button>
       <Button type="text" size="small" aria-label="查看代码" icon={<CodeOutlined />} onClick={() => showProject("files")}>代码</Button>
       <Button type="text" size="small" aria-label="查看变更" icon={<BranchesOutlined />} onClick={() => showProject("changes")}>变更</Button>
-      <Button type="text" size="small" icon={<MenuUnfoldOutlined />} aria-label="显示执行过程" onClick={() => setContext(!context)} />
+      <Button type="text" size="small" icon={<MenuUnfoldOutlined />} aria-label="显示执行过程" disabled={center === "collaboration"} onClick={() => setContext(!context)} />
     </div>
     <div className="desk-body">
-      <SessionSidebar collapsed={sessionsCollapsed} onToggle={() => setSessionsCollapsed(true)} onSelected={() => { setCenter("chat"); if (window.innerWidth < 760) setSessionsCollapsed(true); }} />
+      <SessionSidebar active={active} collapsed={sessionsCollapsed} onToggle={() => setSessionsCollapsed(true)} onSelected={() => { setCenter("chat"); if (window.innerWidth < 760) setSessionsCollapsed(true); }} />
       <main className="desk-main">
-        {gatewayDown && <Alert type="error" title="本地网关已停止" action={<Button size="small" onClick={() => void desktopInvoke("gateway_restart").catch((error: unknown) => message.error(String(error)))}>重启网关</Button>} />}
+        {gatewayDown && <Alert type="error" title="本地网关已停止" action={<Button size="small" onClick={onSettings}>打开桌面设置</Button>} />}
         <nav className="desk-file-tabs" aria-label="打开的文件">
-          <button aria-current={center === "chat" ? "page" : undefined} onClick={() => setCenter("chat")}><MessageOutlined /> 对话</button>
+          <button aria-label="对话" aria-current={center === "chat" ? "page" : undefined} onClick={() => setCenter("chat")}><MessageOutlined /> 对话</button>
+          <button aria-label="协作群聊" aria-current={center === "collaboration" ? "page" : undefined} onClick={() => { fileRequest.current += 1; setCollaborationOpened(true); setCenter("collaboration"); }}><TeamOutlined /> 协作群聊</button>
           {Object.values(files).map((file) => <div className="desk-file-tab" key={file.path}>
             <button aria-current={center === fileView(file.path) ? "page" : undefined} title={file.path} onClick={() => { fileRequest.current += 1; setCenter(fileView(file.path)); }}>{file.path.split("/").at(-1)}{file.content !== file.draft ? " ●" : ""}</button>
             <Button type="text" size="small" icon={<CloseOutlined />} aria-label={`关闭 ${file.path}`} onClick={() => void closeFile(file.path)} />
           </div>)}
         </nav>
         <div className="desk-center-pane" hidden={center !== "chat"}>
-          <DesktopChat workspace={workspace} onProject={() => void chooseWorkspace()} active={center === "chat"} contextVersion={settings ? 0 : refresh} />
+          <DesktopChat workspace={workspace} onProject={chooseWorkspace} active={active && center === "chat"} contextVersion={refresh} />
         </div>
-        <div className="desk-center-pane" hidden={center !== "project"}>
+        {collaborationOpened && <div className="desk-center-pane" hidden={center !== "collaboration"}>
+          <DesktopCollaboration projects={projects} active={active && center === "collaboration"} />
+        </div>}
+        {active && center === "project" && <div className="desk-center-pane">
           <ProjectPanel workspace={workspace} onOpen={(path) => void openFile(path)} refresh={refresh} tab={projectTab} onTabChange={setProjectTab} onApproval={() => { void useExm.getState().refreshPendingApprovals(); setCenter("chat"); }} />
-        </div>
-        {open && <CodeEditor key={`${workspace}:${open.path}`} file={open}
+        </div>}
+        {open && active && <CodeEditor key={`${workspace}:${open.path}`} file={open}
           onChange={(draft) => setFiles((current) => ({ ...current, [open.path]: { ...current[open.path], draft } }))}
           onReload={() => void reloadFile(open.path)}
           onSaved={(path, content) => {
@@ -295,12 +265,7 @@ export function DesktopApp() {
             setRefresh((value) => value + 1);
           }} />}
       </main>
-      {context && <ContextRail onClose={() => setContext(false)} />}
+      {context && center !== "collaboration" && <ContextRail active={active} onClose={() => setContext(false)} />}
     </div>
-    <DesktopSettings open={settings} onClose={() => { setSettings(false); setRefresh((value) => value + 1); }} />
-    <Modal open={projectInput !== null} title="打开项目" okText="打开" confirmLoading={projectBusy} onCancel={() => setProjectInput(null)} onOk={() => void changeWorkspace(projectInput ?? "")}>
-      <p>{window.__EXM_GATEWAY__?.remote ? "输入网关所在机器上的项目目录。" : "输入项目目录。"}</p>
-      <Input autoFocus aria-label="项目目录" value={projectInput ?? ""} onChange={(event) => setProjectInput(event.target.value)} onPressEnter={() => void changeWorkspace(projectInput ?? "")} />
-    </Modal>
   </div>;
 }

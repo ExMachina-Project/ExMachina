@@ -1,0 +1,235 @@
+/** 前端使用的协议类型（与 docs/04 契约一致；核心实现的对外 camelCase 命名） */
+
+export type SpeechTag = "肯定" | "否定" | "疑问" | "报告" | "提案" | "警告" | "要求" | "观测";
+export type EvidenceLevel = "A" | "B" | "C" | "D";
+
+export interface Statement {
+  tag: SpeechTag;
+  text: string;
+  evidenceLevel?: EvidenceLevel;
+}
+
+export type MessageRole = "user" | "orchestrator" | "unit" | "system";
+
+export interface ChatMessage {
+  id: string;
+  sessionId: string;
+  role: MessageRole;
+  agentId?: string;
+  statements: Statement[];
+  createdAt: string;
+  /** 所属轮次（回滚按钮 undo 目标） */
+  turn?: number;
+  /** 本轮收束时附带执行的工具轨迹（本地组装，刷新后由审计页回看） */
+  toolCalls?: ToolCallItem[];
+  /** 本轮思维链（本地组装：随收束留存，刷新后不在） */
+  thinking?: string;
+  /** 有序过程步骤（思考段落 / 工具调用按发生顺序交错；服务端留存） */
+  steps?: MessageStep[];
+  /** 本轮产物附件（send-file 能力）：控制台会话在 run.finished 事件携带；
+   *  IM 通道由适配器直发，不进这里 */
+  artifacts?: ArtifactItem[];
+  /** 入站附件（im-inbound-attach）：外部通道用户随消息发来的媒体（图片缩略图/文件卡片） */
+  attachments?: InboundAttachment[];
+}
+
+/** 会话产物附件（outbox 登记 → 轮次收束排空投递） */
+export interface ArtifactItem {
+  /** image | file | voice */
+  kind: string;
+  /** 工作区相对路径（下载经 /api/asset/download）或绝对路径 */
+  path: string;
+  caption?: string;
+}
+
+/** 有序过程步骤：kind=tool 时 callId 关联 toolCalls 记录 */
+export interface MessageStep {
+  kind: "thinking" | "tool";
+  text?: string;
+  callId?: string;
+}
+
+/** 入站附件（im-inbound-attach）：外部通道用户随消息发来的媒体元数据，
+ *  随 user 消息落库（path 为工作区相对路径，/api/asset 预览） */
+export interface InboundAttachment {
+  kind: string;
+  path: string;
+  name: string;
+}
+
+/** 工具执行轨迹（tool.call / tool.result 事件组装）：编程软件式过程透明 */
+export interface ToolCallItem {
+  callId: string;
+  agentId: string;
+  tool: string;
+  args: Record<string, unknown>;
+  status: "running" | "ok" | "error";
+  durationMs?: number;
+  summary?: string;
+  images?: string[];
+}
+
+/** 待人工审批单（会话内联裁决） */
+export interface ApprovalItem {
+  approvalId: string;
+  agentId: string;
+  command: string;
+  /** 审批来源会话（子会话里的审批也在此可见，可跳转） */
+  sessionId?: string;
+}
+
+export interface LedgerTask {
+  goal: string;
+  acceptance: string[];
+  constraints: string[];
+  forbidden: string[];
+  priorities: string[];
+}
+export interface LedgerEvidenceItem {
+  text: string;
+  level: EvidenceLevel;
+  source: string;
+}
+export interface LedgerEvidence {
+  confirmed: LedgerEvidenceItem[];
+  gaps: string[];
+}
+export interface LedgerRisk {
+  openAssertions: string[];
+  impact: string[];
+  revertPaths: string[];
+  blockers: string[];
+}
+export interface SessionLedger {
+  task: LedgerTask;
+  evidence: LedgerEvidence;
+  risk: LedgerRisk;
+}
+
+export interface Session {
+  id: string;
+  title: string;
+  status: string;
+  /** Live process state returned by the session detail endpoint (absent on older gateways). */
+  running?: boolean;
+  /** 会话归属的智能体组（组是交互对象） */
+  groupId: string;
+  /** Persisted directory for project-bound conversations (absent on legacy sessions). */
+  workspace?: string;
+  /** Room-owned execution session; mutate it through the collaboration API. */
+  collaborationId?: string;
+  /** 派生来源会话（fork 分支 / 派发子会话） */
+  parentSession?: string;
+  parentUpto?: number;
+  ledger: SessionLedger;
+  createdAt: string;
+  updatedAt: string;
+  lastMessagePreview?: string;
+  lastActiveAt?: string;
+  /** 用户置顶（列表置顶分组） */
+  pinned?: boolean;
+  /** 归档时间（ISO）：有值 = 归档态（主列表/左栏不显示，归档区可见） */
+  archivedAt?: string;
+  /** 消息条数（管理页附加） */
+  messageCount?: number;
+  /** 会话来源（读时派生）：console 或 channel:{channelId}:{chatKey}。
+   *  旧网关不返回该字段（undefined）——分组视图降级隐藏，回落平铺。 */
+  origin?: string;
+  /** 来源展示名（通道会话 = 流显示名·标签；控制台会话缺省） */
+  originLabel?: string;
+}
+
+/** 会话检索命中片段（session-search） */
+export interface SessionSearchSnippet {
+  messageId: string;
+  role: string;
+  text: string;
+  createdAt: string;
+  /** 来源标记（im: / imctx: / auto: 等） */
+  agentId?: string;
+}
+
+/** 会话检索命中（标题或最近 200 条消息正文） */
+export interface SessionSearchHit {
+  sessionId: string;
+  title: string;
+  titleMatch: boolean;
+  messageMatches: number;
+  snippets: SessionSearchSnippet[];
+  lastActiveAt: string;
+}
+
+/** 轮次快照（历史检查点；preview = 该轮用户输入摘要） */
+export interface SessionSnapshot {
+  turn: number;
+  messageCount: number;
+  status: string;
+  checkpointIds: string[];
+  promptTokens: number;
+  completionTokens: number;
+  createdAt: string;
+  preview: string;
+}
+
+export type TaskStatus =
+  | "pending"
+  | "ready"
+  | "dispatched"
+  | "running"
+  | "syncing"
+  | "done"
+  | "blocked"
+  | "failed"
+  | "arbitrating"
+  | "cancelled";
+
+export interface TaskNode {
+  id: string;
+  sessionId: string;
+  graphId: string;
+  agentIdentifier: string;
+  title: string;
+  objective: string;
+  modelSelection?: { model: string; purpose: import("./modelRouting").ModelPurpose; reason: string } | null;
+  acceptance: string[];
+  priority: string;
+  dependsOn: string[];
+  status: TaskStatus;
+  syncReportId?: string;
+  retryCount: number;
+  createdAt: string;
+}
+
+export interface TaskGraph {
+  id: string;
+  sessionId: string;
+  nodes: TaskNode[];
+  status: string;
+  createdAt: string;
+}
+
+export interface AgentDefinition {
+  id: string;
+  name: string;
+  identifier: string;
+  domain: string;
+  tier: "orchestrator" | "unit";
+  description: string;
+  capabilities: string[];
+  tools: string[];
+  whenToCall: string;
+  /** 默认模型（"档案ID" 或 "档案ID/模型名"；空 = 跟随所属组/全局） */
+  modelHint?: string | null;
+  modelRouting?: import("./modelRouting").ModelRouting | null;
+  /** 连结体代理绑定（智能连结网络）：非空 = 该个体是外部连结体的代理，任务转交对端执行 */
+  link?: string | null;
+}
+
+export interface EvidenceItem {
+  id?: string;
+  level: EvidenceLevel;
+  kind: string;
+  ref: string;
+  note: string;
+  createdAt?: string;
+}

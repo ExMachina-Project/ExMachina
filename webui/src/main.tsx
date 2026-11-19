@@ -5,6 +5,10 @@ import zhCN from "antd/locale/zh_CN";
 import App from "./App";
 import { accentColor, themeOf, useTheme, type ThemeKey } from "./theme";
 import { installViewportFix } from "./viewport";
+import { api, assetUrl, downloadUrl } from "./api";
+import { useT } from "./i18n/core";
+import { ClientServices } from "../../client/src/services";
+import "../../client/src/chat.css";
 import "./styles.css";
 import "./settings.css";
 import "./console.css";
@@ -64,6 +68,7 @@ function Root(): React.ReactElement {
   const mode = themeOf(preset).mode;
   const color = accentColor(preset, accent);
   const tokens = ANTD_TOKENS[preset];
+  const t = useT();
   return (
     <ConfigProvider
       locale={zhCN}
@@ -96,7 +101,9 @@ function Root(): React.ReactElement {
         },
       }}
     >
-      <App />
+      <ClientServices.Provider value={{ api, assetUrl, downloadUrl, t, dark: mode === "dark" }}>
+        <App />
+      </ClientServices.Provider>
     </ConfigProvider>
   );
 }

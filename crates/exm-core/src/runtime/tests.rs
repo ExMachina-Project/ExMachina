@@ -24,6 +24,42 @@ mod timeout_tests {
     /// 从不产出 SyncReport——模拟「预算内一直在干活但收不了束」的个体。
     struct AlwaysToolProvider;
 
+    struct FinishOnBudgetProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FinishOnBudgetProvider {
+        fn name(&self) -> &'static str { "finish-on-budget" }
+
+        async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("test requires streaming")
+        }
+
+        async fn stream(
+            &self,
+            request: ChatRequest,
+            tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return AlwaysToolProvider.stream(request, tx).await;
+            }
+            assert_eq!(call, 1, "only one report-only completion is allowed");
+            assert!(request.tools.is_empty(), "final report must not expose executable tools");
+            assert!(request.messages.last().unwrap().content.contains("dry-run"));
+            let text = serde_json::json!({
+                "sourceAgent":"untrusted", "taskNodeId":"untrusted", "status":"blocked",
+                "statements":[{"tag":"报告", "text":"标题和画面已取得；评论仅为 dry-run，未发布"}],
+                "summary":"观看材料已取得；评论未发布", "evidence":[], "risks":[],
+                "blockers":[{"reason":"dry-run，未实际发布", "unblockCondition":"等待人工确认"}],
+                "confidence":0.8
+            }).to_string();
+            let _ = tx.send(StreamDelta::Text(text.clone()));
+            Ok(ChatResponse { content:text, ..Default::default() })
+        }
+    }
+
     #[async_trait::async_trait]
     impl LlmProvider for AlwaysToolProvider {
         fn name(&self) -> &'static str {
@@ -261,6 +297,63 @@ mod timeout_tests {
             "陈述应带预算值: {:?}",
             report.statements
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatched_budget_fallback_uses_child_trace_and_keeps_dry_run_evidence() {
+        let rt = runtime_with(Arc::new(AlwaysToolProvider));
+        let parent = format!("parent-{}", uuid::Uuid::new_v4());
+        let child = format!("child-{}", uuid::Uuid::new_v4());
+        let mut order = order_with(60_000);
+        order.constraints.max_steps = 1;
+        for (index, tool, summary) in [
+            ("summary", "video__summary", "标题：已核验的视频标题"),
+            ("shots", "video__shots", "已抽取 6 帧画面"),
+            ("act", "video__act", "[dry-run] 拟评论（未发送至平台）"),
+        ] {
+            crate::round_trace::push_tool(&child, crate::round_trace::ToolCallRecord {
+                call_id:index.into(), agent_id:"timeout-agent".into(), tool:tool.into(),
+                args:serde_json::json!({"secret":"must-not-enter-report"}), ok:true,
+                duration_ms:1, summary:summary.into(),
+            });
+        }
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), Arc::new(AlwaysToolProvider), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt.execute(&def_with(), &order, chain, &parent, &child, false, ToolScope::Computer, |_| {}).await.unwrap();
+        assert_eq!(report.status, crate::types::SyncStatus::Blocked);
+        assert!(!report.summary.contains("未留下工具调用记录"), "must read the dispatched child trace");
+        assert!(report.summary.contains("video__summary(ok)"));
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(serialized.contains("已抽取 6 帧画面"));
+        assert!(serialized.contains("[dry-run]"));
+        assert!(serialized.contains("未发送至平台"));
+        assert!(!serialized.contains("must-not-enter-report"));
+        assert!(report.evidence.iter().all(|item| item.reference.starts_with(&format!("session:{child}/tool:"))));
+        assert!(crate::round_trace::tool_count(&child) >= 3, "evidence snapshot must not drain child records");
+        crate::round_trace::end(&parent);
+        crate::round_trace::end(&child);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_tool_budget_allows_one_tools_free_report_without_replaying_tools() {
+        let provider = Arc::new(FinishOnBudgetProvider { calls:std::sync::atomic::AtomicUsize::new(0) });
+        let rt = runtime_with(provider.clone());
+        let mut order = order_with(60_000);
+        order.constraints.max_steps = 1;
+        let session = format!("budget-report-{}", uuid::Uuid::new_v4());
+        let chain = crate::provider::ModelChain {
+            candidates:vec![(String::new(), provider.clone(), "m".into())],
+            failover:Arc::new(FailoverState::default()),
+        };
+        let report = rt.execute(&def_with(), &order, chain, &session, &session, false, ToolScope::Computer, |_| {}).await.unwrap();
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(report.source_agent, "timeout-agent");
+        assert_eq!(report.task_node_id, "T1");
+        assert_eq!(report.status, crate::types::SyncStatus::Blocked);
+        assert_eq!(report.summary, "观看材料已取得；评论未发布");
+        crate::round_trace::end(&session);
     }
 }
 

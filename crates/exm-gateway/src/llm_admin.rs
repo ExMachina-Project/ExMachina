@@ -510,7 +510,10 @@ pub async fn test_profile(
             }))
             .into_response()
         }
-        Err(_) => Json(json!({ "ok": false, "latencyMs": t0.elapsed().as_millis() as u64, "identity":preview,"error": "模型服务连接失败或超时" })).into_response(),
+        Err(error) => {
+            let error = OpenAiCompatibleProvider::transport_error("模型服务连通测试失败", error);
+            Json(json!({ "ok": false, "latencyMs": t0.elapsed().as_millis() as u64, "identity":preview,"error": error.to_string() })).into_response()
+        }
     }
 }
 

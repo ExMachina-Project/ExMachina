@@ -25,15 +25,32 @@ fn editor_git_args_valid(args: &[String]) -> bool {
 async fn execute_editor_git(req: &ApprovalRequest) -> anyhow::Result<String> {
     let action: EditorGitAction = serde_json::from_str(req.meta_json.as_deref().ok_or_else(|| anyhow::anyhow!("Git 审批缺少工作区信息"))?)?;
     anyhow::ensure!(editor_git_args_valid(&action.args), "Git 审批参数无效");
+    let root = crate::workspace::pinned(&action.root.to_string_lossy())?;
     anyhow::ensure!(action.root.join(".git").exists(), "审批来源工作区已不是 Git 仓库");
     let out = tokio::time::timeout(std::time::Duration::from_secs(60), tokio::process::Command::new("git")
-        .arg("--literal-pathspecs").args(&action.args).current_dir(&action.root).env("GIT_TERMINAL_PROMPT", "0")
+        .arg("--literal-pathspecs").args(&action.args).current_dir(root).env("GIT_TERMINAL_PROMPT", "0")
         .kill_on_drop(true).output()).await.map_err(|_| anyhow::anyhow!("Git 操作超时"))??;
     anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     Ok(String::from_utf8_lossy(&out.stdout).chars().take(4000).collect())
 }
 
 impl Core {
+    pub fn approval_workspace(&self, req: &ApprovalRequest) -> anyhow::Result<Option<String>> {
+        if req.agent_id == "desktop" && req.command.starts_with("[git]") {
+            let meta: EditorGitAction = serde_json::from_str(req.meta_json.as_deref().unwrap_or(""))?;
+            return Ok(Some(meta.root.to_string_lossy().into_owned()));
+        }
+        if req.session_id.is_empty() { return Ok(None); }
+        Ok(self.store.get_session(&req.session_id)?.and_then(|s| s.workspace))
+    }
+
+    fn approved_command_root(&self, req: &ApprovalRequest) -> anyhow::Result<std::path::PathBuf> {
+        let root = req.meta_json.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|meta| meta.get("projectWorkspace").or_else(|| meta.get("root"))?.as_str().map(str::to_string));
+        if let Some(root) = root { return crate::workspace::pinned(&root); }
+        self.approval_workspace(req)?.as_deref().map(crate::workspace::pinned).transpose()
+            .map(|root| root.unwrap_or_else(|| self.config().workspace_root.clone()))
+    }
     /// 会话审批授权写入（approval-ergonomics「本会话允许」档）：
     /// 前缀口径见 allowlist::command_head。红线校验在 approval_decide 调用侧——
     /// [root] 提权单与破坏性命令不会走到这里。
@@ -267,7 +284,7 @@ impl Core {
             }
             // 剥离 sudo/doas/run0 冗余壳（root 下多余）；su/sudo -u/runuser 保留语义
             let eff_cmd = crate::tools::strip_redundant_elevation(&raw_cmd);
-            let workspace = self.config().workspace_root.clone();
+            let workspace = self.approved_command_root(&req)?;
             // root 代执行：ShellOpts::plain（不降权——审批的就是提权本身）
             let opts = crate::tools::ShellOpts::plain();
             let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
@@ -309,7 +326,7 @@ impl Core {
             .strip_prefix("[红线]")
             .map(|c| c.trim().to_string())
             .unwrap_or_else(|| req.command.clone());
-        let workspace = self.config().workspace_root.clone();
+        let workspace = self.approved_command_root(&req)?;
         let opts = self.orchestrator().tools.shell_opts(&eff_cmd);
         let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
         req.status = if out.ok {

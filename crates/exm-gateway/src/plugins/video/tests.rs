@@ -439,8 +439,8 @@ mod tick_smoke_tests {
             memory_isolation: false,
             created_at: String::new(),
         };
-        let s = Settings::from_channel(&ch);
-        let r = tick(&core, &ch, &s).await;
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        let r = tick(&core, &ch).await;
         assert!(r.is_err(), "无 apiKey 应失败：{r:?}");
         let msg = r.unwrap_err().to_string();
         assert!(msg.contains("apiKey"), "错误应指向凭据缺失：{msg}");
@@ -476,8 +476,338 @@ mod tick_smoke_tests {
             memory_isolation: false,
             created_at: String::new(),
         };
-        let s = Settings::from_channel(&ch);
-        let r = tick(&core, &ch, &s).await.unwrap();
-        assert!(r.contains("均已关闭"), "{r}");
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        let r = tick(&core, &ch).await.unwrap();
+        assert!(r.contains("主动观看已关闭"), "{r}");
+    }
+}
+
+#[cfg(test)]
+mod watch_switch_tests {
+    use super::*;
+    use exm_core::tools::DynamicToolExec;
+    use serde_json::json;
+    use std::future::Future;
+    use std::task::Poll;
+
+    fn core() -> Arc<Core> {
+        let dir = std::env::temp_dir().join(format!("exm-watch-switch-{}", exm_core::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        cfg.security.approval_wait_secs = 0;
+        let core = Core::with_config(cfg).unwrap();
+        let agent = serde_json::from_value(json!({
+            "name": "Mock 观众", "identifier": "machina", "description": "local fixture",
+            "domain": "test", "tier": "unit"
+        })).unwrap();
+        core.registry().upsert_single(agent, Some("本地测试，只产出观感".into())).unwrap();
+        core.registry().set_active_single(Some("machina")).unwrap();
+        Arc::new(core)
+    }
+
+    fn channel(kind: &str, watch: bool, comment: bool, reply: bool) -> Channel {
+        serde_json::from_value(json!({
+            "id": format!("watch-switch-{kind}"),
+            "type": kind,
+            "enabled": true,
+            "createdAt": "",
+            "config": {
+                "watch": watch.to_string(),
+                "comment": comment.to_string(),
+                "reply": reply.to_string(),
+                "dryRun": "true"
+            }
+        })).unwrap()
+    }
+
+    fn exec(core: &Arc<Core>, ch: &Channel, trigger: WatchTrigger, name: &str) -> DynamicToolExec {
+        let injections = match trigger {
+            WatchTrigger::Automatic => tools::build_watch_injections(core, ch),
+            WatchTrigger::OnDemand => tools::build_injections(core, ch),
+        };
+        injections.into_iter().find(|(spec, _)| spec.name == name).unwrap().1
+    }
+
+    #[test]
+    fn watch_false不被评论回复开关重新开启() {
+        for kind in ["bilibili", "youtube"] {
+            for (comment, reply) in [(false, false), (true, false), (false, true), (true, true)] {
+                let ch = channel(kind, false, comment, reply);
+                let s = Settings::from_channel(&ch);
+                assert!(!s.watch);
+                assert_eq!(s.comment, comment);
+                assert_eq!(s.reply, reply);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn 关闭观看不调度不建会话且保留互动配置() {
+        let core = core();
+        for (comment, reply) in [(false, false), (true, false), (false, true), (true, true)] {
+            let channels: Vec<_> = ["bilibili", "youtube"].map(|k| channel(k, false, comment, reply)).into();
+            platform::save_channels(&core, &channels).unwrap();
+            assert!(watch_channels(&core).is_empty(), "不应创建自动 runner");
+            // YouTube 未配 apiKey，即便回归也只在本地报错，绝不会请求外部平台。
+            let note = tick(&core, &channels[1]).await.unwrap();
+            assert!(note.contains("主动观看已关闭"), "{note}");
+            assert!(ask_agent(&core, &channels[0], "不应入队").await.is_err());
+            assert!(core.list_sessions().unwrap().is_empty());
+            assert!(!state_path(&core, &channels[1].id).exists());
+            let saved = platform::load_channels(&core);
+            assert_eq!(Settings::from_channel(&saved[0]).comment, comment);
+            assert_eq!(Settings::from_channel(&saved[0]).reply, reply);
+        }
+    }
+
+    #[tokio::test]
+    async fn 旧通道快照与已排队工具在关闭后拒绝执行() {
+        let core = core();
+        let old = channel("youtube", true, true, true);
+        platform::save_channels(&core, &[old.clone()]).unwrap();
+        assert_eq!(watch_channels(&core).len(), 1);
+        let sid = "watch-switch-queued";
+        tools::register_act_gate(sid, tools::ActGate::from_settings(&Settings::from_channel(&old), 0));
+        let act = exec(&core, &old, WatchTrigger::Automatic, "video__act");
+        let first = act("video", sid, json!({"videoId": "local", "comment": "测试短评"})).await;
+        assert!(first.ok && first.text.contains("dry-run"), "{}", first.text);
+        let queued = act("video", sid, json!({"videoId": "local", "comment": "待执行短评"}));
+        let mut latest = old.clone();
+        latest.config.insert("watch".into(), "false".into());
+        platform::save_channels(&core, &[latest]).unwrap();
+        assert!(watch_channels(&core).is_empty());
+        assert!(tick(&core, &old).await.unwrap().contains("主动观看已关闭"));
+        assert!(ask_agent(&core, &old, "旧快照不得启动轮次").await.is_err());
+        let denied = queued.await;
+        assert!(!denied.ok && denied.text.contains("主动观看已关闭"), "{}", denied.text);
+        assert_eq!(tools::act_gate_count(sid), 1, "不得消耗配额或执行动作");
+        tools::drop_act_gate(sid);
+        // 闸门清理后也不能把滞留的自动闭包误当成点播放行。
+        let denied = act("video", sid, json!({"videoId": "local", "comment": "禁止回放"})).await;
+        assert!(!denied.ok && denied.text.contains("主动观看已关闭"), "{}", denied.text);
+        assert_eq!(tools::session_state(sid).lock().acted, 1);
+        tools::drop_session(sid);
+    }
+
+    #[tokio::test]
+    async fn 旧闭包立即检查通道停用删除平台变化和插件停用() {
+        let core = core();
+        let old = channel("bilibili", true, false, false);
+        let automatic = exec(&core, &old, WatchTrigger::Automatic, "video__summary");
+        let manual = exec(&core, &old, WatchTrigger::OnDemand, "video__summary");
+        let mut stopped = old.clone();
+        stopped.enabled = false;
+        let mut changed = old.clone();
+        changed.kind = "youtube".into();
+        for (channels, reason) in [(vec![stopped], "停用"), (vec![], "删除"), (vec![changed], "平台已变更")] {
+            platform::save_channels(&core, &channels).unwrap();
+            assert!(watch_channels(&core).values().all(|ch| ch.kind != old.kind));
+            for tool in [&automatic, &manual] {
+                // 不传 videoId，任何意外放行也只会触发本地参数校验，不触网。
+                let result = tool("video", "watch-switch-stopped", json!({})).await;
+                assert!(!result.ok && result.text.contains(reason), "{}", result.text);
+            }
+        }
+        platform::save_channels(&core, &[old]).unwrap();
+        core.plugins().register_builtin_late(Box::new(crate::plugins::VideoPlugin::new()));
+        assert!(core.plugins().set_enabled("video", false));
+        assert!(watch_channels(&core).is_empty());
+        let result = automatic("video", "watch-switch-stopped", json!({})).await;
+        assert!(!result.ok && result.text.contains("视频插件已停用"), "{}", result.text);
+        assert!(core.plugins().set_enabled("video", true));
+        let mut cfg = (*core.config()).clone();
+        cfg.plugins.state.insert("video".into(), false);
+        core.apply_config(cfg).unwrap();
+        assert!(watch_channels(&core).is_empty());
+        let result = manual("video", "watch-switch-stopped", json!({})).await;
+        assert!(!result.ok && result.text.contains("视频插件已停用"), "{}", result.text);
+        tools::drop_session("watch-switch-stopped");
+    }
+
+    #[tokio::test]
+    async fn 关闭主动观看仍允许显式点播与独立评论回复() {
+        let core = core();
+        let old = channel("youtube", true, true, true);
+        let summary = exec(&core, &old, WatchTrigger::OnDemand, "video__summary");
+        let act = exec(&core, &old, WatchTrigger::OnDemand, "video__act");
+        let mut latest = old.clone();
+        latest.config.insert("watch".into(), "false".into());
+        platform::save_channels(&core, &[latest.clone()]).unwrap();
+        let result = summary("machina", "watch-switch-manual", json!({})).await;
+        assert!(!result.ok && result.text.contains("缺少 videoId"), "观看应通过开关闸门：{}", result.text);
+        // 凭据校验是本地执行；到达 apiKey 检查证明已进入手动观看而非被 watch 拦截。
+        let result = summary("machina", "watch-switch-manual", json!({"videoId": "local"})).await;
+        assert!(!result.ok && result.text.contains("apiKey"), "{}", result.text);
+        let sid = "watch-switch-manual";
+        let result = act("machina", sid, json!({"videoId": "local", "comment": "手动短评"})).await;
+        assert!(result.ok && result.text.contains("dry-run"), "{}", result.text);
+        tools::session_state(sid).lock().seen_comments.insert("local-comment".into());
+        let result = act("machina", sid, json!({"videoId": "local", "replyText": "手动回复", "replyTo": "local-comment"})).await;
+        assert!(result.ok && result.text.contains("dry-run"), "{}", result.text);
+        latest.config.insert("comment".into(), "false".into());
+        platform::save_channels(&core, &[latest]).unwrap();
+        let result = act("machina", sid, json!({"videoId": "local", "comment": "已关闭评论"})).await;
+        assert!(result.text.contains("未开启评论"), "旧点播闭包也必须读最新评论开关：{}", result.text);
+        assert_eq!(tools::session_state(sid).lock().acted, 2);
+        tools::drop_session(sid);
+    }
+
+    #[tokio::test]
+    async fn 自动审批在观看关闭后不代发且手动审批不受观看开关限制() {
+        let core = core();
+        let mut ch = channel("youtube", true, true, false);
+        ch.config.insert("dryRun".into(), "false".into());
+        ch.config.insert("approval".into(), "always".into());
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        let act = exec(&core, &ch, WatchTrigger::Automatic, "video__act");
+        let result = act("video", "watch-switch-approval", json!({"videoId": "local", "comment": "待审批短评"})).await;
+        assert!(result.ok && result.text.contains("人工审批"), "{}", result.text);
+        let pending = core.approval_list(Some("pending"), 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        let payload = pending[0].command.strip_prefix("[video] ").unwrap();
+        let mut manual: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(manual["automatic"], true);
+        ch.config.insert("watch".into(), "false".into());
+        platform::save_channels(&core, &[ch]).unwrap();
+        let error = tools::execute_act_payload(&core, payload).await.unwrap_err();
+        assert!(error.to_string().contains("主动观看已关闭"), "{error}");
+        manual["automatic"] = json!(false);
+        // 无 API 密钥，只验证手动审批能通过 watch 闸门，绝不实际发布。
+        let error = tools::execute_act_payload(&core, &manual.to_string()).await.unwrap_err();
+        assert!(error.to_string().contains("apiKey"), "{error}");
+        assert_eq!(VideoState::load(&core, "watch-switch-youtube").actions_today, 0);
+        tools::drop_session("watch-switch-approval");
+    }
+
+    #[tokio::test]
+    async fn 升级前自动审批也不能绕过观看关闭而点播审批保留() {
+        let core = core();
+        let mut ch = channel("youtube", false, true, false);
+        ch.config.insert("dryRun".into(), "false".into());
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        for (title, reason) in [(format!("channel:{}:video", ch.id), "主动观看已关闭"), ("手动点播会话".into(), "apiKey")] {
+            let session = core.create_session(&title).unwrap();
+            let payload = json!({"channelId": ch.id, "videoId": title, "text": "升级前待审短评", "replyTo": null}).to_string();
+            let request = exm_core::types::ApprovalRequest {
+                id: exm_core::types::new_id(),
+                session_id: session.id,
+                node_id: None,
+                agent_id: "video".into(),
+                command: format!("[video] {payload}"),
+                status: "pending".into(),
+                result: None,
+                created_at: exm_core::types::now_iso(),
+                decided_at: None,
+                origin_user: None,
+                origin_role: None,
+                meta_json: None,
+            };
+            core.store.add_approval(&request).unwrap();
+            let error = tools::execute_act_payload(&core, &payload).await.unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn 等待中的自动工具在恢复前校验新配置且不继续后续动作() {
+        let core = core();
+        let old = channel("youtube", true, true, false);
+        platform::save_channels(&core, &[old.clone()]).unwrap();
+        let resume = tokio::sync::Notify::new();
+        let continued = std::sync::atomic::AtomicBool::new(false);
+        let mut work = Box::pin(with_live_guard(&core, &old, WatchTrigger::Automatic, async {
+            resume.notified().await;
+            continued.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(work.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }).await;
+        let mut latest = old.clone();
+        latest.config.insert("watch".into(), "false".into());
+        platform::save_channels(&core, &[latest]).unwrap();
+        resume.notify_one();
+        let error = work.await.unwrap_err();
+        assert!(error.to_string().contains("主动观看已关闭"), "{error}");
+        assert!(!continued.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    async fn poll_until_running<F: Future>(core: &Core, future: &mut std::pin::Pin<Box<F>>) -> String {
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending(), "Mock 轮次应在流式输出处挂起");
+            match core.list_sessions().unwrap().into_iter().find(|s| exm_core::round_trace::is_running(&s.id)) {
+                Some(s) => Poll::Ready(s.id),
+                None => Poll::Pending,
+            }
+        }).await
+    }
+
+    #[tokio::test]
+    async fn 取消观看future同步清理执行任务闸门和注入工具() {
+        let core = core();
+        let ch = channel("youtube", true, false, false);
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        let mut future = Box::pin(ask_agent(&core, &ch, "本地 Mock 观看"));
+        let sid = poll_until_running(&core, &mut future).await;
+        let gateway = core.orchestrator().tools.clone();
+        assert!(!gateway.session_tool_specs(&sid).is_empty());
+        assert!(gateway.session_step_budget(&sid).is_some());
+        drop(future);
+        assert!(!exm_core::round_trace::is_running(&sid), "不得留下游离观看任务");
+        assert!(gateway.session_tool_specs(&sid).is_empty());
+        assert_eq!(gateway.session_step_budget(&sid), None);
+        assert_eq!(tools::act_gate_count(&sid), 0);
+    }
+
+    #[tokio::test]
+    async fn 运行中关闭观看在下个安全边界停止并清理() {
+        let core = core();
+        let mut ch = channel("youtube", true, false, false);
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        let old = ch.clone();
+        let mut future = Box::pin(ask_agent(&core, &old, "本地 Mock 观看"));
+        let sid = poll_until_running(&core, &mut future).await;
+        ch.config.insert("watch".into(), "false".into());
+        platform::save_channels(&core, &[ch]).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), future).await.unwrap();
+        assert!(result.err().unwrap().to_string().contains("主动观看已关闭"));
+        assert!(!exm_core::round_trace::is_running(&sid));
+        assert!(core.orchestrator().tools.session_tool_specs(&sid).is_empty());
+        assert_eq!(core.orchestrator().tools.session_step_budget(&sid), None);
+    }
+
+    #[tokio::test]
+    async fn 会话锁排队期间关闭观看不得落库或启动自动轮次() {
+        let core = core();
+        let ch = channel("youtube", true, false, false);
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        let (run, _) = ChannelRun::begin(&core, &ch, "video").await.unwrap();
+        let sid = run.session_id.clone();
+        let mut blocker = Box::pin(core.chat(&sid, "手动 Mock 轮次暂占会话锁"));
+        std::future::poll_fn(|cx| {
+            assert!(blocker.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }).await;
+        assert!(exm_core::round_trace::is_running(&sid));
+        let mut automatic = Box::pin(ask_agent(&core, &ch, "关闭后绝不能执行的自动轮次"));
+        std::future::poll_fn(|cx| {
+            assert!(automatic.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }).await;
+        let mut latest = ch.clone();
+        latest.config.insert("watch".into(), "false".into());
+        platform::save_channels(&core, &[latest]).unwrap();
+        // 先释放锁，再立即恢复排队 future，不依赖一秒周期检查恰好先到达。
+        blocker.await.unwrap();
+        let error = automatic.await.err().unwrap();
+        assert!(error.to_string().contains("主动观看已关闭"), "{error}");
+        let messages = core.store.list_messages(&sid, 100).unwrap();
+        assert!(!messages.iter().any(|m| m.agent_id.as_deref() == Some("auto:video")));
+        assert!(!messages.iter().flat_map(|m| &m.statements).any(|s| s.text.contains("关闭后绝不能执行的自动轮次")));
+        assert!(!exm_core::round_trace::is_running(&sid));
+        assert!(core.orchestrator().tools.session_tool_specs(&sid).is_empty());
     }
 }

@@ -159,9 +159,12 @@ impl Orchestrator {
             let agent=agent.to_string();let session=session.to_string();let task=task.to_string();
             Box::pin(async move {
                 let router=weak.upgrade().ok_or_else(||anyhow::anyhow!("运行时已释放"))?;
-                let context=router.store.get_session(&session)?.and_then(|s|crate::core::sessions::parse_session_scope(&router.registry,&s.group_id));
+                let session_data = router.store.get_session(&session)?;
+                let workspace = session_data.as_ref().and_then(|s| s.workspace.as_deref()).map(crate::workspace::pinned).transpose()?;
+                let context=session_data.and_then(|s|crate::core::sessions::parse_session_scope(&router.registry,&s.group_id));
+                anyhow::ensure!(workspace.is_none() || context.is_some(), "项目会话的对话对象已不存在");
                 let caller=crate::model_routing::ModelCaller {agent_id:agent.clone(),session_id:session.clone()};
-                crate::registry::round_scope_decl::ROUND_SCOPE.scope(context,crate::model_routing::MODEL_CALLER.scope(caller,async {
+                crate::workspace::scope(workspace, crate::registry::round_scope_decl::ROUND_SCOPE.scope(context,crate::model_routing::MODEL_CALLER.scope(caller,async {
                     let mut def=router.routing_agent(&agent).ok_or_else(||anyhow::anyhow!("派生任务的调用智能体不存在：{agent}"))?;
                     let chain=router.resolve_agent_chain(&def,ModelPurpose::Chat,&task,&session,None).await?;
                     def.tools=tools;
@@ -169,7 +172,7 @@ impl Orchestrator {
                     def.tier=Tier::Unit;
                     crate::model_routing::SPAWN_CALLER.scope(crate::model_routing::ModelCaller {agent_id:agent.clone(),session_id:session.clone()},
                         router.unit_runtime.chat_execute(&def,format!("# 派生子智能体\n你独立执行封闭子任务，只能使用任务书和本次工具；不要假定持有主会话历史。完成后输出真实结果与缺口。\n## 任务书\n{task}"),vec![],&session,&format!("{session}:spawn"),chain,false,ToolScope::Tools,|_|{})).await
-                })).await
+                }))).await
             })
         }));
     }

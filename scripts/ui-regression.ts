@@ -7,10 +7,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page, type Route, type WebSocketRoute } from "playwright-core";
 import { createServer } from "vite";
-import type {} from "../webui/src/desktop";
+import type {} from "../desktop/src/native";
 import type { ChatMessage, Session } from "../webui/src/types";
 import type { ClientIdentity, ClientIdentityPreview } from "../webui/src/api/core";
 import type { ModelRouting } from "../webui/src/modelRouting";
+import type { CollaborationPage, CollaborationRoom, CollaborationTurnInput } from "../client/src/api/collaborations";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const screenshotDir = process.env.UI_SCREENSHOT_DIR;
@@ -28,7 +29,7 @@ await Promise.all(servers.map((server) => server.listen()));
 const [base, desktopBase] = servers.map((server) => `http://127.0.0.1:${(server.httpServer!.address() as AddressInfo).port}`);
 
 const ledger = { task: { goal: "fixture", acceptance: ["works"], constraints: [], forbidden: [], priorities: [] }, evidence: { confirmed: [], gaps: [] }, risk: { openAssertions: [], impact: [], revertPaths: [], blockers: [] } };
-const makeSession = (id: string): Session => ({ id, title: `Conversation ${id}`, groupId: "single:machina", status: "active", running: false, ledger, createdAt: "2026-11-16T00:00:00Z", updatedAt: "2026-11-16T00:00:00Z" });
+const makeSession = (id: string, workspace = "/fixture/project"): Session => ({ id, title: `Conversation ${id}`, groupId: "single:machina", workspace, status: "active", running: false, ledger, createdAt: "2026-11-16T00:00:00Z", updatedAt: "2026-11-16T00:00:00Z" });
 const message = (id: string, text: string): ChatMessage => ({ id: `msg-${text}`, sessionId: id, role: "orchestrator", statements: [{ tag: "报告", text }], createdAt: "2026-11-16T00:00:00Z" });
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=", "base64");
 const config = { mock: true, llm: { apiKey: "", baseUrl: "", model: "mock" }, memory: { enabled: false, recallLimit: 6, halfLifeDays: 30, semanticModel: "" }, security: { execApproval: "risky", execAllowlist: "" }, automation: {}, maxSessionTokens: 0, maxConcurrency: 2, tools: {}, trash: {}, experiments: {}, identity: {}, limits: {}, triggers: { fileWatch: {}, eventWebhook: {} }, mcpServe: {}, notify: {} };
@@ -48,9 +49,9 @@ async function fixture(desktop = false, viewport = { width: 1440, height: 900 },
   page.setDefaultNavigationTimeout(30_000);
   const errors: string[] = [];
   const state = {
-    sessions: [makeSession("a"), makeSession("b")], messages: { a: [], b: [] } as Record<string, ChatMessage[]>,
+    sessions: [makeSession("a"), makeSession("b")], archivedSessions: [] as Session[], messages: { a: [], b: [] } as Record<string, ChatMessage[]>,
     approvals: [] as { id: string; sessionId: string; agentId: string; command: string; status?: string }[],
-    sockets: [] as WebSocketRoute[], requests: [] as { path: string; method: string; body: unknown }[],
+    sockets: [] as WebSocketRoute[], requests: [] as { path: string; method: string; body: unknown; workspace?: string }[],
     chat: null as Handler | null, overrides: new Map<string, Handler>(),
     pong: true, pings: 0, fileContent: "fn main() {}\n", saved: "", workspace: "/fixture/project",
     config: structuredClone(config), target: { mode: "single", id: "machina", name: "Fixture Agent", primary: "machina" },
@@ -66,17 +67,24 @@ async function fixture(desktop = false, viewport = { width: 1440, height: 900 },
     const url = new URL(route.request().url());
     if (!url.pathname.startsWith("/api/")) return route.continue();
     const p = url.pathname.slice(4);
-    state.requests.push({ path: p, method: route.request().method(), body: route.request().postData() ? route.request().postDataJSON() as unknown : null });
+    state.requests.push({ path: p, method: route.request().method(), body: route.request().postData() ? route.request().postDataJSON() as unknown : null, workspace: route.request().headers()["x-exm-workspace"] });
     const fulfill = async (body: unknown, status = 200) => { await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) }); };
     const override = state.overrides.get(p);
     if (override) return override(route, fulfill);
     if (/\/sessions\/[^/]+\/chat$/.test(p)) return state.chat ? state.chat(route, fulfill) : fulfill({ accepted: true }, 202);
-    if (p === "/sessions" && route.request().method() === "GET") return fulfill(state.sessions);
+    if (p === "/sessions" && route.request().method() === "GET") {
+      const source = url.searchParams.has("archived") ? state.archivedSessions : state.sessions;
+      const workspace = url.searchParams.get("workspace");
+      return fulfill(workspace ? source.filter((session) => session.workspace === workspace) : source);
+    }
     if (p === "/sessions" && route.request().method() === "POST") {
-      const created = { ...makeSession(`new-${state.sessions.length}`), title: (route.request().postDataJSON() as { title: string }).title };
+      const body = route.request().postDataJSON() as { title: string; workspace?: string };
+      const created = { ...makeSession(`new-${state.sessions.length}`, body.workspace ?? "/fixture/project"), title: body.title };
       state.sessions.unshift(created); state.messages[created.id] = []; return fulfill(created);
     }
     if (p === "/workspace" && route.request().method() === "PUT") { state.workspace = (route.request().postDataJSON() as { path: string }).path; return fulfill({ workspace: state.workspace }); }
+    if (p === "/sessions/search") return fulfill({ query: url.searchParams.get("q"), hits: [] });
+    if (p === "/sessions/batch" && route.request().method() === "POST") return fulfill({ ok: true, affected: (route.request().postDataJSON() as { ids: string[] }).ids.length, failed: [] });
     if (p === "/target" && route.request().method() === "PUT") { Object.assign(state.target, route.request().postDataJSON() as object); return fulfill({ ok: true }); }
     if (p === "/config" && route.request().method() === "PUT") { Object.assign(state.config, route.request().postDataJSON() as object); return fulfill({ ok: true }); }
     const approval = p.match(/^\/approvals\/([^/]+)\/(approve|deny)$/);
@@ -96,7 +104,7 @@ async function fixture(desktop = false, viewport = { width: 1440, height: 900 },
     const session = p.match(/^\/sessions\/([^/]+)(?:\/(\w+))?$/);
     if (session) {
       const [, id, part] = session;
-      if (!part) return fulfill(state.sessions.find((item) => item.id === id) ?? makeSession(id));
+      if (!part) return fulfill(state.sessions.find((item) => item.id === id) ?? state.archivedSessions.find((item) => item.id === id) ?? makeSession(id));
       if (part === "messages") return fulfill(state.messages[id] ?? []);
       if (part === "graph") return fulfill({ nodes: [] });
       if (["events", "snapshots", "archive"].includes(part)) return fulfill([]);
@@ -114,9 +122,15 @@ async function fixture(desktop = false, viewport = { width: 1440, height: 900 },
       "/agents": [{ name: "Fixture Agent", identifier: "machina", domain: "test", tier: "unit", description: "fixture", capabilities: [], tools: [] }],
       "/llm/profiles": { active: "test", mock: true, profiles: [profile] },
       "/llm/effort": { effort: "default" }, "/llm/capabilities": { speech: "", transcribe: "", embedding: "", visionRelay: "" },
-      "/workspace": { workspace: state.workspace }, "/health": { ok: true, mock: true, agents: 1 },
+      "/workspace": (() => {
+        const header = route.request().headers()["x-exm-workspace"];
+        return { workspace: header ? decodeURIComponent(header) : state.workspace, explicit: null, scoped: Boolean(header) };
+      })(), "/health": { ok: true, mock: true, agents: 1, features: ["session-workspace-v1"] },
       "/version": { version: "0.7.0", gitHash: "fixture" }, "/audit": { items: [] },
-      "/approvals": state.approvals,
+      "/approvals": (() => {
+        const workspace = url.searchParams.get("workspace");
+        return workspace ? state.approvals.filter((approval) => state.sessions.find((session) => session.id === approval.sessionId)?.workspace === workspace) : state.approvals;
+      })(),
       "/workbench/tree": { root: "/fixture", count: 0, nodes: [] },
       "/selfcheck": { ok: true, overall: "ok", items: [], errors: 0, warns: 0 },
       "/plugins": { plugins: [] }, "/skills": [], "/cron": [], "/cron/runs": [], "/memory/stats": { memory: { total: 0, pinned: 0, byKind: {} }, agentStats: [] }, "/memory": [], "/knowledge": { items: [], total: 0 }, "/channels": [], "/channels/flows": [],
@@ -132,14 +146,20 @@ async function fixture(desktop = false, viewport = { width: 1440, height: 900 },
     state.sockets.push(socket);
     socket.onMessage((text) => { if (text === "ping") { state.pings += 1; if (state.pong) socket.send("pong"); } });
   });
-  await page.goto(desktop ? desktopBase : base, { waitUntil: "domcontentloaded" });
-  if (desktop) {
-    await page.waitForSelector("#btn-send", { state: "visible" });
-    await page.waitForFunction(async (url) => { const { useExm } = await import(url) as typeof import("../webui/src/store"); return useExm.getState().sessionId === "a"; }, `${desktopBase}/@fs${root}/webui/src/store.ts`);
-  } else {
-    await page.waitForSelector(".chat-composer textarea", { state: "attached" });
-    if (viewport.width <= 860) await page.locator(".session-row").filter({ hasText: "Conversation a" }).click();
-    await page.waitForSelector(".chat-composer textarea", { state: "visible" });
+  try {
+    await page.goto(desktop ? desktopBase : base, { waitUntil: "domcontentloaded" });
+    if (desktop) {
+      await page.waitForSelector("#btn-send", { state: "visible", timeout: 30_000 });
+      await page.waitForFunction(async (url) => { const { useExm } = await import(url) as typeof import("../webui/src/store"); return useExm.getState().sessionId === "a"; }, `${desktopBase}/src/testing.ts`);
+    } else {
+      await page.waitForSelector(".chat-composer textarea", { state: "attached", timeout: 30_000 });
+      if (viewport.width <= 860) await page.locator(".session-row").filter({ hasText: "Conversation a" }).click();
+      await page.waitForSelector(".chat-composer textarea", { state: "visible" });
+    }
+  } catch (error) {
+    const main = (await page.locator("body").innerText({ timeout: 1_000 }).catch(() => "")).slice(0, 600);
+    await context.close();
+    throw new Error(`${desktop ? "Desktop" : "WebUI"} fixture did not boot. Page: ${main}\nErrors: ${errors.join("\n")}`, { cause: error });
   }
   return {
     page, state, errors,
@@ -161,7 +181,7 @@ async function test(name: string, run: () => Promise<void>): Promise<void> {
   try { await run(); passed += 1; console.log(`✓ ${name}`); }
   finally { clearTimeout(timeout); }
 }
-const storeUrl = (page: Page) => `${new URL(page.url()).origin}${page.url().startsWith(desktopBase) ? `/@fs${root}/webui` : ""}/src/store.ts`;
+const storeUrl = (page: Page) => `${new URL(page.url()).origin}/src/${page.url().startsWith(desktopBase) ? "testing" : "store"}.ts`;
 const webState = (page: Page) => page.evaluate(async (url) => {
   const { useExm } = await import(url) as typeof import("../webui/src/store"); const state = useExm.getState();
   return { messages: state.messages, running: state.running, drafts: state.drafts, approvals: state.approvals, sessionId: state.sessionId, liveOrch: state.liveOrch };
@@ -199,7 +219,29 @@ async function selectRoutingMode(page: Page, purpose: string, mode: string) {
 }
 
 try {
-  for (const desktop of [false, true]) {
+  await test("WebUI stays on its own instance despite a legacy remote address", async () => {
+    const f = await fixture();
+    try {
+      const apiOrigins: string[] = [];
+      f.page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (url.pathname.startsWith("/api/")) apiOrigins.push(url.origin);
+      });
+      await f.page.evaluate(() => localStorage.setItem("exm.server", "https://legacy-remote.invalid"));
+      await f.page.reload({ waitUntil: "domcontentloaded" });
+      await f.page.locator(".chat-composer textarea").waitFor();
+      assert.ok(apiOrigins.length > 0);
+      assert.ok(apiOrigins.every((origin) => origin === base), "WebUI must never send instance credentials to a saved remote address");
+      f.state.overrides.set("/auth/verify", (_, fulfill) => fulfill({ ok: false }));
+      await f.page.reload({ waitUntil: "domcontentloaded" });
+      await f.page.locator(".login-box input[type=password]").waitFor();
+      assert.equal(await f.page.locator(".login-remote-toggle").count(), 0);
+      assert.equal(await f.page.locator(".login-box input").count(), 1);
+    } finally { await f.close(); }
+  });
+  // Desktop intentionally keeps instance administration out of the coding shell;
+  // the WebUI suite remains the owner of model/agent/provider settings coverage.
+  for (const desktop of [false]) {
     const client = desktop ? "Desktop" : "WebUI";
     await test(`${client} settings UX preserves multi-section agent drafts and retries failed saves`, async () => {
       const f = await fixture(desktop);
@@ -433,6 +475,43 @@ try {
       await screenshot(f.page, "webui-settings-agent-directory");
     } finally { await f.close(); }
   });
+  for (const viewport of [{ width: 1916, height: 867 }, { width: 1440, height: 900 }]) {
+    await test(`WebUI model workspace fills available height and scrolls its catalog ${viewport.width}x${viewport.height}`, async () => {
+      const f = await fixture(false, viewport);
+      try {
+        await f.page.evaluate(async (url) => {
+          const { useTheme } = await import(url) as typeof import("../webui/src/theme");
+          useTheme.getState().setPreset("minimal");
+        }, `${base}/src/theme.ts`);
+        let models = [{ model: "small", vision: true, audio: false }];
+        f.state.overrides.set("/llm/profiles", (_, fulfill) => fulfill({ active: "test", profiles: [{ ...profile, apiKey: "***已配置***", models }] }));
+        await openSettings(f.page, false, "模型");
+        await f.page.locator(".provider-model-entry").first().waitFor();
+        const geometry = await f.page.evaluate(() => {
+          const content = document.querySelector(".app-content")!.getBoundingClientRect();
+          const workspace = document.querySelector(".provider-workspace")!.getBoundingClientRect();
+          const list = document.querySelector(".provider-workspace .settings-list-panel")!.getBoundingClientRect();
+          const detail = document.querySelector(".provider-workspace .settings-detail-panel")!.getBoundingClientRect();
+          const footer = document.querySelector(".provider-owner-hint")!.getBoundingClientRect();
+          return { bottomGap: content.bottom - workspace.bottom, panelGap: Math.abs(list.bottom - detail.bottom), footerGap: workspace.bottom - footer.bottom };
+        });
+        assert.ok(geometry.bottomGap >= 0 && geometry.bottomGap <= 16, `Dead space below model workspace: ${JSON.stringify(geometry)}`);
+        assert.ok(geometry.panelGap <= 1 && geometry.footerGap <= 20, `Provider panels/actions do not fill their allocated workspace: ${JSON.stringify(geometry)}`);
+        await screenshot(f.page, `webui-model-height-${viewport.width}x${viewport.height}`);
+        models = Array.from({ length: 40 }, (_, index) => ({ model: `catalog-${index}`, vision: true, audio: false }));
+        await f.page.getByRole("button", { name: "刷新", exact: true }).click();
+        await f.page.locator(".provider-model-entry").filter({ hasText: "catalog-39" }).waitFor({ state: "attached" });
+        const scroll = await f.page.locator(".provider-model-list").evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          const bounds = element.getBoundingClientRect();
+          const workspace = element.closest(".provider-workspace")!.getBoundingClientRect();
+          return { scrolls: element.scrollHeight > element.clientHeight && element.scrollTop > 0, contained: bounds.bottom <= workspace.bottom, height: element.clientHeight };
+        });
+        assert.ok(scroll.scrolls && scroll.contained && scroll.height >= 80, `Catalog should scroll inside the workspace: ${JSON.stringify(scroll)}`);
+        assert.ok(await f.page.locator(".provider-owner-hint").isVisible());
+      } finally { await f.close(); }
+    });
+  }
   for (const viewport of [{ width: 1440, height: 900 }, { width: 420, height: 820 }, { width: 420, height: 480 }]) {
     await test(`WebUI console keeps every route inside a compact viewport ${viewport.width}x${viewport.height}`, async () => {
       const f = await fixture(false, viewport);
@@ -475,10 +554,10 @@ try {
           const current = useExm.getState().config;
           if (current) useExm.setState({ config: { ...current, memory: { ...current.memory, enabled: true } } });
         }, storeUrl(f.page));
-        const routes = ["chat", "flows", "tasks", "agent", "nexus", "sessions", "graph", "automations", "skills", "plugins", "models", "approvals", "ledger", "memory", "knowledge", "activity", "settings"];
+        const routes = ["chat", "flows", "tasks", "agent", "nexus", "graph", "automations", "skills", "plugins", "models", "approvals", "ledger", "memory", "knowledge", "activity", "settings"];
         const contentSelectors: Record<string, string> = {
           chat: ".chat-shell", flows: ".flows-rail .flow-item", tasks: ".flows-rail .flow-item", agent: ".agent-directory-card",
-          nexus: ".ant-table", sessions: ".sessions-tr", graph: ".graph-empty", automations: ".ant-table-tbody > .ant-table-row",
+          nexus: ".ant-table", graph: ".graph-empty", automations: ".ant-table-tbody > .ant-table-row",
           skills: ".skill-card", plugins: ".card-grid .ant-card", models: ".provider-model-entry", approvals: ".ant-table-tbody > .ant-table-row",
           ledger: ".ledger-wrap .ant-card", memory: ".memory-stats", knowledge: ".memory-hits .ant-list-item", activity: ".event-stream", settings: ".cfg-panel",
         };
@@ -506,7 +585,7 @@ try {
       } finally { await f.close(); }
     });
   }
-  for (const desktop of [false, true]) for (const viewport of [{ width: 1440, height: 900 }, { width: 420, height: 820 }, { width: 420, height: 480 }]) {
+  for (const desktop of [false]) for (const viewport of [{ width: 1440, height: 900 }, { width: 420, height: 820 }, { width: 420, height: 480 }]) {
     await test(`${desktop ? "Desktop" : "WebUI"} settings layout keeps fields and save actions reachable ${viewport.width}x${viewport.height}`, async () => {
       const f = await fixture(desktop, viewport);
       try {
@@ -521,6 +600,16 @@ try {
           const fits = await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
           assert.ok(fits, `${section} has horizontal overflow`);
         }
+        await settingsSection(f.page, "模型清单");
+        const catalogDetails = dialog.locator(".provider-model-field .ant-collapse-header").first();
+        await catalogDetails.scrollIntoViewIfNeeded();
+        await catalogDetails.click();
+        const switches = dialog.locator(".provider-capability-switches .ant-form-item");
+        await switches.first().waitFor();
+        assert.equal(await switches.count(), 3);
+        const heights = await switches.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().height));
+        assert.ok(heights.every((height) => height <= 48), `Model capability options remain compact: ${heights.join(", ")}`);
+        if (!desktop) assert.ok(!(await f.page.locator(".telemetry-bar").innerText()).includes("MODEL"));
         await settingsSection(f.page, "客户端伪装");
         await dialog.getByTestId("client-identity-preset").click();
         await f.page.locator(".ant-select-dropdown:visible").getByText("Codex CLI", { exact: true }).click();
@@ -532,7 +621,7 @@ try {
       } finally { await f.close(); }
     });
   }
-  for (const desktop of [false, true]) {
+  for (const desktop of [false]) {
     await test(`${desktop ? "Desktop" : "WebUI"} model rules are configured inside the agent's own settings`, async () => {
       const f = await fixture(desktop);
       try {
@@ -738,7 +827,7 @@ try {
         const current = await webState(f.page); assert.equal(current.sessionId, "a"); assert.equal(current.messages[0].statements[0].text, "latest A result");
       } finally { release?.(); await f.close(); }
     });
-    await test(`${name} stale approval refresh cannot resurrect a resolved request`, async () => {
+    if (!desktop) await test(`${name} stale approval refresh cannot resurrect a resolved request`, async () => {
       const f = await fixture(desktop);
       let release!: () => void;
       try {
@@ -759,8 +848,8 @@ try {
     await test(`${name} restores missed messages and clears resolved approvals`, async () => {
       const f = await fixture(desktop);
       try {
-        f.emit("approval.required", { approvalId: "ap", agentId: "agent", command: "echo pending" });
         f.state.approvals = [{ id: "ap", sessionId: "a", agentId: "agent", command: "echo pending" }];
+        f.emit("approval.required", { approvalId: "ap", agentId: "agent", command: "echo pending" });
         await f.page.waitForSelector(".approval-card");
         f.state.messages.a = [message("a", "completed while disconnected")]; f.state.approvals = [];
         await f.state.sockets.at(-1)!.close({ code: 1012, reason: "fixture restart" });
@@ -830,17 +919,160 @@ try {
       await eventually(async () => (await f.page.locator(".cm-content").innerText()).includes("// external edit"), "External file not loaded");
     } finally { await f.close(); }
   });
-  await test("Desktop workspace changes protect unsaved files and clear old file tabs", async () => {
+  await test("Desktop keeps project conversations and drafts isolated while switching tabs", async () => {
     const f = await fixture(true);
     try {
-      await f.page.getByRole("button", { name: "查看代码", exact: true }).click(); await f.page.getByText("main.rs", { exact: true }).click();
-      await f.page.locator(".cm-content").click(); await f.page.keyboard.type("// draft");
-      await f.page.getByRole("button", { name: "打开项目", exact: true }).click(); await f.page.getByRole("textbox", { name: "项目目录" }).fill("/fixture/other");
-      await f.page.getByRole("dialog").getByRole("button", { name: "打开", exact: true }).click(); await f.page.getByRole("button", { name: "继续编辑", exact: true }).click();
-      assert.equal(f.state.workspace, "/fixture/project");
-      await f.page.getByRole("dialog").getByRole("button", { name: "打开", exact: true }).click(); await f.page.getByRole("button", { name: "丢弃修改", exact: true }).click();
-      await eventually(() => f.state.workspace === "/fixture/other", "Workspace did not change");
-      await f.page.getByRole("button", { name: "关闭 src/main.rs", exact: true }).waitFor({ state: "detached" });
+      const input = f.page.locator("#input");
+      await input.fill("draft in project one");
+      await f.page.getByRole("button", { name: "项目与连接", exact: true }).click();
+      const dialog = f.page.getByRole("dialog", { name: "项目与连接" });
+      await dialog.getByRole("textbox", { name: "项目名称" }).fill("Project Two");
+      await dialog.getByRole("textbox", { name: "项目目录" }).fill("/fixture/second");
+      await dialog.getByRole("button", { name: "打开项目", exact: true }).click();
+      await f.page.locator("#input").waitFor({ state: "visible" });
+      const second = f.page.locator("#input");
+      await eventually(async () => await f.page.locator(".desk-project-tabs").getByRole("button", { name: /Project Two/ }).count() === 1,
+        `Second project tab did not appear: ${await f.page.locator("body").innerText()}`);
+      await second.fill("draft in project two");
+      const secondList = f.state.requests.findLast((request) => request.path === "/sessions" && request.method === "GET" && request.workspace === encodeURIComponent("/fixture/second"));
+      assert.ok(secondList, `Project Two did not query its scoped session list: ${JSON.stringify(f.state.requests.filter((request) => request.path === "/sessions" && request.method === "GET"))}`);
+      const secondCreate = f.state.requests.find((request) => request.path === "/sessions" && request.method === "POST" && (request.body as { workspace?: string } | null)?.workspace === "/fixture/second");
+      assert.ok(secondCreate, "Project Two's new session did not persist its project directory");
+      await f.page.locator(".desk-project-tabs").getByRole("button", { name: /project$/i }).click();
+      await eventually(async () => (await f.page.locator("#input").inputValue()) === "draft in project one", "Project One draft changed after switching");
+      await f.page.locator(".desk-project-tabs").getByRole("button", { name: /Project Two/ }).click();
+      await eventually(async () => (await f.page.locator("#input").inputValue()) === "draft in project two", "Project Two draft changed after switching");
+    } finally { await f.close(); }
+  });
+  await test("Desktop preserves unsaved editor changes when switching projects", async () => {
+    const f = await fixture(true);
+    try {
+      await f.page.getByRole("button", { name: "查看代码", exact: true }).click();
+      await f.page.getByText("main.rs", { exact: true }).click();
+      await f.page.waitForSelector(".cm-content");
+      await f.page.locator(".cm-content").click();
+      await f.page.keyboard.press("Control+End");
+      await f.page.keyboard.type("// unsaved project-one edit");
+      await f.page.locator(".desk-editor header").getByText("src/main.rs · 未保存", { exact: true }).waitFor();
+
+      await f.page.getByRole("button", { name: "项目与连接", exact: true }).click();
+      const dialog = f.page.getByRole("dialog", { name: "项目与连接" });
+      await dialog.getByRole("textbox", { name: "项目名称" }).fill("Project Two");
+      await dialog.getByRole("textbox", { name: "项目目录" }).fill("/fixture/second");
+      await dialog.getByRole("button", { name: "打开项目", exact: true }).click();
+
+      const projects = f.page.locator(".desk-project-tabs");
+      await projects.getByRole("button", { name: "Project Two", exact: true }).waitFor();
+      await projects.getByRole("button", { name: "project", exact: true }).click();
+      await f.page.locator(".cm-content").getByText("// unsaved project-one edit", { exact: true }).waitFor();
+      await f.page.locator(".desk-editor header").getByText("src/main.rs · 未保存", { exact: true }).waitFor();
+      assert.equal(f.state.requests.filter((request) => request.path === "/fs/file" && request.method === "PUT").length, 0);
+    } finally { await f.close(); }
+  });
+  await test("Desktop collaboration routes selected work, recovers a rejected send and uses the member approval scope", async () => {
+    const f = await fixture(true);
+    try {
+      const home = "/fixture/project", second = "/fixture/second";
+      const updatedAt = "2026-11-19T00:00:00Z";
+      const room: CollaborationRoom = { id: "mixed", title: "Release coordination", workspace: home, updatedAt, members: [
+        { sessionId: "solo-alpha", target: "single:machina", label: "Fixture Agent", workspace: home },
+        { sessionId: "group-beta", target: "default", label: "Default", workspace: second },
+      ] };
+      let created = false;
+      let attempts = 0;
+      const snapshot: CollaborationPage = { room, turns: [], activeTurnId: null, approvals: [], nextBefore: null };
+      f.state.overrides.set("/health", (_, fulfill) => fulfill({ ok: true, features: ["session-workspace-v1", "collaboration-v1"] }));
+      f.state.overrides.set("/collaborations", (route, fulfill) => {
+        if (route.request().method() === "POST") {
+          created = true;
+          return fulfill(room, 201);
+        }
+        return fulfill(created && route.request().headers()["x-exm-workspace"] === encodeURIComponent(home) ? [room] : []);
+      });
+      f.state.overrides.set("/collaborations/mixed", (_, fulfill) => fulfill(snapshot));
+      f.state.overrides.set("/collaborations/mixed/turns", (route, fulfill) => {
+        if (++attempts === 1) return fulfill({ error: "temporary interruption" }, 503);
+        const body = route.request().postDataJSON() as CollaborationTurnInput;
+        snapshot.activeTurnId = body.requestId;
+        snapshot.turns = [{ id: body.requestId, text: body.text, createdAt: updatedAt, deliveries: [
+          { ...body.recipients[0], status: "done", messages: [message("solo-alpha", "Alpha result")] },
+          { ...body.recipients[1], status: "running" },
+        ] }];
+        snapshot.approvals = [{ memberSessionId: "group-beta", id: "beta-approval", agentId: "unit", command: "echo review" }];
+        f.state.overrides.set(`/collaborations/mixed/turns/${body.requestId}/stop`, (_, stopped) => {
+          snapshot.turns[0].deliveries[1].status = "stopped"; snapshot.activeTurnId = null;
+          return stopped({ stopped: 1 });
+        });
+        return fulfill({ id: body.requestId }, 202);
+      });
+      f.state.overrides.set("/approvals/beta-approval/approve", (_, fulfill) => {
+        snapshot.approvals = [];
+        return fulfill({ id: "beta-approval", status: "executed" });
+      });
+
+      await f.page.getByRole("button", { name: "项目与连接", exact: true }).click();
+      const projectDialog = f.page.getByRole("dialog", { name: "项目与连接" });
+      await projectDialog.getByRole("textbox", { name: "项目名称" }).fill("Project Two");
+      await projectDialog.getByRole("textbox", { name: "项目目录" }).fill(second);
+      await projectDialog.getByRole("button", { name: "打开项目", exact: true }).click();
+      const projects = f.page.getByRole("navigation", { name: "项目切换" });
+      await projects.getByRole("button", { name: "Project Two", exact: true }).waitFor();
+      await projects.getByRole("button", { name: "project", exact: true }).click();
+      await f.page.getByRole("button", { name: "协作群聊", exact: true }).click();
+      await f.page.getByRole("button", { name: "新建协作群聊", exact: true }).click();
+      const dialog = f.page.getByRole("dialog", { name: "新建协作群聊" });
+      await dialog.getByRole("textbox", { name: "群聊名称" }).fill(room.title);
+      await dialog.getByRole("combobox", { name: "成员 1 对象" }).click();
+      await f.page.getByText("智能体 · Fixture Agent（machina）", { exact: true }).last().click();
+      await dialog.getByRole("combobox", { name: "成员 2 对象" }).click();
+      await f.page.getByText("组 · Default（default）", { exact: true }).last().click();
+      await dialog.getByRole("button", { name: "创建群聊", exact: true }).click();
+      const collab = f.page.getByRole("region", { name: "项目协作群聊" });
+      const input = collab.getByRole("textbox", { name: "群聊消息" });
+      const send = collab.getByRole("button", { name: "发送给所选成员" });
+      await input.fill("Prepare release");
+      assert.ok(await send.isDisabled(), "No default broadcast");
+      await collab.getByRole("checkbox", { name: /Fixture Agent/ }).check();
+      await collab.getByRole("checkbox", { name: /Project Two.*Default/ }).check();
+      await collab.getByRole("textbox", { name: /Fixture Agent 的分工/ }).fill("check docs");
+      await collab.getByRole("textbox", { name: /Default 的分工/ }).fill("verify tests");
+      await send.click();
+      await f.page.getByText(/temporary interruption/).waitFor();
+      assert.equal(await input.inputValue(), "Prepare release");
+      await send.click();
+      await collab.getByText("Alpha result", { exact: true }).waitFor();
+      const creation = f.state.requests.find((request) => request.path === "/collaborations" && request.method === "POST")!;
+      assert.equal(creation.workspace, encodeURIComponent(home));
+      assert.deepEqual(creation.body, { title: room.title, members: [{ workspace: home, target: "single:machina" }, { workspace: second, target: "default" }] });
+      const sends = f.state.requests.filter((request) => request.path === "/collaborations/mixed/turns");
+      assert.equal(sends.length, 2);
+      assert.deepEqual(sends[0].body, sends[1].body, "Retry must keep the same request ID and payload");
+      assert.deepEqual((sends[0].body as CollaborationTurnInput).recipients, [{ sessionId: "solo-alpha", instruction: "check docs" }, { sessionId: "group-beta", instruction: "verify tests" }]);
+      await collab.getByRole("button", { name: "批准一次", exact: true }).click();
+      assert.equal(f.state.requests.find((request) => request.path === "/approvals/beta-approval/approve")?.workspace, encodeURIComponent(second));
+      await collab.getByRole("button", { name: /停止 Project Two/ }).click();
+      await collab.getByText("已停止", { exact: true }).waitFor();
+      const cancelled = f.state.requests.find((request) => request.path.startsWith("/collaborations/mixed/turns/") && request.path.endsWith("/stop"));
+      assert.deepEqual(cancelled?.body, { sessionId: "group-beta" });
+      await collab.getByRole("button", { name: "引用到草稿", exact: true }).click();
+      assert.ok((await input.inputValue()).includes("> Alpha result"));
+      assert.ok(await send.isDisabled());
+      await projects.getByRole("button", { name: "Project Two", exact: true }).click();
+      await projects.getByRole("button", { name: "project", exact: true }).click();
+      assert.ok((await input.inputValue()).includes("> Alpha result"));
+      assert.ok(!f.state.requests.some((request) => request.method === "PUT" && ["/target", "/workspace"].includes(request.path)));
+      await screenshot(f.page, "desktop-collaboration");
+    } finally { await f.close(); }
+  });
+  await test("Desktop collaboration leaves ordinary chat usable on an old gateway", async () => {
+    const f = await fixture(true);
+    try {
+      await f.page.getByRole("button", { name: "协作群聊", exact: true }).click();
+      await f.page.getByText("该网关不支持协作群聊", { exact: true }).waitFor();
+      assert.ok(!f.state.requests.some((request) => request.path.startsWith("/collaborations")));
+      await f.page.getByRole("button", { name: "对话", exact: true }).click();
+      await f.page.locator("#input").fill("old gateway remains usable");
+      assert.ok(await f.page.locator("#btn-send").isEnabled());
     } finally { await f.close(); }
   });
   await test("Desktop cross-session approvals navigate to their source", async () => {
@@ -923,18 +1155,17 @@ try {
       assert.equal(f.state.requests.filter((request) => request.path === "/sessions/a/edit").length, 1);
     } finally { await f.close(); }
   });
-  await test("Desktop settings keep management inside the workspace dialog", async () => {
+  await test("Desktop settings keep project and instance controls inside the workspace dialog", async () => {
     const f = await fixture(true);
     try {
-      f.state.overrides.set("/memory/md", (_, fulfill) => fulfill({ content: "fixture memory" }));
       await f.page.getByRole("button", { name: "设置", exact: true }).click();
-      for (const label of ["模型", "智能体", "桌面", "技能", "插件", "会话", "审批", "记忆", "知识", "自动化", "连结", "高级", "审计"]) {
+      for (const label of ["桌面", "手机连接", "实例配置"]) {
         await f.page.getByRole("tab", { name: label, exact: true }).click();
         await f.page.getByRole("tabpanel", { name: label, exact: true }).waitFor({ state: "visible", timeout: 30_000 });
-        await f.page.waitForFunction(() => !Array.from(document.querySelectorAll(".desk-settings .ant-spin-spinning")).some((element) => element.getClientRects().length));
-        await f.page.waitForLoadState("networkidle");
         assert.ok(await f.page.locator(".desk-statusbar").count());
       }
+      assert.equal(await f.page.getByRole("tab", { name: "模型", exact: true }).count(), 0);
+      assert.equal(await f.page.getByRole("tab", { name: "智能体", exact: true }).count(), 0);
       await screenshot(f.page, "desktop-settings");
     } finally { await f.close(); }
   });
@@ -981,6 +1212,172 @@ try {
       const update = f.state.requests.findLast((request) => request.path === "/config" && request.method === "PUT")!.body as { compaction: { triggerRatio: number } };
       assert.equal(update.compaction.triggerRatio, 0.72); assert.ok(!Object.hasOwn(update, "compaction.triggerRatio"));
       await screenshot(f.page, "webui-settings");
+    } finally { await f.close(); }
+  });
+  await test("WebUI keeps session management in chat and exposes Agent execution details in context", async () => {
+    const f = await fixture();
+    try {
+      const store = storeUrl(f.page);
+      await f.page.evaluate(async (url) => {
+        const { useExm } = await import(url) as typeof import("../webui/src/store");
+        useExm.setState({
+          running: true,
+          liveParts: { machina: [{ kind: "text", text: "正在检查工作区文件" }] },
+          runToolCalls: [{ callId: "work-call", agentId: "machina", tool: "read", args: { path: "src/main.rs" }, status: "running" }],
+          graph: { id: "graph-a", sessionId: "a", status: "running", createdAt: "2026-11-18T00:00:00Z", nodes: [{
+            id: "node-a", sessionId: "a", graphId: "graph-a", agentIdentifier: "machina", title: "检查入口代码",
+            objective: "确认当前工作区的主要执行路径", acceptance: ["找到入口"], priority: "normal", dependsOn: [], status: "running", retryCount: 0, createdAt: "2026-11-18T00:00:00Z",
+          }] },
+        });
+      }, store);
+      const menuItems = await f.page.locator(".nav-menu .ant-menu-item").allInnerTexts();
+      assert.ok(!menuItems.some((item) => item.includes("会话管理")), "Session management should not occupy a navigation page");
+      await f.page.getByRole("button", { name: "Agent 工作态势", exact: true }).click();
+      const workDrawer = f.page.locator(".agent-work-drawer");
+      await workDrawer.getByText("检查入口代码", { exact: true }).last().waitFor();
+      await workDrawer.getByText("正在检查工作区文件", { exact: true }).waitFor();
+      await workDrawer.getByText("src/main.rs", { exact: true }).waitFor();
+      assert.equal(await workDrawer.locator(".agent-work-metrics").locator("strong").nth(1).innerText(), "1");
+      await f.page.keyboard.press("Escape");
+
+      await f.page.getByRole("button", { name: "管理会话", exact: true }).click();
+      const manager = f.page.locator(".session-manager-drawer");
+      await manager.getByText("会话管理", { exact: true }).waitFor();
+      await manager.locator(".sessions-row").first().waitFor();
+      assert.equal(await manager.locator(".sessions-row").count(), 2);
+      await manager.locator(".sessions-search input").fill("does-not-match");
+      await manager.getByText("没有匹配的会话（标题或最近 200 条消息）", { exact: true }).waitFor();
+      await manager.locator(".sessions-search input").clear();
+      await manager.locator(".sessions-row").first().getByRole("checkbox").check();
+      await manager.getByText("已选 1 项", { exact: true }).waitFor();
+      await manager.getByRole("button", { name: "取消选择", exact: true }).click();
+      await manager.getByText("归档区", { exact: true }).click();
+      await manager.getByText("归档区为空", { exact: true }).waitFor();
+      await f.page.keyboard.press("Escape");
+      assert.deepEqual(f.errors, []);
+    } finally { await f.close(); }
+  });
+  await test("WebUI session management uses the console theme and straight edges", async () => {
+    const f = await fixture(false, { width: 1916, height: 867 });
+    try {
+      f.state.sessions = f.state.sessions.map((session) => ({ ...session, origin: "console" }));
+      f.state.sessions.push({ ...makeSession("style-subtask"), title: "sub:crawler-agent:fixture task", origin: "console" });
+      await f.page.getByRole("button", { name: "管理会话", exact: true }).click();
+      const drawer = f.page.locator(".session-manager-drawer");
+      await drawer.locator(".sessions-row").first().waitFor();
+      const subtask = drawer.locator('[data-session-id="style-subtask"]');
+      await subtask.getByText("fixture task", { exact: true }).waitFor();
+      assert.equal(await subtask.getAttribute("data-raw-title"), "sub:crawler-agent:fixture task");
+      assert.equal(await subtask.getAttribute("data-session-kind"), "subtask");
+      assert.equal(await subtask.locator(".sessions-title-text").getAttribute("title"), "sub:crawler-agent:fixture task");
+      for (const preset of ["minimal", "graphite"] as const) {
+        await f.page.evaluate(async ({ url, preset }) => {
+          const { useTheme } = await import(url) as typeof import("../webui/src/theme");
+          useTheme.getState().setPreset(preset);
+        }, { url: `${base}/src/theme.ts`, preset });
+        const theme = await drawer.evaluate((element) => {
+          const header = element.querySelector<HTMLElement>(".sessions-th")!;
+          const table = element.querySelector<HTMLElement>(".sessions-table")!;
+          const tag = element.querySelector<HTMLElement>(".sessions-kind-tag")!;
+          const probe = document.createElement("span");
+          probe.style.backgroundColor = "var(--bg-raise)";
+          element.append(probe);
+          const expected = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return { background: getComputedStyle(header).backgroundColor, expected,
+            tableRadius: getComputedStyle(table).borderRadius, tagRadius: getComputedStyle(tag).borderRadius };
+        });
+        assert.equal(theme.background, theme.expected, `Session header ignores ${preset} theme: ${JSON.stringify(theme)}`);
+        assert.equal(theme.tableRadius, "0px", "Table must follow console straight-edge styling");
+        assert.equal(theme.tagRadius, "0px", "Type labels must not use unrelated pill styling");
+        await screenshot(f.page, `webui-session-manager-${preset}`);
+      }
+      await drawer.locator(".sessions-row").first().getByRole("checkbox").check();
+      assert.equal(await drawer.locator(".sessions-batchbar").evaluate((element) => getComputedStyle(element).borderRadius), "0px");
+      await drawer.getByRole("button", { name: "取消选择", exact: true }).click();
+      await drawer.getByRole("combobox", { name: "视图", exact: true }).click();
+      await f.page.locator(".ant-select-dropdown:visible").getByText("按来源分组", { exact: true }).click();
+      await drawer.locator(".sessions-group").first().waitFor();
+      assert.equal(await drawer.locator(".sessions-group").first().evaluate((element) => getComputedStyle(element).borderRadius), "0px");
+      await drawer.getByText("归档区", { exact: true }).click();
+      await drawer.getByText("归档区为空", { exact: true }).waitFor();
+    } finally { await f.close(); }
+  });
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 420, height: 820 }]) {
+    await test(`WebUI session manager preserves raw search and reachable controls ${viewport.width}x${viewport.height}`, async () => {
+      const f = await fixture(false, viewport);
+      try {
+        f.state.sessions = f.state.sessions.map((session) => ({ ...session, origin: "console" }));
+        f.state.sessions.push(
+          { ...makeSession("child-view"), title: "sub:crawler-agent:Check video evidence·T1", origin: "console" },
+          { ...makeSession("channel-view"), title: "channel:fixture:long-external-id", origin: "channel:fixture:long-external-id", originLabel: "Engineering room" },
+          { ...makeSession("auto-view"), title: "job-fixture", origin: "console" },
+          ...Array.from({ length: 35 }, (_, i) => ({ ...makeSession(`scroll-${i}`), origin: "console" })),
+        );
+        f.state.overrides.set("/channels", (_, fulfill) => fulfill([{ id: "fixture", type: "qqbot", enabled: true, config: {}, group: "default", capability: "tools", createdAt: "" }]));
+        if (viewport.width <= 860) await f.page.locator(".rail-back").click();
+        await f.page.getByRole("button", { name: "管理会话", exact: true }).click();
+        const drawer = f.page.locator(".session-manager-drawer");
+        const kind = drawer.locator(".sessions-kind-filter");
+        await drawer.locator('[data-session-id="child-view"] .sessions-title-text').getByText("Check video evidence", { exact: true }).waitFor();
+        await drawer.locator('[data-session-id="channel-view"] .sessions-title-text').getByText("Engineering room", { exact: true }).waitFor();
+        await kind.getByText("子任务", { exact: true }).click();
+        assert.equal(await drawer.locator(".sessions-row").count(), 1);
+        assert.equal(await drawer.locator(".sessions-row").getAttribute("data-session-kind"), "subtask");
+        await drawer.locator(".sessions-search input").fill("sub:crawler-agent");
+        await drawer.locator('.search-result[data-session-id="child-view"]').waitFor();
+        assert.equal(await drawer.locator(".search-result").count(), 1);
+        assert.equal(await drawer.locator(".search-result").getAttribute("data-raw-title"), "sub:crawler-agent:Check video evidence·T1");
+        await drawer.locator(".sessions-search input").clear();
+        await kind.getByText("系统任务", { exact: true }).click();
+        await drawer.locator('[data-session-id="auto-view"]').waitFor();
+        assert.equal(await drawer.locator(".sessions-row").count(), 1);
+        await kind.getByText("全部", { exact: true }).click();
+        await drawer.locator(".sessions-row").first().getByRole("checkbox").check();
+        const before = await drawer.getByTestId("sessions-controls").boundingBox();
+        const scroll = await drawer.getByTestId("sessions-list-scroll").evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          return { scrollHeight: element.scrollHeight, clientHeight: element.clientHeight, scrollTop: element.scrollTop };
+        });
+        assert.ok(scroll.scrollTop > 0 && scroll.scrollHeight > scroll.clientHeight, "Only the session list should scroll");
+        const after = await drawer.getByTestId("sessions-controls").boundingBox();
+        assert.equal(after?.y, before?.y, "Search and filters must stay in place while browsing sessions");
+        const footer = await drawer.getByTestId("sessions-footer").boundingBox();
+        assert.ok(footer && footer.y >= 0 && footer.y + footer.height <= viewport.height + 1, "Batch actions must remain inside the viewport");
+        assert.ok(await drawer.getByRole("button", { name: "取消选择", exact: true }).isVisible());
+        await drawer.getByRole("button", { name: "取消选择", exact: true }).click();
+        await drawer.getByRole("combobox", { name: "视图", exact: true }).click();
+        await f.page.locator(".ant-select-dropdown:visible").getByText("按来源分组", { exact: true }).click();
+        await drawer.locator(".sessions-group").first().waitFor();
+        assert.equal(await drawer.locator('[data-session-id="channel-view"]').getAttribute("data-session-kind"), "channel");
+        assert.equal(f.state.requests.filter((request) => ["POST", "PUT", "DELETE"].includes(request.method) && !request.path.startsWith("/auth/")).length, 0, "Browsing and filtering must not mutate sessions");
+        await screenshot(f.page, `webui-session-controls-${viewport.width}x${viewport.height}`);
+      } finally { await f.close(); }
+    });
+  }
+  await test("WebUI chat-flow management can reopen archived flow history in the flow stream", async () => {
+    const f = await fixture();
+    try {
+      const archived = { ...makeSession("archived-flow"), title: "channel:fixture:old-room", origin: "channel:fixture:old-room", originLabel: "Old room", archivedAt: "2026-11-18T00:00:00Z" };
+      f.state.archivedSessions.push(archived);
+      f.state.messages[archived.id] = [message(archived.id, "Archived flow transcript")];
+      await f.page.evaluate(() => { location.hash = "#/flows"; });
+      await f.page.locator(".flow-session-manager-trigger").waitFor();
+      await f.page.locator(".flow-session-manager-trigger").click();
+      const manager = f.page.locator(".session-manager-drawer");
+      await manager.getByText("归档区", { exact: true }).click();
+      const row = manager.locator('[data-session-id="archived-flow"]');
+      await row.waitFor();
+      await row.locator(".sessions-td-ops .ant-btn").last().click();
+      await f.page.getByText("打开会话", { exact: true }).last().click();
+      await f.page.waitForFunction(async (url) => {
+        const { useExm } = await import(url) as typeof import("../webui/src/store");
+        return useExm.getState().sessionId === "archived-flow";
+      }, storeUrl(f.page));
+      await f.page.waitForFunction(() => document.querySelector(".app-shell")?.getAttribute("data-view") === "flows");
+      await f.page.getByText("历史通道会话 · 只读", { exact: true }).waitFor();
+      await f.page.locator(".flows-messages").getByText("Archived flow transcript", { exact: true }).waitFor();
+      assert.deepEqual(f.errors, []);
     } finally { await f.close(); }
   });
   console.log(`${passed} browser regressions passed`);

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口拖拽、桌面事件订阅和项目目录选择。窗口控制走应用命令。",
+  "description": "项目目录选择和主窗口拖拽。窗口控制走应用命令。",
   "windows": ["main"],
   "permissions": [
     "core:window:allow-start-dragging",

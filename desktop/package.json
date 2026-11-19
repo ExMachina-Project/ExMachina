@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "EXMACHINA 桌面端（Tauri v2）：自带本地网关 / 远程直连",
+  "description": "EXMACHINA 桌面端（Tauri v2）：本地与远程多项目工作区",
   "scripts": {
     "build:ui": "npm --prefix .. run build:desktop-ui",
     "check:ui": "npm --prefix .. run check:desktop-ui",

@@ -20,6 +20,7 @@ pub(crate) struct SearchParams {
     q: Option<String>,
     /// 结果会话上限（缺省 20，钳制 1~50）
     limit: Option<usize>,
+    workspace: Option<String>,
 }
 
 /// 会话内容检索（GET /api/sessions/search）：标题 + 最近 200 条消息正文，
@@ -37,7 +38,11 @@ pub(crate) async fn search_sessions(
             .into_response();
     }
     let limit = p.limit.unwrap_or(20).clamp(1, 50);
-    match st.core.search_sessions(&query, limit) {
+    let root = match p.workspace.as_deref().map(|raw| crate::project_scope::pinned(&st, raw)).transpose() {
+        Ok(root) => root,
+        Err(response) => return response,
+    };
+    match st.core.store.search_sessions_in(&query, limit, root.as_deref().and_then(std::path::Path::to_str)) {
         Ok(hits) => Json(json!({ "query": query, "hits": hits })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -81,7 +86,7 @@ pub(crate) async fn get_workspace(State(st): State<AppState>) -> impl IntoRespon
     let global = st.core.config().workspace_root.clone();
     let explicit = st.core.registry().active_workspace();
     let path = st.core.registry().effective_workspace(&global);
-    Json(json!({ "workspace": path.to_string_lossy(), "explicit": explicit }))
+    Json(json!({ "workspace": path.to_string_lossy(), "explicit": explicit, "scoped": exm_core::workspace::current().is_some() }))
 }
 
 #[derive(Deserialize)]
@@ -260,6 +265,7 @@ pub(crate) struct SessionBatchBody {
 /// 批量语义 = 「尽力而为 + 全量反馈」，前端据 failed 提示部分失败。
 pub(crate) async fn session_batch(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(b): Json<SessionBatchBody>,
 ) -> impl IntoResponse {
     if b.ids.is_empty() {
@@ -268,6 +274,32 @@ pub(crate) async fn session_batch(
             Json(json!({ "error": "ids 不能为空" })),
         )
             .into_response();
+    }
+    if let Some(header) = headers.get("x-exm-workspace") {
+        let raw = match header.to_str() {
+            Ok(value) => crate::ws::percent_decode(value),
+            Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "项目目录请求头无效" }))).into_response(),
+        };
+        let root = match crate::project_scope::pinned(&st, &raw) {
+            Ok(root) => root,
+            Err(response) => return response,
+        };
+        for id in &b.ids {
+            let session = st.core.store.get_session(id).ok().flatten()
+                .filter(|session| session.workspace.as_deref() == root.to_str());
+            let Some(session) = session else {
+                return (StatusCode::NOT_FOUND, Json(json!({ "error": "会话不存在" }))).into_response();
+            };
+            if session.collaboration_id.is_some() {
+                return (StatusCode::CONFLICT, Json(json!({ "error": "协作成员会话不能批量操作" }))).into_response();
+            }
+        }
+    } else {
+        for id in &b.ids {
+            if st.core.store.get_session(id).ok().flatten().is_none_or(|session| session.workspace.is_some()) {
+                return (StatusCode::NOT_FOUND, Json(json!({ "error": "会话不存在" }))).into_response();
+            }
+        }
     }
     let mut ok_count = 0usize;
     let mut failed: Vec<Value> = Vec::new();
@@ -618,6 +650,7 @@ pub(crate) async fn session_tokens(State(st): State<AppState>, Path(id): Path<St
 
 pub(crate) async fn create_session(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     // 用 Bytes 而非 Option<Json>：Option 会吞掉内层提取器的拒绝（含 413 超限），
@@ -648,7 +681,37 @@ pub(crate) async fn create_session(
             .into_response();
     }
     let title = explicit_title.unwrap_or_else(|| "新会话".to_string());
-    match st.core.create_session(&title) {
+    let workspace = match v.get("workspace") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => match crate::project_scope::pinned(&st, raw) {
+            Ok(root) => Some(root.to_string_lossy().into_owned()),
+            Err(response) => return response,
+        },
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "workspace 应为绝对目录路径" }))).into_response(),
+    };
+    if let Some(header) = headers.get("x-exm-workspace") {
+        let header = match header.to_str() {
+            Ok(value) => crate::ws::percent_decode(value),
+            Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "项目目录请求头无效" }))).into_response(),
+        };
+        if workspace.as_deref() != Some(header.as_str()) {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": "新会话项目目录与连接项目不匹配" }))).into_response();
+        }
+    }
+    let target = match v.get("target") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(target)) => Some(target.as_str()),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "target 必须是组 ID 或 single:<id>" }))).into_response(),
+    };
+    let scope = target.map(str::to_string).unwrap_or_else(|| st.core.registry().active_scope());
+    let valid = match scope.strip_prefix("single:") {
+        Some(id) => st.core.registry().single_exists(id),
+        None => st.core.registry().group_exists(&scope),
+    };
+    if (target.is_some() || workspace.is_some()) && !valid {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "对话对象不存在" }))).into_response();
+    }
+    match st.core.store.create_session_in(&title, &scope, workspace) {
         Ok(s) => Json(serde_json::to_value(s).unwrap_or(Value::Null)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -664,15 +727,34 @@ pub(crate) async fn list_sessions(
 ) -> impl IntoResponse {
     // 组是交互对象：会话列表归属激活组（?all=1 管理视角看全部，附消息数）；
     // ?archived=true 显式查归档区（归档会话不进默认列表）
+    let root = match q.workspace.as_deref().map(|raw| crate::project_scope::pinned(&st, raw)).transpose() {
+        Ok(root) => root,
+        Err(response) => return response,
+    };
     let result = if q.archived.unwrap_or(false) {
         st.core.list_archived_sessions()
-    } else if q.all.unwrap_or(false) {
+    } else if let Some(root) = root.as_deref().and_then(std::path::Path::to_str) {
+        st.core.list_sessions_admin_in_workspace(root)
+    } else if q.all.unwrap_or(false) || root.is_some() {
         st.core.list_sessions_admin()
     } else {
         st.core.list_sessions_in_scope()
     };
     match result {
-        Ok(list) => Json(serde_json::to_value(list).unwrap_or(Value::Null)).into_response(),
+        Ok(mut list) => {
+            if let Some(root) = root {
+                list.retain(|s| s.workspace.as_deref() == root.to_str());
+            } else {
+                list.retain(|s| s.workspace.is_none());
+            }
+            let list: Vec<Value> = list.into_iter().map(|s| {
+                let running = exm_core::round_trace::is_running(&s.id);
+                let mut value = serde_json::to_value(s).unwrap_or(Value::Null);
+                value["running"] = json!(running);
+                value
+            }).collect();
+            Json(json!(list)).into_response()
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -688,6 +770,8 @@ pub(crate) struct SessionListQuery {
     all: Option<bool>,
     #[serde(default)]
     archived: Option<bool>,
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 pub(crate) async fn delete_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {

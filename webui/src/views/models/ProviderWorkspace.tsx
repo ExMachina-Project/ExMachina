@@ -56,6 +56,7 @@ export function ProviderWorkspace({ profiles, active, testing, onEdit, onTest, o
         {!record.ok && record.lastSuccess && <small>{t("ux.lastSuccess", { time: new Date(record.lastSuccess.at).toLocaleString(), ms: record.lastSuccess.latencyMs ?? "?" })}</small>}
       </div>}
       {!record && <p className="settings-context-note">{t("ux.notTested")}</p>}
+      <section className="provider-catalog" aria-label={t("routing.catalog")}>
       <div className="settings-section-title"><div><h3>{t("routing.catalog")} <span className="settings-count">{current.models.length}</span></h3><p>{t("ux.catalogDescription")}</p></div><Button size="small" onClick={() => onEdit(current, "catalog")}>{t("ux.manageModels")}</Button></div>
       {!!current.models.length && <Input prefix={<SearchOutlined />} allowClear value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder={t("models.pickerSearch")} aria-label={t("models.pickerSearch")} />}
       <div className="provider-model-list">{modelMatches.map((model) => <div key={model.model} className="provider-model-entry">
@@ -64,6 +65,7 @@ export function ProviderWorkspace({ profiles, active, testing, onEdit, onTest, o
       </div>)}</div>
       {!!current.models.length && !modelMatches.length && <p className="settings-list-empty">{t("models.pickerEmpty")}</p>}
       {!current.models.length && <div className="settings-list-empty"><p>{t("ux.noCatalog")}</p><Button icon={<PlusOutlined />} onClick={() => onEdit(current, "catalog")}>{t("models.addModel")}</Button></div>}
+      </section>
       <div className="provider-detail-foot"><span className="dim">{current.id === active && <Tag>{t("ux.systemDefault")}</Tag>}{current.fallback && t("models.fallbackTo", { id: current.fallback })}</span>
         {profiles.length > 1 && <Popconfirm title={t("common.confirmDelete", { name: current.name })} onConfirm={() => onDelete(current.id)}><Button type="text" danger icon={<DeleteOutlined />} aria-label={t("common.delete")} /></Popconfirm>}
       </div>

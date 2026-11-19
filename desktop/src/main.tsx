@@ -2,11 +2,9 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { App, ConfigProvider, theme } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { DesktopApp } from "./DesktopApp";
-import "../../webui/src/styles.css";
+import { DesktopApp } from "./DesktopShell";
+import "../../client/src/chat.css";
 import "./styles.css";
-import "../../webui/src/settings.css";
-import "../../webui/src/console.css";
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

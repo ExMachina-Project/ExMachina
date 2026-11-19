@@ -94,6 +94,11 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/version", "版本信息"),
         // ---------------- 会话
         Endpoint::new("get", "/api/sessions", "会话列表（含末条预览）"),
+        Endpoint::new("get", "/api/collaborations", "列出当前项目的协作群聊"),
+        Endpoint::new("post", "/api/collaborations", "创建同实例、多项目协作群聊"),
+        Endpoint::new("get", "/api/collaborations/:id", "协作群聊记录、成员状态与待审批"),
+        Endpoint::new("post", "/api/collaborations/:id/turns", "向明确选中的成员发送任务（支持 requestId 幂等重试）"),
+        Endpoint::new("post", "/api/collaborations/:id/turns/:turn_id/stop", "停止指定协作轮次（可指定单个成员）"),
         Endpoint::new("post", "/api/sessions", "新建会话"),
         Endpoint::new("get", "/api/sessions/search", "会话内容检索（标题+消息）"),
         Endpoint::new("post", "/api/sessions/batch", "会话批量操作"),
@@ -378,6 +383,30 @@ pub fn generate() -> Value {
         }
         if let Some(resp) = ep.response {
             op["responses"]["200"]["content"] = resp;
+        }
+        if ep.path.starts_with("/api/collaborations") {
+            let mut parameters = vec![json!({"name": "X-Exm-Workspace", "in": "header", "required": true,
+                "schema": {"type": "string"}, "description": "百分号编码后的群聊归属项目绝对目录"})];
+            if (ep.method, ep.path) == ("get", "/api/collaborations/:id") {
+                parameters.push(json!({"name": "before", "in": "query", "schema": {"type": "string"},
+                    "description": "上一页返回的 nextBefore（独占游标）"}));
+            }
+            op["parameters"] = json!(parameters);
+            op["responses"]["400"] = error_response("项目请求头或参数无效");
+            op["responses"]["403"] = error_response("实例未启用访问密钥");
+            let status = match (ep.method, ep.path) {
+                ("post", "/api/collaborations") => Some("201"),
+                ("post", "/api/collaborations/:id/turns") => Some("202"),
+                _ => None,
+            };
+            if let Some(status) = status {
+                let responses = op["responses"].as_object_mut().unwrap();
+                let success = responses.remove("200").unwrap();
+                responses.insert(status.into(), success);
+            }
+            if ep.method == "post" && ep.path.contains("/turns") {
+                op["responses"]["409"] = error_response("轮次或成员状态冲突");
+            }
         }
         entry[ep.method] = op;
     }

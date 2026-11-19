@@ -34,10 +34,10 @@ export function ProviderCatalogFields({ fetching, onFetch }: { fetching: boolean
                 {model?.vision && <Tag>{t("models.visionCap")}</Tag>}{model?.audio && <Tag>{t("models.audioCap")}</Tag>}
                 {model?.autoEligible && <Tag>{t("routing.autoEligible")}</Tag>}</span>,
               children: <>
-                <div className="settings-switch-grid">
-                  <Form.Item {...rest} name={[name, "vision"]} label={t("models.visionCap")} valuePropName="checked" extra={t("ux.visionHint")}><Switch /></Form.Item>
-                  <Form.Item {...rest} name={[name, "audio"]} label={t("models.audioCap")} valuePropName="checked" extra={t("ux.audioHint")}><Switch /></Form.Item>
-                  <Form.Item {...rest} name={[name, "autoEligible"]} label={t("routing.autoEligible")} valuePropName="checked" extra={t("routing.autoEligibleHint")}><Switch /></Form.Item>
+                <div className="provider-capability-switches">
+                  <Form.Item {...rest} layout="horizontal" name={[name, "vision"]} label={t("models.visionCap")} tooltip={t("ux.visionHint")} valuePropName="checked"><Switch size="small" /></Form.Item>
+                  <Form.Item {...rest} layout="horizontal" name={[name, "audio"]} label={t("models.audioCap")} tooltip={t("ux.audioHint")} valuePropName="checked"><Switch size="small" /></Form.Item>
+                  <Form.Item {...rest} layout="horizontal" name={[name, "autoEligible"]} label={t("routing.autoEligible")} tooltip={t("routing.autoEligibleHint")} valuePropName="checked"><Switch size="small" /></Form.Item>
                 </div>
                 <Form.Item {...rest} name={[name, "purposes"]} label={t("routing.purposes")}>
                   <Select mode="multiple" maxTagCount="responsive" options={MODEL_PURPOSES.map((purpose) => ({ value: purpose, label: purposeLabel(purpose) }))} />

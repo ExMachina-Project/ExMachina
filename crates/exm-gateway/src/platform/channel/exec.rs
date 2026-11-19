@@ -347,6 +347,15 @@ impl ChannelRun {
 
     /// 执行本轮；返回后交互上下文已还原（Drop guard 覆盖提前返回 / 任务中止）
     pub(crate) async fn run(self, text: &str) {
+        self.run_guarded(text, || Ok(())).await;
+    }
+
+    /// 自动来源在取得会话运行锁后重新判定开关，避免排队期间关闭后仍落库 / 推理。
+    pub(crate) async fn run_guarded(
+        self,
+        text: &str,
+        check: impl Fn() -> anyhow::Result<()> + Send + Sync,
+    ) {
         // 主动回复降档（im-proactive-scope）：漏斗放行的插话轮次按 Chat 档执行
         // （工具白名单清空，提示层同步注入「仅聊天」边界）。群友间闲聊经主动
         // 插话进入轮次，不应被当作工作指令执行工具；需要干活由 @ 点名触发。
@@ -403,7 +412,13 @@ impl ChannelRun {
         let _ = limits;
         if let Err(e) = self
             .core
-            .chat_scoped_origin(&self.session_id, text, scope, self.origin.as_deref())
+            .chat_scoped_origin_guarded(
+                &self.session_id,
+                text,
+                scope,
+                self.origin.as_deref(),
+                &check,
+            )
             .await
         {
             eprintln!("[channel:{}] 执行失败：{e}", self.session_id);
@@ -630,4 +645,3 @@ pub(crate) type ApprovalHook = Box<
 pub(crate) type MediaHook = Box<
     dyn Fn(MediaItem) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send,
 >;
-

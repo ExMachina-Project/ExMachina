@@ -1,7 +1,7 @@
 {
   "name": "EXMACHINA 控制台",
   "short_name": "EXMACHINA",
-  "description": "可审计的智能集群：编程软件 + 助手 + Computer Use。连接任意 ExMachina 网关（本机桌面端或远程服务器）。",
+  "description": "EXMACHINA 实例管理台：配置模型、智能体、通道与安全策略，查看运行状态。桌面和移动应用通过独立连接使用实例后端。",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

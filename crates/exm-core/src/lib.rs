@@ -11,6 +11,7 @@ pub mod budget;
 pub mod bus;
 pub mod autonomy;
 pub mod compaction;
+pub mod collaboration;
 pub mod computer;
 pub mod config;
 pub mod config_schema;
@@ -47,6 +48,7 @@ pub mod tools;
 pub mod trajectory;
 pub mod trash;
 pub mod types;
+pub mod workspace;
 
 use crate::bus::{InProcessBus, MessageBus};
 use crate::config::ExmConfig;
@@ -119,6 +121,8 @@ pub struct Core {
     meta_state: parking_lot::RwLock<MetaAgentState>,
     /// 会话级运行串行：同一会话的并发输入排队（followup），不互踩编排图
     run_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Accepted in-process collaboration turns. Durable history is stored separately.
+    collaboration_runs: Mutex<std::collections::HashMap<String, String>>,
     /// 聊天流未读计数（流粒度，内存态）：智能体在流绑定会话产出回复且用户未打开
     /// 该会话时累积；打开即清零。未读是瞬时 UI 状态，重启归零合理（D5 单一事实源）。
     flow_unread: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
@@ -266,6 +270,7 @@ impl Core {
             auto_state,
             meta_state: parking_lot::RwLock::new(MetaAgentState { last_tick_minute: 0 }),
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            collaboration_runs: Mutex::default(),
             flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
             once_flags: parking_lot::Mutex::new(std::collections::HashSet::new()),
             approval_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -580,7 +585,22 @@ impl Core {
         scope: crate::types::ToolScope,
         origin: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.chat_round(session_id, text, scope, origin, None).await
+        self.chat_round(session_id, text, scope, origin, None, None)
+            .await
+    }
+
+    /// Background sources revalidate their live switch after waiting for the session lock,
+    /// before persisting a new message or starting inference.
+    pub async fn chat_scoped_origin_guarded(
+        &self,
+        session_id: &str,
+        text: &str,
+        scope: crate::types::ToolScope,
+        origin: Option<&str>,
+        check: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
+    ) -> anyhow::Result<()> {
+        self.chat_round(session_id, text, scope, origin, None, Some(check))
+            .await
     }
 
     /// Direct unit conversations share the same lock, budget and cancellation lifecycle.
@@ -590,7 +610,7 @@ impl Core {
         agent: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        self.chat_round(session_id, text, crate::types::ToolScope::Computer, None, Some(agent))
+        self.chat_round(session_id, text, crate::types::ToolScope::Computer, None, Some(agent), None)
             .await
     }
 
@@ -601,9 +621,30 @@ impl Core {
         scope: crate::types::ToolScope,
         origin: Option<&str>,
         agent: Option<&str>,
+        check: Option<&(dyn Fn() -> anyhow::Result<()> + Send + Sync)>,
     ) -> anyhow::Result<()> {
         let lock = self.run_lock(session_id);
         let _guard = lock.lock().await;
+        if let Some(check) = check {
+            check()?;
+        }
+        let session = self.store.get_session(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        anyhow::ensure!(session.collaboration_id.is_none(), "请从协作群聊向该成员发消息");
+        let _round = crate::round_trace::RoundGuard::begin(session_id);
+        self.execute_chat_round(&session, text, scope, origin, agent).await
+    }
+
+    /// Caller owns the session run lock and round trace (including cancellation).
+    async fn execute_chat_round(
+        &self,
+        session: &Session,
+        text: &str,
+        scope: ToolScope,
+        origin: Option<&str>,
+        agent: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let session_id = session.id.as_str();
         // 预算闸门：估算口径超限即拒绝新轮次（0 = 不限）
         let budget = self.config().max_session_tokens;
         if budget > 0 {
@@ -612,11 +653,6 @@ impl Core {
                 anyhow::bail!("会话 token 预算已耗尽（估算 {used} / {budget}）；请新建会话或上调 maxSessionTokens");
             }
         }
-        let session = self
-            .store
-            .get_session(session_id)?
-            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
-        let _round = crate::round_trace::RoundGuard::begin(session_id);
         // 交互上下文对齐会话归属（路由唯一事实源）：会话 group_id 形如
         // "single:<id>"（单智能体）或组名。WebUI 切换目标 / 通道绑定切换 /
         // 子代理会话并发都可能翻转全局激活态，若不对齐，旧会话会被错误的
@@ -626,8 +662,9 @@ impl Core {
         // （旧实现写全局态再还原，run.finished 事件先于还原到达时会泄漏临时态）。
         // 归属目标已删除 → scope None → 回落全局激活态（轮次不中断）。
         let ctx = crate::core::sessions::parse_session_scope(&self.registry, &session.group_id);
-        crate::registry::round_scope_decl::ROUND_SCOPE
-            .scope(ctx, async {
+        let workspace = session.workspace.as_deref().map(crate::workspace::pinned).transpose()?;
+        anyhow::ensure!(workspace.is_none() || ctx.is_some(), "项目会话的对话对象已不存在");
+        crate::workspace::scope(workspace, crate::registry::round_scope_decl::ROUND_SCOPE.scope(ctx, async {
                 let orch = self.orchestrator();
                 let caller_id=agent.map(str::to_string).unwrap_or_else(||orch.orch_id());
                 let caller=crate::model_routing::ModelCaller {agent_id:caller_id,session_id:session_id.to_string()};
@@ -639,8 +676,7 @@ impl Core {
                     orch.handle_user_message_scoped(session_id, text, scope, origin).await
                 }
                 }).await
-            })
-            .await
+            })).await
     }
 
 

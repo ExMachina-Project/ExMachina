@@ -83,6 +83,392 @@ mod reasoning_effort_tests {
     }
 }
 
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use std::{
+        net::SocketAddr,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpSocket, TcpStream},
+    };
+
+    struct LocalResolver {
+        calls: AtomicUsize,
+        addresses: Vec<SocketAddr>,
+    }
+
+    impl reqwest::dns::Resolve for LocalResolver {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            assert_eq!(name.as_str(), "transport.test");
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            let address = self.addresses[attempt.min(self.addresses.len() - 1)];
+            let addresses: reqwest::dns::Addrs = Box::new(std::iter::once(address));
+            Box::pin(async move { Ok(addresses) })
+        }
+    }
+
+    fn local_client(addresses: Vec<SocketAddr>) -> (reqwest::Client, Arc<LocalResolver>) {
+        let resolver = Arc::new(LocalResolver {
+            calls: AtomicUsize::new(0),
+            addresses,
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(resolver.clone())
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        (client, resolver)
+    }
+
+    // Reserve an unused port without listening: connection refusal is deterministic,
+    // and another parallel test cannot claim the port before the retry.
+    fn refused_socket() -> TcpSocket {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        socket
+    }
+
+    async fn read_request(socket: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0, "client closed before sending the complete POST");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]);
+                let length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    return request;
+                }
+            }
+        }
+    }
+
+    type SeenRequests = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    async fn raw_server(
+        response: Option<String>,
+    ) -> (SocketAddr, SeenRequests, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let requests = seen.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_request(&mut socket).await;
+                requests.lock().push(request);
+                if let Some(response) = &response {
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                } else {
+                    // Keep the fully received POST open without returning HTTP headers.
+                    std::future::pending::<()>().await;
+                }
+            }
+        });
+        (address, seen, server)
+    }
+
+    fn http_response(status: &str, content_type: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    async fn send(request: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            OpenAiCompatibleProvider::send_with_connect_retry(request, "LLM 流式请求失败"),
+        )
+        .await
+        .expect("transport attempts must be bounded")
+    }
+
+    #[tokio::test]
+    async fn transport_error_preserves_sources_without_credential_urls() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        // An unsupported scheme produces a real reqwest error without any network call.
+        let error = client.post("file:///fixture").send().await.unwrap_err();
+        let error = error.with_url(reqwest::Url::parse(
+            "https://url-user-secret:url-password-secret@transport.test/v1/responses?api_key=query-secret#fragment-secret",
+        ).unwrap());
+        let error = OpenAiCompatibleProvider::transport_error("模型服务连通测试失败", error);
+        assert!(error.to_string().contains("传输失败"));
+        assert!(error.chain().count() > 2, "typed source chain must survive");
+        assert!(error
+            .downcast_ref::<reqwest::Error>()
+            .unwrap()
+            .url()
+            .is_none());
+        for formatted in [
+            error.to_string(),
+            format!("{error:#}"),
+            format!("{error:?}"),
+        ] {
+            for secret in [
+                "url-user-secret",
+                "url-password-secret",
+                "query-secret",
+                "fragment-secret",
+                "transport.test",
+                "/v1/responses",
+            ] {
+                assert!(
+                    !formatted.contains(secret),
+                    "diagnostics must strip the whole URL"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_connection_recovers_with_one_identical_request_retry() {
+        let refused = refused_socket();
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"ok\"}}\n\n",
+        );
+        let (address, seen, server) =
+            raw_server(Some(http_response("200 OK", "text/event-stream", body))).await;
+        let (client, resolver) = local_client(vec![refused.local_addr().unwrap(), address]);
+        let provider = OpenAiCompatibleProvider::new("http://transport.test/v1", vec![])
+            .with_client_identity(&crate::config::ClientIdentity {
+                preset: crate::config::ClientIdentityPreset::Codex,
+                ..Default::default()
+            })
+            .unwrap();
+        let request = provider
+            .chat_http_request(
+                "fixture-header-secret",
+                &ChatRequest::new(
+                    "fixture-model",
+                    vec![ChatMessage::user("fixture-body-secret")],
+                ),
+                true,
+            )
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let expected_headers = request.headers().clone();
+        let expected_body = request.body().unwrap().as_bytes().unwrap().to_vec();
+        let started = std::time::Instant::now();
+        let response = send(reqwest::RequestBuilder::from_parts(client, request))
+            .await
+            .unwrap();
+        let response = provider
+            .parse_chat_http_response(response, true)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(response.content, "ok");
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() >= Duration::from_millis(240),
+            "retry must back off"
+        );
+        let requests = seen.lock();
+        assert_eq!(requests.len(), 1, "refused connections cannot send a POST");
+        let wire = String::from_utf8_lossy(&requests[0]);
+        let (headers, body) = wire.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+        assert_eq!(body.as_bytes(), expected_body);
+        for (name, value) in &expected_headers {
+            assert!(
+                headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .any(|(actual_name, actual_value)| actual_name
+                        .eq_ignore_ascii_case(name.as_str())
+                        && actual_value.trim() == value.to_str().unwrap()),
+                "retry must preserve header {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_refusal_is_bounded_and_keeps_the_typed_connect_cause() {
+        let refused = refused_socket();
+        let (client, resolver) = local_client(vec![refused.local_addr().unwrap()]);
+        let error = send(
+            client
+                .post("http://transport.test/v1/responses?api_key=query-secret")
+                .bearer_auth("fixture-header-secret")
+                .body("fixture-body-secret"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            2,
+            "at most one retry"
+        );
+        assert!(error.to_string().contains("连接失败"));
+        let source = error.downcast_ref::<reqwest::Error>().unwrap();
+        assert!(source.is_connect());
+        assert!(source.url().is_none());
+        assert!(error.chain().any(|source| source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)));
+        for formatted in [
+            error.to_string(),
+            format!("{error:#}"),
+            format!("{error:?}"),
+        ] {
+            for secret in [
+                "query-secret",
+                "fixture-header-secret",
+                "fixture-body-secret",
+            ] {
+                assert!(
+                    !formatted.contains(secret),
+                    "never log credentials or the POST body"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_after_sending_the_post_is_not_retried() {
+        let (address, seen, server) = raw_server(None).await;
+        let (client, resolver) = local_client(vec![address]);
+        let error = send(
+            client
+                .post("http://transport.test/v1/responses")
+                .body("fixture")
+                .timeout(Duration::from_millis(100)),
+        )
+        .await
+        .unwrap_err();
+        server.abort();
+        let source = error.downcast_ref::<reqwest::Error>().unwrap();
+        assert!(source.is_timeout());
+        assert!(!source.is_connect());
+        assert!(error.to_string().contains("请求超时"));
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            seen.lock().len(),
+            1,
+            "an ambiguous POST timeout must not replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_after_sending_the_post_is_not_retried() {
+        let (address, seen, server) = raw_server(Some(String::new())).await;
+        let (client, resolver) = local_client(vec![address]);
+        let error = send(
+            client
+                .post("http://transport.test/v1/responses")
+                .body("fixture"),
+        )
+        .await
+        .unwrap_err();
+        server.abort();
+        assert!(!error.downcast_ref::<reqwest::Error>().unwrap().is_connect());
+        assert!(error.to_string().contains("传输失败"));
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(seen.lock().len(), 1, "a received POST must not replay");
+    }
+
+    #[tokio::test]
+    async fn http_errors_do_not_trigger_transport_retries_for_chat_or_stream() {
+        for stream in [false, true] {
+            for (status, body) in [
+                (
+                    "400 Bad Request",
+                    r#"{"error":{"message":"fixture rejection"}}"#,
+                ),
+                (
+                    "403 Forbidden",
+                    r#"{"error":{"code":"client_not_allowed"}}"#,
+                ),
+                (
+                    "429 Too Many Requests",
+                    r#"{"error":{"message":"fixture quota"}}"#,
+                ),
+                (
+                    "500 Internal Server Error",
+                    r#"{"error":{"message":"fixture failure"}}"#,
+                ),
+            ] {
+                let (address, seen, server) =
+                    raw_server(Some(http_response(status, "application/json", body))).await;
+                let provider = OpenAiCompatibleProvider::with_format(
+                    format!("http://{address}/v1"),
+                    vec!["fixture-key".into()],
+                    "responses",
+                );
+                let result = tokio::time::timeout(Duration::from_secs(3), async {
+                    let request = ChatRequest::new("fixture-model", vec![ChatMessage::user("hi")]);
+                    if stream {
+                        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+                        provider.stream(request, tx).await
+                    } else {
+                        provider.chat(request).await
+                    }
+                })
+                .await
+                .unwrap();
+                server.abort();
+                assert!(result.is_err(), "HTTP {status} must remain an error");
+                assert_eq!(
+                    seen.lock().len(),
+                    1,
+                    "HTTP {status} must not replay (stream={stream})"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn broken_response_stream_is_not_replayed() {
+        let response = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        );
+        let (address, seen, server) = raw_server(Some(response.into())).await;
+        let provider = OpenAiCompatibleProvider::with_format(
+            format!("http://{address}/v1"),
+            vec!["fixture-key".into()],
+            "responses",
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            provider.stream(
+                ChatRequest::new("fixture-model", vec![ChatMessage::user("hi")]),
+                tx,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        server.abort();
+        assert!(error.downcast_ref::<reqwest::Error>().is_some());
+        assert!(error.to_string().contains("流式响应读取失败"));
+        assert_eq!(
+            seen.lock().len(),
+            1,
+            "never replay after receiving HTTP headers or deltas"
+        );
+        assert_eq!(rx.try_recv().unwrap().text(), "partial");
+        assert!(rx.try_recv().is_err());
+    }
+}
+
 // ---------------------------------------------------------------- 流解析与 Key 池测试
 
 #[cfg(test)]

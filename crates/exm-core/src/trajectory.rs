@@ -198,6 +198,8 @@ mod tests {
             title: "轨迹测试".into(),
             status: "idle".into(),
             group_id: "g1".into(),
+            workspace: None,
+            collaboration_id: None,
             memory_partition: None,
             rolling_summary: None,
             summary_upto: None,

@@ -32,6 +32,7 @@ indexmap = { version = "1", features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "native-tls"] }
 futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 lto = "fat"

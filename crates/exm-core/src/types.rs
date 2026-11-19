@@ -764,6 +764,12 @@ pub struct Session {
     /// 会话归属的智能体组（组是交互对象：切组即切换会话上下文；旧数据归入 default）
     #[serde(default = "default_session_group")]
     pub group_id: String,
+    /// Immutable project root for this conversation. Legacy sessions retain gateway defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Backing session for a collaboration room (also inherited by dispatched children).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_id: Option<String>,
     /// 记忆分区覆盖（外部通道「记忆隔离」用）：None = 与同组所有会话共享记忆；
     /// Some(partition) = 该会话的读写都落在独立分区，不与同组其他平台会话互通。
     #[serde(default, skip_serializing_if = "Option::is_none")]

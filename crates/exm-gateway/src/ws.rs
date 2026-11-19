@@ -9,6 +9,8 @@ use super::*;
 pub(crate) struct WsQuery {
     #[serde(default)]
     session_id: Option<String>,
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -73,10 +75,31 @@ pub(crate) async fn ws_handler(
     if required && a.key.as_deref() != Some(st.core.config().security.auth_key.as_str()) {
         return (StatusCode::UNAUTHORIZED, "需要访问密钥").into_response();
     }
-    ws.on_upgrade(move |socket| ws_loop(socket, st.core, q.session_id))
+    if !required && q.workspace.is_some() {
+        return (StatusCode::FORBIDDEN, "项目连接必须启用访问密钥").into_response();
+    }
+    if let Some(session_id) = q.session_id.as_deref() {
+        let session = match st.core.store.get_session(session_id) {
+            Ok(Some(session)) => session,
+            _ => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
+        };
+        match (session.workspace.as_deref(), q.workspace.as_deref()) {
+            (Some(expected), Some(raw)) if exm_core::workspace::pinned(raw).is_ok_and(|root| root.to_str() == Some(expected)) => {},
+            (None, None) => {},
+            _ => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
+        }
+    }
+    let workspace = match q.workspace.as_deref() {
+        Some(raw) => match exm_core::workspace::pinned(raw) {
+            Ok(root) => Some(root.to_string_lossy().into_owned()),
+            Err(_) => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
+        },
+        None => None,
+    };
+    ws.on_upgrade(move |socket| ws_loop(socket, st.core, q.session_id, workspace))
 }
 
-pub(crate) async fn ws_loop(mut socket: WebSocket, core: Arc<Core>, session_filter: Option<String>) {
+pub(crate) async fn ws_loop(mut socket: WebSocket, core: Arc<Core>, session_filter: Option<String>, workspace_filter: Option<String>) {
     let mut rx = core.subscribe();
     // 心跳保活：周期性协议层 Ping（浏览器自动 Pong）。空闲连接经 NAT/代理常被静默丢弃，
     // 且无事件流时客户端无从判活——Ping 既保活又让断连可感知。
@@ -102,6 +125,16 @@ pub(crate) async fn ws_loop(mut socket: WebSocket, core: Arc<Core>, session_filt
                                 continue;
                             }
                         }
+                        let owner = if approval_evt {
+                            let id = e.payload.get("approvalId").and_then(|value| value.as_str()).unwrap_or_default();
+                            let Ok(Some(approval)) = core.store.get_approval(id) else { continue };
+                            let Ok(owner) = core.approval_workspace(&approval) else { continue };
+                            owner
+                        } else if !e.session_id.is_empty() {
+                            let Ok(session) = core.store.get_session(&e.session_id) else { continue };
+                            session.and_then(|s| s.workspace)
+                        } else { None };
+                        if owner.as_deref() != workspace_filter.as_deref() { continue; }
                         let text = serde_json::to_string(&e).unwrap_or_default();
                         if socket.send(Message::Text(text)).await.is_err() {
                             break;

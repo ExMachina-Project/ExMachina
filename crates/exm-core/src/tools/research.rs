@@ -262,7 +262,8 @@ impl ToolGateway {
 
         // ---- 阶段 4：产物落盘 + outbox 登记 ----
         self.emit_stage(session_id, "writing", &topic, &depth);
-        let dir = self.workspace_root.join(".exmachina/outbox");
+        let workspace = self.effective_root();
+        let dir = workspace.join(".exmachina/outbox");
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return ToolResult::err(format!("创建发件箱目录失败：{e}"));
         }

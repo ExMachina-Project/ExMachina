@@ -42,7 +42,7 @@ impl ToolGateway {
             return ToolResult::err("语音合成返回空音频");
         }
         // 落盘 + outbox 登记（与 send_file/filesystem 写 outbox 同口径）
-        let dir = self.workspace_root.join(".exmachina/outbox");
+        let dir = self.effective_root().join(".exmachina/outbox");
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return ToolResult::err(format!("创建发件箱目录失败：{e}"));
         }

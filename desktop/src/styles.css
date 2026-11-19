@@ -19,12 +19,64 @@
   --bg-sunken: #0d0e12;
   --text-hi: #f3f4fa;
   --muted-dim: var(--faint);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --hover: var(--panel-2);
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-full: 50%;
+  --dur-fast: .14s;
+  --ease-out: ease-out;
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 #root > .ant-app { height: 100%; }
 body { background: var(--bg); color: var(--text); font: 13px/1.55 Inter, "Segoe UI", "PingFang SC", sans-serif; overflow: hidden; }
 button, textarea, input { font: inherit; }
+.mono { font-family: var(--mono); }
+.desk-shell { height: 100dvh; display: flex; flex-direction: column; min-height: 0; }
+.desk-project-host, .desk-project-instance { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.desk-project-instance[hidden] { display: none; }
+.desk-app, .desk-shell .desk-boot { flex: 1; height: auto; }
+.desk-app { position: relative; }
+.desk-project-tabs { display: flex; align-items: center; gap: 3px; padding: 4px 8px; overflow-x: auto; min-height: 36px; background: #0d0e12; border-bottom: 1px solid var(--line); }
+.desk-project-tabs > button:not(.ant-btn) { display: inline-flex; flex: none; gap: 5px; align-items: center; padding: 3px 10px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.desk-project-tabs > button:not(.ant-btn):hover { background: var(--panel); color: var(--text); }
+.desk-project-tabs > button[aria-current="page"] { background: var(--panel-3); border-color: var(--line); color: var(--text); }
+.desk-led.working { background: var(--amber); animation: blink 1.2s infinite; }
+.desk-project-manager .ant-modal-body { max-height: min(76dvh, 640px); overflow-y: auto; }
+.desk-project-form, .desk-session-manager { display: grid; gap: 10px; }
+.desk-project-form > label, .desk-project-list > div > span { display: grid; min-width: 0; gap: 3px; }
+.desk-project-form .ant-select { width: 100%; }
+.desk-project-list { display: grid; gap: 6px; margin: 10px 0 16px; }
+.desk-project-list > div, .desk-managed-session { display: flex; align-items: center; gap: 8px; padding: 7px; border: 1px solid var(--line); border-radius: 5px; }
+.desk-project-list > div > span, .desk-managed-session .desk-file-link { flex: 1; }
+.desk-project-list small, .desk-managed-session small { color: var(--muted); overflow-wrap: anywhere; }
+.desk-managed-session small { display: block; }
+.desk-session-batch { display: flex; align-items: center; gap: 8px; }
+.desk-collaboration { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.desk-collab-nav { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.desk-collab-nav .ant-select { flex: 1; min-width: 150px; max-width: 360px; }
+.desk-collab-note { color: var(--muted); margin: 0; }
+.desk-collab-roster { display: grid; gap: 8px; }
+.desk-collab-member-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 8px; }
+.desk-collab-member-form label { display: grid; min-width: 0; align-content: start; gap: 4px; }
+.desk-collab-member-form select { width: 100%; height: 32px; min-width: 0; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--text); background: var(--panel); }
+.desk-collab-stream { overflow-anchor: auto; }
+.desk-collab-turn { padding: 12px; margin: 8px 0 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.desk-collab-turn header { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.desk-collab-turn time, .desk-collab-turn small, .desk-collab-composer small { color: var(--muted); font-size: 11px; }
+.desk-collab-user-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 7px 0; }
+.desk-collab-delivery { min-width: 0; overflow-wrap: anywhere; border-top: 1px solid var(--line); margin-top: 10px; padding: 10px 0 0; }
+.desk-collab-reply { margin: 10px 0; }
+.desk-collab-recipients { max-height: min(27dvh, 220px); overflow: auto; padding: 0 10px; border-block: 1px solid var(--line); }
+.desk-collab-recipient { padding: 6px 0; }
+.desk-collab-recipient + .desk-collab-recipient { border-top: 1px solid var(--line); }
+.desk-composer .desk-collab-recipient textarea { padding: 4px 6px !important; border-radius: 5px !important; background: var(--bg-sunken) !important; margin-top: 4px; }
+.desk-mobile-connect { display: grid; gap: 10px; }
+.desk-mobile-connect label { display: grid; gap: 4px; }
+.desk-model-setup { display: grid; gap: 9px; margin: 12px 0 18px; }
+.desk-model-setup label { display: grid; gap: 4px; }
+.desk-model-setup .ant-select { width: 100%; }
 .desk-app { display: grid; grid-template-rows: 38px 36px minmax(0, 1fr); height: 100dvh; background: var(--bg); }
 .desk-titlebar { display: flex; align-items: center; gap: 8px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--line); background: #0d0e12; user-select: none; }
 .desk-brand { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; color: var(--muted); }

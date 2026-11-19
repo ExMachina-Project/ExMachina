@@ -37,12 +37,13 @@ impl ToolGateway {
             let index = args.get("monitor").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let stamp = crate::types::now_iso().replace([':', '-', '.'], "");
             let name = format!("computer-{stamp}");
-            let dir = self.workspace_root.join(".exmachina").join("screenshots");
+            let root = self.effective_root();
+            let dir = root.join(".exmachina").join("screenshots");
             let result = session.screenshot(index, self.computer_cfg.max_edge, &dir, &name);
             return match result {
                 Ok(shot) => {
                     let rel = std::path::Path::new(&shot.path)
-                        .strip_prefix(&self.workspace_root)
+                        .strip_prefix(&root)
                         .map(|p| p.display().to_string().replace('\\', "/"))
                         .unwrap_or_else(|_| shot.path.clone());
                     // 产物登记（D12）：截图自动进入会话 outbox，通道投递

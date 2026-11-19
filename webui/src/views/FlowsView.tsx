@@ -16,6 +16,7 @@ import {
   MailOutlined,
   NumberOutlined,
   ReloadOutlined,
+  UnorderedListOutlined,
 } from "@ant-design/icons";
 import { api, assetUrl, downloadUrl, type Channel, type ChannelFlow } from "../api";
 import type { InboundAttachment } from "../types";
@@ -28,6 +29,8 @@ import { MessageProcess } from "../components/ProcessSteps";
 import { useIsNarrow } from "../useIsNarrow";
 import { createPortal } from "react-dom";
 import { useSubbarSlot } from "../components/Subbar";
+import { SessionManagementDrawer } from "../components/SessionManagementDrawer";
+import type { Session } from "../types";
 
 /** 平台短标（通道 type → 展示名），与 FlowRailSection 同口径 */
 const PLATFORM_LABEL: Record<string, string> = {
@@ -56,8 +59,11 @@ export function FlowsView(): React.ReactElement {
   const [loading, setLoading] = useState(true);
   /** 选中的流（右侧呈现其绑定会话） */
   const [selected, setSelected] = useState<ChannelFlow | null>(null);
+  const [selectedArchived, setSelectedArchived] = useState<Session | null>(null);
+  const [sessionManagerOpen, setSessionManagerOpen] = useState(false);
   /** 选中流的消息流（只读） */
-  const { messages, loading: msgLoading } = useSessionMessages(selected?.activeSession, 4000);
+  const viewingSessionId = selectedArchived?.id ?? selected?.activeSession;
+  const { messages, loading: msgLoading } = useSessionMessages(viewingSessionId, 4000);
   /** 消息流容器：加载/新消息后滚到底（只读页最新消息在底部） */
   const msgBoxRef = useRef<HTMLDivElement | null>(null);
   // 贴底跟随（与对话页同口径）：用户本来就贴底才跟随新消息，中途上翻回看不打断
@@ -104,8 +110,28 @@ export function FlowsView(): React.ReactElement {
     };
   }, [load]);
 
+  // 管理抽屉可打开历史/归档的通道会话；若它不再绑定到当前 Flow，仍在聊天流
+  // 里显示其只读消息，不把选择悄悄落到另一条活跃流。
+  const archivedRequest = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeSessionId || loading) return;
+    if (flows.some((flow) => flow.activeSession === activeSessionId)) {
+      setSelectedArchived(null);
+      return;
+    }
+    if (archivedRequest.current === activeSessionId) return;
+    archivedRequest.current = activeSessionId;
+    let active = true;
+    void api.getSession(activeSessionId).then((session) => {
+      if (!active || !session.title.startsWith("channel:")) return;
+      setSelectedArchived(session);
+      setSelected(null);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [activeSessionId, flows, loading]);
+
   /** 选中流变化 → 拉绑定会话消息（只读） */
-  const activeSid = selected?.activeSession;
+  const activeSid = viewingSessionId;
   /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新；上翻回看时不抢滚动条） */
   // 定位语义：切流后首次拿到「非空消息列表」时瞬时定位到最新（骨架期与空列表不定位——
   // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）。
@@ -127,6 +153,7 @@ export function FlowsView(): React.ReactElement {
 
   /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
   const openFlow = (f: ChannelFlow) => {
+    setSelectedArchived(null);
     setSelected(f);
     if (f.unread) {
       setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, unread: 0 } : x)));
@@ -150,6 +177,7 @@ export function FlowsView(): React.ReactElement {
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const shownChannels = accountFilter ? byChannel.filter(([chId]) => chId === accountFilter) : byChannel;
   const totalUnread = shownChannels.reduce((n, [, { flows: group }]) => group.reduce((m, f) => m + (f.unread ?? 0), n), 0);
+  const hasSelectedFlow = Boolean(selected || selectedArchived);
 
   const rail = (
       <aside className="flows-rail">
@@ -159,7 +187,17 @@ export function FlowsView(): React.ReactElement {
           <Button
             type="text"
             size="small"
+            icon={<UnorderedListOutlined />}
+            className="flow-session-manager-trigger"
+            title={t("chat.manageSessions")}
+            aria-label={t("chat.manageSessions")}
+            onClick={() => setSessionManagerOpen(true)}
+          />
+          <Button
+            type="text"
+            size="small"
             icon={<ReloadOutlined />}
+            className="flows-refresh-trigger"
             onClick={() => void load()}
             aria-label={t("common.refresh")}
           />
@@ -221,45 +259,49 @@ export function FlowsView(): React.ReactElement {
   );
 
   return (
-    <div className={`flows-shell ${narrow && selected ? "thread" : ""}`}>
+    <div className={`flows-shell ${narrow && hasSelectedFlow ? "thread" : ""}`}>
       {/* 流列表（窄屏选中后隐藏——单列切换） */}
       {narrow ? rail : subbarSlot ? createPortal(rail, subbarSlot) : null}
 
       {/* 右侧：选中流的绑定会话消息流（只读——聊天页无输入框） */}
       <main className="flows-thread">
-        {narrow && selected && (
+        {narrow && hasSelectedFlow && (
           <Button
             className="flows-back"
             type="text"
             icon={<ArrowLeftOutlined />}
-            onClick={() => setSelected(null)}
+            onClick={() => { setSelected(null); setSelectedArchived(null); }}
           >
             {t("nav.flows")}
           </Button>
         )}
-        {!selected && !narrow && (
+        {!selected && !selectedArchived && !narrow && (
           <Empty description={t("flows.pickOne")} style={{ marginTop: 120 }} />
         )}
-        {selected && (
+        {hasSelectedFlow && (
           <>
             <div className="flows-thread-head">
               <span className="flows-thread-name">
-                {selected.isGroup ? "#" : "@"} {selected.displayName || selected.chatKey}
+                {selectedArchived
+                  ? selectedArchived.originLabel || selectedArchived.title.replace(/^channel:[^:]+:/, "")
+                  : `${selected!.isGroup ? "#" : "@"} ${selected!.displayName || selected!.chatKey}`}
               </span>
               <span className="flows-thread-meta">
-                {selected.activeSession
-                  ? activeSessionId === selected.activeSession
-                    ? t("flows.boundCurrent")
-                    : t("flows.bound")
-                  : t("flows.unbound")}
+                {selectedArchived
+                  ? t("flows.archivedSession" as never)
+                  : selected!.activeSession
+                    ? activeSessionId === selected!.activeSession
+                      ? t("flows.boundCurrent")
+                      : t("flows.bound")
+                    : t("flows.unbound")}
               </span>
             </div>
             <div className="flows-messages" ref={msgBoxRef}>
               {msgLoading && <Skeleton active paragraph={{ rows: 4 }} />}
-              {!msgLoading && !selected.activeSession && (
+              {!msgLoading && !viewingSessionId && (
                 <Empty description={t("flows.unboundHint")} style={{ marginTop: 80 }} />
               )}
-              {!msgLoading && selected.activeSession && messages.length === 0 && (
+              {!msgLoading && viewingSessionId && messages.length === 0 && (
                 <Empty description={t("flows.noMessages")} style={{ marginTop: 80 }} />
               )}
               {!msgLoading &&
@@ -301,6 +343,7 @@ export function FlowsView(): React.ReactElement {
           </>
         )}
       </main>
+      {sessionManagerOpen && <SessionManagementDrawer open onClose={() => setSessionManagerOpen(false)} />}
     </div>
   );
 }

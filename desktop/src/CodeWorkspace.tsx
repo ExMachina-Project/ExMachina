@@ -6,10 +6,12 @@ import CodeMirror from "@uiw/react-codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { rust } from "@codemirror/lang-rust";
 import { json } from "@codemirror/lang-json";
-import { editorApi, type EditorFile, type WorkspaceChanges, type GitOverview, type GitOperation } from "../../webui/src/api/editor";
+import type { EditorFile, WorkspaceChanges, GitOverview, GitOperation } from "../../client/src/api/editor";
+import { useProjectClient } from "./projects";
 
 export interface OpenFile extends EditorFile { draft: string }
 export function CodeEditor({ file, onChange, onSaved, onReload }: { file: OpenFile; onChange: (text: string) => void; onSaved: (path: string, content: string) => void; onReload: () => void }) {
+  const { client: { editorApi } } = useProjectClient();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const busy = useRef(false);
@@ -21,7 +23,7 @@ export function CodeEditor({ file, onChange, onSaved, onReload }: { file: OpenFi
     try { await editorApi.save(path, draft, content, file.workspace); onSaved(path, draft); }
     catch (e) { setError(String(e)); }
     finally { busy.current = false; setSaving(false); }
-  }, [file, readonly, onSaved]);
+  }, [editorApi, file, readonly, onSaved]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void save(); } };
     window.addEventListener("keydown", onKey);
@@ -39,6 +41,7 @@ export function CodeEditor({ file, onChange, onSaved, onReload }: { file: OpenFi
 
 export type ProjectTab = "files" | "changes" | "git";
 export function ProjectPanel({ workspace, onOpen, refresh, tab, onTabChange, onApproval }: { workspace: string; onOpen: (path: string) => void; refresh: number; tab: ProjectTab; onTabChange: (tab: ProjectTab) => void; onApproval: () => void }) {
+  const { client: { editorApi } } = useProjectClient();
   const { message, modal } = App.useApp();
   const [tree, setTree] = useState<DataNode[]>([]);
   const [changes, setChanges] = useState<WorkspaceChanges | null>(null);
@@ -59,7 +62,7 @@ export function ProjectPanel({ workspace, onOpen, refresh, tab, onTabChange, onA
       setChanges(nextChanges); setGit(overview);
     } catch (e) { if (seq === generation.current) setError(String(e)); }
     finally { if (seq === generation.current) setLoading(false); }
-  }, []);
+  }, [editorApi]);
   useEffect(() => { setTree([]); void load(); return () => { generation.current += 1; }; }, [workspace, refresh, load]);
   const loadChildren = async ({ key }: DataNode) => {
     const seq = generation.current;

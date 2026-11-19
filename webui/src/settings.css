@@ -101,8 +101,16 @@
 .provider-model-field .ant-collapse-content-box { padding: 16px 0 0 !important; }
 .provider-model-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
 .provider-model-summary .ant-tag { margin: 0; font-size: 10px; }
-.settings-switch-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.settings-switch-grid .ant-form-item-extra { font-size: 11px; }
+.provider-capability-switches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 12px; }
+.ant-modal .provider-capability-switches > .ant-form-item { min-width: 0; margin: 0; padding: 5px 8px; border: 1px solid var(--line); background: var(--bg-sunken, var(--bg)); }
+.provider-capability-switches .ant-form-item-row { display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: 6px; }
+.provider-capability-switches .ant-form-item-label { flex: 1; min-width: 0; padding: 0; text-align: left; }
+.provider-capability-switches .ant-form-item-label > label { height: auto; font-size: 12px; line-height: 1.5; }
+.provider-capability-switches .ant-form-item-control { flex: none; }
+.provider-capability-switches .ant-form-item-control-input { min-height: 24px; }
+.provider-capability-switches .ant-form-item-tooltip { flex: none; }
+.provider-workspace { align-items: start; }
+.provider-workspace > .settings-list-panel, .provider-workspace > .settings-detail-panel { align-self: start; }
 .settings-toggle-row { display: flex; align-items: flex-start; gap: 24px; justify-content: space-between; padding: 18px; border: 1px solid var(--line); }
 .settings-toggle-row p { font-size: 12px; line-height: 1.8; color: var(--muted); }
 .settings-toggle-row > .ant-switch { flex: none; }
@@ -203,10 +211,7 @@
   .settings-nav-index, .settings-nav-tip { display: none; }
   .settings-dialog-content { padding: 20px 18px 24px; }
   .settings-dialog .form-grid-2 { grid-template-columns: 1fr; }
-  .settings-switch-grid { grid-template-columns: 1fr; }
-  .settings-switch-grid .ant-form-item { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-  .settings-switch-grid .ant-form-item-control { text-align: right; }
-  .settings-switch-grid .ant-form-item-extra { text-align: left; }
+  .provider-capability-switches { grid-template-columns: 1fr; }
   .settings-savebar { padding: 12px 14px; gap: 8px; }
   .settings-save-actions { gap: 4px; }
   .settings-savebar .ant-btn { padding-inline: 10px; font-size: 12px; }
