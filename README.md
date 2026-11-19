@@ -7,8 +7,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-animated-tagline-dark.svg">
-  <img src="./docs/logo-animated-tagline.svg" alt="EXMACHINA —— 让我们摒弃拟人表达，让AI回归绝对理性" width="660">
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/branding/logo-animated-tagline-dark.svg">
+  <img src="./assets/branding/logo-animated-tagline.svg" alt="EXMACHINA —— 让我们摒弃拟人表达，让AI回归绝对理性" width="660">
 </picture>
 
 </div>
@@ -412,8 +412,8 @@ npm run build:webui                     # WebUI 构建（tsc + vite）
 
 | 文档 | 内容 |
 |------|------|
-| [docs/安装指南.md](./docs/安装指南.md) | 环境要求、安装步骤、提供商与密钥配置、访问密钥、Docker |
-| [docs/使用指南.md](./docs/使用指南.md) | CLI 全命令与 WebUI 全面板手册、典型工作流 |
+| [docs/README.md](./docs/README.md) | 开发与设计文档索引、文档收录边界 |
+| [docs/安装指南.md](./docs/安装指南.md) | 开发环境、源码构建、隔离 Docker 栈与配置 |
 | [docs/架构与设计.md](./docs/架构与设计.md) | 设计理念、分层架构、核心机制（调度 / 契约回流 / 三账 / 记忆 / 模型解析） |
 | [docs/协议与契约.md](./docs/协议与契约.md) | 语言规范、核心实体 schema、编排契约、REST/WS API、存储布局、扩展点 |
 

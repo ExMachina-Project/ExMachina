@@ -3,13 +3,15 @@
  * UI 视觉验证（ui-visual-language / webui-ux-overhaul 6.1）：
  * puppeteer 全页截图 + 关键 DOM 断言（只锚结构性选择器，不锚文案与像素——主题改版不脆断）。
  *
- * 用法：node scripts/ui-shot.mjs [--base http://localhost:5173] [--out docs/审计/截图]
+ * 用法：node scripts/ui-shot.mjs [--base http://localhost:5173] [--out /tmp/opencode/exm-ui]
  * 前置：webui dev server（vite，代理 /api → 生产网关）或任一承载 WebUI 的地址。
  * 输出：<out>/<YYYY-MM-DD>/<view>.png + assert.json（断言结果清单）。
  */
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import { fileURLToPath } from "node:url";
 
 /** puppeteer-core 解析：项目内优先，回落工具目录（脚本独立于 webui 依赖树） */
 function loadPuppeteer() {
@@ -22,15 +24,19 @@ function loadPuppeteer() {
   // 兜底：NODE_PATH 级解析（require 本身会查 node_modules）
   return require("puppeteer-core");
 }
-const puppeteer = loadPuppeteer();
-
 const args = process.argv.slice(2);
 const argOf = (name, def) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : def;
 };
 const BASE = argOf("--base", "http://localhost:5173");
-const OUT_ROOT = argOf("--out", path.join("docs", "审计", "截图"));
+const OUT_ROOT = argOf("--out", process.env.EXM_ARTIFACT_DIR ?? path.join(os.tmpdir(), "exmachina-ui"));
+const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../docs");
+const outputRelativeToDocs = path.relative(docsRoot, path.resolve(OUT_ROOT));
+if (!outputRelativeToDocs || (!outputRelativeToDocs.startsWith(`..${path.sep}`) && outputRelativeToDocs !== ".." && !path.isAbsolute(outputRelativeToDocs))) {
+  throw new Error("UI artifacts must be written outside docs/; use a temporary directory.");
+}
+const puppeteer = loadPuppeteer();
 const KEY = process.env.EXM_KEY ?? "exmachina";
 
 /** 页面清单：hash → 结构断言（选择器存在性；不锚文案） */

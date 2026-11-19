@@ -8,8 +8,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/logo-animated-dark.svg">
-  <img src="./docs/logo-animated.svg" alt="EXMACHINA" width="660">
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/branding/logo-animated-dark.svg">
+  <img src="./assets/branding/logo-animated.svg" alt="EXMACHINA" width="660">
 </picture>
 
 ![Stage](https://img.shields.io/badge/stage-pre--alpha-orange)
@@ -143,8 +143,8 @@ EXMACHINA gives you two interaction targets, chosen by task weight — both shar
 
 | Doc | Content |
 |-----|---------|
-| [docs/Installation](./docs/安装指南.md) | Setup, provider config, Docker |
-| [docs/Usage](./docs/使用指南.md) | Full CLI + WebUI handbook |
+| [docs/Index](./docs/README.md) | Development/design documentation and inclusion policy |
+| [docs/Development setup](./docs/安装指南.md) | Source builds, isolated Docker stack, configuration |
 | [docs/Architecture](./docs/架构与设计.md) | Design principles, core mechanisms |
 | [docs/Protocol](./docs/协议与契约.md) | Entity schemas, REST/WS API, extension points |
 | [PROGRESS](./PROGRESS.md) | Development log |

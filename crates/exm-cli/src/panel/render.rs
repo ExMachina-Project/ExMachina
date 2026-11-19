@@ -6,7 +6,7 @@ use super::*;
 
 /// 字符画字母表：EXMACHINA（每字母 6 列 × 7 行，双线笔画）
 ///
-/// 字形口径对齐 `docs/wordmark.svg`（终端横幅与字标同一套视觉语汇）：
+/// 字形口径对齐 `assets/branding/wordmark.svg`（终端横幅与字标同一套视觉语汇）：
 /// 笔画取两格宽，与字标的粗板式笔画同量级；单线细字模在终端里过于轻飘。
 const BANNER_LETTERS: [[&str; 7]; 9] = [
     // E
@@ -581,4 +581,3 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
 ];
-

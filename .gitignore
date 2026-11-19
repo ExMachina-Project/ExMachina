@@ -25,6 +25,7 @@ entities/active_workspace
 !.dockerignore
 !.cargo/
 !.github/
+!.githooks/
 !.gitkeep
 
 # 杂项
@@ -46,3 +47,23 @@ openspec/changes/
 
 # 私有注册表凭据（docker login 产物，只留在部署目录）
 .docker/config.json
+
+# docs 仅允许长期维护的开发指导与设计文档；过程产物不得入库。
+/docs/**
+!/docs/README.md
+!/docs/开发规范.md
+!/docs/安装指南.md
+!/docs/架构与设计.md
+!/docs/协议与契约.md
+!/docs/安全模型.md
+!/docs/插件开发指南.md
+!/docs/元智能体.md
+!/docs/客户端兼容身份.md
+!/docs/智能体模型分配.md
+
+# 本地验证产物
+/out/
+/artifacts/
+/test-results/
+/playwright-report/
+*.tsbuildinfo
