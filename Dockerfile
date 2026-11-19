@@ -7,10 +7,12 @@
 # ---------- 1) WebUI ----------
 FROM node:22-bookworm-slim AS webui-builder
 WORKDIR /build
-COPY webui/package.json webui/package-lock.json* ./
-RUN npm install --no-audit --no-fund
-COPY webui/ ./
-RUN npm run build
+COPY package.json package-lock.json .npmrc ./
+COPY webui/package.json ./webui/package.json
+RUN npm ci --no-audit --no-fund
+COPY webui/ ./webui/
+COPY client/ ./client/
+RUN npm run build:webui && cp -r webui/dist /build/dist
 
 # ---------- 2) Rust 核心 ----------
 FROM rust:1.92-bookworm AS rust-builder
@@ -29,7 +31,7 @@ COPY third_party ./third_party
 # cargo 源也切到 rsproxy（crates.io 代理）
 RUN mkdir -p /usr/local/cargo/ && printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n' > /usr/local/cargo/config.toml
 # 依赖缓存层（无 lockfile 变更时命中）
-RUN cargo build --release -p exm-cli -p exm-gateway
+RUN cargo build --locked --release -j 1 -p exm-cli -p exm-gateway
 
 # ---------- 3) 编成数据（生成器需要 node；此处直接 COPY 源仓数据） ----------
 FROM debian:bookworm-slim AS runtime

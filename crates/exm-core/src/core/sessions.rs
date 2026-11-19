@@ -137,9 +137,11 @@ impl Core {
         let _guard = lock
             .try_lock()
             .map_err(|_| anyhow::anyhow!("会话正在处理中，请等待当前任务完成后再撤销"))?;
-        self.store
+        let session = self.store
             .get_session(session_id)?
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        anyhow::ensure!(session.collaboration_id.is_none(), "协作成员会话不能单独撤销");
+        let root = if restore_files { session.workspace.as_deref().map(crate::workspace::pinned).transpose()? } else { None };
         let cursor = self.cursor_at_turn(session_id, upto_turn)?;
 
         // 游标回退 + 归档（spec：被截断内容保留归档视图）
@@ -169,7 +171,19 @@ impl Core {
                     let Some((date, rel)) = cp.split_once('/') else {
                         continue;
                     };
-                    match self.restore_checkpoint(Some(date), rel) {
+                    let outcome = if let Some(root) = &root {
+                        (|| {
+                            let source = crate::workspace::checkpoint(root, date, std::path::Path::new(rel))?;
+                            anyhow::ensure!(source.is_file(), "检查点不存在");
+                            let target = self.orchestrator().tools.editor_path_in(root, rel)?;
+                            if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+                            std::fs::copy(source, target)?;
+                            Ok(String::new())
+                        })()
+                    } else {
+                        self.restore_checkpoint(Some(date), rel)
+                    };
+                    match outcome {
                         Ok(_) => restored.push(cp.clone()),
                         Err(e) => eprintln!("[undo] 检查点恢复失败 {cp}: {e}"),
                     }
@@ -221,6 +235,7 @@ impl Core {
             .store
             .get_session(session_id)?
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        anyhow::ensure!(src.collaboration_id.is_none(), "协作成员会话不能单独分叉");
         let cursor = self.cursor_at_turn(session_id, upto_turn)?;
         let now = now_iso();
         let fork = Session {
@@ -230,6 +245,8 @@ impl Core {
             origin: None,
             origin_label: None,
             group_id: src.group_id.clone(), // 权限与组继承
+            workspace: src.workspace.clone(),
+            collaboration_id: None,
             memory_partition: src.memory_partition.clone(), // 记忆分区随会话继承
             rolling_summary: None,          // 摘要按副本历史重建
             summary_upto: None,
@@ -284,10 +301,12 @@ impl Core {
     }
     /// 当前交互范围（组或智能体）的会话列表
     pub fn list_sessions_in_scope(&self) -> anyhow::Result<Vec<Session>> {
-        self.store
-            .list_sessions_in_group(&self.registry.active_scope())
+        let mut sessions = self.store.list_sessions_in_group(&self.registry.active_scope())?;
+        sessions.retain(|s| s.workspace.is_none());
+        Ok(sessions)
     }
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(self.store.get_session(id)?.is_none_or(|s| s.collaboration_id.is_none()), "协作成员会话不能单独删除");
         crate::orchestrator::unmark_im_session(id);
         // 会话删除连带清理审批授权与工具预算计数（生命周期 = 会话生命周期）
         self.session_grants.lock().remove(id);
@@ -300,6 +319,7 @@ impl Core {
     }
     /// 会话归档 / 恢复（可逆状态：归档移出主列表，恢复回原分组）
     pub fn set_session_archived(&self, id: &str, archived: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(self.store.get_session(id)?.is_none_or(|s| s.collaboration_id.is_none()), "协作成员会话不能单独归档");
         self.store.set_session_archived(id, archived)
     }
     /// 归档区列表（只含归档态，按归档时间倒序；预览口径与主列表一致）
@@ -319,6 +339,12 @@ impl Core {
         for s in list.iter_mut() {
             s.message_count = Some(self.store.message_count(&s.id));
         }
+        self.attach_session_origins(&mut list);
+        Ok(list)
+    }
+    pub fn list_sessions_admin_in_workspace(&self, workspace: &str) -> anyhow::Result<Vec<Session>> {
+        let mut list = self.store.list_sessions_in_workspace(workspace)?;
+        for session in &mut list { session.message_count = Some(self.store.message_count(&session.id)); }
         self.attach_session_origins(&mut list);
         Ok(list)
     }

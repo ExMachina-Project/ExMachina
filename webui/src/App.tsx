@@ -16,7 +16,6 @@ import {
   UserOutlined,
   FundOutlined,
   ClockCircleOutlined,
-  UnorderedListOutlined,
   AppstoreAddOutlined,
   DeploymentUnitOutlined,
   CommentOutlined,
@@ -42,7 +41,6 @@ const SetupKeyView = lazy(() => import("./views/SetupKeyView").then((m) => ({ de
 const ChatView = lazy(() => import("./views/ChatView").then((m) => ({ default: m.ChatView })));
 const FlowsView = lazy(() => import("./views/FlowsView").then((m) => ({ default: m.FlowsView })));
 const TasksView = lazy(() => import("./views/TasksView").then((m) => ({ default: m.TasksView })));
-const SessionsView = lazy(() => import("./views/SessionsView").then((m) => ({ default: m.SessionsView })));
 const ModelsView = lazy(() => import("./views/models/ModelsView").then((m) => ({ default: m.ModelsView })));
 const GraphView = lazy(() => import("./views/GraphView").then((m) => ({ default: m.GraphView })));
 const LedgerView = lazy(() => import("./views/LedgerView").then((m) => ({ default: m.LedgerView })));
@@ -78,7 +76,6 @@ type ViewKey =
   | "chat"
   | "flows"
   | "tasks"
-  | "sessions"
   | "graph"
   | "agent"
   | "nexus"
@@ -95,20 +92,16 @@ type ViewKey =
 
 /** 合法视图键（hash 路由白名单校验） */
 const VIEW_KEYS: ViewKey[] = [
-  "chat", "flows", "tasks", "sessions", "agent", "nexus", "graph", "automations",
+  "chat", "flows", "tasks", "agent", "nexus", "graph", "automations",
   "skills", "plugins", "models", "approvals", "ledger", "memory", "knowledge", "activity", "settings",
 ];
-
-/** 旧路由兼容：独立组页已并入「智能体」页（#/groups → #/agent） */
-const LEGACY_VIEW_ALIASES: Record<string, ViewKey> = { groups: "agent" };
 
 /** 从 hash 解析视图：#/chat/<sessionId> → { view: chat, session }; 非法回落 chat */
 function parseHash(): { view: ViewKey; session?: string } {
   const h = location.hash.replace(/^#\/?/, "");
   if (!h) return { view: "chat" };
   const [head, sub] = h.split("/");
-  // 旧路由别名先行（groups → agent），再匹配白名单；非法回落 chat
-  const view = LEGACY_VIEW_ALIASES[head] ?? VIEW_KEYS.find((k) => k === head);
+  const view = VIEW_KEYS.find((k) => k === head);
   if (!view) return { view: "chat" };
   return { view, session: sub };
 }
@@ -127,7 +120,6 @@ export const NAV_ITEMS: {
   { key: "tasks", en: "TASKS", labelKey: "nav.tasks", icon: <ThunderboltOutlined /> },
   { key: "agent", en: "AGENTS", labelKey: "nav.agent", icon: <UserOutlined /> },
   { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined /> },
-  { key: "sessions", en: "SESSIONS", labelKey: "nav.sessions", icon: <UnorderedListOutlined /> },
   { key: "graph", en: "DAG", labelKey: "nav.dag", icon: <ApartmentOutlined /> },
   { key: "automations", en: "CRON", labelKey: "nav.cron", icon: <ClockCircleOutlined /> },
   { key: "skills", en: "SKILLS", labelKey: "nav.skills", icon: <DeploymentUnitOutlined /> },
@@ -236,8 +228,8 @@ export default function App(): React.ReactElement {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  // 键盘跳页（kbd-nav）：G 武装后接页首字母（gc=对话 gf=聊天 gt=任务 gs=会话
-  // 管理 ga=智能体 gn=智能连结 gd=编排 gm=模型 gp=审批），或 1-9 直达前九项。
+  // 键盘跳页（kbd-nav）：G 武装后接页首字母（gc=对话 gf=聊天 gt=任务
+  // ga=智能体 gn=智能连结 gd=编排 gm=模型 gp=审批），或 1-9 直达前九项。
   // 输入框/文本域聚焦与修饰键按下时不触发，不干扰正常输入与浏览器快捷键。
   // 映射手选不自动派生：首字母冲突页（graph/automations 等）一律走数字直达。
   useEffect(() => {
@@ -247,7 +239,6 @@ export default function App(): React.ReactElement {
       c: "chat",
       f: "flows",
       t: "tasks",
-      s: "sessions",
       a: "agent",
       n: "nexus",
       d: "graph",
@@ -498,7 +489,6 @@ export default function App(): React.ReactElement {
             {view === "chat" && <ChatView />}
             {view === "flows" && <FlowsView />}
             {view === "tasks" && <TasksView />}
-            {view === "sessions" && <SessionsView />}
             {view === "graph" && <GraphView />}
             {view === "agent" && <SinglesView />}
             {view === "nexus" && <NexusView />}

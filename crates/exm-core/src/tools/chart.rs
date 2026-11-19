@@ -69,7 +69,7 @@ impl ToolGateway {
             return ToolResult::err("渲染服务返回内容不是 SVG（可能配置了错误的 endpoint）");
         }
         // 落盘 + outbox 登记（kind=file；SVG 在 WebUI 可直接预览）
-        let dir = self.workspace_root.join(".exmachina/outbox");
+        let dir = self.effective_root().join(".exmachina/outbox");
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return ToolResult::err(format!("创建发件箱目录失败：{e}"));
         }

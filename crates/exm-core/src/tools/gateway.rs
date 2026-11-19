@@ -208,6 +208,14 @@ pub struct ToolGateway {
 pub(crate) type InputAction =
     Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>;
 impl ToolGateway {
+    pub(crate) fn workspace_for_session(&self, session_id: &str) -> PathBuf {
+        if let Some(root) = crate::workspace::current() { return root; }
+        if let Some(root) = self.store.get_session(session_id).ok().flatten()
+            .and_then(|session| session.workspace).and_then(|raw| crate::workspace::pinned(&raw).ok()) {
+            return root;
+        }
+        self.effective_root()
+    }
     pub fn new(
         workspace_root: impl AsRef<Path>,
         store: Arc<Store>,
@@ -806,7 +814,7 @@ impl ToolGateway {
         for h in hooks {
             let (ok, out) = run_hook_command(
                 &h,
-                &self.effective_root(),
+                &self.workspace_for_session(session_id),
                 &[
                     ("EXM_HOOK", "run_end"),
                     ("EXM_RUN_STATUS", status),
@@ -949,9 +957,15 @@ impl ToolGateway {
         name: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
-        crate::model_routing::MODEL_CALLER.scope(crate::model_routing::ModelCaller {
+        let workspace = match self.store.get_session(session_id).and_then(|session| {
+            session.and_then(|s| s.workspace).as_deref().map(crate::workspace::pinned).transpose()
+        }) {
+            Ok(workspace) => workspace.or_else(crate::workspace::current),
+            Err(e) => return ToolResult::err(format!("读取项目作用域失败：{e}")),
+        };
+        crate::workspace::scope(workspace, crate::model_routing::MODEL_CALLER.scope(crate::model_routing::ModelCaller {
             agent_id:agent_id.to_string(),session_id:session_id.to_string(),
-        },self.execute_named_inner(agent_id,session_id,allowlist,name,args)).await
+        },self.execute_named_inner(agent_id,session_id,allowlist,name,args))).await
     }
 
     async fn execute_named_inner(&self,agent_id:&str,session_id:&str,allowlist:&[ToolName],name:&str,args:&serde_json::Value)->ToolResult {
@@ -1043,7 +1057,7 @@ impl ToolGateway {
         if !self.hooks.pre_tool.is_empty() {
             let args_json = serde_json::to_string(args).unwrap_or_default();
             let short_args: String = args_json.chars().take(4000).collect();
-            let root = self.effective_root();
+            let root = self.workspace_for_session(session_id);
             let root_s = root.display().to_string();
             for h in self.hooks.pre_tool.clone() {
                 let (ok, out) = run_hook_command(
@@ -1307,7 +1321,8 @@ impl ToolGateway {
         if text.chars().count() <= limit {
             return result;
         }
-        let dir = self.workspace_root.join(".exmachina").join("tool-output");
+        let root = self.effective_root();
+        let dir = root.join(".exmachina").join("tool-output");
         if std::fs::create_dir_all(&dir).is_err() {
             return result;
         }
@@ -1319,7 +1334,7 @@ impl ToolGateway {
         let lines = text.lines().count();
         let head: String = text.chars().take(4000).collect();
         let rel = file
-            .strip_prefix(&self.workspace_root)
+            .strip_prefix(&root)
             .map(|p| p.display().to_string().replace('\\', "/"))
             .unwrap_or_else(|_| file.display().to_string());
         let note = format!(

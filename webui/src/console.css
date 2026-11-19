@@ -25,7 +25,6 @@ button, input, textarea, select { font-family: inherit; }
 .sider-subpanel .cfg-nav { width: 100%; margin: 0; }
 .telemetry-bar { position: static; grid-row: 2; grid-column: 1 / -1; min-width: 0; height: var(--tel-h); overflow: hidden; }
 .tbar-seg { min-width: 0; }
-.tbar-model { flex: 0 1 auto; }
 .tbar-v { min-width: 0; }
 .tbar-k, .tbar-seg.sys { flex-shrink: 0; }
 .mobile-appbar { display: none; }
@@ -159,6 +158,32 @@ button, input, textarea, select { font-family: inherit; }
 .provider-model-entry small, .provider-model-entry p { margin-top: 4px; line-height: 1.5; }
 .provider-detail-foot { padding: 8px 0; }
 .provider-owner-hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0 0 12px; }
+.provider-catalog { min-width: 0; }
+/* Fill the model workspace down to the console footer. Only the directory/list
+   scrolls on a desktop; compact windows keep the natural document flow below. */
+@media (min-width: 861px) and (min-height: 641px) {
+  .app-shell[data-view="models"] > .app-content { display: flex; flex-direction: column; overflow: hidden; }
+  .app-shell[data-view="models"] .view-stage { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .models-settings-page { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .models-settings-page > .page-head { flex: none; }
+  .models-settings-page > .settings-page-tabs { flex: 1; min-height: 0; }
+  .models-settings-page > .settings-page-tabs > .ant-tabs-nav { flex: none; }
+  .models-settings-page > .settings-page-tabs > :is(.ant-tabs-content-holder, .ant-tabs-body-holder) { min-height: 0; overflow: auto; }
+  .models-settings-page > .settings-page-tabs > :is(.ant-tabs-content-holder, .ant-tabs-body-holder) > :is(.ant-tabs-content, .ant-tabs-body),
+  .models-settings-page > .settings-page-tabs > :is(.ant-tabs-content-holder, .ant-tabs-body-holder) > :is(.ant-tabs-content, .ant-tabs-body) > :is(.ant-tabs-tabpane-active, .ant-tabs-content-active),
+  .provider-workspace-loading, .provider-workspace-loading > .ant-spin-container { height: 100%; min-height: 0; }
+  .models-settings-page .provider-workspace { height: 100%; min-height: 0; align-items: stretch; overflow: hidden; }
+  .provider-workspace > .settings-list-panel,
+  .provider-workspace > .settings-detail-panel { align-self: stretch; display: flex; flex-direction: column; min-height: 0; }
+  .provider-workspace .settings-list-panel > :not(.settings-object-list) { flex: none; }
+  .provider-workspace .settings-object-list { flex: 1; min-height: 0; max-height: none; overflow: auto; }
+  .provider-workspace .settings-detail-panel { overflow: auto; }
+  .provider-workspace .settings-detail-panel > :not(.provider-catalog) { flex: none; }
+  .provider-catalog { flex: 1 0 140px; display: flex; flex-direction: column; min-height: 140px; }
+  .provider-catalog > :not(.provider-model-list) { flex: none; }
+  .provider-catalog .provider-model-list { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+  .provider-workspace-loading .settings-welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+}
 .global-cap-workspace { max-width: none; padding: 14px 16px 0; }
 .global-cap-row { padding: 12px 0; gap: 8px 20px; }
 .global-cap-row small { line-height: 1.6; }
@@ -268,7 +293,6 @@ button, input, textarea, select { font-family: inherit; }
   .settings-dialog-content { padding: 12px; }
   .settings-nav-index, .settings-nav-tip { display: none; }
   .settings-dialog .form-grid-2 { grid-template-columns: minmax(0, 1fr); }
-  .settings-switch-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-detail-actions { gap: 5px; }
   .global-cap-workspace { padding: 12px 12px 0; }
   .global-cap-row { grid-template-columns: minmax(0, 1fr); }

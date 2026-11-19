@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SRC = join(ROOT, "webui/src");
+const SOURCES = [join(ROOT, "client/src"), join(ROOT, "webui/src")];
+const DICT_SRC = join(ROOT, "client/src");
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -51,10 +52,10 @@ function dictKeys(file) {
   return set;
 }
 
-const files = walk(SRC).filter((f) => !f.includes(`${join("i18n", "langs")}`) && !f.endsWith(`${join("i18n", "core.ts")}`));
+const files = SOURCES.flatMap((src) => walk(src).filter((f) => !f.includes(`${join("i18n", "langs")}`) && !f.endsWith(`${join("i18n", "core.ts")}`)));
 const used = new Map(); // key -> [file:line]
 for (const f of files) {
-  const rel = f.replace(SRC + "/", "");
+  const rel = SOURCES.map((src) => f.startsWith(`${src}/`) ? f.slice(src.length + 1) : "").find(Boolean) ?? f;
   readFileSync(f, "utf8").split("\n").forEach((line, i) => {
     for (const k of keysIn(line)) {
       if (!used.has(k)) used.set(k, []);
@@ -63,8 +64,8 @@ for (const f of files) {
   });
 }
 
-const zh = dictKeys(join(SRC, "i18n/langs/zh.ts"));
-const en = dictKeys(join(SRC, "i18n/langs/en.ts"));
+const zh = dictKeys(join(DICT_SRC, "i18n/langs/zh.ts"));
+const en = dictKeys(join(DICT_SRC, "i18n/langs/en.ts"));
 
 // 前缀取词锚定取词函数后不再需要「哪些前缀不是词条」的例外名单：
 // 校验过一遍收紧后依然零缺失（配置字段名等都在 `t()` 之外，不进 used）。

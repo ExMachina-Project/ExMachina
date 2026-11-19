@@ -322,7 +322,7 @@ export function ModelsView({ active = true }: { active?: boolean } = {}): React.
       />
       <Tabs className="settings-page-tabs" activeKey={tab} onChange={(next) => setTab(next as Tab)} items={[
         { key: "providers", label: <>{t("models.tabProviders")} <span className="settings-count">{profiles.length}</span></>, children:
-          <Spin spinning={loading}><ProviderWorkspace profiles={profiles} active={info?.active} testing={testing} onEdit={openEdit}
+          <Spin classNames={{ root: "provider-workspace-loading" }} spinning={loading}><ProviderWorkspace profiles={profiles} active={info?.active} testing={testing} onEdit={openEdit}
              onTest={(id) => void test(id)} onDelete={(id) => void remove(id)} onCreate={openCreate} /></Spin> },
         { key: "global", label: t("ux.globalCapabilities"), children: <GlobalCapabilityPanel profiles={profiles} active={active && tab === "global"} /> },
       ]} />

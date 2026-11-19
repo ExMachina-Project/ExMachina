@@ -19,6 +19,8 @@ pub struct DesktopConfig {
     pub notify_approval: bool,
     pub notify_cron: bool,
     pub notify_task_done: bool,
+    /// Allow authenticated clients on trusted LANs to connect to this bundled gateway.
+    pub allow_lan: bool,
 }
 
 impl Default for DesktopConfig {
@@ -29,6 +31,7 @@ impl Default for DesktopConfig {
             notify_approval: true,
             notify_cron: true,
             notify_task_done: true,
+            allow_lan: false,
         }
     }
 }
@@ -156,6 +159,16 @@ pub fn launch_gateway(
     data_dir: &std::path::Path,
     port: u16,
 ) -> std::io::Result<Child> {
+    launch_gateway_authenticated(gateway, data_dir, port, None, "127.0.0.1")
+}
+
+pub fn launch_gateway_authenticated(
+    gateway: &std::path::Path,
+    data_dir: &std::path::Path,
+    port: u16,
+    key: Option<&str>,
+    host: &str,
+) -> std::io::Result<Child> {
     std::fs::create_dir_all(data_dir.join("data"))?;
 
     // 默认工作区 = 用户数据目录下的 workspace/（干活的项目根），
@@ -165,11 +178,13 @@ pub fn launch_gateway(
 
     let mut cmd = Command::new(gateway);
     cmd.arg("serve")
+        .args(["--host", host])
         .arg("--port")
         .arg(port.to_string())
         .env("EXM_DATA_DIR", data_dir.join("data"))
         .env("EXM_WORKSPACE_ROOT", &workspace)
         .current_dir(&workspace);
+    if let Some(key) = key { cmd.env("EXM_AUTH_KEY", key); }
     // Windows：网关是控制台子系统程序，GUI 进程无控制台可继承 → 系统会为其新开终端窗口；
     // CREATE_NO_WINDOW (0x0800_0000) 抑制弹窗（日志经事件桥与 WebUI 可见，无需终端）
     #[cfg(target_os = "windows")]

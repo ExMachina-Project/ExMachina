@@ -24,7 +24,7 @@ pub(crate) async fn get_asset(State(st): State<AppState>, Query(q): Query<AssetQ
     if raw.is_empty() {
         return (StatusCode::BAD_REQUEST, "path 不能为空").into_response();
     }
-    let root = st.core.config().workspace_root.clone();
+    let root = exm_core::workspace::current().unwrap_or_else(|| st.core.config().workspace_root.clone());
     let candidate = root.join(raw);
     // 词法 + 规范化双重校验（与工具面 resolve_safe 同口径）
     let ok = std::path::Path::new(raw).is_relative()
@@ -90,7 +90,7 @@ pub(crate) async fn download_asset(
     if raw.is_empty() {
         return (StatusCode::BAD_REQUEST, "path 不能为空").into_response();
     }
-    let root = st.core.config().workspace_root.clone();
+    let root = exm_core::workspace::current().unwrap_or_else(|| st.core.config().workspace_root.clone());
     let candidate = root.join(raw);
     // 路径校验与 /api/asset 同口径（相对路径 + 无 .. + 目标必须已存在于工作区内）
     // 语义区分（REST 通用约定）：不存在的文件 → 404；路径越界（绝对路径/..）→ 403
@@ -101,6 +101,9 @@ pub(crate) async fn download_asset(
     }
     if !candidate.exists() {
         return (StatusCode::NOT_FOUND, "文件不存在").into_response();
+    }
+    if !candidate.canonicalize().is_ok_and(|p| p.starts_with(root.canonicalize().unwrap_or(root.clone()))) {
+        return (StatusCode::FORBIDDEN, "路径越界（仅允许工作区内的文件）").into_response();
     }
     let meta = match tokio::fs::metadata(&candidate).await {
         Ok(m) if m.is_file() => m,
@@ -155,10 +158,15 @@ pub(crate) async fn download_asset(
 }
 
 pub(crate) async fn health(State(st): State<AppState>) -> impl IntoResponse {
+    let running_sessions = exm_core::round_trace::running_count();
+    let pending_approvals = st.core.approval_list(Some("pending"), 1000).map(|approvals| approvals.len()).unwrap_or(0);
     Json(json!({
         "ok": true,
         "mock": st.core.is_mock(),
+        "features": ["session-workspace-v1", "collaboration-v1"],
         "agents": st.core.registry.count(),
+        "runningSessions": running_sessions,
+        "pendingApprovals": pending_approvals,
         "provider": if st.core.is_mock() { "mock" } else { "openai-compatible" },
     }))
 }

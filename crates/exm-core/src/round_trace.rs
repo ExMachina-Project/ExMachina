@@ -114,6 +114,16 @@ pub fn snapshot_tool_trace(session_id: &str) -> String {
         .join(" → ")
 }
 
+/// Bounded, non-consuming evidence for a dispatched task's fallback report.
+/// Arguments are kept out of reports; callers use only the recorded result summary.
+pub fn snapshot_tool_records(session_id: &str, limit: usize) -> Vec<ToolCallRecord> {
+    let map = states().lock();
+    let Some(st) = map.get(session_id) else {
+        return Vec::new();
+    };
+    st.tools[st.tools.len().saturating_sub(limit)..].to_vec()
+}
+
 /// 会话运行标志：chat 开始时置存在、结束移除（存在 = 有运行中轮次）
 pub fn begin(session_id: &str) {
     states().lock().entry(session_id.to_string()).or_default();
@@ -144,6 +154,11 @@ pub fn end(session_id: &str) {
 /// 会话是否有运行中轮次
 pub fn is_running(session_id: &str) -> bool {
     states().lock().contains_key(session_id)
+}
+
+/// Number of live session turns, used to refuse a gateway restart that would interrupt work.
+pub fn running_count() -> usize {
+    states().lock().len()
 }
 
 /// 请求停止：置位取消令牌；返回会话是否有运行中轮次

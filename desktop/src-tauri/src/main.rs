@@ -4,7 +4,7 @@
 //! 参考常见 agent 桌面客户端：打开即对话，会话列表 + 流式回答 + 审批内联裁决。
 //! 壳拉起捆绑的 exm-gateway 作为后端（REST/WS 同端口），全部管理能力（模型/组/通道/定时/
 //! 安全）由工作区设置视图直连环口 API 完成；亦支持 `--remote <url>`。
-//! 移动端无需单独 App：手机浏览器 / PWA 打开网关地址即为同源客户端。
+//! 移动端使用独立应用连接实例后端；浏览器打开网关地址进入 WebUI 管理台。
 //!
 //! 启动形态：
 //! - `exmachina-desktop`                                          —— 拉起捆绑网关，主窗口进入对话界面
@@ -24,7 +24,7 @@
 
 mod desktop;
 
-use desktop::{launch_gateway, wait_gateway_ready};
+use desktop::{launch_gateway_authenticated, wait_gateway_ready};
 use std::net::TcpListener;
 use std::process::Child;
 use std::sync::Mutex;
@@ -34,8 +34,11 @@ use tauri_plugin_notification::NotificationExt;
 
 /// 应用状态：随应用存活的网关子进程（退出时终止）+ 网关地址与密钥（事件桥 / 深链定位用）
 struct GatewayChild(Mutex<Option<Child>>);
+struct LocalGatewayInfo(Mutex<Option<GatewayInfo>>);
+struct ActiveGatewayInfo(Mutex<GatewayInfo>);
 
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GatewayInfo {
     /// 网关基址（http://host:port）
     url: String,
@@ -43,6 +46,10 @@ struct GatewayInfo {
     key: String,
     /// 远程模式（true = 壳不托管网关进程，健康监控只看连通性不看重启）
     remote: bool,
+    console_url: String,
+    lan_enabled: bool,
+    lan_url: Option<String>,
+    workspace: Option<String>,
 }
 
 fn main() {
@@ -62,6 +69,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(GatewayChild(Mutex::new(None)))
+        .manage(LocalGatewayInfo(Mutex::new(None)))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -83,16 +91,21 @@ fn main() {
             close_window,
             hide_window,
             toggle_max_window,
-            gateway_restart
+            gateway_restart,
+            get_local_gateway,
+            set_event_gateway,
+            open_console
         ])
         .setup(move |app| {
             let remote_mode = remote.is_some();
-            let url: String = match remote {
-                Some(r) => r.trim_end_matches('/').to_string(),
-                None => spawn_local_gateway(app.handle())?,
+            let info = match remote {
+                Some(r) => GatewayInfo { url: r.trim_end_matches('/').to_string(), key: key.clone().unwrap_or_default(), remote: true, console_url: r.trim_end_matches('/').to_string(), lan_enabled: false, lan_url: None, workspace: None },
+                None => spawn_local_gateway(app.handle(), desktop::DesktopConfig::load().allow_lan)?,
             };
-            let key_val = key.clone().unwrap_or_default();
-            app.manage(GatewayInfo { url: url.clone(), key: key_val.clone(), remote: remote_mode });
+            let url = info.url;
+            let key_val = info.key;
+            let info = GatewayInfo { url: url.clone(), key: key_val.clone(), remote: remote_mode, console_url: info.console_url, lan_enabled: info.lan_enabled, lan_url: info.lan_url, workspace: None };
+            app.manage(ActiveGatewayInfo(Mutex::new(info.clone())));
 
             // 主界面：独立 React 编程工作区（desktop/dist，经 frontendDist 打进二进制），
             // 网关只做后端（REST/WS）。网关地址与密钥经初始化脚本注入（window.__EXM_GATEWAY__），
@@ -281,6 +294,7 @@ fn set_desktop_config(
     notify_approval: Option<bool>,
     notify_cron: Option<bool>,
     notify_task_done: Option<bool>,
+    allow_lan: Option<bool>,
 ) -> Result<desktop::DesktopConfig, String> {
     let mut cfg = desktop::DesktopConfig::load();
     if let Some(v) = exit_on_close {
@@ -294,6 +308,9 @@ fn set_desktop_config(
     }
     if let Some(v) = notify_task_done {
         cfg.notify_task_done = v;
+    }
+    if let Some(v) = allow_lan {
+        cfg.allow_lan = v;
     }
     if let Some(s) = shortcut {
         let s = s.trim().to_string();
@@ -331,13 +348,16 @@ fn spawn_event_bridge(app: tauri::AppHandle) {
         };
         rt.block_on(async move {
             loop {
-                let info = app.state::<GatewayInfo>().inner().clone();
-                let ws_url = event_stream_url(&info.url, &info.key);
-                match connect_and_pump(&app, &ws_url).await {
+                let active = app.state::<ActiveGatewayInfo>();
+                let info = active.0.lock().map(|info| info.clone());
+                let Ok(info) = info else { return };
+                let ws_url = event_stream_url(&info.url, &info.key, info.workspace.as_deref());
+                match connect_and_pump(&app, &ws_url, &info).await {
                     Ok(()) => return,
                     Err(e) => {
-                        eprintln!("[desktop] 事件流断开，5s 后重连: {e}");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let delay = if e == "active gateway changed" { Duration::from_millis(100) } else { Duration::from_secs(5) };
+                        eprintln!("[desktop] 事件流断开，{delay:?} 后重连: {e}");
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }
@@ -345,14 +365,23 @@ fn spawn_event_bridge(app: tauri::AppHandle) {
     });
 }
 
-async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str) -> Result<(), String> {
+async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str, expected: &GatewayInfo) -> Result<(), String> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
     let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| e.to_string())?;
-    while let Some(msg) = ws.next().await {
-        match msg {
+    let mut check = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            _ = check.tick() => {
+                let active = app.state::<ActiveGatewayInfo>().0.lock().map_err(|e| e.to_string())?.clone();
+                if active.url != expected.url || active.key != expected.key || active.workspace != expected.workspace {
+                    return Err("active gateway changed".into());
+                }
+            }
+            msg = ws.next() => match msg {
+            Some(msg) => match msg {
             Ok(Message::Text(text)) => {
                 let Ok(evt) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
                 let kind = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -377,13 +406,15 @@ async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str) -> Result<(), St
             }
             Ok(Message::Close(_)) | Err(_) => return Err("事件流已关闭".into()),
             _ => {}
+            },
+            None => return Err("事件流已结束".into()),
+            }
         }
     }
-    Err("事件流已结束".into())
 }
 
 /// Keep reverse-proxy path prefixes, and append authentication after the WS path.
-fn event_stream_url(base: &str, key: &str) -> String {
+fn event_stream_url(base: &str, key: &str, workspace: Option<&str>) -> String {
     let base = base.trim_end_matches('/');
     let base = if let Some(rest) = base.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -392,12 +423,12 @@ fn event_stream_url(base: &str, key: &str) -> String {
     } else {
         base.to_string()
     };
-    let query = if key.is_empty() {
-        String::new()
-    } else {
-        format!("?key={}", percent_encode_query_value(key))
-    };
-    format!("{base}/ws{query}")
+    let mut params = Vec::new();
+    if let Some(workspace) = workspace {
+        params.push(format!("workspace={}", percent_encode_query_value(workspace)));
+    }
+    if !key.is_empty() { params.push(format!("key={}", percent_encode_query_value(key))); }
+    if params.is_empty() { format!("{base}/ws") } else { format!("{base}/ws?{}", params.join("&")) }
 }
 
 fn percent_encode_query_value(value: &str) -> String {
@@ -452,30 +483,102 @@ fn spawn_gateway_monitor(app: tauri::AppHandle) {
 /// `gateway://up` 事件并重启健康监控；失败返回错误文案（UI 呈现原因）。
 /// 远程模式无子进程可重启，直接明示。
 #[tauri::command]
-fn gateway_restart(app: tauri::AppHandle) -> Result<String, String> {
-    let info = app.state::<GatewayInfo>().inner().clone();
-    if info.remote {
-        return Err("远程模式：网关不在本机托管，无法重启（请在远端重启后重连）".into());
+fn gateway_restart(app: tauri::AppHandle) -> Result<GatewayInfo, String> {
+    let mut info = app.state::<ActiveGatewayInfo>().0.lock().map_err(|e| e.to_string())?.clone();
+    if info.remote { return Err("远程实例在服务器上运行，桌面客户端不能重启它".into()); }
+    {
+        let gateway_child = app.state::<GatewayChild>();
+        let mut child = gateway_child.0.lock().map_err(|e| e.to_string())?;
+        if let Some(mut running) = child.take() {
+            if running.try_wait().ok().flatten().is_none() { running.kill().map_err(|e| e.to_string())?; }
+            let _ = running.wait();
+        }
     }
     // 从当前 URL 提取原端口（重启复用——UI/事件桥寻址不变）
     let port = desktop::port_of_url(&info.url).ok_or("无法解析网关端口")?;
-    match spawn_gateway_on_port(&app, port) {
+    let allow_lan = desktop::DesktopConfig::load().allow_lan;
+    match spawn_gateway_on_port(&app, port, &info.key, allow_lan) {
         Ok(p) => {
+            info.url = format!("http://127.0.0.1:{p}");
+            info.lan_enabled = allow_lan;
+            info.lan_url = info.lan_enabled.then(|| lan_address(p)).flatten();
+            info.console_url = info.lan_url.clone().unwrap_or_default();
+            if let Ok(mut active) = app.state::<ActiveGatewayInfo>().0.lock() { *active = info.clone(); }
+            if let Ok(mut local) = app.state::<LocalGatewayInfo>().0.lock() { *local = Some(info.clone()); }
             use tauri::Emitter;
             if let Some(w) = app.get_webview_window("main") {
-                let _ = w.emit("gateway://up", format!("http://127.0.0.1:{p}"));
+                let _ = w.emit("gateway://up", info.url.clone());
             }
             spawn_gateway_monitor(app.clone());
-            Ok(format!("http://127.0.0.1:{p}"))
+            Ok(())
         }
         Err(e) => Err(format!("网关重启失败：{e}")),
-    }
+    }?;
+    let active = app.state::<ActiveGatewayInfo>();
+    active.0.lock().map(|info| info.clone()).map_err(|e| e.to_string())
 }
 
 /// 拉起捆绑的 exm-gateway：空闲端口 + 独立数据目录，就绪后返回 UI 地址（REST / WS / WebUI 同端口）
-fn spawn_local_gateway(app: &tauri::AppHandle) -> Result<String, Box<dyn std::error::Error>> {
+fn spawn_local_gateway(app: &tauri::AppHandle, allow_lan: bool) -> Result<GatewayInfo, Box<dyn std::error::Error>> {
+    let state = app.state::<LocalGatewayInfo>();
+    let mut local = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(info) = local.as_ref() { return Ok(info.clone()); }
     let port = free_port();
-    spawn_gateway_on_port(app, port).map(|p| format!("http://127.0.0.1:{p}"))
+    let key = uuid::Uuid::new_v4().to_string();
+    spawn_gateway_on_port(app, port, &key, allow_lan)?;
+    let lan_url = allow_lan.then(|| lan_address(port)).flatten();
+    let console_url = lan_url.clone().unwrap_or_default();
+    let info = GatewayInfo { url: format!("http://127.0.0.1:{port}"), key, remote: false, console_url, lan_enabled: allow_lan, lan_url, workspace: None };
+    *local = Some(info.clone());
+    Ok(info)
+}
+
+#[tauri::command]
+async fn get_local_gateway(app: tauri::AppHandle) -> Result<GatewayInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let was_started = app.state::<LocalGatewayInfo>().0.lock().map_err(|e| e.to_string())?.is_some();
+        let info = spawn_local_gateway(&app, desktop::DesktopConfig::load().allow_lan).map_err(|e| e.to_string())?;
+        *app.state::<ActiveGatewayInfo>().0.lock().map_err(|e| e.to_string())? = info.clone();
+        if !was_started {
+            let info = info.clone();
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(window) = handle.get_webview_window("main") {
+                    let script = format!("window.__EXM_GATEWAY__={{url:{},key:{},remote:false}};", serde_json::to_string(&info.url).unwrap(), serde_json::to_string(&info.key).unwrap());
+                    if let Err(e) = window.eval(&script) { eprintln!("[desktop] 本机网关密钥注入失败: {e}"); }
+                }
+            });
+            spawn_gateway_monitor(app);
+        }
+        Ok(info)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn set_event_gateway(app: tauri::AppHandle, url: String, key: String, remote: bool, workspace: Option<String>) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("网关地址仅支持 HTTP(S)".into());
+    }
+    *app.state::<ActiveGatewayInfo>().0.lock().map_err(|e| e.to_string())? = GatewayInfo {
+        url: url.clone(), key, remote, console_url: url, lan_enabled: false, lan_url: None, workspace,
+    };
+    Ok(())
+}
+
+#[tauri::command]
+fn open_console(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("控制台仅支持 HTTP(S) 地址".into());
+    }
+    #[cfg(target_os = "windows")]
+    let mut command = { let mut cmd = std::process::Command::new("rundll32"); cmd.arg("url.dll,FileProtocolHandler"); cmd };
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(parsed.as_str()).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// 在指定端口拉起捆绑网关（首启随机端口 / 重启复用原端口——UI 与事件桥寻址不变）。
@@ -483,18 +586,41 @@ fn spawn_local_gateway(app: &tauri::AppHandle) -> Result<String, Box<dyn std::er
 fn spawn_gateway_on_port(
     app: &tauri::AppHandle,
     port: u16,
+    key: &str,
+    allow_lan: bool,
 ) -> Result<u16, Box<dyn std::error::Error>> {
-    let bin_dir = app.path().resource_dir()?.join("binaries");
-    let gateway = ["exm-gateway.exe", "exm-gateway"]
-        .iter()
-        .map(|n| bin_dir.join(n))
-        .find(|p| p.is_file())
+    let mut bin_dirs = vec![app.path().resource_dir()?.join("binaries")];
+    // `tauri dev`/debug binaries do not always carry the cargo marker that
+    // tauri-utils uses to identify a target directory. Keep the production
+    // lookup above authoritative, but let an adjacent debug `binaries/` dir
+    // work for local Linux/macOS acceptance runs and contributors.
+    #[cfg(debug_assertions)]
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            bin_dirs.push(parent.join("binaries"));
+        }
+    }
+    let gateway = bin_dirs
+        .into_iter()
+        .flat_map(|dir| {
+            ["exm-gateway.exe", "exm-gateway"]
+                .into_iter()
+                .map(move |name| dir.join(name))
+        })
+        .find(|path| path.is_file())
         .ok_or("未找到捆绑的 exm-gateway（检查 src-tauri/binaries/，见 desktop/README.md）")?;
     let data_dir = desktop::data_dir().join("ExMachina");
-    let mut child = launch_gateway(&gateway, &data_dir, port)?;
+    let mut child = launch_gateway_authenticated(&gateway, &data_dir, port, Some(key), if allow_lan { "0.0.0.0" } else { "127.0.0.1" })?;
     wait_gateway_ready(&mut child, port).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     *app.state::<GatewayChild>().0.lock().unwrap() = Some(child);
     Ok(port)
+}
+
+fn lan_address(port: u16) -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:80").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback()).then(|| format!("http://{ip}:{port}"))
 }
 
 fn free_port() -> u16 {
@@ -511,11 +637,15 @@ mod query_encoding_tests {
     #[test]
     fn notification_stream_path_precedes_authentication() {
         assert_eq!(
-            event_stream_url("http://localhost:4173/", "a&b"),
+            event_stream_url("http://localhost:4173/", "a&b", None),
             "ws://localhost:4173/ws?key=a%26b"
         );
         assert_eq!(
-            event_stream_url("https://example.com/agent/", ""),
+            event_stream_url("http://localhost:4173/", "k", Some("/tmp/a b")),
+            "ws://localhost:4173/ws?workspace=%2Ftmp%2Fa%20b&key=k"
+        );
+        assert_eq!(
+            event_stream_url("https://example.com/agent/", "", None),
             "wss://example.com/agent/ws"
         );
     }

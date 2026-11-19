@@ -11,16 +11,29 @@ pub struct ApprovalsQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    pub workspace: Option<String>,
 }
 
 pub async fn list_approvals(
     State(st): State<AppState>,
     Query(q): Query<ApprovalsQuery>,
 ) -> impl IntoResponse {
-    match st
-        .core
-        .approval_list(q.status.as_deref(), q.limit.unwrap_or(50))
-    {
+    let limit = q.limit.unwrap_or(50);
+    let result = if let Some(raw) = q.workspace {
+        let root = match crate::project_scope::pinned(&st, &raw) {
+            Ok(root) => root,
+            Err(response) => return response,
+        };
+        st.core.approval_list(q.status.as_deref(), 1000).map(|items| {
+            items.into_iter().filter(|item| st.core.approval_workspace(item).ok().flatten().as_deref() == root.to_str()).take(limit).collect::<Vec<_>>()
+        })
+    } else {
+        st.core.approval_list(q.status.as_deref(), 1000).map(|items| {
+            items.into_iter().filter(|item| st.core.approval_workspace(item).ok().flatten().is_none())
+                .take(limit).collect()
+        })
+    };
+    match result {
         Ok(items) => Json(serde_json::to_value(items).unwrap_or(Value::Null)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

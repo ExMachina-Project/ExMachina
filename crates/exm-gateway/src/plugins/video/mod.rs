@@ -41,6 +41,59 @@ fn is_video_platform(kind: &str) -> bool {
     matches!(kind, "bilibili" | "youtube")
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatchTrigger {
+    Automatic,
+    OnDemand,
+}
+
+fn plugin_enabled(core: &Core) -> bool {
+    core.config().plugins.state.get("video") != Some(&false)
+        && core.plugins().get("video").is_none_or(|p| p.enabled)
+}
+
+/// 执行边界必须重读配置，不能用 runner / 已注册工具闭包里的旧通道快照放行。
+/// watch 仅控制自动轮次；点播仍可观看，并沿用独立的评论 / 回复开关。
+fn live_channel(core: &Core, snapshot: &Channel, trigger: WatchTrigger) -> anyhow::Result<Channel> {
+    anyhow::ensure!(plugin_enabled(core), "视频插件已停用");
+    let ch = platform::load_channels(core)
+        .into_iter()
+        .find(|c| c.id == snapshot.id && c.kind == snapshot.kind && is_video_platform(&c.kind))
+        .ok_or_else(|| anyhow::anyhow!("未配置可用的视频通道（通道已删除或平台已变更）"))?;
+    anyhow::ensure!(ch.enabled, "未配置可用的视频通道（通道已停用）");
+    anyhow::ensure!(
+        trigger != WatchTrigger::Automatic || Settings::from_channel(&ch).watch,
+        "主动观看已关闭，已取消自动观看与互动"
+    );
+    Ok(ch)
+}
+
+/// 每次异步工作恢复前重验开关；关闭发生在网络等待中时，不继续下一步请求 / 动作。
+async fn with_live_guard<T>(
+    core: &Core,
+    ch: &Channel,
+    trigger: WatchTrigger,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    tokio::pin!(work);
+    std::future::poll_fn(|cx| match live_channel(core, ch, trigger) {
+        Ok(_) => std::future::Future::poll(work.as_mut(), cx),
+        Err(e) => std::task::Poll::Ready(Err(e)),
+    })
+    .await
+}
+
+fn watch_channels(core: &Core) -> HashMap<String, Channel> {
+    if !plugin_enabled(core) {
+        return HashMap::new();
+    }
+    platform::load_channels(core)
+        .into_iter()
+        .filter(|c| c.enabled && is_video_platform(&c.kind) && Settings::from_channel(c).watch)
+        .map(|c| (c.id.clone(), c))
+        .collect()
+}
+
 fn fingerprint(ch: &Channel) -> String {
     let cfg = serde_json::to_string(&ch.config).unwrap_or_default();
     format!(
@@ -62,11 +115,7 @@ pub fn spawn_supervisor(core: Arc<Core>) {
 fn reconcile(core: &Arc<Core>) {
     // 全局点播工具面同步（先于 runner 治理：通道启停立即反映到工具注册表）
     tools::reconcile_ondemand(core);
-    let wanted: HashMap<String, Channel> = platform::load_channels(core)
-        .into_iter()
-        .filter(|c| c.enabled && is_video_platform(&c.kind))
-        .map(|c| (c.id.clone(), c))
-        .collect();
+    let wanted = watch_channels(core);
 
     let mut map = runners().lock();
     let stale: Vec<String> = map
@@ -106,8 +155,11 @@ async fn run_loop(core: Arc<Core>, ch: Channel) {
     // 启动错峰：避免进程重启时多条视频通道同时打平台接口
     tokio::time::sleep(Duration::from_secs(8)).await;
     loop {
+        let Ok(ch) = live_channel(&core, &ch, WatchTrigger::Automatic) else {
+            return;
+        };
         let settings = Settings::from_channel(&ch);
-        match tick(&core, &ch, &settings).await {
+        match tick(&core, &ch).await {
             Ok(note) => platform::report_status(&ch.id, "ok", note),
             Err(e) => platform::report_status(&ch.id, "error", format!("主动观看失败：{e}")),
         }
@@ -146,7 +198,7 @@ impl Settings {
     fn from_channel(ch: &Channel) -> Self {
         let comment = cfg_bool(ch, "comment", false);
         let reply = cfg_bool(ch, "reply", false);
-        let watch = cfg_bool(ch, "watch", true) || comment || reply;
+        let watch = cfg_bool(ch, "watch", true);
         Settings {
             watch,
             comment,

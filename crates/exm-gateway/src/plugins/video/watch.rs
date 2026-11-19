@@ -5,21 +5,30 @@ use super::*;
 
 // ---------------------------------------------------------------- 单轮
 
-pub(crate) async fn tick(core: &Arc<Core>, ch: &Channel, s: &Settings) -> anyhow::Result<String> {
-    if !s.watch && !s.comment && !s.reply {
-        return Ok("主动观看与互动均已关闭".into());
-    }
+pub(crate) async fn tick(core: &Arc<Core>, ch: &Channel) -> anyhow::Result<String> {
+    let ch = match live_channel(core, ch, WatchTrigger::Automatic) {
+        Ok(ch) => ch,
+        Err(e) => return Ok(e.to_string()),
+    };
+    let ch = &ch;
+    let s = &Settings::from_channel(ch);
     // B 站互动前先养设备指纹（buvid3/4），缺指纹发评论易被静默风控
     if ch.kind == "bilibili" && (s.comment || s.reply) {
-        bili_prime_buvid(ch).await;
+        with_live_guard(core, ch, WatchTrigger::Automatic, async {
+            bili_prime_buvid(ch).await;
+            Ok(())
+        })
+        .await?;
     }
+    live_channel(core, ch, WatchTrigger::Automatic)?;
     let mut state = VideoState::load(core, &ch.id);
     state.reset_day();
     if (s.comment || s.reply) && state.actions_today >= s.daily_limit {
         return Ok(format!("今日互动已达上限（{} 次）", s.daily_limit));
     }
 
-    let mut items = fetch_candidates(ch, s).await?;
+    let mut items = with_live_guard(core, ch, WatchTrigger::Automatic, fetch_candidates(ch, s)).await?;
+    live_channel(core, ch, WatchTrigger::Automatic)?;
     items.retain(|v| !state.seen(&video_key(v)));
     // 内容倾向（软偏好）：命中的视频排到队首优先观看，未命中的保留在后（不硬过滤）
     let interest_terms = split_list(Some(s.interests.as_str()));
@@ -34,7 +43,14 @@ pub(crate) async fn tick(core: &Arc<Core>, ch: &Channel, s: &Settings) -> anyhow
             .collect();
         // 热门流没有命中关键词时，尝试一次关键词搜索；失败则回退热门流（不中断轮询）
         if filtered.is_empty() && s.source != "search" && !s.keywords.is_empty() {
-            if let Ok(mut searched) = search_candidates(ch, s).await {
+            if let Ok(mut searched) = with_live_guard(
+                core,
+                ch,
+                WatchTrigger::Automatic,
+                search_candidates(ch, s),
+            )
+            .await
+            {
                 searched.retain(|v| !state.seen(&video_key(v)) && matches_keywords(v, &s.keywords));
                 if !searched.is_empty() {
                     items = searched;
@@ -44,6 +60,7 @@ pub(crate) async fn tick(core: &Arc<Core>, ch: &Channel, s: &Settings) -> anyhow
             items = filtered;
         }
     }
+    live_channel(core, ch, WatchTrigger::Automatic)?;
     if items.is_empty() {
         return Ok("本轮没有新的候选视频".into());
     }
@@ -52,21 +69,22 @@ pub(crate) async fn tick(core: &Arc<Core>, ch: &Channel, s: &Settings) -> anyhow
     // 不再由系统逐个拼材料。限量 = 每轮动作数上限的 2 倍（有挑选余地但不至于刷屏）。
     let feed: Vec<VideoItem> = items.into_iter().take(s.max_actions * 2).collect();
     let keys: Vec<String> = feed.iter().map(video_key).collect();
+    // 成功 / 失败都不重试同批候选；提前落盘也覆盖运行中关闭导致 future 被丢弃的路径。
+    for k in &keys {
+        state.mark_video(k);
+    }
+    state.save(core, &ch.id);
     let mut processed = 0usize;
     let mut posted = 0u32;
     match process_video(core, ch, s, &mut state, &feed).await {
         Ok(did_post) => {
             posted += did_post;
             processed += feed.len();
-            for k in &keys {
-                state.mark_video(k);
-            }
         }
         Err(e) => {
-            // 轮次失败不打断轮询；候选全部标记已见，避免同批坏数据每轮重试
-            for k in &keys {
-                state.mark_video(k);
-            }
+            state.actions_today = state
+                .actions_today
+                .max(VideoState::load(core, &ch.id).actions_today);
             state.save(core, &ch.id);
             return Err(e);
         }
@@ -121,13 +139,47 @@ pub(crate) struct WatchOutcome {
     acted_notes: Vec<String>,
 }
 
-pub(crate) async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> anyhow::Result<WatchOutcome> {
+/// 与观看 future 同生命周期：监督循环取消父任务时也回收工具和闸门。
+struct WatchRound {
+    core: Arc<Core>,
+    channel_id: String,
+    session_id: String,
+}
+
+impl Drop for WatchRound {
+    fn drop(&mut self) {
+        let sid = &self.session_id;
+        let acted = tools::act_gate_count(sid);
+        let mut state = VideoState::load(&self.core, &self.channel_id);
+        state.reset_day();
+        state.actions_today = state.actions_today.max(acted);
+        state.save(&self.core, &self.channel_id);
+        tools::drop_act_gate(sid);
+        tools::drop_session(sid);
+        let gateway = &self.core.orchestrator().tools;
+        gateway.clear_session_tools(sid);
+        gateway.set_session_step_budget(sid, 0);
+    }
+}
+
+pub(crate) async fn ask_agent(
+    core: &Arc<Core>,
+    ch: &Channel,
+    prompt: &str,
+) -> anyhow::Result<WatchOutcome> {
+    let ch = live_channel(core, ch, WatchTrigger::Automatic)?;
+    let ch = &ch;
     let (run, mut rx) = ChannelRun::begin(core, ch, "video")
         .await
         .ok_or_else(|| anyhow::anyhow!("视频通道会话建立失败"))?;
     // 视频观看会话：注入 video__* 工具组 + act 闸门（绑定本通道凭据与配额）。
     // 注入键 = ChannelRun 的数据库会话 id（工具面与事件订阅同键）。
     let sid = run.session_id.clone();
+    let _round = WatchRound {
+        core: core.clone(),
+        channel_id: ch.id.clone(),
+        session_id: sid.clone(),
+    };
     {
         let s = Settings::from_channel(ch);
         let mut state_probe = VideoState::load(core, &ch.id);
@@ -137,7 +189,7 @@ pub(crate) async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> a
             tools::ActGate::from_settings(&s, state_probe.actions_today),
         );
     }
-    let injections = tools::build_injections(core, ch);
+    let injections = tools::build_watch_injections(core, ch);
     core.orchestrator()
         .tools
         .inject_session_tools(&sid, injections);
@@ -149,40 +201,51 @@ pub(crate) async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> a
     // 系统自动任务标记：落库消息带 auto:video 来源，展示层与真人消息区分
     let run = run.with_origin("auto:video");
     let reply_run = run.clone();
-    let prompt = prompt.to_string();
-    let task = tokio::spawn(async move { run.run(&prompt).await });
-
     let mut out = String::new();
     let wait = async {
+        // 直接驱动执行 future，不派生会在 runner.abort() 后继续运行的游离子任务。
+        let execution = run.run_guarded(prompt, || {
+            live_channel(core, ch, WatchTrigger::Automatic).map(|_| ())
+        });
+        tokio::pin!(execution);
+        let mut checks = tokio::time::interval(Duration::from_secs(1));
         loop {
-            match rx.recv().await {
-                Ok(evt) if evt.session_id == sid => {
-                    if let Some(text) = reply_run.take_reply(&evt, 20_000) {
-                        out = text;
+            tokio::select! {
+                biased;
+                _ = &mut execution => {
+                    while let Ok(evt) = rx.try_recv() {
+                        if evt.session_id == sid {
+                            if let Some(text) = reply_run.take_reply(&evt, 20_000) {
+                                out = text;
+                            }
+                        }
+                    }
+                    break;
+                }
+                _ = checks.tick() => {
+                    live_channel(core, ch, WatchTrigger::Automatic)?;
+                }
+                event = rx.recv() => match event {
+                    Ok(evt) if evt.session_id == sid => {
+                        if let Some(text) = reply_run.take_reply(&evt, 20_000) {
+                            out = text;
+                        }
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => {
                         break;
                     }
                 }
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(_) => break,
             }
         }
+        Ok::<(), anyhow::Error>(())
     };
     // 自主探索多轮工具调用需更长收束窗口：600s（原单轮投喂 300s）
-    let timed_out = tokio::time::timeout(Duration::from_secs(600), wait)
-        .await
-        .is_err();
-    if timed_out {
-        // 超时中止：ChannelRun::run 内部的组还原 guard 会随 Drop 执行
-        task.abort();
-        let _ = task.await;
-        tools::drop_act_gate(&sid);
-        tools::drop_session(&sid);
-        core.orchestrator().tools.clear_session_tools(&sid);
-        core.orchestrator().tools.set_session_step_budget(&sid, 0);
-        anyhow::bail!("视频观看推理超时（600s）");
+    match tokio::time::timeout(Duration::from_secs(600), wait).await {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!("视频观看推理超时（600s）"),
     }
-    let _ = task.await;
+    live_channel(core, ch, WatchTrigger::Automatic)?;
     // 收束：收集轮次产出（动作计数/跳过理由），清理注入与闸门
     let acted = tools::act_gate_count(&sid);
     let st = tools::session_state(&sid);
@@ -193,10 +256,6 @@ pub(crate) async fn ask_agent(core: &Arc<Core>, ch: &Channel, prompt: &str) -> a
             std::mem::take(&mut g.acted_notes),
         )
     };
-    tools::drop_act_gate(&sid);
-    tools::drop_session(&sid);
-    core.orchestrator().tools.clear_session_tools(&sid);
-    core.orchestrator().tools.set_session_step_budget(&sid, 0);
     if out.trim().is_empty() {
         anyhow::bail!("智能体没有产出收束文本");
     }
@@ -543,4 +602,3 @@ pub(crate) async fn search_candidates(ch: &Channel, s: &Settings) -> anyhow::Res
         _ => Ok(Vec::new()),
     }
 }
-

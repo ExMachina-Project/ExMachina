@@ -22,7 +22,7 @@ impl ToolGateway {
             // 先算 opts 再 await：shell_opts 内部的身份解析含非 Send 中间态,
             // 其结果（ShellOpts 本身 Send）跨 await 持有即可
             let opts = self.shell_opts(cmd);
-            let workspace = self.workspace_root.clone();
+            let workspace = self.workspace_for_session(session_id);
             let timeout = self.security.terminal_timeout_secs.max(1) as u64;
             let out = crate::tools::execute_shell_with(&workspace, cmd, timeout, &opts).await;
             return if out.ok {
@@ -49,7 +49,7 @@ impl ToolGateway {
             decided_at: None,
             origin_user: origin.as_ref().map(|(u, _)| u.clone()),
             origin_role: origin.as_ref().map(|(_, r)| r.clone()),
-            meta_json: None,
+            meta_json: crate::workspace::current().map(|root| serde_json::json!({ "projectWorkspace": root }).to_string()),
         };
         let _ = self.store.add_approval(&req);
         let _ = self.events.send(CoreEvent {

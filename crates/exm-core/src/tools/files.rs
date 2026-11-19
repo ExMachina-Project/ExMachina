@@ -184,11 +184,11 @@ impl ToolGateway {
                 }
             }
         }
-        // Reuse execution-identity restrictions as well as the workspace boundary.
-        self.resolve_safe(&path.to_string_lossy())?;
-        if !canonicalize_best(&path).starts_with(strip_verbatim(root)) {
+        let canonical = canonicalize_best(&path);
+        if !canonical.starts_with(strip_verbatim(root)) {
             bail!("路径越界");
         }
+        self.check_exec_home(&canonical)?;
         Ok(path)
     }
 
@@ -208,23 +208,29 @@ impl ToolGateway {
         let group_canon = canonicalize_best(&group_root);
         let ws_canon = canonicalize_best(&self.workspace_root);
         let cand_canon = canonicalize_best(&candidate);
-        if !cand_canon.starts_with(&group_canon) && !cand_canon.starts_with(&ws_canon) {
+        if !cand_canon.starts_with(&group_canon)
+            && (crate::workspace::current().is_some() || !cand_canon.starts_with(&ws_canon)) {
             bail!("路径越界（仅允许工作区内的路径）: {raw}");
         }
+        self.check_exec_home(&cand_canon)?;
+        Ok(candidate)
+    }
+
+    fn check_exec_home(&self, candidate: &Path) -> anyhow::Result<()> {
         // 执行身份约束第二道防线（agent-exec-confinement）：约束开启时 fs 目标
         // 必须落在 execHome 内——即使 workspace 校验通过,越过身份边界的读写也拒绝。
         // 终端子进程有内核级 uid 圈禁,这里是 fs 工具的显式路径校验双保险。
         if !self.security.exec_user.trim().is_empty() {
             if let Some(home) = self.exec_confine_home() {
                 let home_canon = canonicalize_best(&PathBuf::from(&home));
-                if !cand_canon.starts_with(&home_canon) {
+                if !candidate.starts_with(&home_canon) {
                     bail!(
-                        "路径越界（执行身份约束: 仅允许 {home} 内的路径;系统级操作请走 root 提权审批）: {raw}"
+                        "路径越界（执行身份约束: 仅允许 {home} 内的路径;系统级操作请走 root 提权审批）: {}", candidate.display()
                     );
                 }
             }
         }
-        Ok(candidate)
+        Ok(())
     }
 
     /// 身份约束圈禁根目录（缓存解析结果；解析失败 = None → 由终端侧报错,这里只做边界）
@@ -251,13 +257,13 @@ impl ToolGateway {
         let Ok(rel) = target.strip_prefix(&root) else {
             return Ok(()); // 组工作区在工作区外：不做快照（无回滚能力，但也不阻断写入）
         };
-        let day: String = crate::types::now_iso().chars().take(10).collect();
-        let dst = self
-            .workspace_root
-            .join(".exmachina")
-            .join("checkpoints")
-            .join(&day)
-            .join(rel);
+        let scoped = crate::workspace::current().is_some();
+        let id: String = if scoped {
+            // Distinct writes to the same relative path must not reuse another round's backup.
+            crate::types::new_id()
+        } else { crate::types::now_iso().chars().take(10).collect() };
+        let dst = if scoped { crate::workspace::checkpoint(&root, &id, rel)? }
+            else { self.workspace_root.join(".exmachina/checkpoints").join(&id).join(rel) };
         let fresh = !dst.exists();
         if fresh {
             if let Some(parent) = dst.parent() {
@@ -268,7 +274,7 @@ impl ToolGateway {
         // 轮次检查点链：仅登记当日首次快照（重复跳过的文件其既有检查点已可回滚）
         if fresh && !session_id.is_empty() {
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let _ = self.store.record_checkpoint_ref(session_id, &day, &rel_str);
+            self.store.record_checkpoint_ref(session_id, &id, &rel_str)?;
         }
         Ok(())
     }
@@ -851,8 +857,9 @@ impl ToolGateway {
                 match std::fs::write(&target, content).context("写入失败") {
                     Ok(_) => {
                         // 产物登记（D12）：写入投递目录 `.exmachina/outbox/` 的文件 → 会话 outbox
+                        let artifact_root = crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
                         let norm = target
-                            .strip_prefix(&self.workspace_root)
+                            .strip_prefix(&artifact_root)
                             .map(|p| p.display().to_string().replace('\\', "/"))
                             .unwrap_or_default();
                         if norm.starts_with(".exmachina/outbox/") {
@@ -901,8 +908,9 @@ impl ToolGateway {
                     .collect();
                 // 登记口径与 write→outbox 一致：工作区相对路径（spawn_reply 的
                 // workspace_root.join(rel) 与 WebUI /api/asset/download 都按此解析）
+                let artifact_root = crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
                 let rel = target
-                    .strip_prefix(&self.workspace_root)
+                    .strip_prefix(&artifact_root)
                     .map(|p| p.display().to_string().replace('\\', "/"))
                     .unwrap_or_else(|_| target.display().to_string());
                 // kind 按扩展名分类：IM 平台对图片有原生内嵌展示（qqbot files
@@ -938,8 +946,12 @@ impl ToolGateway {
                 if target == root {
                     return ToolResult::err("拒绝删除：工作区根目录不可删除");
                 }
-                let sys = self.workspace_root.join(".exmachina");
-                if target.starts_with(&sys) {
+                let storage_root = crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
+                let sys = storage_root.join(".exmachina");
+                if crate::workspace::current().is_some() && std::fs::symlink_metadata(&sys).is_ok_and(|m| m.file_type().is_symlink()) {
+                    return ToolResult::err("项目 .exmachina 目录不能是符号链接");
+                }
+                if canonicalize_best(&target).starts_with(canonicalize_best(&sys)) {
                     return ToolResult::err(
                         "拒绝删除：.exmachina 系统区（检查点/回收站/沙箱等）不可经此删除；确需清理请用终端并过审批",
                     );
@@ -970,7 +982,7 @@ impl ToolGateway {
                     }
                 }
                 let rel_disp = dst
-                    .strip_prefix(&self.workspace_root)
+                    .strip_prefix(&storage_root)
                     .map(|p| p.display().to_string().replace('\\', "/"))
                     .unwrap_or_else(|_| dst.display().to_string());
                 // fs::rename 跨设备（EXDEV：回收站常为独立挂载卷）时 fallback copy+删源。

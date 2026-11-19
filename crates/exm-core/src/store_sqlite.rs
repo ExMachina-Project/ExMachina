@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title TEXT NOT NULL,
     status TEXT NOT NULL,
     group_id TEXT NOT NULL,
+    memory_partition TEXT,
     rolling_summary TEXT,
     summary_upto INTEGER,
     parent_session TEXT,
@@ -143,6 +144,9 @@ impl SqliteStore {
         // 旧库列补齐（CREATE TABLE IF NOT EXISTS 不会给已存在的表加新列）
         add_column_if_missing(&conn, "sessions", "pinned", "INTEGER NOT NULL DEFAULT 0");
         add_column_if_missing(&conn, "sessions", "archived_at", "TEXT");
+        add_column_if_missing(&conn, "sessions", "workspace", "TEXT");
+        add_column_if_missing(&conn, "sessions", "collaboration_id", "TEXT");
+        add_column_if_missing(&conn, "sessions", "memory_partition", "TEXT");
         // im-inbound-attach：入站附件随 user 消息落库（JSON 数组文本，缺省 '[]'）
         add_column_if_missing(&conn, "messages", "attachments", "TEXT NOT NULL DEFAULT '[]'");
 
@@ -250,8 +254,8 @@ impl SqliteStore {
 
     fn insert_session_conn(conn: &Connection, s: &Session) -> anyhow::Result<()> {
         conn.execute(
-            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,pinned,archived_at,ledger,created_at,updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            "INSERT OR REPLACE INTO sessions(id,title,status,group_id,rolling_summary,summary_upto,parent_session,parent_upto,pinned,archived_at,ledger,created_at,updated_at,workspace,memory_partition,collaboration_id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             rusqlite::params![
                 s.id,
                 s.title,
@@ -266,6 +270,9 @@ impl SqliteStore {
                 serde_json::to_string(&s.ledger)?,
                 s.created_at,
                 s.updated_at,
+                s.workspace,
+                s.memory_partition,
+                s.collaboration_id,
             ],
         )?;
         Ok(())
@@ -279,7 +286,9 @@ impl SqliteStore {
             origin: None,
             origin_label: None,
             group_id: row.get("group_id")?,
-            memory_partition: None,
+            workspace: row.get("workspace")?,
+            collaboration_id: row.get("collaboration_id")?,
+            memory_partition: row.get("memory_partition")?,
             rolling_summary: row.get("rolling_summary")?,
             summary_upto: row.get("summary_upto")?,
             parent_session: row.get("parent_session")?,
@@ -310,6 +319,8 @@ impl SqliteStore {
             },
             memory_partition: None,
             rolling_summary: None,
+            workspace: None,
+            collaboration_id: None,
             summary_upto: None,
             parent_session: None,
             parent_upto: None,

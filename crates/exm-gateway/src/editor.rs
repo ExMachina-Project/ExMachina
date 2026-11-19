@@ -19,14 +19,6 @@ fn root(st: &AppState) -> Result<PathBuf, ApiError> {
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))
 }
 
-fn file_path(st: &AppState, raw: &str) -> Result<PathBuf, ApiError> {
-    st.core
-        .orchestrator()
-        .tools
-        .editor_path(raw)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))
-}
-
 #[derive(Deserialize)]
 pub struct FileQuery {
     path: String,
@@ -299,7 +291,7 @@ pub async fn changes(State(st): State<AppState>) -> Result<Json<Value>, ApiError
         }
         let mut files = Vec::new();
         for (rel, checkpoint) in latest.into_iter().take(50) {
-            let Ok(path) = file_path(&st, &rel) else {
+            let Ok(path) = st.core.orchestrator().tools.editor_path_in(&root, &rel) else {
                 continue;
             };
             if std::fs::metadata(&checkpoint).is_ok_and(|m| m.len() > FILE_CAP as u64) {
@@ -415,7 +407,8 @@ pub async fn operation(
     }
     let path = b.path.as_deref().unwrap_or(".");
     if matches!(b.op.as_str(), "stage" | "unstage" | "discard") {
-        file_path(&st, path)?;
+        st.core.orchestrator().tools.editor_path_in(&root, path)
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
     }
     let args: Vec<&str> = match b.op.as_str() {
         "stage" => vec!["add", "--", path],

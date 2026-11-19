@@ -1614,11 +1614,18 @@ pub struct ExecCtx {
 
 impl ExecCtx {
     pub async fn run_node(&self, node: TaskNode) -> NodeOutcome {
-        let context=self.orchestrator.store.get_session(&self.session_id).ok().flatten()
-            .and_then(|s|crate::core::sessions::parse_session_scope(&self.orchestrator.registry,&s.group_id));
+        let session = self.orchestrator.store.get_session(&self.session_id).ok().flatten();
+        let workspace = match session.as_ref().and_then(|s| s.workspace.as_deref()).map(crate::workspace::pinned).transpose() {
+            Ok(root) => root,
+            Err(e) => return NodeOutcome::failed(node.id.clone(), e.to_string()),
+        };
+        let context = session.and_then(|s| crate::core::sessions::parse_session_scope(&self.orchestrator.registry, &s.group_id));
+        if workspace.is_some() && context.is_none() {
+            return NodeOutcome::failed(node.id.clone(), "项目会话的对话对象已不存在");
+        }
         let caller=crate::model_routing::ModelCaller {agent_id:node.agent_identifier.clone(),session_id:self.session_id.clone()};
-        crate::registry::round_scope_decl::ROUND_SCOPE.scope(context,
-            crate::model_routing::MODEL_CALLER.scope(caller,self.run_node_scoped(node))).await
+        crate::workspace::scope(workspace, crate::registry::round_scope_decl::ROUND_SCOPE.scope(context,
+            crate::model_routing::MODEL_CALLER.scope(caller,self.run_node_scoped(node)))).await
     }
 
     async fn run_node_scoped(&self, node: TaskNode) -> NodeOutcome {

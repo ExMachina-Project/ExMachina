@@ -21,6 +21,8 @@ use std::sync::{Arc};
 pub(crate) struct WatchSession {
     /// videoId 归一缓存（原始输入 → 归一 id；同会话重复输入零重复解析）
     pub resolved_ids: std::collections::HashMap<String, String>,
+    /// 已校验的 B 站字幕快照（按通道 + 视频隔离，最近使用的放末尾）。分页不重新选轨。
+    subtitle_snapshots: Vec<Arc<BiliSubtitleSnapshot>>,
     /// 本会话已见评论 id 集合（act 回复目标的核验面——防编造 id）
     pub seen_comments: BTreeSet<String>,
     /// 本会话已发动作数（与全局每日配额联动由调用方在 act 内检查）
@@ -30,6 +32,31 @@ pub(crate) struct WatchSession {
     /// 观感摘要（收束时智能体产出——由 prompt 引导写在最终回复，工具不设此项；
     /// 此字段留给 act/报告填写动作面）
     pub acted_notes: Vec<String>,
+}
+
+impl WatchSession {
+    fn cached_subtitle(&mut self, channel: &str, video: &str) -> Option<Arc<BiliSubtitleSnapshot>> {
+        let i = self.subtitle_snapshots.iter().position(|s| {
+            s.channel_id == channel && matches_bvid(Some(&s.video_id), video)
+        })?;
+        let snapshot = self.subtitle_snapshots.remove(i);
+        self.subtitle_snapshots.push(snapshot.clone());
+        Some(snapshot)
+    }
+
+    fn pin_subtitle(&mut self, snapshot: BiliSubtitleSnapshot) -> Arc<BiliSubtitleSnapshot> {
+        // 同轮并发请求可能各自下载一次；只采用先完成的快照，后续页保持同一轨道/总页数。
+        if let Some(existing) = self.cached_subtitle(&snapshot.channel_id, &snapshot.video_id) {
+            return existing;
+        }
+        // 普通点播会话可长时间存活，避免字幕全文缓存随观看数量无限增长。
+        if self.subtitle_snapshots.len() >= 8 {
+            self.subtitle_snapshots.remove(0);
+        }
+        let snapshot = Arc::new(snapshot);
+        self.subtitle_snapshots.push(snapshot.clone());
+        snapshot
+    }
 }
 
 /// 全局会话表（session_id → 观看状态；进程生命周期）
@@ -127,15 +154,20 @@ pub(crate) async fn expand_b23(input: &str) -> Option<String> {
         return None;
     }
     // 归一短链形态（无协议头补 https://）
-    let url = if short.starts_with("http") {
-        format!("https://{short}")
-    } else {
-        short.to_string()
-    }
-    .replace("http://b23.tv", "https://b23.tv");
+    let url = b23_url(short);
     let resp = super::head_no_redirect(&url).await.ok()?;
     let loc = resp.headers().get("location")?.to_str().ok()?.to_string();
     extract_bili_from_url(&loc)
+}
+
+fn b23_url(short: &str) -> String {
+    if let Some(rest) = short.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else if short.starts_with("https://") {
+        short.to_string()
+    } else {
+        format!("https://{short}")
+    }
 }
 
 /// 分发入口的归一收口：同步归一 + 短链展开 + 会话缓存
@@ -193,12 +225,12 @@ pub(crate) fn watch_tool_specs(kind: &str) -> Vec<CustomTool> {
         ),
         spec(
             "video__subtitle",
-            "字幕全文（带时间戳，超长分页）；无字幕时明确告知",
+            "字幕全文（带时间戳，超长分页）；先取第 1 页建立固定字幕快照，续页沿用同一 videoId；无字幕或来源校验失败时明确告知",
             json!({
                 "type": "object",
                 "properties": {
                     "videoId": { "type": "string", "description": "视频标识" },
-                    "page": { "type": "integer", "description": "页码（从 1 起；缺省第 1 页）" }
+                    "page": { "type": "integer", "description": "页码（从 1 起；缺省第 1 页；续页须已取同一 videoId 的第 1 页）" }
                 },
                 "required": ["videoId"]
             }),
@@ -292,11 +324,12 @@ pub(crate) fn act_tool_spec() -> CustomTool {
 // ---------------------------------------------------------------- 全局点播注册
 
 /// 全局点播注册表指纹（上次注册时的通道绑定快照；变更即重建）。
-/// Vec<(平台, 通道 fingerprint)>：任一平台通道增删/启停/凭据变化即重建工具闭包。
+/// Vec<(平台, 通道 id + fingerprint)>：任一平台通道增删/启停/凭据变化即重建工具闭包。
 type OndemandFp = Vec<(String, String)>;
+type OndemandRegistration = (std::sync::Weak<exm_core::tools::ToolGateway>, OndemandFp);
 
-fn ondemand_fp() -> &'static Mutex<Option<OndemandFp>> {
-    static F: std::sync::OnceLock<Mutex<Option<OndemandFp>>> = OnceLock::new();
+fn ondemand_fp() -> &'static Mutex<Option<OndemandRegistration>> {
+    static F: std::sync::OnceLock<Mutex<Option<OndemandRegistration>>> = OnceLock::new();
     F.get_or_init(|| Mutex::new(None))
 }
 
@@ -307,23 +340,28 @@ pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
     // 各平台取首个启用通道（与 push_channel_text 取 first 同口径）
     let mut by_kind: std::collections::BTreeMap<String, Channel> =
         std::collections::BTreeMap::new();
-    for ch in platform::load_channels(core) {
-        if ch.enabled && super::is_video_platform(&ch.kind) && !by_kind.contains_key(&ch.kind) {
-            by_kind.insert(ch.kind.clone(), ch);
+    if super::plugin_enabled(core) {
+        for ch in platform::load_channels(core) {
+            if ch.enabled && super::is_video_platform(&ch.kind) && !by_kind.contains_key(&ch.kind) {
+                by_kind.insert(ch.kind.clone(), ch);
+            }
         }
     }
     // 注册指纹：平台 → 通道 fingerprint（凭据/配置变化即重建闭包）
     let fp: Vec<(String, String)> = by_kind
         .iter()
-        .map(|(k, ch)| (k.clone(), super::fingerprint(ch)))
+        .map(|(k, ch)| (k.clone(), format!("{}:{}", ch.id, super::fingerprint(ch))))
         .collect();
+    let gateway = core.orchestrator().tools.clone();
     {
         let last = ondemand_fp().lock();
-        if *last == Some(fp.clone()) {
+        // apply_config/编成切换会重建 ToolGateway；通道没变也必须向新网关重挂。
+        if last.as_ref().is_some_and(|(registered, previous)| {
+            registered.ptr_eq(&Arc::downgrade(&gateway)) && previous == &fp
+        }) {
             return; // 无变化
         }
     }
-    let gateway = core.orchestrator().tools.clone();
     // 先全部注销（通道全停时清面；平台消失时回收该平台工具）
     for name in [
         "video__summary",
@@ -333,6 +371,7 @@ pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
         "video__uploader",
         "video__related",
         "video__search",
+        "video__shots",
         "video__act",
     ] {
         gateway.unregister_dynamic_tool(name);
@@ -351,17 +390,7 @@ pub(crate) fn reconcile_ondemand(core: &Arc<Core>) {
             gateway.register_dynamic_tool(spec, exec);
         }
     }
-    *ondemand_fp().lock() = Some(fp);
-}
-
-/// 全局工具执行入口的兜底：工具已注册但通道已停用/删除（注册表尚未收敛）时
-/// 执行闭包内自检通道可用性，返回未配置提示而非恐慌。
-async fn guard_channel_alive(ch: &Channel) -> anyhow::Result<()> {
-    // 通道快照仍有效 = enabled（注册时已过滤；reconcile 周期内的停用由闭包重建兜底）
-    if !ch.enabled {
-        anyhow::bail!("未配置可用的视频通道（通道已停用）；请在控制台「通道」页启用后再试");
-    }
-    Ok(())
+    *ondemand_fp().lock() = Some((Arc::downgrade(&gateway), fp));
 }
 
 // ---------------------------------------------------------------- 执行面注册
@@ -374,11 +403,26 @@ pub(crate) fn build_injections(
     core: &Arc<Core>,
     ch: &Channel,
 ) -> Vec<(CustomTool, DynamicToolExec)> {
+    build_injections_for(core, ch, WatchTrigger::OnDemand)
+}
+
+pub(crate) fn build_watch_injections(
+    core: &Arc<Core>,
+    ch: &Channel,
+) -> Vec<(CustomTool, DynamicToolExec)> {
+    build_injections_for(core, ch, WatchTrigger::Automatic)
+}
+
+fn build_injections_for(
+    core: &Arc<Core>,
+    ch: &Channel,
+    trigger: WatchTrigger,
+) -> Vec<(CustomTool, DynamicToolExec)> {
     let mut out: Vec<(CustomTool, DynamicToolExec)> = watch_tool_specs(&ch.kind)
         .into_iter()
         .chain(std::iter::once(act_tool_spec()))
         .map(|s| {
-            let exec = build_exec(core.clone(), ch.clone(), s.name.clone());
+            let exec = build_exec(core.clone(), ch.clone(), s.name.clone(), trigger);
             (s, exec)
         })
         .collect();
@@ -386,7 +430,7 @@ pub(crate) fn build_injections(
     out
 }
 
-fn build_exec(core: Arc<Core>, ch: Channel, name: String) -> DynamicToolExec {
+fn build_exec(core: Arc<Core>, ch: Channel, name: String, trigger: WatchTrigger) -> DynamicToolExec {
     // 执行闭包：路由到具体工具实现；错误统一为结构化文本（工具结果 ok=false）
     dynamic_exec_images(move |_agent, session, args| {
         let core = core.clone();
@@ -394,12 +438,16 @@ fn build_exec(core: Arc<Core>, ch: Channel, name: String) -> DynamicToolExec {
         let name = name.clone();
         let session = session.to_string();
         async move {
-            // 兜底自检：全局点播闭包可能滞后于通道停用（reconcile 10s 收敛窗内）
-            if let Err(e) = guard_channel_alive(&ch).await {
-                return Ok((e.to_string(), Vec::new()));
-            }
-            let st = session_state(&session);
-            dispatch_tool(&core, &name, &ch, &session, &st, args).await
+            with_live_guard(
+                &core,
+                &ch,
+                trigger,
+                async {
+                    let st = session_state(&session);
+                    dispatch_tool(&core, &name, &ch, &session, &st, trigger, args).await
+                },
+            )
+            .await
         }
     })
 }
@@ -412,8 +460,11 @@ async fn dispatch_tool(
     ch: &Channel,
     session: &str,
     st: &Arc<Mutex<WatchSession>>,
+    trigger: WatchTrigger,
     args: Value,
 ) -> anyhow::Result<(String, Vec<String>)> {
+    let ch = live_channel(core, ch, trigger)?;
+    let ch = &ch;
     // videoId 归一收口：所有吃 videoId 的工具统一过 resolve（裸号/长链/短链 → 归一 id）
     let vid =
         |k: &str| -> Option<String> { args.get(k).and_then(|v| v.as_str()).map(str::to_string) };
@@ -426,6 +477,7 @@ async fn dispatch_tool(
             let id = resolve_video_id(st, &vid("videoId").unwrap_or_default()).await;
             tool_subtitle(
                 ch,
+                st,
                 id,
                 args.get("page").and_then(|p| p.as_u64()).unwrap_or(1),
             )
@@ -499,7 +551,7 @@ async fn dispatch_tool(
             if let Some(obj) = a.as_object_mut() {
                 obj.insert("videoId".into(), serde_json::Value::String(id));
             }
-            tool_act(core, ch, st, session, a)
+            tool_act(core, ch, st, session, trigger, a)
                 .await
                 .map(|s| (s, vec![]))
         }
@@ -593,8 +645,287 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
 
 const SUBTITLE_PAGE_LINES: usize = 120;
 
+struct BiliSubtitleSnapshot {
+    channel_id: String,
+    video_id: String,
+    cid: u64,
+    duration: u64,
+    track_id: String,
+    language: String,
+    lines: Vec<Value>,
+}
+
+impl BiliSubtitleSnapshot {
+    fn page(&self, page: u64) -> anyhow::Result<String> {
+        Ok(format!(
+            "字幕来源：bilibili {}；cid={}；字幕轨={}（{}）；视频时长={}。本会话分页使用同一份已校验字幕快照。\n{}",
+            self.video_id, self.cid, self.track_id, self.language, fmt_mmss(self.duration),
+            format_subtitle_pages(&self.lines, usize::try_from(page)?)?,
+        ))
+    }
+}
+
+fn matches_bvid(actual: Option<&str>, expected: &str) -> bool {
+    let Some(actual) = actual else { return false };
+    match (
+        actual.strip_prefix("BV").or_else(|| actual.strip_prefix("bv")),
+        expected.strip_prefix("BV").or_else(|| expected.strip_prefix("bv")),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => actual == expected,
+    }
+}
+
+fn bili_video_identity(view: &Value, video_id: &str) -> anyhow::Result<(u64, u64)> {
+    api_ok(view)?;
+    anyhow::ensure!(
+        matches_bvid(view.pointer("/data/bvid").and_then(Value::as_str), video_id),
+        "来源视频不匹配（请求 {video_id}），已拒绝将响应作为观看依据"
+    );
+    let cid = view.pointer("/data/pages/0/cid").and_then(as_u64)
+        .or_else(|| view.pointer("/data/cid").and_then(as_u64))
+        .filter(|cid| *cid > 0)
+        .ok_or_else(|| anyhow::anyhow!("无法取得视频 cid"))?;
+    let duration = view.pointer("/data/pages/0/duration").and_then(as_u64)
+        .or_else(|| view.pointer("/data/duration").and_then(as_u64))
+        .filter(|duration| *duration > 0)
+        .ok_or_else(|| anyhow::anyhow!("无法取得视频时长，不能校验观看材料来源"))?;
+    Ok((cid, duration))
+}
+
+fn subtitle_track<'a>(player: &'a Value, video_id: &str, cid: u64) -> anyhow::Result<Option<&'a Value>> {
+    // 风控/鉴权错误不能被吞成「无字幕」，否则模型会把取材失败当成正常无轨。
+    api_ok(player)?;
+    anyhow::ensure!(
+        matches_bvid(player.pointer("/data/bvid").and_then(Value::as_str), video_id)
+            && player.pointer("/data/cid").and_then(as_u64) == Some(cid),
+        "字幕播放器响应的视频/cid 不匹配（请求 {video_id}，cid={cid}），已拒绝作为观看依据"
+    );
+    let subs = player.pointer("/data/subtitle/subtitles").and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("平台响应缺少字幕轨列表，无法确认是否有字幕"))?;
+    Ok(subs.iter().find(|s| {
+        s.get("lan").and_then(Value::as_str).is_some_and(|lan| lan.contains("zh"))
+    }).or_else(|| subs.first()))
+}
+
+fn validate_subtitle_lines(lines: &[Value], duration: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        lines.iter().any(|line| line.get("content").and_then(Value::as_str)
+            .is_some_and(|content| !content.trim().is_empty())),
+        "字幕正文没有可用文本，不能作为观看依据"
+    );
+    let mut previous = 0.0;
+    for (i, line) in lines.iter().enumerate() {
+        let from = line.get("from").and_then(Value::as_f64);
+        let to = line.get("to").and_then(Value::as_f64);
+        let valid = from.zip(to).is_some_and(|(from, to)| {
+            from.is_finite() && to.is_finite() && from >= previous && to >= from
+                // 字幕尾句可能略超视频取整时长；容忍 2 秒，而非接受另一视频的长轨道。
+                && to <= duration as f64 + 2.0
+        });
+        anyhow::ensure!(valid,
+            "字幕时间范围与视频时长不匹配或顺序异常（第 {} 行，视频 {} 秒），疑似字幕来源错误；已拒绝作为观看依据，请改用 video__shots 核实画面",
+            i + 1, duration
+        );
+        previous = from.unwrap_or_default();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod manual_watch_tests {
+    use super::*;
+
+    const VIDEO: &str = "BV1qDHF69EiZ";
+    const CID: u64 = 43_085_202_957;
+
+    fn channel() -> Channel {
+        serde_json::from_value(json!({
+            "id": "manual-bili", "type": "bilibili", "enabled": true,
+            "createdAt": "", "config": { "watch": "false", "comment": "false", "reply": "false" }
+        })).unwrap()
+    }
+
+    fn core() -> Arc<Core> {
+        let dir = std::env::temp_dir().join(format!("exm-manual-video-{}", exm_core::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        Arc::new(Core::with_config(cfg).unwrap())
+    }
+
+    fn snapshot(video: &str, track: &str, line_count: usize) -> BiliSubtitleSnapshot {
+        BiliSubtitleSnapshot {
+            channel_id: "manual-bili".into(),
+            video_id: video.into(),
+            cid: CID,
+            duration: 335,
+            track_id: track.into(),
+            language: "zh-CN".into(),
+            lines: (0..line_count).map(|i| json!({
+                "from": i as f64 / 2.0, "to": (i + 1) as f64 / 2.0,
+                "content": format!("{track} 第{i}句"),
+            })).collect(),
+        }
+    }
+
+    #[test]
+    fn manual_b23_url_协议头不重复且裸短链补齐() {
+        for input in ["b23.tv/abc", "http://b23.tv/abc", "https://b23.tv/abc"] {
+            assert_eq!(b23_url(input), "https://b23.tv/abc");
+        }
+    }
+
+    #[test]
+    fn manual_subtitle_校验视频与cid并保留平台错误() {
+        let view = json!({"code": 0, "data": {
+            "bvid": VIDEO, "cid": CID, "duration": 335,
+            "pages": [{"cid": CID, "duration": 335}]
+        }});
+        assert_eq!(bili_video_identity(&view, VIDEO).unwrap(), (CID, 335));
+        assert_eq!(bili_video_identity(&view, "bv1qDHF69EiZ").unwrap(), (CID, 335));
+        assert!(bili_video_identity(&view, "BV1qdHF69EiZ").is_err(), "BV 号主体大小写不能混同");
+        assert!(bili_video_identity(&view, "BV1xx411c7mD").is_err());
+        let player = json!({"code": 0, "data": {
+            "bvid": VIDEO, "cid": CID,
+            "subtitle": {"subtitles": [
+                {"id_str": "en", "lan": "en"}, {"id_str": "zh", "lan": "zh-CN"}
+            ]}
+        }});
+        assert_eq!(subtitle_track(&player, VIDEO, CID).unwrap().unwrap()["id_str"], "zh");
+        assert!(subtitle_track(&player, VIDEO, CID + 1).is_err());
+        assert!(subtitle_track(&player, "BV1xx411c7mD", CID).is_err());
+        let error = subtitle_track(&json!({"code": -352, "message": "风控"}), VIDEO, CID)
+            .unwrap_err().to_string();
+        assert!(error.contains("code=-352"), "平台失败不能伪报无字幕：{error}");
+        let no_tracks = json!({"code": 0, "data": {
+            "bvid": VIDEO, "cid": CID, "subtitle": {"subtitles": []}
+        }});
+        assert!(subtitle_track(&no_tracks, VIDEO, CID).unwrap().is_none());
+    }
+
+    #[test]
+    fn manual_subtitle_拒绝超过335秒的视频串轨材料() {
+        let valid = vec![json!({"from": 0.0, "to": 2.0, "content": "开场"}),
+            json!({"from": 333.0, "to": 335.8, "content": "结束"})];
+        assert!(validate_subtitle_lines(&valid, 335).is_ok());
+        let mismatch = vec![json!({"from": 393.0, "to": 438.0, "content": "其他视频的解说"})];
+        let error = validate_subtitle_lines(&mismatch, 335).unwrap_err().to_string();
+        assert!(error.contains("视频 335 秒") && error.contains("已拒绝作为观看依据"), "{error}");
+        for line in [
+            json!({"from": -1.0, "to": 2.0, "content": "异常"}),
+            json!({"from": 2.0, "to": 1.0, "content": "异常"}),
+            json!({"from": 0.0, "content": "缺结束时间"}),
+            json!({"from": 0.0, "to": 2.0}),
+        ] {
+            assert!(validate_subtitle_lines(&[line], 335).is_err());
+        }
+    }
+
+    #[test]
+    fn manual_subtitle_分页固定快照且视频通道隔离() {
+        let mut st = WatchSession::default();
+        let first = st.pin_subtitle(snapshot(VIDEO, "original", 400));
+        assert!(first.page(1).unwrap().contains("第 1/4 页"));
+        let changed = st.pin_subtitle(snapshot(VIDEO, "changed", 300));
+        assert!(Arc::ptr_eq(&first, &changed), "不能随翻页换轨道和总页数");
+        let page = changed.page(2).unwrap();
+        assert!(page.contains("第 2/4 页") && page.contains("original 第120句"), "{page}");
+        assert!(!page.contains("changed"));
+        assert!(page.contains(VIDEO) && page.contains(&format!("cid={CID}")), "应带来源标识");
+        assert!(st.cached_subtitle("manual-bili", "bv1qDHF69EiZ").is_some());
+        assert!(st.cached_subtitle("manual-bili", "BV1qdHF69EiZ").is_none());
+        assert!(st.cached_subtitle("manual-bili", "BV1xx411c7mD").is_none());
+        assert!(st.cached_subtitle("other-channel", VIDEO).is_none());
+        assert!(first.page(0).is_err());
+        assert!(first.page(u64::MAX).unwrap().contains("没有更多字幕"));
+        for i in 0..10 {
+            st.pin_subtitle(snapshot(&format!("other-{i}"), "other", 1));
+        }
+        assert_eq!(st.subtitle_snapshots.len(), 8, "长会话全文缓存须有上限");
+    }
+
+    #[test]
+    fn manual_tools_配置重建恢复注册且停用回收shots() {
+        let core = core();
+        let ch = channel();
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        reconcile_ondemand(&core);
+        let old = core.orchestrator().tools.clone();
+        assert!(old.dynamic_tool("video__shots").is_some());
+        core.apply_config((*core.config()).clone()).unwrap();
+        let new = core.orchestrator().tools.clone();
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert!(new.dynamic_tool("video__summary").is_none());
+        reconcile_ondemand(&core);
+        for name in ["video__summary", "video__subtitle", "video__shots"] {
+            assert!(new.dynamic_tool(name).is_some(), "新网关需要恢复 {name}");
+        }
+        let mut disabled = ch;
+        disabled.enabled = false;
+        platform::save_channels(&core, &[disabled]).unwrap();
+        reconcile_ondemand(&core);
+        assert!(new.dynamic_tool_names().iter().all(|name| !name.starts_with("video__")));
+    }
+
+    #[tokio::test]
+    async fn manual_tools_watch关闭仍可离线点播字幕分页() {
+        let core = core();
+        let ch = channel();
+        platform::save_channels(&core, &[ch]).unwrap();
+        reconcile_ondemand(&core);
+        let sid = format!("manual-subtitle-{}", exm_core::types::new_id());
+        session_state(&sid).lock().pin_subtitle(snapshot(VIDEO, "manual", 400));
+        let (_, exec) = core.orchestrator().tools.dynamic_tool("video__subtitle").unwrap();
+        for page in [1, 2] {
+            let output = exec("machina", &sid, json!({"videoId": VIDEO, "page": page})).await;
+            assert!(output.ok, "watch=false 不能禁用手动观看：{}", output.text);
+            assert!(output.text.contains(&format!("第 {page}/4 页")), "{}", output.text);
+            assert!(output.images.is_empty());
+        }
+        let different = exec("machina", &sid, json!({"videoId": "BV1xx411c7mD", "page": 2})).await;
+        assert!(!different.ok && different.text.contains("同一个 videoId"),
+            "不能把别的视频当成目标视频的第 2 页：{}", different.text);
+        let mut replacement = channel();
+        replacement.id = "manual-bili-replacement".into();
+        let mut replaced_snapshot = snapshot(VIDEO, "replacement", 400);
+        replaced_snapshot.channel_id = replacement.id.clone();
+        session_state(&sid).lock().pin_subtitle(replaced_snapshot);
+        platform::save_channels(&core, &[replacement]).unwrap();
+        reconcile_ondemand(&core);
+        let (_, new_exec) = core.orchestrator().tools.dynamic_tool("video__subtitle").unwrap();
+        let output = new_exec("machina", &sid, json!({"videoId": VIDEO})).await;
+        assert!(output.ok && output.text.contains("replacement 第0句"),
+            "配置相同但通道 id 更换也必须重绑：{}", output.text);
+        drop_session(&sid);
+    }
+
+    #[tokio::test]
+    async fn manual_shots_项目目录保存的图像可被运行时读取() {
+        let core = core();
+        let project = core.config().workspace_root.join("manual-project");
+        std::fs::create_dir_all(&project).unwrap();
+        exm_core::workspace::scope(Some(project.clone()), async {
+            let dir = shots_directory(&core);
+            assert_eq!(dir, project.join(".exmachina/video_shots"));
+            std::fs::create_dir_all(&dir).unwrap();
+            image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3]))
+                .save(dir.join("manual-test.png")).unwrap();
+            let data = core.orchestrator().tools
+                .read_image_data_url(".exmachina/video_shots/manual-test.png").unwrap();
+            assert!(data.starts_with("data:image/png;base64,"));
+        }).await;
+    }
+}
+
 /// video__subtitle：B站 CC/AI 字幕（分页）；YouTube captions 轨
-async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Result<String> {
+async fn tool_subtitle(
+    ch: &Channel,
+    st: &Arc<Mutex<WatchSession>>,
+    video_id: String,
+    page: u64,
+) -> anyhow::Result<String> {
     if video_id.trim().is_empty() {
         anyhow::bail!("缺少 videoId");
     }
@@ -603,44 +934,30 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
     }
     match ch.kind.as_str() {
         "bilibili" => {
+            if let Some(snapshot) = st.lock().cached_subtitle(&ch.id, &video_id) {
+                return snapshot.page(page);
+            }
+            anyhow::ensure!(page == 1,
+                "本会话没有 {video_id} 的固定字幕快照（尚未获取或已过期）；请先对同一个 videoId 调用 page=1，不能跨视频续页"
+            );
             let view = bili_get(
                 ch,
                 &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
             )
             .await?;
-            api_ok(&view)?;
-            let d = view.get("data").cloned().unwrap_or(Value::Null);
-            let cid = d
-                .pointer("/pages/0/cid")
-                .and_then(as_u64)
-                .or_else(|| d.get("cid").and_then(as_u64))
-                .unwrap_or(0);
-            if cid == 0 {
-                anyhow::bail!("无法取得字幕轨 cid");
-            }
+            let (cid, duration) = bili_video_identity(&view, &video_id)?;
             let player = bili_get(
                 ch,
                 &format!("https://api.bilibili.com/x/player/v2?bvid={video_id}&cid={cid}"),
             )
             .await?;
-            let subs = player
-                .pointer("/data/subtitle/subtitles")
-                .and_then(|s| s.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let url = subs
-                .iter()
-                .find(|s| {
-                    s.get("lan")
-                        .and_then(|l| l.as_str())
-                        .map(|l| l.contains("zh"))
-                        .unwrap_or(false)
-                })
-                .or_else(|| subs.first())
-                .and_then(|s| s.get("subtitle_url").and_then(|u| u.as_str()));
-            let Some(mut url) = url.map(str::to_string) else {
-                return Ok("该视频无字幕（B站无 CC 字幕且无 AI 字幕）。请用 video__danmaku / video__comments 了解内容与观众反应".into());
+            let Some(track) = subtitle_track(&player, &video_id, cid)? else {
+                return Ok(format!("未获取字幕正文（{video_id}，cid={cid}；当前登录态未返回可用字幕轨）。可用 video__shots 查看抽样画面；简介/弹幕/评论只是辅助资料，不能据此声称已听取对白或完整观看视频。"));
             };
+            let mut url = track.get("subtitle_url").and_then(Value::as_str)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("字幕轨缺少正文地址，未获取可核验字幕"))?
+                .to_string();
             if url.starts_with("//") {
                 url = format!("https:{url}");
             }
@@ -648,19 +965,33 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
                 .get(&url)
                 .send()
                 .await
-                .map_err(|e| anyhow::anyhow!("字幕下载失败：{e}"))?
+                .map_err(|e| anyhow::anyhow!("字幕下载失败：{}", e.without_url()))?
+                .error_for_status()
+                .map_err(|e| anyhow::anyhow!("字幕下载失败：{}", e.without_url()))?
                 .json::<Value>()
                 .await
-                .map_err(|e| anyhow::anyhow!("字幕解析失败：{e}"))?;
+                .map_err(|e| anyhow::anyhow!("字幕解析失败：{}", e.without_url()))?;
             let lines = doc
                 .get("body")
                 .and_then(|b| b.as_array())
                 .cloned()
-                .unwrap_or_default();
+                .ok_or_else(|| anyhow::anyhow!("字幕正文缺少 body 数组，未获取可核验字幕"))?;
             if lines.is_empty() {
-                return Ok("该视频无字幕（字幕轨为空）".into());
+                return Ok(format!("未获取字幕正文（{video_id}，cid={cid}；字幕轨为空），不能作为已观看依据"));
             }
-            format_subtitle_pages(&lines, page as usize)
+            validate_subtitle_lines(&lines, duration)?;
+            let snapshot = st.lock().pin_subtitle(BiliSubtitleSnapshot {
+                channel_id: ch.id.clone(),
+                video_id,
+                cid,
+                duration,
+                track_id: track.get("id_str").and_then(Value::as_str).map(str::to_string)
+                    .or_else(|| track.get("id").and_then(as_u64).map(|id| id.to_string()))
+                    .unwrap_or_else(|| "未知".into()),
+                language: track.get("lan").and_then(Value::as_str).unwrap_or("未知").to_string(),
+                lines,
+            });
+            snapshot.page(page)
         }
         "youtube" => {
             // captions.list 需 OAuth；用 API Key 能列轨，正文多数需权限——失败时明确降级说明
@@ -680,7 +1011,7 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
                 .cloned()
                 .unwrap_or_default();
             if items.is_empty() {
-                return Ok("该视频无字幕（YouTube 无 caption 轨）。请用 video__summary 的简介与 video__comments 了解内容".into());
+                return Ok("未获取字幕正文（YouTube 未返回 caption 轨）；简介与评论只是辅助资料，不能据此声称已听取对白或完整观看视频".into());
             }
             let track = items
                 .iter()
@@ -703,7 +1034,7 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
                 .and_then(|l| l.as_str())
                 .unwrap_or("");
             Ok(format!(
-                "该视频有字幕轨（{lang} {name}），但正文下载需视频所有者授权（OAuth caption download）。\n建议：简介 + 评论区（video__comments）已足够形成观感；如需逐句内容可结合弹幕（若为B站）"
+                "该视频有字幕轨（{lang} {name}），但正文下载需视频所有者授权（OAuth caption download）。\n尚未获取字幕正文；简介与评论只是辅助资料，不能据此声称已听取对白或完整观看视频。当前工具没有视频下载/语音转写回退。"
             ))
         }
         other => anyhow::bail!("不支持的平台：{other}"),
@@ -711,6 +1042,7 @@ async fn tool_subtitle(ch: &Channel, video_id: String, page: u64) -> anyhow::Res
 }
 
 fn format_subtitle_pages(lines: &[Value], page: usize) -> anyhow::Result<String> {
+    anyhow::ensure!(page > 0, "page 从 1 起");
     let total_pages = lines.len().div_ceil(SUBTITLE_PAGE_LINES);
     if page > total_pages {
         return Ok(format!(
@@ -1293,6 +1625,12 @@ fn act_gates() -> &'static Mutex<std::collections::HashMap<String, Arc<ActGate>>
     G.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+fn shots_directory(core: &Core) -> std::path::PathBuf {
+    // 与 ToolGateway::read_image_data_url 使用同一生效根，否则项目/组工作区会静默丢图。
+    core.registry.effective_workspace(&core.config().workspace_root)
+        .join(".exmachina").join("video_shots")
+}
+
 /// video__shots：B 站官方 videoshot 雪碧图抽帧——视觉模态直看画面。
 /// 雪碧图 = 网格 JPG（img_x_len × img_y_len 帧/图，多图各 100 帧按序铺满全片）。
 /// 帧时间表在 index 数组（画面变化自适应间隔，非匀速）——按目标时间查表定位帧。
@@ -1322,11 +1660,7 @@ async fn tool_shots(
         &format!("https://api.bilibili.com/x/web-interface/view?bvid={video_id}"),
     )
     .await?;
-    api_ok(&view)?;
-    let duration = view.pointer("/data/duration").and_then(as_u64).unwrap_or(0);
-    if duration == 0 {
-        anyhow::bail!("无法获取视频时长（视频不存在或已下架？）");
-    }
+    let (_, duration) = bili_video_identity(&view, video_id)?;
     // 雪碧图索引（index=1 带帧时间表：index[n] = 第 n 帧截取秒，自适应间隔）
     let vs = bili_get(
         ch,
@@ -1345,10 +1679,7 @@ async fn tool_shots(
         })
         .unwrap_or_default();
     if images.is_empty() {
-        return Ok((
-            format!("该视频无画面抽帧数据（{video_id}，可能未生成预览）"),
-            vec![],
-        ));
+        anyhow::bail!("该视频无画面抽帧数据（{video_id}，可能未生成预览）；未获得可观察图像，不能作为已观看依据");
     }
     let x_len = data.get("img_x_len").and_then(as_u64).unwrap_or(10).max(1) as u32; // 每行帧数
     let fw = data.get("img_x_size").and_then(as_u64).unwrap_or(480) as u32; // 单帧宽
@@ -1389,11 +1720,7 @@ async fn tool_shots(
         .map(|i| (start + i * step).min(duration.saturating_sub(1)))
         .collect();
 
-    let dir = core
-        .config()
-        .workspace_root
-        .join(".exmachina")
-        .join("video_shots");
+    let dir = shots_directory(core);
     std::fs::create_dir_all(&dir)?;
     // 雪碧图缓存（同图多帧只下载一次）
     let mut sheet_cache: std::collections::HashMap<usize, Option<image::DynamicImage>> =
@@ -1455,18 +1782,15 @@ async fn tool_shots(
         saved.push((t, format!(".exmachina/video_shots/{name}")));
     }
     if saved.is_empty() {
-        return Ok((
-            format!("画面抽帧失败（雪碧图下载或裁切均未产出；{video_id}）"),
-            vec![],
-        ));
+        anyhow::bail!("画面抽帧失败（雪碧图下载或裁切均未产出；{video_id}）；未获得可观察图像，不能作为已观看依据");
     }
     let list = saved
         .iter()
-        .map(|(t, p)| format!("{}s → {}", fmt_mmss(*t), p))
+        .map(|(t, p)| format!("采样请求 {} → {}", fmt_mmss(*t), p))
         .collect::<Vec<_>>()
         .join("\n");
     let note = format!(
-        "已抽取 {} 帧画面（覆盖 {}–{}），图像已附带——请直接观察画面内容（构图/字幕画面/界面演示），与 summary/subtitle 文本互补：\n{list}",
+        "已生成 {} 张平台预览抽样帧（采样请求区间 {}–{}；实际时刻以平台预览为准，非完整播放，未提取音频）。仅在本轮实际收到并观察附图后描述画面；若未收到图像请如实报告，不能把生成文件当作已观看：\n{list}",
         saved.len(),
         fmt_mmss(saved[0].0),
         fmt_mmss(saved[saved.len() - 1].0),
@@ -1587,6 +1911,7 @@ async fn tool_act(
     ch: &Channel,
     st: &Arc<Mutex<WatchSession>>,
     session: &str,
+    trigger: WatchTrigger,
     args: Value,
 ) -> anyhow::Result<String> {
     let video_id = args
@@ -1647,6 +1972,8 @@ async fn tool_act(
     } else {
         anyhow::bail!("需提供 comment（评论）或 replyText+replyTo（回复），不能都为空");
     };
+    let ch = live_act_channel(core, ch, trigger, target.is_some())?;
+    let ch = &ch;
 
     // 闸门 2：内容清洗（字数上限 + markdown/指令痕迹去除）。
     // 超长/AI 味套话不静默截断——回给模型明确反馈，下一轮自我修正
@@ -1705,9 +2032,12 @@ async fn tool_act(
             .unwrap_or("")
             .to_string();
     }
+    let ch = live_act_channel(core, ch, trigger, target.is_some())?;
+    let ch = &ch;
+    let current = Settings::from_channel(ch);
 
     // 闸门 4：dry-run 分流（不落平台）
-    if gate.dry_run {
+    if gate.dry_run || current.dry_run {
         gate.actions_today
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         sync_ondemand_quota(core, ch, session, &gate);
@@ -1722,7 +2052,7 @@ async fn tool_act(
     }
 
     // 闸门 5：审批模式（always = 产审批单，批准代发/拒绝跳过；off = 直接发）
-    if gate.approval == "always" {
+    if gate.approval == "always" || current.approval == "always" {
         return create_act_approval(
             core,
             ch,
@@ -1734,6 +2064,7 @@ async fn tool_act(
             target.as_ref(),
             &item,
             &video_id,
+            trigger,
         )
         .await;
     }
@@ -1744,7 +2075,13 @@ async fn tool_act(
     }
 
     // 执行
-    post_comment(ch, &item, &text, target.as_deref()).await?;
+    let latest = live_act_channel(core, ch, trigger, target.is_some())?;
+    let current = Settings::from_channel(&latest);
+    anyhow::ensure!(
+        !current.dry_run && current.approval != "always",
+        "互动安全配置已变化，已取消本次发送"
+    );
+    post_comment(&latest, &item, &text, target.as_deref()).await?;
     gate.actions_today
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     sync_ondemand_quota(core, ch, session, &gate);
@@ -1761,6 +2098,22 @@ async fn tool_act(
         text.chars().take(60).collect::<String>(),
         video_id
     ))
+}
+
+fn live_act_channel(
+    core: &Core,
+    ch: &Channel,
+    trigger: WatchTrigger,
+    reply: bool,
+) -> anyhow::Result<Channel> {
+    let ch = live_channel(core, ch, trigger)?;
+    let s = Settings::from_channel(&ch);
+    anyhow::ensure!(
+        if reply { s.reply } else { s.comment },
+        "已拒绝：本通道未开启{}",
+        if reply { "回复" } else { "评论" }
+    );
+    Ok(ch)
 }
 
 /// 审批分流的代发执行入口（Core::approval_decide 的 [video] 回调）：
@@ -1790,6 +2143,10 @@ pub(crate) async fn execute_act_payload(core: &Arc<Core>, payload: &str) -> anyh
         .get("replyTo")
         .and_then(|x| x.as_str())
         .map(str::to_string);
+    let trigger = approval_trigger(core, ch, payload, &v)?;
+    let ch = live_act_channel(core, ch, trigger, reply_to.is_some())?;
+    anyhow::ensure!(!Settings::from_channel(&ch).dry_run, "演练模式已开启，已取消审批代发");
+    let ch = &ch;
     let mut item = VideoItem {
         platform: ch.kind.clone(),
         id: video_id.clone(),
@@ -1807,13 +2164,50 @@ pub(crate) async fn execute_act_payload(core: &Arc<Core>, payload: &str) -> anyh
         .await?;
         api_ok(&view)?;
         item.aid = view.pointer("/data/aid").and_then(as_u64);
+        live_act_channel(core, ch, trigger, reply_to.is_some())?;
         bili_prime_buvid(ch).await;
     }
-    post_comment(ch, &item, &text, reply_to.as_deref()).await?;
+    let latest = live_act_channel(core, ch, trigger, reply_to.is_some())?;
+    anyhow::ensure!(!Settings::from_channel(&latest).dry_run, "演练模式已开启，已取消审批代发");
+    post_comment(&latest, &item, &text, reply_to.as_deref()).await?;
     Ok(format!(
         "已代发（审批通过）：{}",
         text.chars().take(60).collect::<String>()
     ))
+}
+
+fn approval_trigger(
+    core: &Core,
+    ch: &Channel,
+    payload: &str,
+    value: &Value,
+) -> anyhow::Result<WatchTrigger> {
+    if let Some(automatic) = value.get("automatic").and_then(Value::as_bool) {
+        return Ok(if automatic {
+            WatchTrigger::Automatic
+        } else {
+            WatchTrigger::OnDemand
+        });
+    }
+    // 升级前的审批载荷没有来源字段；从原审批单会话识别，不能把滞留的自动动作
+    // 默认当成点播绕过 watch。无法确认来源则保守沿用自动闸门，不重放未知任务。
+    let watch_title = format!("channel:{}:video", ch.id);
+    let mut manual = false;
+    for request in core.approval_list(Some("pending"), usize::MAX)? {
+        if request.command.strip_prefix("[video]").map(str::trim) == Some(payload.trim()) {
+            if let Some(session) = core.store.get_session(&request.session_id)? {
+                if session.title == watch_title {
+                    return Ok(WatchTrigger::Automatic);
+                }
+                manual = true;
+            }
+        }
+    }
+    Ok(if manual {
+        WatchTrigger::OnDemand
+    } else {
+        WatchTrigger::Automatic
+    })
 }
 
 /// 产审批单并等待裁决（approval=always 分流）：
@@ -1830,12 +2224,15 @@ async fn create_act_approval(
     target: Option<&String>,
     item: &VideoItem,
     video_id: &str,
+    trigger: WatchTrigger,
 ) -> anyhow::Result<String> {
+    live_act_channel(core, ch, trigger, target.is_some())?;
     let payload = serde_json::json!({
         "channelId": ch.id,
         "videoId": video_id,
         "text": text,
         "replyTo": target,
+        "automatic": trigger == WatchTrigger::Automatic,
     });
     let req = exm_core::types::ApprovalRequest {
         id: format!("apr{}", &exm_core::types::new_id()[..14]),
@@ -2137,6 +2534,7 @@ mod tests {
         };
         let settings = Settings::from_channel(&ch);
         assert!(settings.comment && settings.dry_run);
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
         // 配额测试需要 limit=1：显式注入（默认 6 不够严格）
         let mut gate = ActGate::from_settings(&settings, 0);
         gate.daily_limit = 1;
@@ -2150,6 +2548,7 @@ mod tests {
             &ch,
             "s1",
             &st,
+            WatchTrigger::Automatic,
             json!({ "videoId": "vid1", "replyText": "你好", "replyTo": "ghost-id" }),
         )
         .await
@@ -2164,6 +2563,7 @@ mod tests {
             &ch,
             "s1",
             &st,
+            WatchTrigger::Automatic,
             json!({ "videoId": "vid1", "comment": "测试评论内容" }),
         )
         .await
@@ -2179,6 +2579,7 @@ mod tests {
             &ch,
             "s1",
             &st,
+            WatchTrigger::Automatic,
             json!({ "videoId": "vid1", "comment": "再来一条" }),
         )
         .await
@@ -2220,12 +2621,15 @@ mod tests {
         let settings = Settings::from_channel(&ch);
         register_act_gate("s2", ActGate::from_settings(&settings, 0));
         let st = session_state("s2");
+        let core = test_core("off");
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
         let r = dispatch_tool(
-            &test_core("off"),
+            &core,
             "video__act",
             &ch,
             "s2",
             &st,
+            WatchTrigger::Automatic,
             json!({ "videoId": "v", "comment": "hi" }),
         )
         .await
@@ -2249,6 +2653,7 @@ mod act_approval_tests {
         let mut cfg = ExmConfig::load(&dir);
         cfg.use_mock = true;
         cfg.memory_enabled = false;
+        cfg.security.approval_wait_secs = 0;
         Arc::new(Core::with_config(cfg).expect("Core 创建失败"))
     }
 
@@ -2289,6 +2694,7 @@ mod act_approval_tests {
         let s = Settings::from_channel(&ch);
         assert_eq!(s.approval, "always");
         assert!(!s.dry_run);
+        platform::save_channels(&core, &[ch.clone()]).unwrap();
         register_act_gate("s-apr", ActGate::from_settings(&s, 0));
         let st = session_state("s-apr");
         let r = dispatch_tool(
@@ -2297,6 +2703,7 @@ mod act_approval_tests {
             &ch,
             "s-apr",
             &st,
+            WatchTrigger::Automatic,
             json!({ "videoId": "vid1", "comment": "审批模式下的拟发评论" }),
         )
         .await

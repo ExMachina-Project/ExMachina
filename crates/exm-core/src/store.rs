@@ -15,11 +15,19 @@
 //! 之所以是文档而非 SQL：构建环境无任何 C 编译器（见 docs/架构与设计.md）。
 //! 存储层位于 repository 接口之后，替换回 SQLite/redb 不影响上层。
 
+use crate::collaboration::{CollaborationRecord, CollaborationTurn};
 use crate::fsdb::FsDb;
 use crate::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::path::Path;
+
+fn project_memory_partition(group: &str, workspace: &str) -> String {
+    let hash = group.bytes().chain([0]).chain(workspace.bytes()).fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("project-{hash:016x}")
+}
 
 pub struct Store {
     db: FsDb,
@@ -44,9 +52,29 @@ impl Store {
     // ---------------- 会话 / 三账 ----------------
 
     pub fn create_session(&self, title: &str, group_id: &str) -> Result<Session> {
+        self.create_session_in(title, group_id, None)
+    }
+
+    pub fn create_session_in(&self, title: &str, group_id: &str, workspace: Option<String>) -> Result<Session> {
+        self.create_bound_session(title, group_id, workspace, None)
+    }
+
+    pub(crate) fn create_bound_session(
+        &self,
+        title: &str,
+        group_id: &str,
+        workspace: Option<String>,
+        collaboration_id: Option<String>,
+    ) -> Result<Session> {
+        let id = new_id();
         let now = now_iso();
+        let memory_partition = if collaboration_id.is_some() {
+            Some(format!("collaboration-{id}"))
+        } else {
+            workspace.as_deref().map(|workspace| project_memory_partition(group_id, workspace))
+        };
         let s = Session {
-            id: new_id(),
+            id,
             title: title.to_string(),
             status: "active".into(),
             origin: None,
@@ -56,7 +84,9 @@ impl Store {
             } else {
                 group_id.to_string()
             },
-            memory_partition: None,
+            memory_partition,
+            workspace,
+            collaboration_id,
             rolling_summary: None,
             summary_upto: None,
             parent_session: None,
@@ -89,6 +119,8 @@ impl Store {
             origin: None,
             origin_label: None,
             group_id: parent.group_id.clone(),
+            workspace: parent.workspace.clone(),
+            collaboration_id: parent.collaboration_id.clone(),
             memory_partition: parent.memory_partition.clone(),
             rolling_summary: None,
             summary_upto: None,
@@ -144,10 +176,31 @@ impl Store {
         self.db.get("sessions", id)
     }
 
+    pub(crate) fn put_collaboration(&self, room: &CollaborationRecord) -> Result<()> {
+        self.db.put("collaborations", &room.room.id, room)
+    }
+
+    pub(crate) fn get_collaboration(&self, id: &str) -> Result<Option<CollaborationRecord>> {
+        self.db.get("collaborations", id)
+    }
+
+    pub(crate) fn list_collaborations(&self) -> Result<Vec<CollaborationRecord>> {
+        self.db.list("collaborations")
+    }
+
+    pub(crate) fn put_collaboration_turn(&self, room: &str, turn: &CollaborationTurn) -> Result<()> {
+        self.db.put(&format!("collaboration_turns/{room}"), &turn.id, turn)
+    }
+
+    pub(crate) fn get_collaboration_turn(&self, room: &str, id: &str) -> Result<CollaborationTurn> {
+        self.db.get(&format!("collaboration_turns/{room}"), id)?
+            .ok_or_else(|| anyhow::anyhow!("协作轮次记录不存在"))
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
         // 主列表不含归档态（归档区走 list_archived_sessions 专用视图）
-        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_none()).collect();
+        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_none() && s.collaboration_id.is_none()).collect();
         // 置顶优先，组内按活跃时间倒序（列表结构 = 置顶分组 + 时间分组）
         list.sort_by(|a, b| {
             b.pinned
@@ -158,10 +211,22 @@ impl Store {
         Ok(list)
     }
 
+    /// Apply the list cap after project filtering so one project's active sessions cannot
+    /// disappear behind more recently updated sessions from another project.
+    pub fn list_sessions_in_workspace(&self, workspace: &str) -> Result<Vec<Session>> {
+        let all: Vec<Session> = self.db.list("sessions")?;
+        let mut list: Vec<Session> = all.into_iter()
+            .filter(|session| session.archived_at.is_none() && session.collaboration_id.is_none() && session.workspace.as_deref() == Some(workspace))
+            .collect();
+        list.sort_by(|a, b| b.pinned.cmp(&a.pinned).then_with(|| b.updated_at.cmp(&a.updated_at)));
+        list.truncate(200);
+        Ok(list)
+    }
+
     /// 归档区视图：只含归档态，按归档时间倒序（最近归档在前）
     pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
-        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_some()).collect();
+        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_some() && s.collaboration_id.is_none()).collect();
         list.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
         Ok(list)
     }
@@ -423,13 +488,21 @@ impl Store {
     /// 只读、无索引：扫描上界与消息读取窗口一致（≤200 会话 × 最近 200 条），
     /// 保证命中片段一定能被 `GET /sessions/:id/messages` 的窗口加载到。
     pub fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchHit>> {
+        self.search_sessions_in(query, limit, None)
+    }
+
+    pub fn search_sessions_in(&self, query: &str, limit: usize, workspace: Option<&str>) -> Result<Vec<SessionSearchHit>> {
         let q = query.trim();
         if q.is_empty() {
             return Ok(Vec::new());
         }
         let q_lower = q.to_lowercase();
         let limit = limit.max(1);
-        let mut sessions = self.list_sessions()?;
+        let mut sessions = if let Some(root) = workspace {
+            self.list_sessions_in_workspace(root)?
+        } else {
+            self.list_sessions()?.into_iter().filter(|s| s.workspace.is_none()).collect()
+        };
         sessions.truncate(200);
         let mut hits: Vec<SessionSearchHit> = Vec::new();
         for s in sessions {
@@ -815,7 +888,7 @@ impl Store {
         let all: Vec<Session> = self.db.list("sessions")?;
         let mut list: Vec<Session> = all
             .into_iter()
-            .filter(|s| s.group_id == group_id && s.archived_at.is_none())
+            .filter(|s| s.group_id == group_id && s.archived_at.is_none() && s.collaboration_id.is_none())
             .collect();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list.truncate(200);

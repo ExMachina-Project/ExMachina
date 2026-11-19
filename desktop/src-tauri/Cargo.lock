@@ -962,6 +962,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
 ]
 
 [[package]]

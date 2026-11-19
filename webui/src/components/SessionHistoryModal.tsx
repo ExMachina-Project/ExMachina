@@ -1,6 +1,6 @@
 /** 历史检查点（session-history）：按轮次总览快照，支持回到某轮与从该轮分叉。
  *
- *  入口只在会话管理页行菜单（聊天页消息操作条保持现状）；复用既有
+ *  入口在会话管理抽屉行菜单；复用既有
  *  `GET /sessions/:id/snapshots`、`POST /sessions/:id/undo`、`POST /sessions/:id/fork`。
  *  轮次口径 = 第 N 条用户消息（与聊天页一致）。
  */

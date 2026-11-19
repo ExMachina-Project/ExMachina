@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 
 /** react 系（react/react-dom 生态 + 状态管理）：地基 chunk，其余 vendor 依赖它（单向） */
 const REACT_PKGS = new Set([
@@ -93,6 +94,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    fs: { allow: [fileURLToPath(new URL("..", import.meta.url))] },
     proxy: {
       // dev 代理目标默认指向本地空白端口（防误连生产 4173——dev 页面上的操作
       // 会经代理直达生产实例）。需要联调时显式指定：EXM_DEV_API=http://127.0.0.1:4173 npm run dev

@@ -150,7 +150,7 @@ impl ToolGateway {
             timeout
         };
         execute_shell_with(
-            &self.effective_root(),
+            &self.workspace_for_session(session_id),
             &cmd,
             timeout,
             &self.shell_opts(&cmd),
@@ -164,7 +164,7 @@ impl ToolGateway {
         let id = format!("bg-{}", &crate::types::new_id()[..8]);
         let buf = Arc::new(parking_lot::Mutex::new(String::new()));
         let state = Arc::new(parking_lot::Mutex::new(None::<i32>));
-        let cwd = self.effective_root();
+        let cwd = self.workspace_for_session(session_id);
 
         let opts = self.shell_opts(cmd);
         let mut process = tokio::process::Command::new(&opts.program);

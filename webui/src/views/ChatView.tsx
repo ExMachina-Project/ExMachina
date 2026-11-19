@@ -1,7 +1,7 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Dropdown, Input, Modal, Select, Spin, message } from "antd";
-import { ApartmentOutlined, ArrowLeftOutlined, CloudUploadOutlined, EditOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, ArrowLeftOutlined, CloudUploadOutlined, DeleteOutlined, DeploymentUnitOutlined, EditOutlined, ExportOutlined, InboxOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { createPortal } from "react-dom";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
 import { ChatMessages } from "./chat/ChatMessages";
@@ -10,7 +10,7 @@ import { useChatStream } from "../hooks/useChatStream";
 import { useAttachments } from "../hooks/useAttachments";
 import { useSubbarSlot } from "../components/Subbar";
 
-import { api, type LlmProfile, assetUrl, downloadUrl } from "../api";
+import { api, type LlmProfile, assetUrl, authHeaders, downloadUrl, serverBase } from "../api";
 import { agentIdEn } from "../models";
 import { isTaskSideTitle } from "../session";
 import { useExm, type TimelineItem } from "../store";
@@ -30,6 +30,8 @@ import { MessageProcess } from "../components/ProcessSteps";
 import { TimelineTag } from "../components/TimelineTag";
 import { SkeletonList } from "../components/SkeletonList";
 import { TurnOps } from "../components/HistoryOps";
+import { SessionManagementDrawer } from "../components/SessionManagementDrawer";
+import { AgentWorkDrawer } from "../components/AgentWorkDrawer";
 
 import type { ChatMessage } from "../types";
 
@@ -159,7 +161,7 @@ export function ChatView(): React.ReactElement {
   const {     messages, focusMessage, liveOrch, liveThinking, liveParts, runToolCalls, approvals,
     timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
-    groups, activeGroup, setTarget,
+    groups, activeGroup, setTarget, agents,
     toggleSessionPin, unreadCounts, markAllRead,
     loadGroups,
     sessionsLoaded,
@@ -195,7 +197,7 @@ export function ChatView(): React.ReactElement {
   useEffect(() => {
     void loadTarget();
   }, [loadTarget, activeGroup]);
-  // 会话管理页操作（归档/恢复/删除/重命名/置顶）后同步左栏：轻量重拉列表
+  // 会话管理抽屉操作（归档/恢复/删除/重命名/置顶）后同步左栏：轻量重拉列表
   // （同一后端事实源；归档态在服务端默认过滤，左栏自然隐藏）
   useEffect(() => {
     const h = () => {
@@ -256,6 +258,9 @@ export function ChatView(): React.ReactElement {
   const [mentionLoaded, setMentionLoaded] = useState(false);
   const mentionSeqRef = useRef(0);
   const [sessionFilter, setSessionFilter] = useState("");
+  /** 会话管理直接从对话打开，列表与消息流保持同一上下文。 */
+  const [sessionManagerOpen, setSessionManagerOpen] = useState(false);
+  const [agentWorkOpen, setAgentWorkOpen] = useState(false);
   /** 竖屏导航 = 列表页 / 会话页 两个独立页面（对标主流移动端）：
    *  进入应用先落在会话列表，点某条会话才进入该会话页，会话页有返回按钮回到列表。
    *  带深链（#/chat/<id>）时直接进会话页；桌面端两栏并排，screen 恒为 thread。 */
@@ -559,6 +564,56 @@ export function ChatView(): React.ReactElement {
     setEditing({ turn, text: msg ? msg.statements.map((s) => s.text).join("\n") : "" });
   };
 
+  const exportSession = async (id: string, title: string, format: "markdown" | "json") => {
+    try {
+      const response = await fetch(`${serverBase()}/api/sessions/${id}/export?format=${format}`, { headers: authHeaders() });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${title.replace(/[\\/:*?"<>|]/g, "_") || "session"}-${new Date().toISOString().slice(0, 10)}.${format === "json" ? "json" : "md"}`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      message.success(t("chat.exportDone"));
+    } catch (error) {
+      message.error(t("chat.exportFailed", { err: String(error) }));
+    }
+  };
+
+  const archiveSession = async (id: string, title: string) => {
+    try {
+      await api.batchSessions("archive", [id]);
+      message.success(t("sessions.archivedOne", { name: title }));
+      if (id === sessionId) {
+        const next = visibleSessions.find((session) => session.id !== id);
+        if (next) await selectSession(next.id);
+        else await newSession();
+      }
+      window.dispatchEvent(new Event("exm:flows-refresh"));
+    } catch (error) {
+      message.error(t("sessions.batchFailed", { err: String(error) }));
+    }
+  };
+
+  const deleteSession = (id: string, title: string) => {
+    Modal.confirm({
+      title: t("common.confirmDelete", { name: title }),
+      content: t("sessions.deleteConfirmBody"),
+      okButtonProps: { danger: true, disabled: id === sessionId && running },
+      onOk: async () => {
+        await api.deleteSession(id);
+        useExm.setState((state) => ({ sessions: state.sessions.filter((session) => session.id !== id) }));
+        if (id === sessionId) {
+          const next = visibleSessions.find((session) => session.id !== id);
+          if (next) await selectSession(next.id);
+          else await newSession();
+        }
+        message.success(t("sessions.deletedOne", { name: title }));
+        window.dispatchEvent(new Event("exm:flows-refresh"));
+      },
+    });
+  };
+
   const doEdit = async () => {
     if (!sessionId || !editing) return;
     setHistoryBusy(true);
@@ -640,14 +695,15 @@ export function ChatView(): React.ReactElement {
               value={sessionFilter}
               onChange={(e) => setSessionFilter(e.target.value)}
             />
-            {/* 会话管理入口（session-management）：管理职能解耦到管理页，左栏留直达 */}
+            {/* 会话管理入口：管理能力留在对话上下文内，不再跳独立页面 */}
             <Button
               size="small"
               type="text"
               className="session-manage-btn"
               icon={<UnorderedListOutlined />}
-              title={t("nav.sessions")}
-              onClick={() => useExm.getState().requestNav("sessions")}
+              title={t("chat.manageSessions")}
+              aria-label={t("chat.manageSessions")}
+              onClick={() => setSessionManagerOpen(true)}
             />
           </div>
           <div className="session-list">
@@ -747,9 +803,7 @@ export function ChatView(): React.ReactElement {
                         </>
                       );
                     })()}
-                    {/* 操作收进「⋮」菜单：管理项（导出/删除/归档）在会话管理页，
-                        左栏只留轻操作（重命名/置顶）——左栏是「切换」不是「管理」
-                        （session-management：管理职能解耦到 SessionsView） */}
+                     {/* 操作收进「⋮」菜单：切换与管理在同一会话上下文完成 */}
                     <span className="session-ops" onClick={(e) => e.stopPropagation()}>
                       <Dropdown
                         trigger={["click"]}
@@ -761,14 +815,20 @@ export function ChatView(): React.ReactElement {
                               icon: <PushpinOutlined />,
                               label: s.pinned ? t("chat.unpin") : t("chat.pin"),
                             },
+                            { key: "export", icon: <ExportOutlined />, label: t("chat.export") },
+                            { key: "archive", icon: <InboxOutlined />, label: t("sessions.archiveOne"), disabled: s.id === sessionId && running },
+                            { key: "delete", icon: <DeleteOutlined />, label: t("chat.delete"), danger: true, disabled: s.id === sessionId && running },
                             { type: "divider" },
-                            { key: "manage", icon: <UnorderedListOutlined />, label: t("chat.manageInSessions") },
+                            { key: "manage", icon: <UnorderedListOutlined />, label: t("chat.manageSessions") },
                           ],
                           onClick: ({ key, domEvent }) => {
                             domEvent.stopPropagation();
                             if (key === "rename") setRenaming({ id: s.id, title: s.title });
                             else if (key === "pin") void toggleSessionPin(s.id, !s.pinned);
-                            else if (key === "manage") useExm.getState().requestNav("sessions");
+                            else if (key === "export") void exportSession(s.id, s.title, "markdown");
+                            else if (key === "archive") void archiveSession(s.id, s.title);
+                            else if (key === "delete") deleteSession(s.id, s.title);
+                            else if (key === "manage") setSessionManagerOpen(true);
                           },
                         }}
                       >
@@ -822,6 +882,8 @@ export function ChatView(): React.ReactElement {
           <span className="console-sep" />
           <span className="readout console-mode"><span className="k">MODE</span> <span className="v">{target.mode === "single" ? "SOLO" : "GROUP"}</span></span>
           <span className="readout console-state"><span className="k">STATE</span> <span className={`v${running ? " v-live" : ""}`}>{running ? "RUNNING" : "IDLE"}</span></span>
+          <Button className="agent-work-trigger" size="small" type="text" icon={<DeploymentUnitOutlined />} disabled={!sessionId}
+            aria-label={t("agentWork.open" as never)} title={t("agentWork.open" as never)} onClick={() => setAgentWorkOpen(true)} />
 
           {usage && (
             <span className="readout console-usage">
@@ -1031,6 +1093,10 @@ export function ChatView(): React.ReactElement {
             />
           </Modal>
         )}
+        {sessionManagerOpen && <SessionManagementDrawer open onClose={() => setSessionManagerOpen(false)} />}
+        {agentWorkOpen && <AgentWorkDrawer open onClose={() => setAgentWorkOpen(false)} sessionId={sessionId}
+          sessionTitle={sessions.find((session) => session.id === sessionId)?.title ?? ""} running={running} graph={graph}
+          liveParts={liveParts} toolCalls={runToolCalls} messages={messages} timeline={timeline} agents={agents} targetLabel={orchLabel} />}
         {editing && (
           <Modal
             open

@@ -35,7 +35,7 @@ impl ToolGateway {
                 out.push((k.to_string(), v));
             }
         }
-        let base = self.workspace_root.join(".exmachina").join("sandbox");
+        let base = self.effective_root().join(".exmachina").join("sandbox");
         let home = base.join("home");
         let tmp = base.join("tmp");
         let _ = std::fs::create_dir_all(&home);
