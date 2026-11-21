@@ -1,6 +1,5 @@
 //! gateway/platform/routes —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
 
-
 use super::*;
 /// 平台能力路由（挂到 /api 下）
 pub fn routes() -> Router<AppState> {

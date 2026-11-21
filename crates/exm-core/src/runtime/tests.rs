@@ -1,11 +1,55 @@
 //! runtime 域测试（自 runtime.rs 迁出，纯搬移；各测试 mod 原样保留）。
 
+#[path = "../../tests/support/agent_acceptance.rs"]
+mod acceptance_fixture;
+
 use crate::provider::{ChatRequest, LlmProvider, StreamDelta};
-use crate::runtime::{resolve_max_steps, AgentRuntime};
 use crate::registry::LocalRegistry;
+use crate::runtime::{resolve_max_steps, AgentRuntime};
 use crate::tools::ToolGateway;
 use crate::types::{AgentDefinition, DispatchOrder, ToolScope};
 use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shared_acceptance_fixture_isolates_and_reaps_processes() {
+    let fixture = acceptance_fixture::IsolatedProject::new("shared-process");
+    assert!(fixture.project().starts_with(fixture.root()));
+    assert!(fixture.exec_home().starts_with(fixture.root()));
+    assert!(fixture.bound_project().starts_with(fixture.exec_home()));
+    assert!(fixture.outside().starts_with(fixture.root()));
+    assert!(fixture.oracle().starts_with(fixture.root()));
+    std::fs::write(fixture.oracle().join("expected.txt"), "oracle-only").unwrap();
+
+    let output = fixture
+        .spawn_process("sh", &["-c", "printf 'process-fixture-ok\\n'; pwd"])
+        .await
+        .unwrap()
+        .wait_output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("process-fixture-ok"));
+    assert!(stdout.contains(&fixture.project().display().to_string()));
+
+    let mut sleeper = fixture
+        .spawn_process("sh", &["-c", "exec sleep 30"])
+        .await
+        .unwrap();
+    let pid = sleeper.id().expect("running process fixture has a pid");
+    sleeper.terminate().await.unwrap();
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        !alive.success(),
+        "terminated fixture process must be reaped"
+    );
+}
 
 // ---------------------------------------------------------------- 派发时限测试
 
@@ -30,7 +74,9 @@ mod timeout_tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for FinishOnBudgetProvider {
-        fn name(&self) -> &'static str { "finish-on-budget" }
+        fn name(&self) -> &'static str {
+            "finish-on-budget"
+        }
 
         async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
             anyhow::bail!("test requires streaming")
@@ -46,7 +92,10 @@ mod timeout_tests {
                 return AlwaysToolProvider.stream(request, tx).await;
             }
             assert_eq!(call, 1, "only one report-only completion is allowed");
-            assert!(request.tools.is_empty(), "final report must not expose executable tools");
+            assert!(
+                request.tools.is_empty(),
+                "final report must not expose executable tools"
+            );
             assert!(request.messages.last().unwrap().content.contains("dry-run"));
             let text = serde_json::json!({
                 "sourceAgent":"untrusted", "taskNodeId":"untrusted", "status":"blocked",
@@ -54,9 +103,13 @@ mod timeout_tests {
                 "summary":"观看材料已取得；评论未发布", "evidence":[], "risks":[],
                 "blockers":[{"reason":"dry-run，未实际发布", "unblockCondition":"等待人工确认"}],
                 "confidence":0.8
-            }).to_string();
+            })
+            .to_string();
             let _ = tx.send(StreamDelta::Text(text.clone()));
-            Ok(ChatResponse { content:text, ..Default::default() })
+            Ok(ChatResponse {
+                content: text,
+                ..Default::default()
+            })
         }
     }
 
@@ -282,7 +335,11 @@ mod timeout_tests {
             )
             .await
             .expect("步数耗尽应降级回流而非失败");
-        assert_eq!(report.status, crate::types::SyncStatus::Blocked, "降级状态应为 blocked");
+        assert_eq!(
+            report.status,
+            crate::types::SyncStatus::Blocked,
+            "降级状态应为 blocked"
+        );
         assert!(
             report.summary.contains("步数预算耗尽"),
             "摘要应注明预算耗尽: {}",
@@ -311,43 +368,84 @@ mod timeout_tests {
             ("shots", "video__shots", "已抽取 6 帧画面"),
             ("act", "video__act", "[dry-run] 拟评论（未发送至平台）"),
         ] {
-            crate::round_trace::push_tool(&child, crate::round_trace::ToolCallRecord {
-                call_id:index.into(), agent_id:"timeout-agent".into(), tool:tool.into(),
-                args:serde_json::json!({"secret":"must-not-enter-report"}), ok:true,
-                duration_ms:1, summary:summary.into(),
-            });
+            crate::round_trace::push_tool(
+                &child,
+                crate::round_trace::ToolCallRecord {
+                    call_id: index.into(),
+                    agent_id: "timeout-agent".into(),
+                    tool: tool.into(),
+                    args: serde_json::json!({"secret":"must-not-enter-report"}),
+                    ok: true,
+                    duration_ms: 1,
+                    summary: summary.into(),
+                },
+            );
         }
         let chain = crate::provider::ModelChain {
             candidates: vec![(String::new(), Arc::new(AlwaysToolProvider), "m".into())],
             failover: Arc::new(FailoverState::default()),
         };
-        let report = rt.execute(&def_with(), &order, chain, &parent, &child, false, ToolScope::Computer, |_| {}).await.unwrap();
+        let report = rt
+            .execute(
+                &def_with(),
+                &order,
+                chain,
+                &parent,
+                &child,
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .unwrap();
         assert_eq!(report.status, crate::types::SyncStatus::Blocked);
-        assert!(!report.summary.contains("未留下工具调用记录"), "must read the dispatched child trace");
+        assert!(
+            !report.summary.contains("未留下工具调用记录"),
+            "must read the dispatched child trace"
+        );
         assert!(report.summary.contains("video__summary(ok)"));
         let serialized = serde_json::to_string(&report).unwrap();
         assert!(serialized.contains("已抽取 6 帧画面"));
         assert!(serialized.contains("[dry-run]"));
         assert!(serialized.contains("未发送至平台"));
         assert!(!serialized.contains("must-not-enter-report"));
-        assert!(report.evidence.iter().all(|item| item.reference.starts_with(&format!("session:{child}/tool:"))));
-        assert!(crate::round_trace::tool_count(&child) >= 3, "evidence snapshot must not drain child records");
+        assert!(report.evidence.iter().all(|item| item
+            .reference
+            .starts_with(&format!("session:{child}/tool:"))));
+        assert!(
+            crate::round_trace::tool_count(&child) >= 3,
+            "evidence snapshot must not drain child records"
+        );
         crate::round_trace::end(&parent);
         crate::round_trace::end(&child);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exhausted_tool_budget_allows_one_tools_free_report_without_replaying_tools() {
-        let provider = Arc::new(FinishOnBudgetProvider { calls:std::sync::atomic::AtomicUsize::new(0) });
+        let provider = Arc::new(FinishOnBudgetProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
         let rt = runtime_with(provider.clone());
         let mut order = order_with(60_000);
         order.constraints.max_steps = 1;
         let session = format!("budget-report-{}", uuid::Uuid::new_v4());
         let chain = crate::provider::ModelChain {
-            candidates:vec![(String::new(), provider.clone(), "m".into())],
-            failover:Arc::new(FailoverState::default()),
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
         };
-        let report = rt.execute(&def_with(), &order, chain, &session, &session, false, ToolScope::Computer, |_| {}).await.unwrap();
+        let report = rt
+            .execute(
+                &def_with(),
+                &order,
+                chain,
+                &session,
+                &session,
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .unwrap();
         assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(report.source_agent, "timeout-agent");
         assert_eq!(report.task_node_id, "T1");
@@ -365,11 +463,11 @@ mod timeout_tests {
 #[cfg(test)]
 mod tool_loop_tests {
     use super::*;
-    use parking_lot::Mutex;
     use crate::config::SecurityConfig;
     use crate::provider::{ChatResponse, FailoverState, ToolCall};
     use crate::types::{DispatchBoundary, DispatchConstraints, DispatchInput, SyncStatus};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// 脚本化 Provider：按调用次序回放固定的工具调用序列（模拟真实编码模型的作业轨迹）
     struct ScriptedProvider {
@@ -383,6 +481,288 @@ mod tool_loop_tests {
             ScriptedProvider {
                 step: AtomicUsize::new(0),
                 seen_roles: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    struct NativeImageProvider {
+        step: AtomicUsize,
+        saw_real_image: AtomicBool,
+        observed_image_count: AtomicUsize,
+        saw_ordered_tool_results: AtomicBool,
+        saw_nonvision_downgrade: AtomicBool,
+    }
+
+    struct TextImageProvider {
+        step: AtomicUsize,
+        saw_real_image: AtomicBool,
+        saw_nonvision_downgrade: AtomicBool,
+    }
+
+    struct LateToolProvider {
+        barrier: acceptance_fixture::FaultBarrier,
+    }
+
+    struct SteeringWriteProvider {
+        step: AtomicUsize,
+        root: std::path::PathBuf,
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        release: Arc<tokio::sync::Semaphore>,
+        saw_steering: AtomicBool,
+        saw_late_steering: AtomicBool,
+        saw_written_sentinel: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for LateToolProvider {
+        fn name(&self) -> &'static str {
+            "late-tool-fixture"
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("fixture uses streaming")
+        }
+
+        async fn stream(
+            &self,
+            _request: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.barrier.arrive_and_wait().await;
+            Ok(resp(
+                "",
+                vec![ToolCall {
+                    id: "late-write".into(),
+                    name: "filesystem".into(),
+                    arguments: serde_json::json!({
+                        "op": "write",
+                        "path": "must-not-exist.txt",
+                        "content": "late response"
+                    }),
+                }],
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for SteeringWriteProvider {
+        fn name(&self) -> &'static str {
+            "steering-write-fixture"
+        }
+
+        async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("fixture uses streaming")
+        }
+
+        async fn stream(
+            &self,
+            request: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            match self.step.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    self.entered.send(()).unwrap();
+                    self.release.acquire().await.unwrap().forget();
+                    #[cfg(unix)]
+                    let call = ToolCall {
+                        id: "write-sentinel".into(),
+                        name: "terminal".into(),
+                        arguments: serde_json::json!({
+                            "command": "sh steering-write.sh",
+                            "timeoutSecs": 10
+                        }),
+                    };
+                    #[cfg(not(unix))]
+                    let call = ToolCall {
+                        id: "write-sentinel".into(),
+                        name: "filesystem".into(),
+                        arguments: serde_json::json!({
+                            "op": "write",
+                            "path": "steering-sentinel.txt",
+                            "content": "safe-write"
+                        }),
+                    };
+                    Ok(resp("", vec![call]))
+                }
+                _ => {
+                    assert!(
+                        self.root.join("steering-sentinel.txt").is_file(),
+                        "写工具没有完成：{}",
+                        request
+                            .messages
+                            .iter()
+                            .rev()
+                            .take(2)
+                            .map(|message| message.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    self.saw_steering.store(
+                        request
+                            .messages
+                            .iter()
+                            .any(|message| message.content.contains("改成安全方向")),
+                        Ordering::SeqCst,
+                    );
+                    self.saw_written_sentinel.store(
+                        self.root.join("steering-sentinel.txt").is_file(),
+                        Ordering::SeqCst,
+                    );
+                    self.saw_late_steering.store(
+                        request
+                            .messages
+                            .iter()
+                            .any(|message| message.content.contains("写入中补充")),
+                        Ordering::SeqCst,
+                    );
+                    let report = serde_json::json!({
+                        "sourceAgent": "coding-agent",
+                        "taskNodeId": "T1",
+                        "status": "done",
+                        "statements": [{"tag": "报告", "text": "写入已完成", "evidenceLevel": "B"}],
+                        "summary": "写入完成后应用 steering",
+                        "evidence": [{"level": "B", "kind": "code", "ref": "steering-sentinel.txt"}],
+                        "risks": [],
+                        "confidence": 0.9
+                    });
+                    Ok(resp(&format!("```json\n{report}\n```"), vec![]))
+                }
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for NativeImageProvider {
+        fn name(&self) -> &'static str {
+            "native-image-fixture"
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("fixture uses streaming")
+        }
+
+        async fn stream(
+            &self,
+            request: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            let step = self.step.fetch_add(1, Ordering::SeqCst);
+            if step == 0 {
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .all(|message| message.images.is_empty()),
+                    "image fixture must not exist before the read tool runs"
+                );
+                return Ok(resp(
+                    "",
+                    vec![
+                        ToolCall {
+                            id: "image-read-a".into(),
+                            name: "read".into(),
+                            arguments: serde_json::json!({"path": "shot.png"}),
+                        },
+                        ToolCall {
+                            id: "image-read-b".into(),
+                            name: "read".into(),
+                            arguments: serde_json::json!({"path": "shot-two.png"}),
+                        },
+                    ],
+                ));
+            }
+            let image_messages: Vec<usize> = request
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| !message.images.is_empty())
+                .map(|(index, _)| index)
+                .collect();
+            let real_images = image_messages
+                .iter()
+                .flat_map(|index| request.messages[*index].images.iter())
+                .filter(|url| url.starts_with("data:image/png;base64,") && url.len() > 30)
+                .count();
+            self.observed_image_count
+                .store(real_images, Ordering::SeqCst);
+            if real_images > 0 {
+                self.saw_real_image.store(true, Ordering::SeqCst);
+            }
+            if image_messages.len() >= 2 {
+                let first_image = image_messages[0];
+                let tool_positions: Vec<usize> = request
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, message)| message.role == "tool")
+                    .map(|(index, _)| index)
+                    .collect();
+                if tool_positions.len() == 2
+                    && tool_positions.iter().all(|index| *index < first_image)
+                {
+                    self.saw_ordered_tool_results.store(true, Ordering::SeqCst);
+                }
+            }
+            if image_messages.is_empty()
+                && request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("不支持视觉输入能力"))
+            {
+                self.saw_nonvision_downgrade.store(true, Ordering::SeqCst);
+            }
+            let report = serde_json::json!({
+                "sourceAgent": "coding-agent",
+                "taskNodeId": "T1",
+                "status": "done",
+                "statements": [{"tag":"报告", "text":"已读取真实图片", "evidenceLevel":"B"}],
+                "summary": "图像已回灌",
+                "evidence": [{"level":"B", "kind":"doc", "ref":"shot.png"}],
+                "risks": [],
+                "confidence": 0.9
+            });
+            Ok(resp(&format!("```json\n{report}\n```"), vec![]))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TextImageProvider {
+        fn name(&self) -> &'static str {
+            "text-image-fixture"
+        }
+
+        async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("fixture uses streaming")
+        }
+
+        async fn stream(
+            &self,
+            request: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<ChatResponse> {
+            match self.step.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(resp(
+                    r#"{"tool":"read","args":{"path":"shot.png"}}"#,
+                    vec![],
+                )),
+                _ => {
+                    self.saw_real_image.store(
+                        request.messages.iter().any(|message| {
+                            message.images.iter().any(|url| {
+                                url.starts_with("data:image/png;base64,") && url.len() > 30
+                            })
+                        }),
+                        Ordering::SeqCst,
+                    );
+                    self.saw_nonvision_downgrade.store(
+                        request
+                            .messages
+                            .iter()
+                            .any(|message| message.content.contains("不支持视觉输入能力")),
+                        Ordering::SeqCst,
+                    );
+                    Ok(resp("文本协议图像回灌完成", vec![]))
+                }
             }
         }
     }
@@ -468,8 +848,11 @@ mod tool_loop_tests {
         }
     }
 
-    fn runtime_with_files(provider: Arc<dyn LlmProvider>) -> (AgentRuntime, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!("exm-loop-{}", uuid::Uuid::new_v4()));
+    fn runtime_with_files(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (AgentRuntime, acceptance_fixture::IsolatedProject) {
+        let fixture = acceptance_fixture::IsolatedProject::new("runtime-loop");
+        let base = fixture.project().to_path_buf();
         std::fs::create_dir_all(base.join("src")).unwrap();
         std::fs::write(base.join("src/app.rs"), "fn main() {}\n").unwrap();
         let reg_dir = base.join("entities");
@@ -510,7 +893,7 @@ mod tool_loop_tests {
         ));
         (
             AgentRuntime::new(registry, provider, tools, "test-model"),
-            base,
+            fixture,
         )
     }
 
@@ -552,7 +935,8 @@ mod tool_loop_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 原生工具循环_编码作业全链路() {
         let provider = Arc::new(ScriptedProvider::new());
-        let (rt, base) = runtime_with_files(provider.clone());
+        let (rt, fixture) = runtime_with_files(provider.clone());
+        let base = fixture.project();
         let def = coding_def();
         let order = coding_order(def.tools.clone());
         let chain = crate::provider::ModelChain {
@@ -593,6 +977,349 @@ mod tool_loop_tests {
             last.iter().any(|r| r == "assistant"),
             "应保留 assistant 工具调用记录"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 运行中_steering_不取消写工具并在安全检查点生效() {
+        let fixture = acceptance_fixture::IsolatedProject::new("steering-write");
+        let root = fixture.project().to_path_buf();
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(unix)]
+        std::fs::write(root.join("steering-write.sh"),
+            "printf started > steering-started.txt\nwhile [ ! -f steering-release.txt ]; do sleep 0.01; done\nprintf safe-write > steering-sentinel.txt\n").unwrap();
+        let reg_dir = root.join("entities");
+        std::fs::create_dir_all(reg_dir.join("groups/exmachina/prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            model_routing: None,
+            capabilities: None,
+            self_optimize: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(
+            reg_dir.join("group.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            reg_dir.join("groups/exmachina/prompts/coding-agent.md"),
+            "# 测试个体\n你是测试个体。",
+        )
+        .unwrap();
+        let registry = Arc::new(LocalRegistry::new(&reg_dir).unwrap());
+        let store = Arc::new(crate::store::Store::open(root.join("data")).unwrap());
+        let session = store.create_session("steering-write", "exmachina").unwrap();
+        let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let provider = Arc::new(SteeringWriteProvider {
+            step: AtomicUsize::new(0),
+            root: root.clone(),
+            entered,
+            release: release.clone(),
+            saw_steering: AtomicBool::new(false),
+            saw_late_steering: AtomicBool::new(false),
+            saw_written_sentinel: AtomicBool::new(false),
+        });
+        let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
+        let tools = Arc::new(ToolGateway::new(
+            &root,
+            store,
+            registry.clone(),
+            events,
+            SecurityConfig {
+                exec_approval: "risky".into(),
+                ..SecurityConfig::default()
+            },
+        ));
+        let rt = AgentRuntime::new(registry, provider.clone(), tools, "test-model");
+        let def = coding_def();
+        let order = coding_order(vec![
+            crate::types::ToolName::Filesystem,
+            crate::types::ToolName::Terminal,
+        ]);
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        crate::round_trace::begin(&session.id);
+        let run = tokio::spawn({
+            let provider_session_id = session.id.clone();
+            async move {
+                rt.execute(
+                    &def,
+                    &order,
+                    chain,
+                    &provider_session_id,
+                    &provider_session_id,
+                    false,
+                    ToolScope::Computer,
+                    |_| {},
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx.recv())
+            .await
+            .expect("模型请求应启动")
+            .expect("provider 通知应存在");
+        let steering = crate::round_trace::admit_steering(&session.id, "改成安全方向", || Ok(()))
+            .expect("运行中 steering 应立即被接收");
+        assert_eq!(steering.text, "改成安全方向");
+        assert!(!crate::round_trace::is_cancelled(&session.id));
+        release.add_permits(1);
+        #[cfg(unix)]
+        {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !root.join("steering-started.txt").is_file() {
+                    assert!(!run.is_finished(), "写工具应阻塞在安全终态前");
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("写工具应启动");
+            crate::round_trace::admit_steering(&session.id, "写入中补充：继续安全收束", || Ok(()))
+                .expect("工具执行期间仍应立即 admission");
+            assert!(!crate::round_trace::is_cancelled(&session.id));
+            assert!(!root.join("steering-sentinel.txt").exists());
+            assert!(!provider.saw_late_steering.load(Ordering::SeqCst));
+            std::fs::write(root.join("steering-release.txt"), "release").unwrap();
+        }
+        let report = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .expect("写工具应在释放后收束")
+            .unwrap()
+            .expect("写工具完成后应收束");
+        assert_eq!(report.status, SyncStatus::Done);
+        assert!(provider.saw_written_sentinel.load(Ordering::SeqCst));
+        assert!(provider.saw_steering.load(Ordering::SeqCst));
+        #[cfg(unix)]
+        assert!(provider.saw_late_steering.load(Ordering::SeqCst));
+        assert!(!crate::round_trace::is_cancelled(&session.id));
+        assert_eq!(
+            std::fs::read_to_string(root.join("steering-sentinel.txt")).unwrap(),
+            "safe-write"
+        );
+        crate::round_trace::end(&session.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 原生只读图像_下一次模型请求收到真实data_url() {
+        let provider = Arc::new(NativeImageProvider {
+            step: AtomicUsize::new(0),
+            saw_real_image: AtomicBool::new(false),
+            observed_image_count: AtomicUsize::new(0),
+            saw_ordered_tool_results: AtomicBool::new(false),
+            saw_nonvision_downgrade: AtomicBool::new(false),
+        });
+        let (rt, fixture) = runtime_with_files(provider.clone());
+        fixture.write_png("shot.png");
+        fixture.write_png("shot-two.png");
+        let def = coding_def();
+        let order = coding_order(def.tools.clone());
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt
+            .execute(
+                &def,
+                &order,
+                chain,
+                "sess-image-fixture",
+                "trace-image-fixture",
+                true,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .expect("原生图像工具循环应收束");
+        assert_eq!(report.status, SyncStatus::Done);
+        assert!(
+            provider.saw_real_image.load(Ordering::SeqCst),
+            "并发 read 返回的真实 PNG 必须出现在下一次模型请求中"
+        );
+        assert_eq!(
+            provider.observed_image_count.load(Ordering::SeqCst),
+            2,
+            "并发 read 的两张真实图片都必须回灌"
+        );
+        assert!(
+            provider.saw_ordered_tool_results.load(Ordering::SeqCst),
+            "同轮所有 tool 结果必须先于 user 图像回灌消息"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 原生只读图像_非视觉模型收到明确降级而非伪装观察() {
+        let provider = Arc::new(NativeImageProvider {
+            step: AtomicUsize::new(0),
+            saw_real_image: AtomicBool::new(false),
+            observed_image_count: AtomicUsize::new(0),
+            saw_ordered_tool_results: AtomicBool::new(false),
+            saw_nonvision_downgrade: AtomicBool::new(false),
+        });
+        let (rt, fixture) = runtime_with_files(provider.clone());
+        fixture.write_png("shot.png");
+        fixture.write_png("shot-two.png");
+        let def = coding_def();
+        let order = coding_order(def.tools.clone());
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let report = rt
+            .execute(
+                &def,
+                &order,
+                chain,
+                "sess-image-text-fixture",
+                "trace-image-text-fixture",
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .expect("非视觉图像工具循环应明确收束");
+        assert_eq!(report.status, SyncStatus::Done);
+        assert!(
+            provider.saw_nonvision_downgrade.load(Ordering::SeqCst),
+            "非视觉模型必须收到明确图像降级说明"
+        );
+        assert!(
+            !provider.saw_real_image.load(Ordering::SeqCst),
+            "非视觉模型不得收到伪造的图像输入"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 文本协议图像回灌_仍将真实图片传到下一轮() {
+        let provider = Arc::new(TextImageProvider {
+            step: AtomicUsize::new(0),
+            saw_real_image: AtomicBool::new(false),
+            saw_nonvision_downgrade: AtomicBool::new(false),
+        });
+        let (rt, fixture) = runtime_with_files(provider.clone());
+        fixture.write_png("shot.png");
+        let def = coding_def();
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let result = rt
+            .chat_execute(
+                &def,
+                "文本协议图像回灌测试".into(),
+                vec![],
+                "sess-text-image-fixture",
+                "trace-text-image-fixture",
+                chain,
+                true,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .expect("文本协议图像回灌应收束");
+        assert_eq!(result, "文本协议图像回灌完成");
+        assert!(
+            provider.saw_real_image.load(Ordering::SeqCst),
+            "文本协议工具路径也必须把真实图片传到下一轮模型请求"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 文本协议图像回灌_非视觉模型收到降级说明() {
+        let provider = Arc::new(TextImageProvider {
+            step: AtomicUsize::new(0),
+            saw_real_image: AtomicBool::new(false),
+            saw_nonvision_downgrade: AtomicBool::new(false),
+        });
+        let (rt, fixture) = runtime_with_files(provider.clone());
+        fixture.write_png("shot.png");
+        let def = coding_def();
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider.clone(), "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        let result = rt
+            .chat_execute(
+                &def,
+                "文本协议非视觉图像回灌测试".into(),
+                vec![],
+                "sess-text-image-text-fixture",
+                "trace-text-image-text-fixture",
+                chain,
+                false,
+                ToolScope::Computer,
+                |_| {},
+            )
+            .await
+            .expect("文本协议非视觉降级应收束");
+        assert_eq!(result, "文本协议图像回灌完成");
+        assert!(
+            provider.saw_nonvision_downgrade.load(Ordering::SeqCst),
+            "文本协议路径也必须给非视觉模型明确降级说明"
+        );
+        assert!(
+            !provider.saw_real_image.load(Ordering::SeqCst),
+            "文本协议非视觉模型不得收到图像输入"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 停止屏障_释放迟到模型响应后不执行写工具() {
+        let barrier = acceptance_fixture::FaultBarrier::new();
+        let provider = Arc::new(LateToolProvider {
+            barrier: barrier.clone(),
+        });
+        let (runtime, fixture) = runtime_with_files(provider.clone());
+        let runtime = Arc::new(runtime);
+        let session = format!("late-response-{}", uuid::Uuid::new_v4());
+        let trace = format!("late-response-evidence-{}", uuid::Uuid::new_v4());
+        let def = coding_def();
+        let order = coding_order(def.tools.clone());
+        let chain = crate::provider::ModelChain {
+            candidates: vec![(String::new(), provider, "m".into())],
+            failover: Arc::new(FailoverState::default()),
+        };
+        crate::round_trace::begin(&session);
+        let task_session = session.clone();
+        let task_trace = trace.clone();
+        let task = tokio::spawn(async move {
+            runtime
+                .execute(
+                    &def,
+                    &order,
+                    chain,
+                    &task_session,
+                    &task_trace,
+                    false,
+                    ToolScope::Computer,
+                    |_| {},
+                )
+                .await
+        });
+        barrier.wait_until_entered().await;
+        assert!(crate::round_trace::request_cancel(&session));
+        barrier.release();
+        let error = task
+            .await
+            .unwrap()
+            .expect_err("stopped round must not complete");
+        assert!(
+            error.to_string().contains("已被用户停止"),
+            "unexpected result: {error}"
+        );
+        assert!(
+            !fixture.project().join("must-not-exist.txt").exists(),
+            "late response tool call must be blocked before filesystem side effects"
+        );
+        crate::round_trace::end(&session);
     }
 
     /// 白名单外的工具调用必须被拒且不炸循环：模型拿到错误回灌后仍能继续收敛
@@ -637,7 +1364,7 @@ mod tool_loop_tests {
         let provider = Arc::new(RogueProvider {
             step: AtomicUsize::new(0),
         });
-        let (rt, _base) = runtime_with_files(provider.clone());
+        let (rt, _fixture) = runtime_with_files(provider.clone());
         let def = coding_def();
         let order = coding_order(def.tools.clone());
         let chain = crate::provider::ModelChain {
@@ -845,10 +1572,10 @@ mod soft_landing_tests {
 #[cfg(test)]
 mod search_discipline_tests {
     use super::*;
-    use parking_lot::Mutex;
     use crate::config::SearchConfig;
     use crate::provider::{ChatRequest, ChatResponse, StreamDelta};
     use crate::types::AgentDefinition;
+    use parking_lot::Mutex;
     use std::sync::Arc;
 
     /// 回声替身：记录看到的系统提示，直接产出终文本
@@ -913,13 +1640,24 @@ mod search_discipline_tests {
         .unwrap();
         let prompts_dir = reg_dir.join("groups").join("exmachina").join("prompts");
         std::fs::create_dir_all(&prompts_dir).unwrap();
-        std::fs::write(prompts_dir.join("watch-agent.md"), "# 观众代理\n你是观众代理。").unwrap();
+        std::fs::write(
+            prompts_dir.join("watch-agent.md"),
+            "# 观众代理\n你是观众代理。",
+        )
+        .unwrap();
         let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("临时注册表创建失败"));
-        let store = Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
+        let store =
+            Arc::new(crate::store::Store::open(base.join("data")).expect("临时存储创建失败"));
         let (events, _rx) = tokio::sync::broadcast::channel(64);
         let tools = Arc::new(
-            crate::tools::ToolGateway::new(&base, store, registry.clone(), events, Default::default())
-                .with_search(search),
+            crate::tools::ToolGateway::new(
+                &base,
+                store,
+                registry.clone(),
+                events,
+                Default::default(),
+            )
+            .with_search(search),
         );
         let rt = AgentRuntime::new(registry, provider, tools, "test-model");
         (rt, base)
@@ -948,14 +1686,26 @@ mod search_discipline_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 搜索就绪_系统提示含纪律() {
-        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
+        let probe = Arc::new(PromptProbeProvider {
+            seen: Mutex::new(String::new()),
+        });
         let (rt, base) = probe_rig(probe.clone(), tavily(true));
         let chain = crate::provider::ModelChain {
             candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
             failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
         };
         let _ = rt
-            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd1", "t", chain, false, ToolScope::Tools, |_d| {})
+            .chat_execute(
+                &def(),
+                "系统提示".into(),
+                vec![],
+                "s-sd1",
+                "t",
+                chain,
+                false,
+                ToolScope::Tools,
+                |_d| {},
+            )
             .await
             .unwrap();
         let seen = probe.seen.lock().clone();
@@ -966,14 +1716,26 @@ mod search_discipline_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 开关关闭_零注入() {
-        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
+        let probe = Arc::new(PromptProbeProvider {
+            seen: Mutex::new(String::new()),
+        });
         let (rt, base) = probe_rig(probe.clone(), tavily(false));
         let chain = crate::provider::ModelChain {
             candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
             failover: std::sync::Arc::new(crate::provider::FailoverState::default()),
         };
         let _ = rt
-            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd2", "t", chain, false, ToolScope::Tools, |_d| {})
+            .chat_execute(
+                &def(),
+                "系统提示".into(),
+                vec![],
+                "s-sd2",
+                "t",
+                chain,
+                false,
+                ToolScope::Tools,
+                |_d| {},
+            )
             .await
             .unwrap();
         let seen = probe.seen.lock().clone();
@@ -983,7 +1745,9 @@ mod search_discipline_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 仅聊天档_零注入() {
-        let probe = Arc::new(PromptProbeProvider { seen: Mutex::new(String::new()) });
+        let probe = Arc::new(PromptProbeProvider {
+            seen: Mutex::new(String::new()),
+        });
         let (rt, base) = probe_rig(probe.clone(), tavily(true));
         let chain = crate::provider::ModelChain {
             candidates: vec![("probe".into(), probe.clone(), "test-model".into())],
@@ -991,7 +1755,17 @@ mod search_discipline_tests {
         };
         // Chat 档无工具面：纪律无意义（web_search 不可达），不注入
         let _ = rt
-            .chat_execute(&def(), "系统提示".into(), vec![], "s-sd3", "t", chain, false, ToolScope::Chat, |_d| {})
+            .chat_execute(
+                &def(),
+                "系统提示".into(),
+                vec![],
+                "s-sd3",
+                "t",
+                chain,
+                false,
+                ToolScope::Chat,
+                |_d| {},
+            )
             .await
             .unwrap();
         let seen = probe.seen.lock().clone();
@@ -1008,7 +1782,9 @@ mod search_discipline_tests {
 mod report_rejected_tests {
     use crate::provider::{ChatRequest, ChatResponse, LlmProvider, StreamDelta};
     use crate::runtime::AgentRuntime;
-    use crate::types::{DispatchBoundary, DispatchConstraints, DispatchInput, DispatchOrder, ToolScope};
+    use crate::types::{
+        DispatchBoundary, DispatchConstraints, DispatchInput, DispatchOrder, ToolScope,
+    };
     use std::sync::Arc;
 
     /// 恒产「缺 taskNodeId」报告的替身（核心字段缺失 → 不可修复 → 连续失败）
@@ -1074,7 +1850,11 @@ mod report_rejected_tests {
         )
         .unwrap();
         std::fs::write(
-            reg_dir.join("groups").join("exmachina").join("prompts").join("timeout-agent.md"),
+            reg_dir
+                .join("groups")
+                .join("exmachina")
+                .join("prompts")
+                .join("timeout-agent.md"),
             "# 测试个体\n你是测试个体。",
         )
         .unwrap();
@@ -1088,7 +1868,12 @@ mod report_rejected_tests {
             events,
             crate::config::SecurityConfig::default(),
         ));
-        let rt = AgentRuntime::new(registry, Arc::new(InvalidReportProvider), tools, "test-model");
+        let rt = AgentRuntime::new(
+            registry,
+            Arc::new(InvalidReportProvider),
+            tools,
+            "test-model",
+        );
         (rt, store, base)
     }
 
@@ -1097,10 +1882,20 @@ mod report_rejected_tests {
             task_node_id: "T9".into(),
             objective: "失败可观测演练".into(),
             acceptance: vec![],
-            boundary: DispatchBoundary { in_scope: vec![], forbidden: vec![] },
-            inputs: vec![DispatchInput { ref_id: "user".into(), kind: "userInput".into(), summary: "演练".into() }],
+            boundary: DispatchBoundary {
+                in_scope: vec![],
+                forbidden: vec![],
+            },
+            inputs: vec![DispatchInput {
+                ref_id: "user".into(),
+                kind: "userInput".into(),
+                summary: "演练".into(),
+            }],
             tool_allowlist: vec![],
-            constraints: DispatchConstraints { max_steps: 6, timeout_ms: 600_000 },
+            constraints: DispatchConstraints {
+                max_steps: 6,
+                timeout_ms: 600_000,
+            },
             report_format: "SyncReport".into(),
             model_selection: None,
         }
@@ -1126,7 +1921,16 @@ mod report_rejected_tests {
             failover: Arc::new(crate::provider::FailoverState::default()),
         };
         let r = rt
-            .execute(&def, &order(), chain, "ses-rej", "ses-rej", false, ToolScope::Tools, |_| {})
+            .execute(
+                &def,
+                &order(),
+                chain,
+                "ses-rej",
+                "ses-rej",
+                false,
+                ToolScope::Tools,
+                |_| {},
+            )
             .await;
         let err = r.expect_err("核心字段缺失应连续失败判死");
         assert!(
@@ -1152,7 +1956,11 @@ mod report_rejected_tests {
                 payload["textLen"].as_u64().unwrap_or(0) > 0,
                 "原文长度在事件里: {payload}"
             );
-            assert_eq!(payload["attempt"].as_u64().unwrap_or(0), (i + 1) as u64, "attempt 递增");
+            assert_eq!(
+                payload["attempt"].as_u64().unwrap_or(0),
+                (i + 1) as u64,
+                "attempt 递增"
+            );
         }
         let _ = std::fs::remove_dir_all(&base);
     }

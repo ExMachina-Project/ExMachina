@@ -535,7 +535,10 @@ pub(crate) struct PartialLlm {
     model: Option<String>,
 }
 
-pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> impl IntoResponse {
+pub(crate) async fn put_config(
+    State(st): State<AppState>,
+    Json(body): Json<ConfigBody>,
+) -> impl IntoResponse {
     let current = st.core.config();
     let partial = body.llm.unwrap_or(PartialLlm {
         base_url: None,
@@ -673,11 +676,19 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
     let sanitize = sec.sanitize_rules.unwrap_or_default();
     let mut next = ExmConfig {
         compaction: exm_core::config::CompactionConfig {
-            trigger_ratio: compaction.trigger_ratio.filter(|v| (0.0..=0.95).contains(v))
+            trigger_ratio: compaction
+                .trigger_ratio
+                .filter(|v| (0.0..=0.95).contains(v))
                 .unwrap_or(current.compaction.trigger_ratio),
         },
-        knowledge_inject_top_k: knowledge.inject_top_k.unwrap_or(current.knowledge_inject_top_k).min(10),
-        knowledge_inject_max_chars: knowledge.inject_max_chars.unwrap_or(current.knowledge_inject_max_chars).clamp(100, 2000),
+        knowledge_inject_top_k: knowledge
+            .inject_top_k
+            .unwrap_or(current.knowledge_inject_top_k)
+            .min(10),
+        knowledge_inject_max_chars: knowledge
+            .inject_max_chars
+            .unwrap_or(current.knowledge_inject_max_chars)
+            .clamp(100, 2000),
         memory_auto_decay: mem.auto_decay.unwrap_or(current.memory_auto_decay),
         llm: LlmConfig {
             base_url: partial
@@ -904,9 +915,7 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                     .filter(|p| ["daily", "weekly", "monthly"].contains(&p.as_str()))
                     .unwrap_or_else(|| current.limits.quota_period.clone()),
                 quota_tokens: l.quota_tokens.unwrap_or(current.limits.quota_tokens),
-                quota_requests: l
-                    .quota_requests
-                    .unwrap_or(current.limits.quota_requests),
+                quota_requests: l.quota_requests.unwrap_or(current.limits.quota_requests),
                 quota_running_policy: l
                     .quota_running_policy
                     .filter(|p| ["finish", "interrupt"].contains(&p.as_str()))
@@ -955,7 +964,11 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
                 http_path: {
                     let p = m.http_path.unwrap_or_else(|| cur.http_path.clone());
                     let p = p.trim().to_string();
-                    if p.is_empty() { "/mcp".to_string() } else { p }
+                    if p.is_empty() {
+                        "/mcp".to_string()
+                    } else {
+                        p
+                    }
                 },
                 allowed_groups: to_hook_list(m.allowed_groups).unwrap_or(cur.allowed_groups),
                 allowed_sessions: cur.allowed_sessions,
@@ -988,7 +1001,8 @@ pub(crate) async fn put_config(State(st): State<AppState>, Json(body): Json<Conf
     {
         let profile_pool_was_empty = slot.api_keys.iter().all(|k| k.trim().is_empty());
         let mut runtime_pool = next.llm.api_keys.clone();
-        if profile_pool_was_empty && runtime_pool.len() == 1 && runtime_pool[0] == next.llm.api_key {
+        if profile_pool_was_empty && runtime_pool.len() == 1 && runtime_pool[0] == next.llm.api_key
+        {
             // 运行时池只是主 Key 补位：档案池保持空（激活/加载时会再补位，不丢功能）
             runtime_pool.clear();
         }

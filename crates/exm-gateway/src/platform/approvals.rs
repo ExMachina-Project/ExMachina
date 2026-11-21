@@ -2,7 +2,6 @@
 
 // ---------------------------------------------------------------- 执行审批
 
-
 use super::*;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,14 +23,27 @@ pub async fn list_approvals(
             Ok(root) => root,
             Err(response) => return response,
         };
-        st.core.approval_list(q.status.as_deref(), 1000).map(|items| {
-            items.into_iter().filter(|item| st.core.approval_workspace(item).ok().flatten().as_deref() == root.to_str()).take(limit).collect::<Vec<_>>()
-        })
+        st.core
+            .approval_list(q.status.as_deref(), 1000)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter(|item| {
+                        st.core.approval_workspace(item).ok().flatten().as_deref() == root.to_str()
+                    })
+                    .take(limit)
+                    .collect::<Vec<_>>()
+            })
     } else {
-        st.core.approval_list(q.status.as_deref(), 1000).map(|items| {
-            items.into_iter().filter(|item| st.core.approval_workspace(item).ok().flatten().is_none())
-                .take(limit).collect()
-        })
+        st.core
+            .approval_list(q.status.as_deref(), 1000)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter(|item| st.core.approval_workspace(item).ok().flatten().is_none())
+                    .take(limit)
+                    .collect()
+            })
     };
     match result {
         Ok(items) => Json(serde_json::to_value(items).unwrap_or(Value::Null)).into_response(),
@@ -52,18 +64,19 @@ pub async fn approve_request(
     let scope = body
         .and_then(|Json(b)| b.scope)
         .unwrap_or_else(|| "once".to_string());
-    let decision = match scope.as_str() {
-        "session" => exm_core::types::ApprovalScope::Session,
-        "allowlist" => exm_core::types::ApprovalScope::Allowlist,
-        "once" => exm_core::types::ApprovalScope::Once { approve: true },
-        other => {
-            return (
+    let decision =
+        match scope.as_str() {
+            "session" => exm_core::types::ApprovalScope::Session,
+            "allowlist" => exm_core::types::ApprovalScope::Allowlist,
+            "once" => exm_core::types::ApprovalScope::Once { approve: true },
+            other => return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": format!("未知档位: {other}（可选 once/session/allowlist）") })),
+                Json(
+                    json!({ "error": format!("未知档位: {other}（可选 once/session/allowlist）") }),
+                ),
             )
-                .into_response()
-        }
-    };
+                .into_response(),
+        };
     match st.core.approval_decide_scoped(&id, decision).await {
         Ok(r) => Json(serde_json::to_value(r).unwrap_or(Value::Null)).into_response(),
         Err(e) => (

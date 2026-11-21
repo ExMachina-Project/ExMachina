@@ -71,15 +71,11 @@ where
     // 发言权接管（latest-wins）：spawn 前登记（顺序即创建顺序），
     // 本任务成为该会话当前唯一发言人；旧任务自此静默。
     let my_seq = next_reply_seq();
-    reply_ledger()
-        .lock()
-        .insert(run.session_id.clone(), my_seq);
+    reply_ledger().lock().insert(run.session_id.clone(), my_seq);
     tokio::spawn(async move {
         let mut rx = rx;
         let sid = run.session_id.clone();
-        let is_speaker = || {
-            reply_ledger().lock().get(&sid).copied() == Some(my_seq)
-        };
+        let is_speaker = || reply_ledger().lock().get(&sid).copied() == Some(my_seq);
         // round_done 兜底（见模块注释）：无收束事件的异常路径下防悬挂
         let round_done = || run.round_done.load(std::sync::atomic::Ordering::Acquire);
         // 收流容错（竞态 P1-4）：Lagged = 广播环溢出丢了一批旧事件，新事件仍在
@@ -214,7 +210,11 @@ where
                 // 审批/计划推送还共享同一额度——qqbot 单独收紧防后段静默失败。
                 let segments = split_reply(&text, max_chars);
                 let total = segments.len();
-                let max_segments = if run.kind == "qqbot" { 4 } else { MAX_REPLY_SEGMENTS };
+                let max_segments = if run.kind == "qqbot" {
+                    4
+                } else {
+                    MAX_REPLY_SEGMENTS
+                };
                 if total <= max_segments {
                     for (i, seg) in segments.into_iter().enumerate() {
                         // 产物注记并入最后一段（文本主体保持整洁）
@@ -230,7 +230,12 @@ where
                         send(seg).await;
                     }
                     let mut note = media_notes.join("\n");
-                    note.truncate(note.char_indices().nth(200).map(|(i, _)| i).unwrap_or(note.len()));
+                    note.truncate(
+                        note.char_indices()
+                            .nth(200)
+                            .map(|(i, _)| i)
+                            .unwrap_or(note.len()),
+                    );
                     send(format!(
                         "（内容过长已截断，略去末尾 {capped} 段；完整回复见工作台会话记录）\n{note}"
                     ))

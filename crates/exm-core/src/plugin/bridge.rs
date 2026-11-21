@@ -869,6 +869,10 @@ impl ProcessPluginProvider {
 }
 
 impl crate::plugin::ToolProvider for ProcessPluginProvider {
+    fn ready(&self) -> bool {
+        self.supervisor.state() == PluginState::Running
+    }
+
     fn tool_specs(&self) -> Vec<crate::config::CustomTool> {
         self.snapshot
             .iter()
@@ -894,6 +898,7 @@ impl crate::plugin::ToolProvider for ProcessPluginProvider {
                     .map(|(_, t)| t)
                     .unwrap_or(tool.clone());
                 let r = sup.call_tool(&bare, args).await?;
+                anyhow::ensure!(!r.is_error, "插件工具返回执行失败");
                 Ok(r.text())
             })
         })
@@ -922,6 +927,10 @@ struct ProcessToolsView {
 }
 
 impl crate::plugin::ToolProvider for ProcessToolsView {
+    fn ready(&self) -> bool {
+        self.supervisor.state() == PluginState::Running
+    }
+
     fn tool_specs(&self) -> Vec<crate::config::CustomTool> {
         self.snapshot
             .iter()
@@ -947,6 +956,7 @@ impl crate::plugin::ToolProvider for ProcessToolsView {
                     .map(|(_, t)| t)
                     .unwrap_or(tool.clone());
                 let r = sup.call_tool(&bare, args).await?;
+                anyhow::ensure!(!r.is_error, "插件工具返回执行失败");
                 Ok(r.text())
             })
         })

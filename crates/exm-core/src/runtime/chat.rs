@@ -3,6 +3,48 @@
 use super::*;
 
 impl AgentRuntime {
+    /// 在模型/工具循环的安全检查点把已接收的 steering 追加到当前上下文。
+    /// 调用点位于下一次模型请求之前，或当前无工具调用的候选回复被收束之前；
+    /// 不会取消正在执行的工具动作。
+    pub(crate) fn apply_pending_steering(
+        &self,
+        session_id: &str,
+        messages: &mut Vec<ChatMessage>,
+    ) -> bool {
+        let pending = crate::round_trace::take_steering(session_id);
+        self.append_steering_inputs(session_id, messages, pending)
+    }
+
+    fn append_steering_inputs(
+        &self,
+        session_id: &str,
+        messages: &mut Vec<ChatMessage>,
+        pending: Vec<crate::round_trace::SteeringInput>,
+    ) -> bool {
+        if pending.is_empty() {
+            return false;
+        }
+        let ids: Vec<String> = pending.iter().map(|input| input.id.clone()).collect();
+        let body = pending
+            .iter()
+            .map(|input| format!("#{}：{}", input.sequence, input.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        messages.push(ChatMessage::user(format!(
+            "【运行中 steering｜已到安全检查点】当前轮次的既有工具动作已继续完成。以下是用户在运行期间补充的方向，请把它作为当前任务的最新约束处理；不要把接收 steering 当作任务已经完成，也不要撤销已经完成的安全写入。\n{body}"
+        )));
+        self.tools.emit_and_persist(crate::types::CoreEvent {
+            kind: "steering.applied".into(),
+            session_id: session_id.to_string(),
+            payload: serde_json::json!({
+                "status": "steering_applied",
+                "steeringIds": ids,
+                "count": pending.len(),
+            }),
+        });
+        true
+    }
+
     /// 执行一个节点，产出 SyncReport。
     /// `chain` = 按个体/组默认模型展开的回退候选链（含全局档案兜底）。
     /// `on_delta` 用于把流式增量推给渠道（正文 / 思维链分轨）。
@@ -64,8 +106,16 @@ impl AgentRuntime {
             self.tools.search_ready(),
             self.tools.browser_ready(),
             self.tools.computer_ready(),
-            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::Speech,self.tools.speech_ready()),
-            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::ImageGen,self.tools.image_gen_ready()),
+            self.tools.agent_purpose_ready(
+                def,
+                crate::model_routing::ModelPurpose::Speech,
+                self.tools.speech_ready(),
+            ),
+            self.tools.agent_purpose_ready(
+                def,
+                crate::model_routing::ModelPurpose::ImageGen,
+                self.tools.image_gen_ready(),
+            ),
             self.tools.chart_ready(),
             self.tools.memory_deep(),
         );
@@ -111,6 +161,7 @@ impl AgentRuntime {
             if crate::round_trace::is_cancelled(session_id) {
                 anyhow::bail!("本轮已被用户停止");
             }
+            self.apply_pending_steering(session_id, &mut messages);
             // 临近预算耗尽的强提醒（unit-step-budget）：还剩 2 轮时注入收束通牒——
             // 模型常把步数当「软提示」无限探索，不点名剩余量就会一路烧到底。
             // 注入一次即可（重复注入徒增上下文）。
@@ -166,6 +217,26 @@ impl AgentRuntime {
             usage_completion += usage.1;
             last_model = used_model;
 
+            // Dispatch execution uses a separate evidence trace. Re-check the
+            // root/session cancellation token after the provider returns and
+            // before a late native tool call can produce any side effect.
+            if crate::round_trace::is_cancelled(session_id) {
+                self.tools
+                    .record_usage(session_id, usage_prompt, usage_completion, &last_model);
+                anyhow::bail!("本轮已被用户停止");
+            }
+
+            // 本次模型请求期间到达的引导，在当前 tool batch 完成后、解析最终
+            // SyncReport 前注入，确保已经开始的写动作不会被普通消息取消。
+            if calls.is_empty() {
+                let pending = crate::round_trace::take_steering(session_id);
+                if !pending.is_empty() {
+                    messages.push(ChatMessage::assistant(text));
+                    self.append_steering_inputs(session_id, &mut messages, pending);
+                    continue;
+                }
+            }
+
             // 1a) 原生 function calling：协议级工具调用
             //     只读工具（read/grep/glob/web_fetch/web_search）并发执行；写工具按原顺序串行
             if !calls.is_empty() {
@@ -182,17 +253,25 @@ impl AgentRuntime {
                         scope,
                     )
                     .await;
+                let mut image_feedback = Vec::new();
                 for (c, (feedback, images)) in calls.iter().zip(feedbacks) {
                     let mut msg = ChatMessage::tool_result(&c.id, feedback);
                     msg.name = Some(c.name.clone());
                     messages.push(msg);
-                    // 视觉回灌：截图以 user 消息附带（OpenAI 兼容端点不支持 tool 消息带图）
                     if let Some((note, data_urls)) = images {
-                        let mut um = ChatMessage::user(note);
-                        um.images = data_urls;
-                        messages.push(um);
+                        image_feedback.push((note, data_urls));
                     }
                 }
+                // 视觉回灌：截图以 user 消息附带（OpenAI 兼容端点不支持 tool 消息带图）。
+                // 同轮并发调用必须先完成全部 tool/result 配对，再追加图片消息；否则
+                // 一个 tool 结果与另一个 tool 结果之间插入 user 消息，部分 provider 会
+                // 拒绝该 assistant tool-call 批次或把后续结果错配。
+                for (note, data_urls) in image_feedback {
+                    let mut um = ChatMessage::user(note);
+                    um.images = data_urls;
+                    messages.push(um);
+                }
+                self.apply_pending_steering(session_id, &mut messages);
                 continue;
             }
 
@@ -215,15 +294,14 @@ impl AgentRuntime {
                             )
                         };
                         messages.push(ChatMessage::user(feedback));
-                        if attach_images {
-                            if let Some((note, data_urls)) =
-                                self.image_note(tool.key(), &result.images)
-                            {
-                                let mut um = ChatMessage::user(note);
-                                um.images = data_urls;
-                                messages.push(um);
-                            }
+                        if let Some((note, data_urls)) =
+                            self.image_feedback(tool.key(), &result.images, attach_images)
+                        {
+                            let mut um = ChatMessage::user(note);
+                            um.images = data_urls;
+                            messages.push(um);
                         }
+                        self.apply_pending_steering(session_id, &mut messages);
                         continue;
                     }
                 }
@@ -370,10 +448,26 @@ impl AgentRuntime {
         })
     }
 
-    /// 截图回灌材料：读文件 → data URL；不可读时返回 None
-    pub(crate) fn image_note(&self, tool: &str, images: &[String]) -> Option<(String, Vec<String>)> {
+    /// 图像工具结果回灌材料：视觉模型读取为 data URL；非视觉模型得到明确降级，
+    /// 不把“文件已生成”伪装成“模型已经看过”。
+    pub(crate) fn image_feedback(
+        &self,
+        tool: &str,
+        images: &[String],
+        attach_images: bool,
+    ) -> Option<(String, Vec<String>)> {
         if images.is_empty() {
             return None;
+        }
+        if !attach_images {
+            return Some((
+                format!(
+                    "【图像降级】工具 {tool} 生成了 {} 个图像产物，但当前模型不支持视觉输入能力（未声明视觉输入能力）；系统未将图像内容伪装成已观察。图像路径：{}",
+                    images.len(),
+                    images.join("、")
+                ),
+                Vec::new(),
+            ));
         }
         let mut data_urls = Vec::new();
         for p in images {
@@ -382,11 +476,18 @@ impl AgentRuntime {
             }
         }
         if data_urls.is_empty() {
-            return None;
+            return Some((
+                format!(
+                    "【图像回灌失败】工具 {tool} 返回了图像产物，但当前工作区内无法读取有效图像文件：{}",
+                    images.join("、")
+                ),
+                Vec::new(),
+            ));
         }
         Some((
             format!(
-                "【附图】以下是工具 {tool} 的执行截图（已作为图像附带）。请直接观察画面内容并决定下一步。"
+                "【附图】以下是工具 {tool} 的执行图像（共 {} 张，已作为图像附带）。请直接观察画面内容并决定下一步。",
+                data_urls.len()
             ),
             data_urls,
         ))
@@ -466,8 +567,16 @@ impl AgentRuntime {
             self.tools.search_ready(),
             self.tools.browser_ready(),
             self.tools.computer_ready(),
-            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::Speech,self.tools.speech_ready()),
-            self.tools.agent_purpose_ready(def,crate::model_routing::ModelPurpose::ImageGen,self.tools.image_gen_ready()),
+            self.tools.agent_purpose_ready(
+                def,
+                crate::model_routing::ModelPurpose::Speech,
+                self.tools.speech_ready(),
+            ),
+            self.tools.agent_purpose_ready(
+                def,
+                crate::model_routing::ModelPurpose::ImageGen,
+                self.tools.image_gen_ready(),
+            ),
             self.tools.chart_ready(),
             self.tools.memory_deep(),
         );
@@ -500,15 +609,25 @@ impl AgentRuntime {
             if crate::round_trace::is_cancelled(session_id) {
                 anyhow::bail!("本轮已被用户停止");
             }
+            self.apply_pending_steering(session_id, &mut messages);
             let (text, calls, usage, used_model) = self
-                .call_llm(session_id, &messages, &agent_hint, &chain, &specs, None, &mut on_delta)
+                .call_llm(
+                    session_id,
+                    &messages,
+                    &agent_hint,
+                    &chain,
+                    &specs,
+                    None,
+                    &mut on_delta,
+                )
                 .await?;
             usage_prompt += usage.0;
             usage_completion += usage.1;
             let last_model = used_model;
 
             if crate::round_trace::is_cancelled(session_id) {
-                self.tools.record_usage(session_id, usage_prompt, usage_completion, &last_model);
+                self.tools
+                    .record_usage(session_id, usage_prompt, usage_completion, &last_model);
                 anyhow::bail!("本轮已被用户停止");
             }
 
@@ -530,15 +649,19 @@ impl AgentRuntime {
                         scope,
                     )
                     .await;
+                let mut image_feedback = Vec::new();
                 for (c, (feedback, images)) in calls.iter().zip(feedbacks) {
                     let mut msg = ChatMessage::tool_result(&c.id, feedback);
                     msg.name = Some(c.name.clone());
                     messages.push(msg);
                     if let Some((note, data_urls)) = images {
-                        let mut um = ChatMessage::user(note);
-                        um.images = data_urls;
-                        messages.push(um);
+                        image_feedback.push((note, data_urls));
                     }
+                }
+                for (note, data_urls) in image_feedback {
+                    let mut um = ChatMessage::user(note);
+                    um.images = data_urls;
+                    messages.push(um);
                 }
                 continue;
             }
@@ -563,14 +686,12 @@ impl AgentRuntime {
                             )
                         };
                         messages.push(ChatMessage::user(feedback));
-                        if attach_images {
-                            if let Some((note, data_urls)) =
-                                self.image_note(tool.key(), &result.images)
-                            {
-                                let mut um = ChatMessage::user(note);
-                                um.images = data_urls;
-                                messages.push(um);
-                            }
+                        if let Some((note, data_urls)) =
+                            self.image_feedback(tool.key(), &result.images, attach_images)
+                        {
+                            let mut um = ChatMessage::user(note);
+                            um.images = data_urls;
+                            messages.push(um);
                         }
                         // 元认知反思钩子（实验性 metaAgent）：连续失败 ≥2 时触发一次
                         // 反思调用（策略 JSON 注入后续循环;失败静默降级 continue）
@@ -594,6 +715,14 @@ impl AgentRuntime {
             }
 
             // 无工具调用 = 最终回复
+            // steering 可能在本次模型等待期间到达；在把候选文本作为最终回复前
+            // 再检查一次，避免迟到输入被静默丢在当前轮次之后。
+            let pending = crate::round_trace::take_or_close_steering(session_id);
+            if !pending.is_empty() {
+                messages.push(ChatMessage::assistant(text));
+                self.append_steering_inputs(session_id, &mut messages, pending);
+                continue;
+            }
             self.tools
                 .record_usage(session_id, usage_prompt, usage_completion, &last_model);
             return Ok(text);
@@ -604,27 +733,50 @@ impl AgentRuntime {
         let wrap_note = ChatMessage::user(
             "【系统提示】工具调用步数预算已用完。不要再调用任何工具，直接基于已获取的材料给出最终结论。",
         );
+        self.apply_pending_steering(session_id, &mut messages);
         messages.push(wrap_note);
-        let (text, _calls, usage, used_model) = self
-            .call_llm(session_id, &messages, &agent_hint, &chain, &[], None, &mut on_delta)
-            .await?;
-        usage_prompt += usage.0;
-        usage_completion += usage.1;
-        let last_model=used_model;
-        self.tools
-            .record_usage(session_id, usage_prompt, usage_completion, &last_model);
-        if !text.trim().is_empty() {
-            return Ok(text);
-        }
-        anyhow::bail!(
-            "个体 {} 已达最大工具步数 {max_steps} 仍未产出最终回复；已完成的工具调用：{}",
-            def.identifier,
-            if done_tools.is_empty() {
-                "（无）".to_string()
-            } else {
-                done_tools.join("、")
+        for _ in 0..=32 {
+            if crate::round_trace::is_cancelled(session_id) {
+                anyhow::bail!("本轮已被用户停止");
             }
-        )
+            let (text, _calls, usage, last_model) = self
+                .call_llm(
+                    session_id,
+                    &messages,
+                    &agent_hint,
+                    &chain,
+                    &[],
+                    None,
+                    &mut on_delta,
+                )
+                .await?;
+            usage_prompt += usage.0;
+            usage_completion += usage.1;
+            let pending = crate::round_trace::take_or_close_steering(session_id);
+            if !pending.is_empty() {
+                messages.push(ChatMessage::assistant(text));
+                self.append_steering_inputs(session_id, &mut messages, pending);
+                messages.push(ChatMessage::user(
+                    "【系统提示】工具调用步数预算已用完。不要再调用工具，直接给出最终结论。",
+                ));
+                continue;
+            }
+            self.tools
+                .record_usage(session_id, usage_prompt, usage_completion, &last_model);
+            if !text.trim().is_empty() {
+                return Ok(text);
+            }
+            anyhow::bail!(
+                "个体 {} 已达最大工具步数 {max_steps} 仍未产出最终回复；已完成的工具调用：{}",
+                def.identifier,
+                if done_tools.is_empty() {
+                    "（无）".to_string()
+                } else {
+                    done_tools.join("、")
+                }
+            )
+        }
+        anyhow::bail!("本轮 steering 输入过于频繁，已达到安全收束上限")
     }
 
     /// 元认知反思（实验性 metaAgent）：连续失败触发的单次非流式调用,
@@ -636,7 +788,15 @@ impl AgentRuntime {
         done_tools: &[String],
     ) -> Option<String> {
         let trace = crate::round_trace::snapshot_tool_trace(session_id);
-        let (provider,model)=self.tools.agent_aux_model(crate::model_routing::ModelPurpose::Review,"工具连续失败后的策略检查",Some((self.provider.clone(),self.model.clone()))).await.ok()?;
+        let (provider, model) = self
+            .tools
+            .agent_aux_model(
+                crate::model_routing::ModelPurpose::Review,
+                "工具连续失败后的策略检查",
+                Some((self.provider.clone(), self.model.clone())),
+            )
+            .await
+            .ok()?;
         let req = crate::provider::ChatRequest::new(
             model,
             vec![
@@ -660,9 +820,13 @@ impl AgentRuntime {
             .unwrap_or("")
             .to_string();
         let hint = match strategy.as_str() {
-            "replan" => "【元认知】连续失败提示当前分解方式可能有误:请重新审视任务分解,换一条更稳的路径。",
+            "replan" => {
+                "【元认知】连续失败提示当前分解方式可能有误:请重新审视任务分解,换一条更稳的路径。"
+            }
             "redirect" => "【元认知】连续失败提示该工具/路径不通:请更换工具或调整调用方式。",
-            "compact" => "【元认知】上下文可能已混入大量失败噪声:请先理清已知有效信息,基于确定的事实继续。",
+            "compact" => {
+                "【元认知】上下文可能已混入大量失败噪声:请先理清已知有效信息,基于确定的事实继续。"
+            }
             _ => return None, // continue = 不注入
         };
         let _ = self.tools.events.send(crate::types::CoreEvent {
@@ -674,7 +838,6 @@ impl AgentRuntime {
         });
         Some(format!("{hint}（{note}）"))
     }
-
 }
 
 /// 从校验错误串提取首个失败字段（report.rejected 事件的 field 值）：

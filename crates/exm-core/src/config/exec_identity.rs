@@ -8,7 +8,10 @@ use super::*;
 /// - 用户名 → getpwuid 体系查询 uid/gid/home；查不到 → Err（显式失败,不静默降级回原身份——那等于假安全）
 /// - execHome 非空必须绝对路径（/ 开头）,否则 Err
 #[cfg(unix)]
-pub fn resolve_exec_identity(exec_user: &str, exec_home: &str) -> Result<Option<ExecIdentity>, String> {
+pub fn resolve_exec_identity(
+    exec_user: &str,
+    exec_home: &str,
+) -> Result<Option<ExecIdentity>, String> {
     let user = exec_user.trim();
     if user.is_empty() {
         return Ok(None);
@@ -24,16 +27,25 @@ pub fn resolve_exec_identity(exec_user: &str, exec_home: &str) -> Result<Option<
         } else {
             home_override.to_string()
         };
-        return Ok(Some(ExecIdentity { uid, gid: uid, home }));
+        return Ok(Some(ExecIdentity {
+            uid,
+            gid: uid,
+            home,
+        }));
     }
-    // 用户名:经 getent 查询(免 libc getpwnam 依赖,结果含 uid:gid:home)
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("getent passwd {user} 2>/dev/null"))
+    // 用户名:经 getent 查询(免 libc getpwnam 依赖,结果含 uid:gid:home)。
+    // 使用 argv 传参，不把配置值拼进 shell，避免执行身份配置变成命令注入面。
+    let out = std::process::Command::new("getent")
+        .arg("passwd")
+        .arg(user)
         .output();
     let parsed = match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return Err(format!("约束用户不存在或不可查: {user}(getent passwd 无结果)")),
+        _ => {
+            return Err(format!(
+                "约束用户不存在或不可查: {user}(getent passwd 无结果)"
+            ))
+        }
     };
     // passwd 格式:name:passwd:uid:gid:gecos:home:shell
     let fields: Vec<&str> = parsed.split(':').collect();
@@ -56,7 +68,9 @@ pub fn resolve_exec_identity(exec_user: &str, exec_home: &str) -> Result<Option<
 
 /// 非 Unix 平台:execUser 配置无效化(None)——Windows 无 uid 语义
 #[cfg(not(unix))]
-pub fn resolve_exec_identity(_exec_user: &str, _exec_home: &str) -> Result<Option<ExecIdentity>, String> {
+pub fn resolve_exec_identity(
+    _exec_user: &str,
+    _exec_home: &str,
+) -> Result<Option<ExecIdentity>, String> {
     Ok(None)
 }
-

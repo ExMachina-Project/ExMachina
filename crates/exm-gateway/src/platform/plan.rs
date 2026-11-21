@@ -1,6 +1,5 @@
 //! gateway/platform/plan —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
 
-
 use super::*;
 /// 计划清单（GET /api/sessions/:id/plan）：当前条目 + 模式位
 pub async fn plan_list(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {

@@ -127,7 +127,10 @@ mod cron_notify_tests {
                 let c = c2.clone();
                 async move {
                     if c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string())
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            "boom".to_string(),
+                        )
                     } else {
                         (axum::http::StatusCode::OK, body)
                     }
@@ -166,8 +169,7 @@ mod cron_notify_tests {
         // 审计事件必达：含通道目标与原因摘要
         let mut found = None;
         for _ in 0..20 {
-            match tokio::time::timeout(std::time::Duration::from_millis(500), events.recv()).await
-            {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), events.recv()).await {
                 Ok(Ok(e)) if e.kind == "notify.delivery_failed" => {
                     found = Some(e);
                     break;
@@ -180,7 +182,9 @@ mod cron_notify_tests {
         assert_eq!(evt.payload["channel"], "ch-hook", "事件含通道目标");
         assert_eq!(evt.payload["attempts"], 3, "共 3 次尝试（1 + 2 重试）");
         assert!(
-            evt.payload["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            evt.payload["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
             "事件含原因摘要"
         );
     }

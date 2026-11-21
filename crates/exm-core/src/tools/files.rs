@@ -170,8 +170,13 @@ impl ToolGateway {
     /// Resolve against a captured root so an in-flight editor operation cannot change projects.
     pub fn editor_path_in(&self, root: &Path, raw: &str) -> anyhow::Result<PathBuf> {
         let normalized = raw.replace('\\', "/");
-        if normalized.is_empty() || normalized.starts_with('/') || normalized.contains(':')
-            || normalized.split('/').any(|part| matches!(part, ".." | ".git" | ".exmachina")) {
+        if normalized.is_empty()
+            || normalized.starts_with('/')
+            || normalized.contains(':')
+            || normalized
+                .split('/')
+                .any(|part| matches!(part, ".." | ".git" | ".exmachina"))
+        {
             bail!("路径越界（仅允许工作区内的相对路径）");
         }
         let root = root.canonicalize()?;
@@ -209,7 +214,8 @@ impl ToolGateway {
         let ws_canon = canonicalize_best(&self.workspace_root);
         let cand_canon = canonicalize_best(&candidate);
         if !cand_canon.starts_with(&group_canon)
-            && (crate::workspace::current().is_some() || !cand_canon.starts_with(&ws_canon)) {
+            && (crate::workspace::current().is_some() || !cand_canon.starts_with(&ws_canon))
+        {
             bail!("路径越界（仅允许工作区内的路径）: {raw}");
         }
         self.check_exec_home(&cand_canon)?;
@@ -261,9 +267,17 @@ impl ToolGateway {
         let id: String = if scoped {
             // Distinct writes to the same relative path must not reuse another round's backup.
             crate::types::new_id()
-        } else { crate::types::now_iso().chars().take(10).collect() };
-        let dst = if scoped { crate::workspace::checkpoint(&root, &id, rel)? }
-            else { self.workspace_root.join(".exmachina/checkpoints").join(&id).join(rel) };
+        } else {
+            crate::types::now_iso().chars().take(10).collect()
+        };
+        let dst = if scoped {
+            crate::workspace::checkpoint(&root, &id, rel)?
+        } else {
+            self.workspace_root
+                .join(".exmachina/checkpoints")
+                .join(&id)
+                .join(rel)
+        };
         let fresh = !dst.exists();
         if fresh {
             if let Some(parent) = dst.parent() {
@@ -274,7 +288,49 @@ impl ToolGateway {
         // 轮次检查点链：仅登记当日首次快照（重复跳过的文件其既有检查点已可回滚）
         if fresh && !session_id.is_empty() {
             let rel_str = rel.to_string_lossy().replace('\\', "/");
-            self.store.record_checkpoint_ref(session_id, &id, &rel_str)?;
+            self.store
+                .record_checkpoint_ref(session_id, &id, &rel_str)?;
+        }
+        Ok(())
+    }
+
+    /// 为由会话明确绑定的项目根创建写前检查点。与默认 `effective_root` 不同，
+    /// spec 导出等项目级操作可能运行在 task-local/pinned workspace 中，必须以
+    /// 实际目标项目为检查点根，不能把相对路径记到另一个项目。
+    pub(crate) fn checkpoint_at_root(
+        &self,
+        root: &Path,
+        target: &Path,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        if !target.is_file() {
+            return Ok(());
+        }
+        let root = root.canonicalize()?;
+        let target = target.canonicalize()?;
+        anyhow::ensure!(target.starts_with(&root), "检查点目标不属于会话项目");
+        let relative = target
+            .strip_prefix(&root)
+            .map_err(|_| anyhow::anyhow!("检查点目标不属于会话项目"))?;
+        let id = if crate::workspace::current().is_some() {
+            crate::types::new_id()
+        } else {
+            crate::types::now_iso().chars().take(10).collect()
+        };
+        let destination = crate::workspace::checkpoint(&root, &id, relative)?;
+        let fresh = !destination.exists();
+        if fresh {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&target, &destination).context("写检查点失败")?;
+        }
+        if fresh && !session_id.is_empty() {
+            self.store.record_checkpoint_ref(
+                session_id,
+                &id,
+                &relative.to_string_lossy().replace('\\', "/"),
+            )?;
         }
         Ok(())
     }
@@ -325,7 +381,7 @@ impl ToolGateway {
                 .map(|x| x.display().to_string())
                 .unwrap_or_else(|_| p.display().to_string());
             return ToolResult::ok(format!(
-                "图像文件：{path}（{ext}，{} 字节）—— 已作为图像输入回灌，具备视觉能力的模型可直接查看",
+                "图像文件：{path}（{ext}，{} 字节）—— 可作为图像输入回灌；具备视觉能力的模型可直接查看",
                 meta.len()
             ))
             .with_images(vec![abs]);
@@ -857,7 +913,8 @@ impl ToolGateway {
                 match std::fs::write(&target, content).context("写入失败") {
                     Ok(_) => {
                         // 产物登记（D12）：写入投递目录 `.exmachina/outbox/` 的文件 → 会话 outbox
-                        let artifact_root = crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
+                        let artifact_root = crate::workspace::current()
+                            .unwrap_or_else(|| self.workspace_root.clone());
                         let norm = target
                             .strip_prefix(&artifact_root)
                             .map(|p| p.display().to_string().replace('\\', "/"))
@@ -908,7 +965,8 @@ impl ToolGateway {
                     .collect();
                 // 登记口径与 write→outbox 一致：工作区相对路径（spawn_reply 的
                 // workspace_root.join(rel) 与 WebUI /api/asset/download 都按此解析）
-                let artifact_root = crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
+                let artifact_root =
+                    crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
                 let rel = target
                     .strip_prefix(&artifact_root)
                     .map(|p| p.display().to_string().replace('\\', "/"))
@@ -946,9 +1004,12 @@ impl ToolGateway {
                 if target == root {
                     return ToolResult::err("拒绝删除：工作区根目录不可删除");
                 }
-                let storage_root = crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
+                let storage_root =
+                    crate::workspace::current().unwrap_or_else(|| self.workspace_root.clone());
                 let sys = storage_root.join(".exmachina");
-                if crate::workspace::current().is_some() && std::fs::symlink_metadata(&sys).is_ok_and(|m| m.file_type().is_symlink()) {
+                if crate::workspace::current().is_some()
+                    && std::fs::symlink_metadata(&sys).is_ok_and(|m| m.file_type().is_symlink())
+                {
                     return ToolResult::err("项目 .exmachina 目录不能是符号链接");
                 }
                 if canonicalize_best(&target).starts_with(canonicalize_best(&sys)) {

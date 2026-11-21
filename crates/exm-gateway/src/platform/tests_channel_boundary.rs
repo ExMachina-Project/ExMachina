@@ -168,10 +168,9 @@ mod channel_boundary_tests {
     /// 部署实测「【警告】【报告】…」双层前缀的回归锚点
     #[test]
     fn 回帖_前缀不双层() {
-        let core = exm_core::Core::create(std::env::temp_dir().join(format!(
-            "exm-prefix-{}",
-            uuid::Uuid::new_v4()
-        )))
+        let core = exm_core::Core::create(
+            std::env::temp_dir().join(format!("exm-prefix-{}", uuid::Uuid::new_v4())),
+        )
         .expect("创建 Core 失败");
         let run = ChannelRun {
             core: std::sync::Arc::new(core),
@@ -219,10 +218,9 @@ mod channel_boundary_tests {
     /// 独立成行 / 与少量文字混行 / 全半角变体都识别；正常回复不受影响。
     #[test]
     fn 回帖_沉默约定整轮丢弃() {
-        let core = exm_core::Core::create(std::env::temp_dir().join(format!(
-            "exm-silence-{}",
-            uuid::Uuid::new_v4()
-        )))
+        let core = exm_core::Core::create(
+            std::env::temp_dir().join(format!("exm-silence-{}", uuid::Uuid::new_v4())),
+        )
         .expect("创建 Core 失败");
         let run = ChannelRun {
             core: std::sync::Arc::new(core),
@@ -253,12 +251,14 @@ mod channel_boundary_tests {
         assert!(run.take_reply(&evt("＜沉默/＞"), 500).is_none());
         // 正常回复：原样投递，不加强制句式前缀（前缀由模型自己决定）
         assert_eq!(
-            run.take_reply(&evt("已把任务跑完，结果见文件。"), 500).unwrap(),
+            run.take_reply(&evt("已把任务跑完，结果见文件。"), 500)
+                .unwrap(),
             "已把任务跑完，结果见文件。"
         );
         // 模型自己写了前缀：保留，且投递层不再叠加第二层
         assert_eq!(
-            run.take_reply(&evt("【报告】本机已完成推演。"), 500).unwrap(),
+            run.take_reply(&evt("【报告】本机已完成推演。"), 500)
+                .unwrap(),
             "【报告】本机已完成推演。"
         );
         // 文本里偶然提到「沉默」二字（非标记形态）：不误杀
@@ -277,10 +277,9 @@ mod channel_boundary_tests {
             session_id: "s".into(),
             payload: serde_json::json!({ "statements": [{ "tag": "报告", "text": long }] }),
         };
-        let core = exm_core::Core::create(std::env::temp_dir().join(format!(
-            "exm-longreply-{}",
-            uuid::Uuid::new_v4()
-        )))
+        let core = exm_core::Core::create(
+            std::env::temp_dir().join(format!("exm-longreply-{}", uuid::Uuid::new_v4())),
+        )
         .expect("创建 Core 失败");
         let run = ChannelRun {
             core: std::sync::Arc::new(core),

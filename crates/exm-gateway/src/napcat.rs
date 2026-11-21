@@ -6,15 +6,15 @@
 //! 收发解耦：入站读取不阻塞（消息处理全部 spawn），动作经 mpsc 通道交给专职写任务，
 //! 避免长运行期间无法应答 WS 层 Ping 被服务端断开。
 
+use crate::ambient_media;
 use crate::channel_util::{builtin_command, first_seen, media_placeholder};
 use crate::platform::{
     admit, report_status, spawn_reply, Channel, ChannelRun, GateDecision, InboundCtx, MediaItem,
 };
-use crate::ambient_media;
 use exm_core::Core;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -59,7 +59,10 @@ pub(crate) async fn api_call(
     action: &str,
     params: serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let echo = format!("exm-api-{}", api_echo_seq().fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let echo = format!(
+        "exm-api-{}",
+        api_echo_seq().fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let (tx, mut rx) = mpsc::unbounded_channel();
     api_waiters().lock().insert(echo.clone(), tx);
     let sent = {
@@ -266,7 +269,10 @@ fn fresh_channel(core: &Arc<Core>, conn_clone: &Channel) -> Channel {
         None => true,
     };
     if need_load {
-        *slot = Some((now, std::sync::Arc::new(crate::platform::load_channels(core))));
+        *slot = Some((
+            now,
+            std::sync::Arc::new(crate::platform::load_channels(core)),
+        ));
     }
     if let Some((_, list)) = slot.as_ref() {
         if let Some(hit) = list.iter().find(|c| c.id == conn_clone.id) {
@@ -291,9 +297,7 @@ async fn reconcile(core: &Arc<Core>) {
     let desired: Vec<Channel> = crate::platform::load_channels(core)
         .into_iter()
         .filter(|c| {
-            matches!(c.kind.as_str(), "napcat" | "snowluma")
-                && c.enabled
-                && c.cfg("url").is_some()
+            matches!(c.kind.as_str(), "napcat" | "snowluma") && c.enabled && c.cfg("url").is_some()
         })
         .collect();
 
@@ -807,7 +811,9 @@ async fn napcat_gate(
     // 提及判定：@ 机器人本体 **或引用回复机器人消息**——「回复」与「@」同为
     // 明确点名（回复机器人上一条发言却因不带 at 段被当未提及 → 概率丢弃 =
     // 用户点名石沉大海）。回查引用消息的 sender 是否机器人本体（get_msg）。
-    let at_hit = raw_message.map(|m| is_mentioned(m, self_id)).unwrap_or(false);
+    let at_hit = raw_message
+        .map(|m| is_mentioned(m, self_id))
+        .unwrap_or(false);
     let mentioned = if at_hit {
         true
     } else {
@@ -859,8 +865,7 @@ async fn napcat_gate(
     // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）：card 优先，回落昵称，再回落 QQ 号
     let sender_mark = crate::channel_util::sender_origin(
         is_group,
-        raw
-            .pointer("/sender/card")
+        raw.pointer("/sender/card")
             .or_else(|| raw.pointer("/sender/nickname"))
             .and_then(|x| x.as_str())
             .unwrap_or(""),
@@ -905,7 +910,10 @@ fn extract_text(m: &serde_json::Value) -> String {
                         .pointer("/data/name")
                         .and_then(|x| x.as_str())
                         .unwrap_or("");
-                    let qq = seg.pointer("/data/qq").and_then(|x| x.as_str()).unwrap_or("");
+                    let qq = seg
+                        .pointer("/data/qq")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
                     let who = if name.trim().is_empty() { qq } else { name };
                     if !who.trim().is_empty() {
                         out.push_str(&format!("@{who}"));
@@ -1287,12 +1295,10 @@ async fn handle_message(
     );
     // napcat 会话工具组（群文件 / 发文件）：绑定本流（群号取 chat_key）。
     // 注入 = 本轮生效；轮次收束后清理（防工具面泄漏到无关会话）。
-    core.orchestrator()
-        .tools
-        .inject_session_tools(
-            &run.session_id,
-            crate::napcat_tools::build_injections(core, ch, &peer),
-        );
+    core.orchestrator().tools.inject_session_tools(
+        &run.session_id,
+        crate::napcat_tools::build_injections(core, ch, &peer),
+    );
     // 入站媒体注入（组 6.4）：图片进多模态暂存，文件附路径说明
     let note = crate::platform::stage_inbound_media(core, &run.session_id, &media);
     let text = if note.is_empty() {
@@ -1378,9 +1384,7 @@ async fn handle_message(
     run.run(&text).await;
     let _ = reply.await;
     // 会话工具组随轮次收束清理（注入键 = 本轮数据库会话 id）
-    core.orchestrator()
-        .tools
-        .clear_session_tools(&session_id);
+    core.orchestrator().tools.clear_session_tools(&session_id);
 }
 
 // ---------------------------------------------------------------- 测试（纯函数部分）
@@ -1431,7 +1435,10 @@ mod tests {
         // TTL 缓存直读旁路：测试不等 2s 窗口，直接清缓存再取
         *channel_cache().lock() = None;
         let fresh = fresh_channel(&core, &conn_clone);
-        assert!(fresh.proactive_enabled(), "配置更新应及时可见（连接克隆不可吞噬）");
+        assert!(
+            fresh.proactive_enabled(),
+            "配置更新应及时可见（连接克隆不可吞噬）"
+        );
         assert!(fresh.admins.iter().any(|a| a == "boss"));
         // 通道删除（磁盘清空）：回落连接克隆，收尾兼容
         crate::platform::save_channels(&core, &[]).unwrap();
@@ -1455,7 +1462,11 @@ mod tests {
             .insert(id.clone(), exm_core::types::now_ms() - 5 * 60 * 1000);
         check_event_silence(&id);
         let st = crate::platform::status_of(&id);
-        assert_eq!(st.as_ref().map(|s| s.state.as_str()), Some("ok"), "在线零事件不应降级");
+        assert_eq!(
+            st.as_ref().map(|s| s.state.as_str()),
+            Some("ok"),
+            "在线零事件不应降级"
+        );
         let detail = st.map(|s| s.detail).unwrap_or_default();
         assert!(
             detail.contains("在线") || detail.contains("轮换"),

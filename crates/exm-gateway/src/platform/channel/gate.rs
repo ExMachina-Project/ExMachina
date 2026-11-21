@@ -61,15 +61,13 @@ pub(crate) async fn admit(
         }
         let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
         let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
-        let sid = core
-            .flow_active_session(&ch.id, ctx.chat_key)
-            .or_else(|| {
-                // 流无绑定（含升级前的存量数据）：回落旧 title 寻址
-                core.list_sessions_in_group(&gid)
-                    .ok()
-                    .and_then(|list| list.into_iter().find(|s| s.title == title))
-                    .map(|s| s.id)
-            });
+        let sid = core.flow_active_session(&ch.id, ctx.chat_key).or_else(|| {
+            // 流无绑定（含升级前的存量数据）：回落旧 title 寻址
+            core.list_sessions_in_group(&gid)
+                .ok()
+                .and_then(|list| list.into_iter().find(|s| s.title == title))
+                .map(|s| s.id)
+        });
         let receipt = match sid.map(|id| core.stop_session(&id)) {
             Some(Ok(n)) => format!("⏹ 已停止本轮（已执行 {n} 次工具调用）。"),
             Some(Err(_)) | None => "当前没有运行中的任务。".to_string(),
@@ -252,15 +250,11 @@ pub(crate) async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &In
     if text.is_empty() {
         return;
     }
-    let Some(sid) =
-        ensure_flow_session(core, ch, ctx.chat_key, ctx.flow_name, ctx.is_group)
-    else {
+    let Some(sid) = ensure_flow_session(core, ch, ctx.chat_key, ctx.flow_name, ctx.is_group) else {
         return;
     };
-    let (clean, findings) = crate::sanitize::sanitize_with(
-        text,
-        Some(&core.config().security.sanitize_rules),
-    );
+    let (clean, findings) =
+        crate::sanitize::sanitize_with(text, Some(&core.config().security.sanitize_rules));
     if !findings.is_empty() {
         crate::sanitize::note_findings(&findings);
         core.emit_sanitize_finding(serde_json::json!({
@@ -273,13 +267,10 @@ pub(crate) async fn record_ambient(core: &exm_core::Core, ch: &Channel, ctx: &In
     }
     // 发送者标记沿用六适配器同口径（im:名(id) → imctx:名(id)）；
     // 无署名时仍保留 imctx: 前缀（前缀本身就是旁听语义，不可丢）
-    let sender = crate::channel_util::sender_origin(
-        ctx.is_group,
-        ctx.display_name,
-        ctx.external_id,
-    )
-    .map(|m| m.trim_start_matches("im:").to_string())
-    .unwrap_or_default();
+    let sender =
+        crate::channel_util::sender_origin(ctx.is_group, ctx.display_name, ctx.external_id)
+            .map(|m| m.trim_start_matches("im:").to_string())
+            .unwrap_or_default();
     let origin = format!("imctx:{sender}");
     let msg = core.store.add_message(
         &sid,
@@ -359,11 +350,7 @@ fn ensure_flow_session(
 ///
 /// 旧指令仍拦截并回执说明（群里发了不能没反应），但不做任何状态变更。
 /// 返回 Some(reply) = 指令已处理（Deny 语义回帖）；None = 非流指令，放行后续闸门。
-async fn flow_command(
-    core: &exm_core::Core,
-    ch: &Channel,
-    ctx: &InboundCtx<'_>,
-) -> Option<String> {
+async fn flow_command(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>) -> Option<String> {
     let text = ctx.text.trim();
     // /reset：重置聊天上下文——旧会话归档保留（控制台归档区可回看），流绑定
     // 切到新会话，后续消息从零开始。「聊天流固定单会话」退役了 /new /sessions
@@ -385,7 +372,10 @@ async fn flow_command(
         return Some(reset_flow_session(core, ch, ctx).await);
     }
     let retired = [
-        ("/new", "本聊天流固定使用一个会话，不再开新会话。如需干净重开请发 /reset（旧对话归档保留）。"),
+        (
+            "/new",
+            "本聊天流固定使用一个会话，不再开新会话。如需干净重开请发 /reset（旧对话归档保留）。",
+        ),
         ("/sessions", "本聊天流固定使用一个会话，无流内会话列表。"),
         ("/use", "本聊天流固定使用一个会话，无需切换。"),
     ];
@@ -453,7 +443,11 @@ async fn reset_flow_session(core: &exm_core::Core, ch: &Channel, ctx: &InboundCt
                 ctx.flow_name,
                 Some(ctx.is_group),
             );
-            let archive_note = if archived { "旧对话已归档（控制台归档区可回看）" } else { "⚠️ 旧会话归档失败（保留原样），但已切换新会话" };
+            let archive_note = if archived {
+                "旧对话已归档（控制台归档区可回看）"
+            } else {
+                "⚠️ 旧会话归档失败（保留原样），但已切换新会话"
+            };
             match bind {
                 Ok(()) => format!(
                     "✅ 已重置{stop_note}。{archive_note}，新会话从零开始。"
@@ -463,7 +457,11 @@ async fn reset_flow_session(core: &exm_core::Core, ch: &Channel, ctx: &InboundCt
         }
         Err(e) => format!(
             "❌ 重置失败：新会话创建失败（{e}）。{}",
-            if archived { "旧会话已归档，可到控制台恢复后重试。" } else { "旧会话未受影响。" }
+            if archived {
+                "旧会话已归档，可到控制台恢复后重试。"
+            } else {
+                "旧会话未受影响。"
+            }
         ),
     }
 }
@@ -516,4 +514,3 @@ pub(crate) fn is_silence(text: &str) -> bool {
         || t.contains("＜沉默 ／＞")
         || t.contains("〈沉默/〉")
 }
-

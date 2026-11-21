@@ -5,7 +5,11 @@ use super::*;
 impl ToolGateway {
     /// 浏览器自动化（headless Chrome + CDP）：懒启动常驻，串行化访问。
     /// 探测不到浏览器时该工具不会出现在下发 schema 里（此处兜底报错）。
-    pub(crate) async fn tool_browser(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
+    pub(crate) async fn tool_browser(
+        &self,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("open");
         if op == "close" {
             let mut guard = self.browser.lock().await;
@@ -19,13 +23,16 @@ impl ToolGateway {
         }
         let root = self.workspace_for_session(session_id);
         let mut guard = self.browser.lock().await;
-        if guard.as_ref().is_some_and(|session| !session.belongs_to(&root)) {
-            if let Some(mut previous) = guard.take() { previous.shutdown(); }
+        if guard
+            .as_ref()
+            .is_some_and(|session| !session.belongs_to(&root))
+        {
+            if let Some(mut previous) = guard.take() {
+                previous.shutdown();
+            }
         }
         if guard.is_none() {
-            match crate::browser::BrowserSession::launch(&self.browser_cfg, &root)
-                .await
-            {
+            match crate::browser::BrowserSession::launch(&self.browser_cfg, &root).await {
                 Ok(s) => *guard = Some(s),
                 Err(e) => return ToolResult::err(format!("启动浏览器失败：{e}")),
             }
@@ -89,7 +96,10 @@ impl ToolGateway {
                         let _ = self
                             .store
                             .outbox_push(session_id, "image", &rel, "网页截图");
-                        ToolResult::ok(format!("截图已保存：{rel}（可用 read 查看路径，或用 browser screenshot 再次覆盖）"))
+                        ToolResult::ok(format!(
+                            "截图已保存：{rel}（可用 read 查看路径，或用 browser screenshot 再次覆盖）"
+                        ))
+                        .with_images(vec![rel])
                     }
                     Err(e) => ToolResult::err(format!("截图失败：{e}")),
                 }

@@ -12,9 +12,9 @@ use exm_core::config::{
     CustomTool, PluginChannelDecl, PluginCredentialField, PluginManifest, PluginWatchDecl,
 };
 use exm_core::Core;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use parking_lot::Mutex;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -490,6 +490,7 @@ pub fn rss_manifest() -> PluginManifest {
         description: "订阅 RSS/Atom 源：定时轮询新条目唤醒阅读简报，rss__digest 随手查阅".into(),
         exm_min: "0.5.3".into(),
         tools: vec![],
+        commands: Default::default(),
         channel: Some(PluginChannelDecl {
             kinds: vec!["rss".into()],
             credentials: vec![

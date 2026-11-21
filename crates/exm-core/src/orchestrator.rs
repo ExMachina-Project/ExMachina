@@ -961,6 +961,13 @@ impl Orchestrator {
         if history.last().map(|m| m.role != "user").unwrap_or(true) {
             history.push(ChatMessage::user(text.to_string()));
         }
+        if let (Some(last), Some(context)) = (
+            history.last_mut(),
+            crate::command_extensions::take_skill_context(session_id, &def.identifier),
+        ) {
+            last.content.push_str("\n\n");
+            last.content.push_str(&context);
+        }
 
         // 多模态输入:图片三态(视觉直附 / 转述模型转写 / 忽略并注记),与规划路径一致
         let images = crate::image_stash::take(session_id);
@@ -1272,7 +1279,42 @@ impl Orchestrator {
         if self.registry.single_mode() {
             return self.single_direct_round(session_id, text, scope).await;
         }
-        let plan = self.plan(session_id, text).await?;
+        let mut goal = text.to_string();
+        let mut steering_revisions = 0;
+        let plan = loop {
+            let plan = self.plan(session_id, &goal).await?;
+            // L0 is already a terminal answer, so close admission atomically before
+            // committing it. A late steer is instead serialized as a following chat.
+            let terminal = matches!(plan.route_level, RouteLevel::L0) || plan.nodes.is_empty();
+            let pending = if terminal {
+                crate::round_trace::take_or_close_steering(session_id)
+            } else {
+                crate::round_trace::take_steering(session_id)
+            };
+            if pending.is_empty() {
+                break plan;
+            }
+            steering_revisions += 1;
+            anyhow::ensure!(steering_revisions <= 32, "steering 更新过于频繁，暂停重新规划");
+            let ids: Vec<String> = pending.iter().map(|input| input.id.clone()).collect();
+            let body = pending
+                .iter()
+                .map(|input| format!("#{}：{}", input.sequence, input.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.emit(
+                session_id,
+                "steering.applied",
+                serde_json::json!({ "status": "steering_applied", "steeringIds": ids, "checkpoint": "planning" }),
+            );
+            goal = format!(
+                "{goal}\n\n【运行中 steering｜已到安全检查点】以下是用户补充的当前任务方向，请在原任务基础上重新规划：\n{body}"
+            );
+            let ledger = self.store.mutate_ledger(session_id, |l| {
+                l.task.goal = goal.clone();
+            })?;
+            self.emit(session_id, "ledger.updated", serde_json::to_value(&ledger)?);
+        };
 
         let ledger = self.store.mutate_ledger(session_id, |l| {
             l.task.acceptance = plan.acceptance.clone();

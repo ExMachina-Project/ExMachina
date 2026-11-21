@@ -23,8 +23,8 @@ pub mod discord;
 pub mod identity;
 pub mod limits;
 pub mod llm_admin;
-mod model_routing;
 pub mod matrix;
+mod model_routing;
 pub mod napcat;
 pub mod napcat_tools;
 pub mod nexus_api;
@@ -32,49 +32,66 @@ pub mod openapi;
 pub mod plan_mode_tools;
 pub mod platform;
 pub mod plugin_admin;
-pub mod task_queue_tools;
 pub mod plugins;
 pub mod qqbot;
-pub mod singles;
 pub mod sanitize;
+pub mod singles;
 pub mod slack;
+pub mod task_queue_tools;
 pub mod telegram;
 pub mod triggers;
 pub mod worker_hub;
 // 资源域 handlers（自本文件拆出；build_router 经此引入）
+use agents_admin::{
+    create_agent, list_agents, remove_agent, remove_agent_from_group, set_agent_model, update_agent,
+};
 use assets::{download_asset, get_asset, health};
-use openapi::serve_openapi;
-use auth_setup::{verify_auth, auth_status, auth_snooze, auth_dismiss, inbound_channel_id};
-use config_admin::{get_config, put_config, get_config_schema, get_sanitize_stats};
-use sessions::{get_effort, put_effort, get_workspace, put_workspace, create_session, list_sessions, delete_session, get_session, list_messages, export_session, export_trajectory, steer_session, chat, get_graph, rename_session, pin_session, list_audit, stop_session, get_evidence, session_undo, session_edit, session_fork, session_archive, session_snapshots, session_tokens, session_batch, session_flow_archive, search_sessions};
-use agents_admin::{list_agents, create_agent, remove_agent_from_group, remove_agent, set_agent_model, update_agent};
-use groups_admin::{list_groups, create_group, active_group, switch_group, activate_group, delete_group, update_group, set_group_self_optimize, list_templates};
-use version::{version_info, version_check, version_apply, version_apply_status};
-use persona::{get_agent, get_agent_prompt, put_agent_prompt, get_persona, put_persona, reset_persona};
-use playbooks::list_playbooks;
-use mcp_admin::{mcp_servers, mcp_refresh, mcp_mount};
-use voice::{voice_transcribe, voice_speak};
+use auth_setup::{auth_dismiss, auth_snooze, auth_status, inbound_channel_id, verify_auth};
 use checkpoints::{list_checkpoints, restore_checkpoint};
-use memory_admin::{list_memory, add_memory, search_memory, memory_stats, memory_reindex, memory_decay, get_memory_md, put_memory_md, memory_render, forget_memory, pin_memory, update_memory, export_memory};
-use ws::{ws_handler, ws_auth_guard};
+use config_admin::{get_config, get_config_schema, get_sanitize_stats, put_config};
+use groups_admin::{
+    activate_group, active_group, create_group, delete_group, list_groups, list_templates,
+    set_group_self_optimize, switch_group, update_group,
+};
+use mcp_admin::{mcp_mount, mcp_refresh, mcp_servers};
+use memory_admin::{
+    add_memory, export_memory, forget_memory, get_memory_md, list_memory, memory_decay,
+    memory_reindex, memory_render, memory_stats, pin_memory, put_memory_md, search_memory,
+    update_memory,
+};
+use openapi::serve_openapi;
+use persona::{
+    get_agent, get_agent_prompt, get_persona, put_agent_prompt, put_persona, reset_persona,
+};
+use playbooks::list_playbooks;
+use sessions::{
+    chat, create_session, delete_session, export_session, export_trajectory, get_effort,
+    get_evidence, get_graph, get_session, get_workspace, list_audit, list_messages, list_sessions,
+    pin_session, put_effort, put_workspace, rename_session, search_sessions, session_archive,
+    session_batch, session_edit, session_flow_archive, session_fork, session_snapshots,
+    session_tokens, session_undo, steer_session, stop_session,
+};
+use version::{version_apply, version_apply_status, version_check, version_info};
+use voice::{voice_speak, voice_transcribe};
+use ws::{ws_auth_guard, ws_handler};
 
+pub mod agents_admin;
 pub mod assets;
 pub mod auth_setup;
 pub mod checkpoints;
 pub mod config_admin;
+pub mod editor;
 pub mod groups_admin;
+pub mod knowledge_admin;
 pub mod mcp_admin;
 pub mod memory_admin;
-pub mod knowledge_admin;
 pub mod persona;
 pub mod playbooks;
-pub mod sessions;
-pub mod agents_admin;
 pub mod selfcheck;
+pub mod sessions;
 pub mod version;
 pub mod voice;
 pub mod ws;
-pub mod editor;
 
 /// 提取器拒绝（请求体 / 查询串解析失败）统一成全站错误契约：400 + {"error": 可读中文}。
 ///
@@ -132,7 +149,6 @@ fn serde_hint(text: &str) -> String {
         .trim()
         .to_string()
 }
-
 
 #[derive(Clone)]
 pub struct AppState {
@@ -246,9 +262,9 @@ async fn auth_middleware(
     }
 }
 
-mod project_scope;
 mod collaborations;
-
+mod command_directory;
+mod project_scope;
 
 pub fn build_router(core: Arc<Core>) -> Router {
     let state = AppState { core: core.clone() };
@@ -256,6 +272,11 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/health", get(health))
         // OpenAPI 契约文档（2.3）：静态清单生成，公共面（发现性优先，鉴权豁免见 auth_middleware）
         .route("/api/openapi.json", get(serve_openapi))
+        .route("/api/commands", get(command_directory::get_commands))
+        .route(
+            "/api/capabilities",
+            get(command_directory::get_capabilities),
+        )
         .route("/api/selfcheck", get(selfcheck::selfcheck))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/search", get(search_sessions))
@@ -273,7 +294,10 @@ pub fn build_router(core: Arc<Core>) -> Router {
         )
         .route("/api/sessions/:id/pin", axum::routing::put(pin_session))
         .route("/api/sessions/batch", axum::routing::post(session_batch))
-        .route("/api/sessions/flow-archive", axum::routing::post(session_flow_archive))
+        .route(
+            "/api/sessions/flow-archive",
+            axum::routing::post(session_flow_archive),
+        )
         // 会话历史管控（组 9）：撤销 / 编辑重发 / 分支派生 / 归档与快照视图
         .route("/api/sessions/:id/undo", post(session_undo))
         .route("/api/sessions/:id/edit", post(session_edit))
@@ -300,16 +324,25 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/version/apply", post(version_apply))
         .route("/api/version/apply/status", get(version_apply_status))
         .route("/api/groups/active", get(active_group).put(switch_group))
-        .route("/api/groups/:id", axum::routing::put(update_group).delete(delete_group))
+        .route(
+            "/api/groups/:id",
+            axum::routing::put(update_group).delete(delete_group),
+        )
         .route("/api/groups/:id/activate", post(activate_group))
-        .route("/api/groups/:id/self-optimize", put(set_group_self_optimize))
+        .route(
+            "/api/groups/:id/self-optimize",
+            put(set_group_self_optimize),
+        )
         .route("/api/playbooks", get(list_playbooks))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/schema", get(get_config_schema))
         .route("/api/config/sanitize-stats", get(get_sanitize_stats))
         .route("/api/mcp", get(mcp_servers))
         .route("/api/mcp/refresh", post(mcp_refresh))
-        .route("/api/voice/transcribe", post(voice_transcribe).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)))
+        .route(
+            "/api/voice/transcribe",
+            post(voice_transcribe).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/api/voice/speak", post(voice_speak))
         .route("/api/sessions/:id/tokens", get(session_tokens))
         // 文件检查点（写工具落笔前的自动快照）：回看与回滚
@@ -323,14 +356,20 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/memory/reindex", post(memory_reindex))
         .route("/api/memory/decay", post(memory_decay))
         .route("/api/memory/render", post(memory_render))
-        .route("/api/memory/:id", axum::routing::delete(forget_memory).put(update_memory))
+        .route(
+            "/api/memory/:id",
+            axum::routing::delete(forget_memory).put(update_memory),
+        )
         .route("/api/memory/:id/pin", post(pin_memory))
         // 知识库（knowledge-base）：全局共享知识层管理面
         .route(
             "/api/knowledge",
             get(knowledge_admin::list_knowledge).post(knowledge_admin::add_knowledge),
         )
-        .route("/api/knowledge/:id", axum::routing::delete(knowledge_admin::delete_knowledge))
+        .route(
+            "/api/knowledge/:id",
+            axum::routing::delete(knowledge_admin::delete_knowledge),
+        )
         .route("/api/memory/md", get(get_memory_md).put(put_memory_md))
         .route(
             "/ws",
@@ -382,7 +421,10 @@ pub fn build_router(core: Arc<Core>) -> Router {
         // 工作区资产（截图 / 工具输出落盘）：沙箱内只读，聊天工具卡内联预览
         .route("/api/asset", get(get_asset))
         .route("/api/asset/download", get(download_asset))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), project_scope::scope))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            project_scope::scope,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -431,25 +473,6 @@ pub fn build_router(core: Arc<Core>) -> Router {
     }
     router
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ---------------------------------------------------------------- 启动
 
@@ -507,21 +530,17 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
     plugins::spawn_all(core.clone());
     // 会话任务队列工具（task__queue）：全局动态工具——智能体执行中收到新任务时
     // 自主决定并行（spawn 派生）或排队（收束钩子串行执行），机制见 task_queue_tools。
-    core.orchestrator()
-        .tools
-        .register_dynamic_tool(
-            crate::task_queue_tools::tool_spec(),
-            crate::task_queue_tools::build_exec(core.clone()),
-        );
+    core.orchestrator().tools.register_dynamic_tool(
+        crate::task_queue_tools::tool_spec(),
+        crate::task_queue_tools::build_exec(core.clone()),
+    );
     // 计划模式工具（plan__mode）：智能体自主决定「先计划再执行」节奏——
     // 用户对话中要求先计划、或 agent 判断任务复杂/高风险时自行进入计划模式；
     // WebUI 不再提供硬开关（plan-mode-tools：模式决定权归 agent）
-    core.orchestrator()
-        .tools
-        .register_dynamic_tool(
-            crate::plan_mode_tools::tool_spec(),
-            crate::plan_mode_tools::build_exec(core.clone()),
-        );
+    core.orchestrator().tools.register_dynamic_tool(
+        crate::plan_mode_tools::tool_spec(),
+        crate::plan_mode_tools::build_exec(core.clone()),
+    );
     // 视频互动审批代发执行器（video__act approval=always 批准后的 [video] 回调）
     {
         let core_for_act = core.clone();
@@ -641,10 +660,46 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             println!("[gateway]   通道  {}", lines.join("｜"));
         }
     }
+    let shutdown_core = core.clone();
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        wait_for_shutdown_signal().await;
+        if let Err(error) = shutdown_core
+            .orchestrator()
+            .tools
+            .shutdown_background()
+            .await
+        {
+            eprintln!("[gateway] 后台终端清理未确认: {error}");
+        }
+    })
     .await?;
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() {
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("[gateway] 无法监听退出信号: {error}");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                eprintln!("[gateway] 无法监听 SIGTERM: {error}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! { _ = interrupt => {}, _ = terminate => {} }
 }

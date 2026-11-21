@@ -17,13 +17,25 @@ impl ToolGateway {
             _ => return None,
         };
         let data = std::fs::read(&p).ok()?;
-        if data.len() > 8 * 1024 * 1024 {
+        if data.len() > 8 * 1024 * 1024 || !Self::image_header_matches(&ext, &data) {
             return None;
         }
         Some(format!(
             "data:{mime};base64,{}",
             crate::computer::b64_encode(&data)
         ))
+    }
+
+    /// 文件扩展名只决定预期 MIME，不能代替格式校验；拒绝伪装成图像的任意字节。
+    fn image_header_matches(ext: &str, data: &[u8]) -> bool {
+        match ext {
+            "png" => data.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "jpg" | "jpeg" => data.starts_with(&[0xff, 0xd8, 0xff]),
+            "gif" => data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a"),
+            "webp" => data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP",
+            "bmp" => data.starts_with(b"BM"),
+            _ => false,
+        }
     }
 
     /// 子进程环境（净化后）：白名单透传 + HOME/TMP 重定向到工作区内沙箱目录。
@@ -40,8 +52,17 @@ impl ToolGateway {
         let tmp = base.join("tmp");
         let _ = std::fs::create_dir_all(&home);
         let _ = std::fs::create_dir_all(&tmp);
+        out.retain(|(key, _)| !matches!(key.as_str(), "CARGO_HOME" | "RUSTUP_HOME"));
         out.push(("HOME".into(), home.display().to_string()));
         out.push(("USERPROFILE".into(), home.display().to_string()));
+        out.push((
+            "CARGO_HOME".into(),
+            home.join(".cargo").display().to_string(),
+        ));
+        out.push((
+            "RUSTUP_HOME".into(),
+            home.join(".rustup").display().to_string(),
+        ));
         out.push(("TMP".into(), tmp.display().to_string()));
         out.push(("TEMP".into(), tmp.display().to_string()));
         out.push(("EXM_SANDBOX".into(), self.sandbox.mode.clone()));
@@ -52,8 +73,8 @@ impl ToolGateway {
     #[cfg_attr(target_os = "windows", allow(unused_variables))]
     pub(crate) fn shell_opts(&self, cmd: &str) -> ShellOpts {
         // 执行身份约束(Linux execUser):独立于 sandbox 开关——sandbox off 时身份仍须生效。
-        // 解析失败(用户不存在/路径非法)不静默降级:返回错误注入到 cmd_override,
-        // 执行时 shell 报出并失败——假安全比不可用更危险。
+        // 解析失败(用户不存在/路径非法)不静默降级：在 spawn 前作为配置错误拒绝，
+        // 不把配置文本拼入 shell 命令——假安全比不可用更危险。
         #[cfg(unix)]
         let identity = match crate::config::resolve_exec_identity(
             &self.security.exec_user,
@@ -62,7 +83,7 @@ impl ToolGateway {
             Ok(id) => id,
             Err(e) => {
                 let mut bad = ShellOpts::plain();
-                bad.cmd_override = Some(format!("echo '执行身份约束配置错误: {e}' >&2; exit 125"));
+                bad.configuration_error = Some(format!("执行身份约束配置错误: {e}"));
                 return bad;
             }
         };
@@ -83,12 +104,34 @@ impl ToolGateway {
                     let home = id.home.clone();
                     o.confine_home = Some(home.clone());
                     o.uid_gid = Some((id.uid, id.gid));
-                    o.envs = vec![
-                        ("HOME".into(), home.clone()),
-                        ("USERPROFILE".into(), home),
-                    ];
+                    o.env_clear = true;
+                    o.envs = ENV_ALLOW
+                        .iter()
+                        .filter_map(|key| {
+                            std::env::var(key)
+                                .ok()
+                                .map(|value| ((*key).to_string(), value))
+                        })
+                        .collect();
+                    o.envs.retain(|(key, _)| {
+                        !matches!(
+                            key.as_str(),
+                            "HOME" | "USERPROFILE" | "USER" | "CARGO_HOME" | "RUSTUP_HOME"
+                        )
+                    });
+                    o.envs.push(("HOME".into(), home.clone()));
+                    o.envs.push(("USERPROFILE".into(), home.clone()));
+                    o.envs.push((
+                        "CARGO_HOME".into(),
+                        format!("{}/.cargo", id.home.trim_end_matches('/')),
+                    ));
+                    o.envs.push((
+                        "RUSTUP_HOME".into(),
+                        format!("{}/.rustup", id.home.trim_end_matches('/')),
+                    ));
                     if let Some(id) = &identity {
-                        o.envs.push(("USER".into(), self.security.exec_user.clone()));
+                        o.envs
+                            .push(("USER".into(), self.security.exec_user.clone()));
                         let _ = &id;
                     }
                 }
@@ -160,13 +203,19 @@ impl ToolGateway {
                     String::new()
                 };
                 args.push(format!("{lim}{cmd}"));
-                // 身份约束开启时 HOME 让位 execHome(身份是更强的边界,workspace 的
-                // HOME 重定向被覆盖)
+                // 身份约束开启时 HOME 让位 execHome；cwd 仍由执行器按项目边界校验。
                 #[cfg(unix)]
                 if let Some(home) = &confine {
-                    envs.retain(|(k, _)| k != "HOME" && k != "USERPROFILE");
+                    envs.retain(|(k, _)| {
+                        !matches!(
+                            k.as_str(),
+                            "HOME" | "USERPROFILE" | "CARGO_HOME" | "RUSTUP_HOME"
+                        )
+                    });
                     envs.push(("HOME".into(), home.clone()));
                     envs.push(("USERPROFILE".into(), home.clone()));
+                    envs.push(("CARGO_HOME".into(), format!("{home}/.cargo")));
+                    envs.push(("RUSTUP_HOME".into(), format!("{home}/.rustup")));
                     if !self.security.exec_user.trim().is_empty() {
                         envs.push(("USER".into(), self.security.exec_user.clone()));
                     }
@@ -182,6 +231,7 @@ impl ToolGateway {
                     #[cfg(unix)]
                     uid_gid: None, // 身份已由 bwrap --uid/--gid 承担
                     confine_home: confine.clone(),
+                    configuration_error: None,
                 };
             }
         }
@@ -198,12 +248,19 @@ impl ToolGateway {
         };
         #[cfg(target_os = "windows")]
         let cmd_override = None;
-        // 身份约束开启时 HOME/USER 覆盖为 execHome(优先于 workspace 沙箱 HOME)
+        // 身份约束开启时 HOME/USER 覆盖为 execHome；cwd 仍保留已批准项目。
         #[cfg(unix)]
         if let Some(home) = &confine {
-            envs.retain(|(k, _)| k != "HOME" && k != "USERPROFILE" && k != "USER");
+            envs.retain(|(k, _)| {
+                !matches!(
+                    k.as_str(),
+                    "HOME" | "USERPROFILE" | "USER" | "CARGO_HOME" | "RUSTUP_HOME"
+                )
+            });
             envs.push(("HOME".into(), home.clone()));
             envs.push(("USERPROFILE".into(), home.clone()));
+            envs.push(("CARGO_HOME".into(), format!("{home}/.cargo")));
+            envs.push(("RUSTUP_HOME".into(), format!("{home}/.rustup")));
             if !self.security.exec_user.trim().is_empty() {
                 envs.push(("USER".into(), self.security.exec_user.clone()));
             }
@@ -219,6 +276,34 @@ impl ToolGateway {
             #[cfg(unix)]
             uid_gid,
             confine_home: confine,
+            configuration_error: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod image_header_tests {
+    use super::ToolGateway;
+
+    #[test]
+    fn image_header_must_match_the_declared_extension() {
+        assert!(ToolGateway::image_header_matches(
+            "png",
+            b"\x89PNG\r\n\x1a\nrest"
+        ));
+        assert!(ToolGateway::image_header_matches(
+            "jpeg",
+            &[0xff, 0xd8, 0xff, 0x00]
+        ));
+        assert!(ToolGateway::image_header_matches("gif", b"GIF89arest"));
+        assert!(ToolGateway::image_header_matches(
+            "webp",
+            b"RIFF0000WEBPrest"
+        ));
+        assert!(ToolGateway::image_header_matches("bmp", b"BMrest"));
+        assert!(!ToolGateway::image_header_matches("png", b"not an image"));
+        assert!(!ToolGateway::image_header_matches("png", b"GIF89a"));
+        assert!(!ToolGateway::image_header_matches("svg", b"<svg/>"));
+        assert!(!ToolGateway::image_header_matches("webp", b"RIFF"));
     }
 }

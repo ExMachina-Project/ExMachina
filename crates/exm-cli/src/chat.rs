@@ -117,17 +117,35 @@ pub async fn run_round(
                                 thinking_streaming = false;
                                 current_unit.clear();
                             }
-                            let tool = evt.payload.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+                            let tool = evt
+                                .payload
+                                .get("tool")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
                             let args = evt.payload.get("args").cloned().unwrap_or_default();
                             let brief = match tool {
-                                "read" | "edit" => args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                "terminal" => args.get("command").and_then(|v| v.as_str()).unwrap_or("").chars().take(120).collect(),
+                                "read" | "edit" => args
+                                    .get("path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                "terminal" => args
+                                    .get("command")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(120)
+                                    .collect(),
                                 "filesystem" => format!(
                                     "{} {}",
                                     args.get("op").and_then(|v| v.as_str()).unwrap_or(""),
                                     args.get("path").and_then(|v| v.as_str()).unwrap_or("")
                                 ),
-                                "browser" | "computer" => args.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                "browser" | "computer" => args
+                                    .get("op")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 other => other.to_string(),
                             };
                             println!("{}", format!("  ⚙ {tool} {brief}").yellow());
@@ -136,8 +154,16 @@ pub async fn run_round(
                             if quiet {
                                 continue;
                             }
-                            let ok = evt.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                            let ms = evt.payload.get("durationMs").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let ok = evt
+                                .payload
+                                .get("ok")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let ms = evt
+                                .payload
+                                .get("durationMs")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
                             println!(
                                 "{}",
                                 dim(format!("  {} ({ms}ms)", if ok { "✔" } else { "✘ 失败" }))
@@ -149,13 +175,22 @@ pub async fn run_round(
                                 orch_streaming = false;
                                 current_unit.clear();
                             }
-                            let cmd = evt.payload.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                            let id = evt.payload.get("approvalId").and_then(|v| v.as_str()).unwrap_or("");
+                            let cmd = evt
+                                .payload
+                                .get("command")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let id = evt
+                                .payload
+                                .get("approvalId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             println!("{}", err(format!("  ⏸ 待人工审批 [{id}]：{cmd}")));
                             println!("{}", dim("     用 /approvals 查看、/approve <id> 批准、/deny <id> 拒绝（批准后系统代执行并把输出回灌）。"));
                         }
                         "graph.updated" => {
-                            if let Ok(g) = serde_json::from_value::<TaskGraph>(evt.payload.clone()) {
+                            if let Ok(g) = serde_json::from_value::<TaskGraph>(evt.payload.clone())
+                            {
                                 let changed: Vec<_> = g
                                     .nodes
                                     .iter()
@@ -200,8 +235,17 @@ pub async fn run_round(
                                 .pointer("/report/summary")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
-                            println!("{}", format!("  ⇦ 同步回流 [{agent}] 置信度 {conf:.2}").cyan());
-                            println!("{}", dim(format!("     {}", summary.chars().take(120).collect::<String>())));
+                            println!(
+                                "{}",
+                                format!("  ⇦ 同步回流 [{agent}] 置信度 {conf:.2}").cyan()
+                            );
+                            println!(
+                                "{}",
+                                dim(format!(
+                                    "     {}",
+                                    summary.chars().take(120).collect::<String>()
+                                ))
+                            );
                         }
                         "memory.recall" => {
                             let n = evt
@@ -250,7 +294,10 @@ pub async fn run_round(
                                     .map(|(a, c)| format!("{a} {c}"))
                                     .collect::<Vec<_>>()
                                     .join(" · ");
-                                println!("{}", dim(format!("  ⌛ 思维链 {think_chars} 字（{by}）")));
+                                println!(
+                                    "{}",
+                                    dim(format!("  ⌛ 思维链 {think_chars} 字（{by}）"))
+                                );
                             }
                             println!(
                                 "{}",
@@ -259,7 +306,11 @@ pub async fn run_round(
                             return;
                         }
                         "run.error" => {
-                            let msg = evt.payload.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                            let msg = evt
+                                .payload
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             println!("{}", err(format!("【警告】运行失败：{msg}")));
                             return;
                         }
@@ -297,8 +348,21 @@ pub async fn run_chat(core: Arc<Core>, text: &str, opts: &ChatOptions) -> anyhow
             format!("{}（{}）", cfg.active_profile, cfg.llm.base_url)
         }
     };
-    println!("{}", dim(format!("会话 {}｜LLM 通道：{}", session.id, channel_label)));
-    println!("{}", render_role("user", None, &[exm_core::types::Statement::new(exm_core::types::SpeechTag::要求, text)]));
+    println!(
+        "{}",
+        dim(format!("会话 {}｜LLM 通道：{}", session.id, channel_label))
+    );
+    println!(
+        "{}",
+        render_role(
+            "user",
+            None,
+            &[exm_core::types::Statement::new(
+                exm_core::types::SpeechTag::要求,
+                text
+            )]
+        )
+    );
     println!();
 
     run_round(&core, &session.id, text, opts.quiet).await
@@ -306,9 +370,21 @@ pub async fn run_chat(core: Arc<Core>, text: &str, opts: &ChatOptions) -> anyhow
 
 /// 交互模式（非 TTY 兜底：管道 / 重定向场景的逐行对话）
 pub async fn run_interactive(core: Arc<Core>, quiet: bool) -> anyhow::Result<()> {
-    use std::io::{BufRead, Write};
     let session = core.create_session("CLI 交互会话")?;
-    println!("{}", dim(format!("交互模式｜会话 {}｜输入 exit 退出", session.id)));
+    run_interactive_with_session(core, session, quiet).await
+}
+
+/// 交互模式继续使用指定会话，不创建替代会话。
+pub async fn run_interactive_with_session(
+    core: Arc<Core>,
+    session: exm_core::types::Session,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+    println!(
+        "{}",
+        dim(format!("交互模式｜会话 {}｜输入 exit 退出", session.id))
+    );
     let stdin = std::io::stdin();
     loop {
         print!("{}", "用户> ".yellow());
@@ -343,7 +419,10 @@ pub async fn run_interactive(core: Arc<Core>, quiet: bool) -> anyhow::Result<()>
         run_chat(
             core.clone(),
             t,
-            &ChatOptions { session: Some(session.id.clone()), quiet },
+            &ChatOptions {
+                session: Some(session.id.clone()),
+                quiet,
+            },
         )
         .await?;
     }

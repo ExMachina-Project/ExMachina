@@ -32,12 +32,20 @@ async fn list(core: &Core) -> anyhow::Result<()> {
     let installed: std::collections::HashMap<String, (String, bool)> = pm
         .list()
         .into_iter()
-        .map(|e| (e.manifest.id.clone(), (e.manifest.version.clone(), e.enabled)))
+        .map(|e| {
+            (
+                e.manifest.id.clone(),
+                (e.manifest.version.clone(), e.enabled),
+            )
+        })
         .collect();
 
     println!("{}", "已安装插件".on_blue().white());
     if installed.is_empty() {
-        println!("{}", dim("（无——从下方目录安装，或把插件目录放入 plugins/）"));
+        println!(
+            "{}",
+            dim("（无——从下方目录安装，或把插件目录放入 plugins/）")
+        );
     }
     let mut rows: Vec<_> = pm.list().into_iter().collect();
     rows.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
@@ -53,7 +61,11 @@ async fn list(core: &Core) -> anyhow::Result<()> {
             "{} {} v{} [{}] {}",
             state,
             e.manifest.id.bold(),
-            if e.manifest.version.is_empty() { "-" } else { &e.manifest.version },
+            if e.manifest.version.is_empty() {
+                "-"
+            } else {
+                &e.manifest.version
+            },
             dim(&e.form),
             e.manifest.name
         );
@@ -74,7 +86,9 @@ async fn list(core: &Core) -> anyhow::Result<()> {
             for (e, status) in catalog {
                 let mark = match status {
                     IndexStatus::Available => ok("可安装").to_string(),
-                    IndexStatus::Updatable(_, new_v) => warn(format!("可更新 → v{new_v}")).to_string(),
+                    IndexStatus::Updatable(_, new_v) => {
+                        warn(format!("可更新 → v{new_v}")).to_string()
+                    }
                     IndexStatus::Incompatible(need) => dim(format!("需宿主 ≥ {need}")).to_string(),
                     IndexStatus::Installed(_) => unreachable!(),
                 };
@@ -86,7 +100,10 @@ async fn list(core: &Core) -> anyhow::Result<()> {
         }
     } else {
         println!();
-        println!("{}", dim("（插件索引拉取失败——仅显示本地列表；可用 config plugins.indexUrl 自定义源）"));
+        println!(
+            "{}",
+            dim("（插件索引拉取失败——仅显示本地列表；可用 config plugins.indexUrl 自定义源）")
+        );
     }
     Ok(())
 }
@@ -100,7 +117,11 @@ async fn install_cmd(core: &Core, source: &str, update: bool) -> anyhow::Result<
         ok("✓"),
         out.id.bold(),
         out.version,
-        if out.updated { "覆盖安装" } else { "安装" }
+        if out.updated {
+            "覆盖安装"
+        } else {
+            "安装"
+        }
     );
     Ok(())
 }
@@ -132,14 +153,22 @@ async fn update_cmd(core: &Core, id: Option<&str>) -> anyhow::Result<()> {
 
 fn uninstall_cmd(core: &Core, id: &str) -> anyhow::Result<()> {
     core.plugin_uninstall(id)?;
-    println!("{} 插件 {} 已卸载（目录与来源/凭据记录已清理）", ok("✓"), id.bold());
+    println!(
+        "{} 插件 {} 已卸载（目录与来源/凭据记录已清理）",
+        ok("✓"),
+        id.bold()
+    );
     Ok(())
 }
 
 /// 来源解析：URL 直判（git/tar.gz）；否则按索引 id 查
 async fn resolve_source(core: &Core, input: &str) -> anyhow::Result<InstallSource> {
     let s = input.trim();
-    if s.contains("://") || s.ends_with(".git") || s.starts_with("git@") || std::path::Path::new(s).is_file() {
+    if s.contains("://")
+        || s.ends_with(".git")
+        || s.starts_with("git@")
+        || std::path::Path::new(s).is_file()
+    {
         return Ok(install::parse_source_url(s));
     }
     // 索引 id

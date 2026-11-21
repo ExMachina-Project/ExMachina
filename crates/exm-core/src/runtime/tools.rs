@@ -54,7 +54,8 @@ impl AgentRuntime {
                         .tools
                         .execute(agent_id, trace, allowlist, tool, &c.arguments)
                         .await;
-                    (tool_feedback(&c.name, &r), None)
+                    let images = self.image_feedback(&c.name, &r.images, attach_images);
+                    (tool_feedback(&c.name, &r), images)
                 }
             });
             let results = futures_util::future::join_all(futs).await;
@@ -94,14 +95,9 @@ impl AgentRuntime {
                     c.name.clone(),
                 )
             };
-            let images = if attach_images {
-                self.image_note(&name, &r.images)
-            } else {
-                None
-            };
+            let images = self.image_feedback(&name, &r.images, attach_images);
             out[i] = Some((tool_feedback(&name, &r), images));
         }
         out.into_iter().map(|x| x.unwrap_or_default()).collect()
     }
-
 }

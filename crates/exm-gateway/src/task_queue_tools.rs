@@ -54,7 +54,11 @@ pub(crate) fn build_injections(core: &Arc<Core>) -> Vec<(CustomTool, DynamicTool
 }
 
 /// 工具分发
-async fn dispatch(core: &Arc<Core>, session_id: &str, args: serde_json::Value) -> anyhow::Result<String> {
+async fn dispatch(
+    core: &Arc<Core>,
+    session_id: &str,
+    args: serde_json::Value,
+) -> anyhow::Result<String> {
     let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
     match op {
         "add" => op_add(core, session_id, &args).await,
@@ -65,8 +69,16 @@ async fn dispatch(core: &Arc<Core>, session_id: &str, args: serde_json::Value) -
 }
 
 /// op=add：parallel 立即派生 / queued 进队
-async fn op_add(core: &Arc<Core>, session_id: &str, args: &serde_json::Value) -> anyhow::Result<String> {
-    let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("").trim();
+async fn op_add(
+    core: &Arc<Core>,
+    session_id: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let task = args
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     if task.is_empty() {
         return Ok("task 不能为空：请提供自包含任务书（目标、范围、期望产出）。".into());
     }
@@ -106,7 +118,10 @@ async fn op_add(core: &Arc<Core>, session_id: &str, args: &serde_json::Value) ->
             let tid = task_queue::enqueue(session_id, task, "queued", "")
                 .map_err(|e| anyhow::anyhow!(e))?;
             emit_updated(core, session_id);
-            Ok(format!("已排队（taskId={tid}）：当前任务收束后自动执行。队列中排在它之前还有 {} 项。", queued_count(session_id, &tid)))
+            Ok(format!(
+                "已排队（taskId={tid}）：当前任务收束后自动执行。队列中排在它之前还有 {} 项。",
+                queued_count(session_id, &tid)
+            ))
         }
     }
 }
@@ -130,7 +145,9 @@ fn op_list(session_id: &str) -> String {
             t.id, t.status, t.run_mode, preview, spawn_tag
         ));
     }
-    out.push_str("\nparallel 项用 spawn op=status spawnId=… 回收结果；queued 项等当前任务收束后自动执行。");
+    out.push_str(
+        "\nparallel 项用 spawn op=status spawnId=… 回收结果；queued 项等当前任务收束后自动执行。",
+    );
     out
 }
 
@@ -211,7 +228,10 @@ mod tests {
 
     #[test]
     fn spawn_id提取() {
-        assert_eq!(extract_spawn_id("已派生 sp-ab12cd34 后台执行"), "sp-ab12cd34");
+        assert_eq!(
+            extract_spawn_id("已派生 sp-ab12cd34 后台执行"),
+            "sp-ab12cd34"
+        );
         assert_eq!(extract_spawn_id("拒绝：并发满"), "");
         assert_eq!(extract_spawn_id("id=sp-xyz），请查收"), "sp-xyz");
     }
@@ -221,10 +241,14 @@ mod tests {
         let core = test_core();
         let sid = "tq-tool-ses";
         task_queue::clear(sid);
-        let out = dispatch(&core, sid, serde_json::json!({"op": "list"})).await.unwrap();
+        let out = dispatch(&core, sid, serde_json::json!({"op": "list"}))
+            .await
+            .unwrap();
         assert!(out.contains("为空"), "{out}");
         task_queue::enqueue(sid, "测试任务：检索全库", "queued", "").unwrap();
-        let out = dispatch(&core, sid, serde_json::json!({"op": "list"})).await.unwrap();
+        let out = dispatch(&core, sid, serde_json::json!({"op": "list"}))
+            .await
+            .unwrap();
         assert!(out.contains("1 项"), "{out}");
         assert!(out.contains("检索全库"), "{out}");
         task_queue::clear(sid);
@@ -236,12 +260,24 @@ mod tests {
         let sid = "tq-tool-ses2";
         task_queue::clear(sid);
         let tid = task_queue::enqueue(sid, "要取消的任务", "queued", "").unwrap();
-        let out = dispatch(&core, sid, serde_json::json!({"op": "cancel", "taskId": tid, "reason": "不需要了"})).await.unwrap();
+        let out = dispatch(
+            &core,
+            sid,
+            serde_json::json!({"op": "cancel", "taskId": tid, "reason": "不需要了"}),
+        )
+        .await
+        .unwrap();
         assert!(out.contains("已取消"), "{out}");
         let listed = task_queue::list(sid);
         assert_eq!(listed[0].status, "cancelled");
         // 再取消一次：已是终态
-        let out = dispatch(&core, sid, serde_json::json!({"op": "cancel", "taskId": tid})).await.unwrap();
+        let out = dispatch(
+            &core,
+            sid,
+            serde_json::json!({"op": "cancel", "taskId": tid}),
+        )
+        .await
+        .unwrap();
         assert!(out.contains("终态"), "{out}");
         task_queue::clear(sid);
     }

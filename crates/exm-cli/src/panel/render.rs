@@ -10,29 +10,106 @@ use super::*;
 /// 笔画取两格宽，与字标的粗板式笔画同量级；单线细字模在终端里过于轻飘。
 const BANNER_LETTERS: [[&str; 7]; 9] = [
     // E
-    ["██████", "██    ", "██    ", "██████", "██    ", "██    ", "██████"],
+    [
+        "██████",
+        "██    ",
+        "██    ",
+        "██████",
+        "██    ",
+        "██    ",
+        "██████",
+    ],
     // X
-    ["██  ██", "██  ██", " ████ ", "  ██  ", " ████ ", "██  ██", "██  ██"],
+    [
+        "██  ██",
+        "██  ██",
+        " ████ ",
+        "  ██  ",
+        " ████ ",
+        "██  ██",
+        "██  ██",
+    ],
     // M
-    ["██████", "██  ██", "██  ██", "██ █ █", "██  ██", "██  ██", "██  ██"],
+    [
+        "██████",
+        "██  ██",
+        "██  ██",
+        "██ █ █",
+        "██  ██",
+        "██  ██",
+        "██  ██",
+    ],
     // A
-    [" ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
+    [
+        " ████ ",
+        "██  ██",
+        "██  ██",
+        "██████",
+        "██  ██",
+        "██  ██",
+        "██  ██",
+    ],
     // C
-    [" ████ ", "██  ██", "██    ", "██    ", "██    ", "██  ██", " ████ "],
+    [
+        " ████ ",
+        "██  ██",
+        "██    ",
+        "██    ",
+        "██    ",
+        "██  ██",
+        " ████ ",
+    ],
     // H
-    ["██  ██", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
+    [
+        "██  ██",
+        "██  ██",
+        "██  ██",
+        "██████",
+        "██  ██",
+        "██  ██",
+        "██  ██",
+    ],
     // I
-    ["██████", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "██████"],
+    [
+        "██████",
+        "  ██  ",
+        "  ██  ",
+        "  ██  ",
+        "  ██  ",
+        "  ██  ",
+        "██████",
+    ],
     // N
-    ["██  ██", "███ ██", "████ █", "██ ███", "██  ██", "██  ██", "██  ██"],
+    [
+        "██  ██",
+        "███ ██",
+        "████ █",
+        "██ ███",
+        "██  ██",
+        "██  ██",
+        "██  ██",
+    ],
     // A
-    [" ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
+    [
+        " ████ ",
+        "██  ██",
+        "██  ██",
+        "██████",
+        "██  ██",
+        "██  ██",
+        "██  ██",
+    ],
 ];
 
 /// 非 TTY（管道 / 重定向）逐行模式下复用同一套 `/` 命令实现。
 ///
 /// 否则在管道里输入 `/help` 会被当成普通任务发给模型。返回 `true` 表示请求退出。
-pub async fn handle_line(core: &Arc<Core>, line: &str, quiet: bool, session_id: &str) -> anyhow::Result<bool> {
+pub async fn handle_line(
+    core: &Arc<Core>,
+    line: &str,
+    quiet: bool,
+    session_id: &str,
+) -> anyhow::Result<bool> {
     let mut panel = Panel::new(
         core.config().workspace_root.clone(),
         prefs_root(core),
@@ -50,7 +127,10 @@ pub async fn handle_line(core: &Arc<Core>, line: &str, quiet: bool, session_id: 
         session_title: title,
         turns: core.session_usage(session_id).2,
     };
-    Ok(matches!(panel.dispatch(core, &mut state, line).await?, Flow::Exit))
+    Ok(matches!(
+        panel.dispatch(core, &mut state, line).await?,
+        Flow::Exit
+    ))
 }
 
 /// 由字母表拼出横幅 7 行（保证各行列宽严格一致）
@@ -105,7 +185,10 @@ pub(crate) fn print_agents(core: &Core, filter: Option<&str>) -> anyhow::Result<
 pub(crate) fn print_checkpoints(core: &Core) {
     let rows = core.list_checkpoints();
     if rows.is_empty() {
-        println!("{}", dim("尚无检查点（写/编辑文件前会自动快照到 .exmachina/checkpoints/）"));
+        println!(
+            "{}",
+            dim("尚无检查点（写/编辑文件前会自动快照到 .exmachina/checkpoints/）")
+        );
         return;
     }
     println!("{:<12} {:<50} {:>10}", "日期", "文件", "大小");
@@ -375,7 +458,9 @@ pub(crate) fn dangling_value(word: &str) -> bool {
 /// 单个超宽「词」（无空格的长中文串 / 长标志链）按显示列硬折，优先在标点处断开。
 fn hard_wrap(word: &str, avail: usize) -> Vec<String> {
     // 允许断行的标点：断点保留在上一行末尾
-    const BREAKS: &[char] = &['·', '、', '，', '。', '（', '）', '/', '|', '[', ']', ':', '：', '→'];
+    const BREAKS: &[char] = &[
+        '·', '、', '，', '。', '（', '）', '/', '|', '[', ']', ':', '：', '→',
+    ];
     let mut out: Vec<String> = Vec::new();
     let mut cur: Vec<char> = Vec::new();
     let mut cur_w = 0usize;
@@ -386,7 +471,11 @@ fn hard_wrap(word: &str, avail: usize) -> Vec<String> {
             // 断点下标可等于 cur.len()（断点字符正好是本行最后一个字符）
             let cut = brk.filter(|&b| b > 0).unwrap_or(cur.len());
             let head: String = cur[..cut].iter().collect();
-            let tail: Vec<char> = cur[cut..].iter().copied().skip_while(|c| c.is_whitespace()).collect();
+            let tail: Vec<char> = cur[cut..]
+                .iter()
+                .copied()
+                .skip_while(|c| c.is_whitespace())
+                .collect();
             out.push(head.trim_end().to_string());
             cur_w = tail.iter().map(|c| char_width(*c)).sum();
             cur = tail;
@@ -508,16 +597,31 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("/del <序号|id>", "删除会话"),
             ("/tasks", "当前会话编排图（节点/依赖/回流）"),
             ("/stop", "终止当前运行中的轮次（等同 Ctrl+C）"),
-            ("/undo <轮次>", "撤销到指定轮次（联动回滚该轮之后改动的工作区文件）"),
+            (
+                "/undo <轮次>",
+                "撤销到指定轮次（联动回滚该轮之后改动的工作区文件）",
+            ),
             ("/fork <轮次>", "派生分支会话（原会话不变）"),
             ("/flows", "外部聊天流列表（通道 · 对端 · 预览 · 绑定/未读）"),
-            ("/flows open <序号>", "打开流（进入绑定会话并清未读；与 WebUI 同源）"),
-            ("/flows sessions <序号>", "流内会话列表（活跃倒序，绑定带 ●）"),
-            ("/flows use <流序号> <会话序号>", "切换流的绑定会话（通道侧同步生效）"),
+            (
+                "/flows open <序号>",
+                "打开流（进入绑定会话并清未读；与 WebUI 同源）",
+            ),
+            (
+                "/flows sessions <序号>",
+                "流内会话列表（活跃倒序，绑定带 ●）",
+            ),
+            (
+                "/flows use <流序号> <会话序号>",
+                "切换流的绑定会话（通道侧同步生效）",
+            ),
             ("/clear", "清屏并重绘面板"),
             ("/status", "重绘运行状态面板"),
             ("/quiet [on|off]", "静默模式：只输出最终结果（落盘记忆）"),
-            ("/theme <名>", "强调色：cyan|green|amber|violet|ice（落盘记忆）"),
+            (
+                "/theme <名>",
+                "强调色：cyan|green|amber|violet|ice（落盘记忆）",
+            ),
             ("/caps", "终端能力探测（色彩档位/宽字符/剪贴板通道）"),
             ("/copy <文本>", "复制到剪贴板（不可用时降级打印）"),
         ],
@@ -535,10 +639,19 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("/group info [id]", "组详情（主智能体 / 成员）"),
             ("/group delete <id>", "删除自定义组"),
             ("/agents [关键词]", "组内个体编成清单（可按能力过滤）"),
-            ("/agent create <名称> --id <identifier> --desc <职责> [--tier orchestrator|unit]", "新建个体"),
+            (
+                "/agent create <名称> --id <identifier> --desc <职责> [--tier orchestrator|unit]",
+                "新建个体",
+            ),
             ("/agent remove <identifier>", "删除个体"),
-            ("/agent optimize|adaptation|reset-adaptation <identifier>", "经验优化：教训 → 行为改进要点"),
-            ("/persona get|set|reset <identifier> [文本]", "人设（说话风格）"),
+            (
+                "/agent optimize|adaptation|reset-adaptation <identifier>",
+                "经验优化：教训 → 行为改进要点",
+            ),
+            (
+                "/persona get|set|reset <identifier> [文本]",
+                "人设（说话风格）",
+            ),
         ],
     ),
     (
@@ -547,7 +660,10 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("/model", "模型档案清单（生效档案标注 ●）"),
             ("/model use <id>", "切换生效档案（热生效）"),
             ("/model test [id]", "连通测试（真实发一条极短请求）"),
-            ("/model add <id> --name <名称> --base-url <url> --key <key> --model <模型>", "新增/更新档案"),
+            (
+                "/model add <id> --name <名称> --base-url <url> --key <key> --model <模型>",
+                "新增/更新档案",
+            ),
             ("/model remove <id>", "删除档案"),
             ("/config", "当前配置摘要"),
             ("/config get <键>", "读单键（密码打码）"),
@@ -560,14 +676,29 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("/memory list [--kind k] [--agent a]", "记忆清单"),
             ("/memory search <查询>", "混合检索（显示得分与理由）"),
-            ("/memory add --kind k <标题> <内容> [--pin] [--agent a] [--global]", "固化一条记忆"),
-            ("/memory stats|pin|forget|decay|reindex|render ...", "统计 / 固定 / 遗忘 / 衰减 / 重建 / 渲染"),
+            (
+                "/memory add --kind k <标题> <内容> [--pin] [--agent a] [--global]",
+                "固化一条记忆",
+            ),
+            (
+                "/memory stats|pin|forget|decay|reindex|render ...",
+                "统计 / 固定 / 遗忘 / 衰减 / 重建 / 渲染",
+            ),
             ("/skills", "技能包清单"),
-            ("/cron list|add|enable|disable|remove|run|runs ...", "定时任务"),
+            (
+                "/cron list|add|enable|disable|remove|run|runs ...",
+                "定时任务",
+            ),
             ("/approvals [--status pending]", "执行审批单"),
-            ("/approve <id> | /deny <id>", "批准（代执行并回灌输出）/ 拒绝"),
+            (
+                "/approve <id> | /deny <id>",
+                "批准（代执行并回灌输出）/ 拒绝",
+            ),
             ("/checkpoints", "文件检查点清单（写前快照）"),
-            ("/restore <路径> [--date YYYY-MM-DD]", "回滚工作区文件到检查点"),
+            (
+                "/restore <路径> [--date YYYY-MM-DD]",
+                "回滚工作区文件到检查点",
+            ),
             ("/doctor", "体检：配置 / 编成 / 记忆 / 模型通道 / WebUI"),
         ],
     ),

@@ -2,7 +2,6 @@
 
 // ---------------------------------------------------------------- 技能包
 
-
 use super::*;
 pub async fn list_skills(State(st): State<AppState>) -> impl IntoResponse {
     match st.core.skills() {
@@ -176,7 +175,11 @@ pub async fn export_skill(State(st): State<AppState>, Path(id): Path<String>) ->
                 .chars()
                 .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
                 .collect();
-            let safe_id = if safe_id.is_empty() { "skill".to_string() } else { safe_id };
+            let safe_id = if safe_id.is_empty() {
+                "skill".to_string()
+            } else {
+                safe_id
+            };
             (
                 StatusCode::OK,
                 [
@@ -184,8 +187,7 @@ pub async fn export_skill(State(st): State<AppState>, Path(id): Path<String>) ->
                     (
                         "content-disposition",
                         Box::leak(
-                            format!("attachment; filename=\"SKILL-{safe_id}.md\"")
-                                .into_boxed_str(),
+                            format!("attachment; filename=\"SKILL-{safe_id}.md\"").into_boxed_str(),
                         ) as &str,
                     ),
                 ],

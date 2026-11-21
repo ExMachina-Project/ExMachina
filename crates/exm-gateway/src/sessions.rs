@@ -38,11 +38,20 @@ pub(crate) async fn search_sessions(
             .into_response();
     }
     let limit = p.limit.unwrap_or(20).clamp(1, 50);
-    let root = match p.workspace.as_deref().map(|raw| crate::project_scope::pinned(&st, raw)).transpose() {
+    let root = match p
+        .workspace
+        .as_deref()
+        .map(|raw| crate::project_scope::pinned(&st, raw))
+        .transpose()
+    {
         Ok(root) => root,
         Err(response) => return response,
     };
-    match st.core.store.search_sessions_in(&query, limit, root.as_deref().and_then(std::path::Path::to_str)) {
+    match st.core.store.search_sessions_in(
+        &query,
+        limit,
+        root.as_deref().and_then(std::path::Path::to_str),
+    ) {
         Ok(hits) => Json(json!({ "query": query, "hits": hits })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -86,7 +95,9 @@ pub(crate) async fn get_workspace(State(st): State<AppState>) -> impl IntoRespon
     let global = st.core.config().workspace_root.clone();
     let explicit = st.core.registry().active_workspace();
     let path = st.core.registry().effective_workspace(&global);
-    Json(json!({ "workspace": path.to_string_lossy(), "explicit": explicit, "scoped": exm_core::workspace::current().is_some() }))
+    Json(
+        json!({ "workspace": path.to_string_lossy(), "explicit": explicit, "scoped": exm_core::workspace::current().is_some() }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -179,7 +190,10 @@ pub(crate) async fn chat(
     (StatusCode::ACCEPTED, Json(json!({ "accepted": true }))).into_response()
 }
 
-pub(crate) async fn get_graph(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn get_graph(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.store.latest_graph(&id) {
         Ok(Some(g)) => Json(serde_json::to_value(g).unwrap_or(Value::Null)).into_response(),
         Ok(None) => Json(json!({ "nodes": [] })).into_response(),
@@ -278,26 +292,56 @@ pub(crate) async fn session_batch(
     if let Some(header) = headers.get("x-exm-workspace") {
         let raw = match header.to_str() {
             Ok(value) => crate::ws::percent_decode(value),
-            Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "项目目录请求头无效" }))).into_response(),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "项目目录请求头无效" })),
+                )
+                    .into_response()
+            }
         };
         let root = match crate::project_scope::pinned(&st, &raw) {
             Ok(root) => root,
             Err(response) => return response,
         };
         for id in &b.ids {
-            let session = st.core.store.get_session(id).ok().flatten()
+            let session = st
+                .core
+                .store
+                .get_session(id)
+                .ok()
+                .flatten()
                 .filter(|session| session.workspace.as_deref() == root.to_str());
             let Some(session) = session else {
-                return (StatusCode::NOT_FOUND, Json(json!({ "error": "会话不存在" }))).into_response();
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "会话不存在" })),
+                )
+                    .into_response();
             };
             if session.collaboration_id.is_some() {
-                return (StatusCode::CONFLICT, Json(json!({ "error": "协作成员会话不能批量操作" }))).into_response();
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "协作成员会话不能批量操作" })),
+                )
+                    .into_response();
             }
         }
     } else {
         for id in &b.ids {
-            if st.core.store.get_session(id).ok().flatten().is_none_or(|session| session.workspace.is_some()) {
-                return (StatusCode::NOT_FOUND, Json(json!({ "error": "会话不存在" }))).into_response();
+            if st
+                .core
+                .store
+                .get_session(id)
+                .ok()
+                .flatten()
+                .is_none_or(|session| session.workspace.is_some())
+            {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "会话不存在" })),
+                )
+                    .into_response();
             }
         }
     }
@@ -395,11 +439,18 @@ pub(crate) struct AuditQuery {
     kind: Option<String>,
 }
 
-pub(crate) async fn list_audit(State(st): State<AppState>, Query(q): Query<AuditQuery>) -> impl IntoResponse {
+pub(crate) async fn list_audit(
+    State(st): State<AppState>,
+    Query(q): Query<AuditQuery>,
+) -> impl IntoResponse {
     // kind=dispatch（agent-budget-audit 3.4）：子代理派发审计（跨会话聚合，
     // 异常条目由前端按 ok/status 高亮）；缺省 = 既有工具审计
     if q.kind.as_deref() == Some("dispatch") {
-        return match st.core.store.list_dispatch_audit_all(q.limit.unwrap_or(200).min(1000)) {
+        return match st
+            .core
+            .store
+            .list_dispatch_audit_all(q.limit.unwrap_or(200).min(1000))
+        {
             Ok(items) => Json(json!({ "items": items })).into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -423,7 +474,10 @@ pub(crate) async fn list_audit(State(st): State<AppState>, Query(q): Query<Audit
 }
 
 /// 停止会话运行中的轮次（POST /api/sessions/:id/stop）：运行中返回已执行工具数，空闲返回 409
-pub(crate) async fn stop_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn stop_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.stop_session(&id) {
         Ok(tools) => Json(json!({ "ok": true, "toolsExecuted": tools })).into_response(),
         Err(e) => {
@@ -438,7 +492,10 @@ pub(crate) async fn stop_session(State(st): State<AppState>, Path(id): Path<Stri
     }
 }
 
-pub(crate) async fn get_evidence(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn get_evidence(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.store.list_evidence(&id) {
         Ok(v) => Json(Value::Array(v)).into_response(),
         Err(e) => (
@@ -560,7 +617,10 @@ pub(crate) async fn session_fork(
 }
 
 /// 归档视图（GET /api/sessions/:id/archive）：被撤销/编辑回退内容的可查留痕
-pub(crate) async fn session_archive(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn session_archive(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.store.list_archived_messages(&id) {
         Ok(msgs) => Json(serde_json::to_value(msgs).unwrap_or(Value::Null)).into_response(),
         Err(e) => (
@@ -570,7 +630,6 @@ pub(crate) async fn session_archive(State(st): State<AppState>, Path(id): Path<S
             .into_response(),
     }
 }
-
 
 /// 轮次快照的输入预览：轮次 = 第 N 条用户消息（与聊天页编号同口径），
 /// 截断至 ≤80 字符；无对应用户消息时给空串。
@@ -628,7 +687,10 @@ pub(crate) async fn session_snapshots(
 }
 
 /// 会话 token 用量（真实用量优先，无记录时字符估算）与预算
-pub(crate) async fn session_tokens(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn session_tokens(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     let used = st.core.session_tokens_estimate(&id);
     let budget = st.core.config().max_session_tokens;
     let (prompt, completion, calls) = st.core.session_usage(&id);
@@ -670,10 +732,16 @@ pub(crate) async fn create_session(
             }
         }
     };
-    let explicit_title = v.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
+    let explicit_title = v
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string());
     // 显式传了 title 字段但 trim 后为空 → 400（「新会话」兜底只覆盖缺省场景；
     // 纯空白标题在会话列表里是不可辨识的垃圾行）
-    if explicit_title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+    if explicit_title
+        .as_deref()
+        .is_some_and(|t| t.trim().is_empty())
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "标题不能为空（空白字符不算）" })),
@@ -687,29 +755,57 @@ pub(crate) async fn create_session(
             Ok(root) => Some(root.to_string_lossy().into_owned()),
             Err(response) => return response,
         },
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "workspace 应为绝对目录路径" }))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "workspace 应为绝对目录路径" })),
+            )
+                .into_response()
+        }
     };
     if let Some(header) = headers.get("x-exm-workspace") {
         let header = match header.to_str() {
             Ok(value) => crate::ws::percent_decode(value),
-            Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "项目目录请求头无效" }))).into_response(),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "项目目录请求头无效" })),
+                )
+                    .into_response()
+            }
         };
         if workspace.as_deref() != Some(header.as_str()) {
-            return (StatusCode::FORBIDDEN, Json(json!({ "error": "新会话项目目录与连接项目不匹配" }))).into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "新会话项目目录与连接项目不匹配" })),
+            )
+                .into_response();
         }
     }
     let target = match v.get("target") {
         None | Some(Value::Null) => None,
         Some(Value::String(target)) => Some(target.as_str()),
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "target 必须是组 ID 或 single:<id>" }))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "target 必须是组 ID 或 single:<id>" })),
+            )
+                .into_response()
+        }
     };
-    let scope = target.map(str::to_string).unwrap_or_else(|| st.core.registry().active_scope());
+    let scope = target
+        .map(str::to_string)
+        .unwrap_or_else(|| st.core.registry().active_scope());
     let valid = match scope.strip_prefix("single:") {
         Some(id) => st.core.registry().single_exists(id),
         None => st.core.registry().group_exists(&scope),
     };
     if (target.is_some() || workspace.is_some()) && !valid {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "对话对象不存在" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "对话对象不存在" })),
+        )
+            .into_response();
     }
     match st.core.store.create_session_in(&title, &scope, workspace) {
         Ok(s) => Json(serde_json::to_value(s).unwrap_or(Value::Null)).into_response(),
@@ -727,7 +823,12 @@ pub(crate) async fn list_sessions(
 ) -> impl IntoResponse {
     // 组是交互对象：会话列表归属激活组（?all=1 管理视角看全部，附消息数）；
     // ?archived=true 显式查归档区（归档会话不进默认列表）
-    let root = match q.workspace.as_deref().map(|raw| crate::project_scope::pinned(&st, raw)).transpose() {
+    let root = match q
+        .workspace
+        .as_deref()
+        .map(|raw| crate::project_scope::pinned(&st, raw))
+        .transpose()
+    {
         Ok(root) => root,
         Err(response) => return response,
     };
@@ -747,14 +848,17 @@ pub(crate) async fn list_sessions(
             } else {
                 list.retain(|s| s.workspace.is_none());
             }
-            let list: Vec<Value> = list.into_iter().map(|s| {
-                let running = exm_core::round_trace::is_running(&s.id);
-                let mut value = serde_json::to_value(s).unwrap_or(Value::Null);
-                value["running"] = json!(running);
-                value
-            }).collect();
+            let list: Vec<Value> = list
+                .into_iter()
+                .map(|s| {
+                    let running = exm_core::round_trace::is_running(&s.id);
+                    let mut value = serde_json::to_value(s).unwrap_or(Value::Null);
+                    value["running"] = json!(running);
+                    value
+                })
+                .collect();
             Json(json!(list)).into_response()
-        },
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -774,7 +878,10 @@ pub(crate) struct SessionListQuery {
     workspace: Option<String>,
 }
 
-pub(crate) async fn delete_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn delete_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.delete_session(&id) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
@@ -785,7 +892,10 @@ pub(crate) async fn delete_session(State(st): State<AppState>, Path(id): Path<St
     }
 }
 
-pub(crate) async fn get_session(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn get_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.store.get_session(&id) {
         Ok(Some(s)) => {
             let mut value = serde_json::to_value(s).unwrap_or(Value::Null);
@@ -805,7 +915,10 @@ pub(crate) async fn get_session(State(st): State<AppState>, Path(id): Path<Strin
     }
 }
 
-pub(crate) async fn list_messages(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn list_messages(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.store.list_messages(&id, 200) {
         Ok(msgs) => Json(serde_json::to_value(msgs).unwrap_or(Value::Null)).into_response(),
         Err(e) => (
@@ -868,7 +981,11 @@ pub(crate) async fn export_trajectory(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(12)
         .collect();
-    let safe_id = if safe_id.is_empty() { "session".to_string() } else { safe_id };
+    let safe_id = if safe_id.is_empty() {
+        "session".to_string()
+    } else {
+        safe_id
+    };
     let fname = format!(
         "exm-trajectory-{}.{}",
         safe_id,
@@ -902,9 +1019,9 @@ pub(crate) struct SteerBody {
     pub text: String,
 }
 
-/// POST /api/sessions/:id/steer —— 中断当前轮次并把新输入排入下一轮。
-/// 语义：正在跑 → 置位取消令牌（工具循环在检查点终止），新消息走会话串行队列；
-/// 空闲 → 等价普通 chat。返回 interrupted 标记便于前端提示。
+/// POST /api/sessions/:id/steer —— 非中断 steering admission。
+/// 语义：正在跑 → 立即暂存，当前工具动作继续到安全检查点；空闲 → 等价普通
+/// chat。该入口不得调用 stop_session，也不得同步等待当前轮次完成。
 pub(crate) async fn steer_session(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -925,7 +1042,28 @@ pub(crate) async fn steer_session(
         )
             .into_response();
     }
-    let interrupted = st.core.stop_session(&id).is_ok();
+    let admission = match st.core.admit_steering(&id, &text, Some("http")) {
+        Ok(admission) => admission,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    if matches!(admission, exm_core::SteeringAdmission::Running) {
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "accepted": true,
+                "status": "steering_accepted",
+                "running": true,
+                "interrupted": false,
+            })),
+        )
+            .into_response();
+    }
     let core = st.core.clone();
     tokio::spawn(async move {
         if let Err(e) = core.chat(&id, &text).await {
@@ -938,7 +1076,13 @@ pub(crate) async fn steer_session(
     });
     (
         StatusCode::ACCEPTED,
-        Json(json!({ "accepted": true, "interrupted": interrupted })),
+        Json(json!({
+            "accepted": true,
+            "status": "accepted",
+            "mode": "chat",
+            "running": false,
+            "interrupted": false,
+        })),
     )
         .into_response()
 }
@@ -957,7 +1101,11 @@ pub(crate) async fn export_session(
         )
             .into_response();
     };
-    let msgs = st.core.store.list_messages(&id, 100_000).unwrap_or_default();
+    let msgs = st
+        .core
+        .store
+        .list_messages(&id, 100_000)
+        .unwrap_or_default();
     let approvals = st
         .core
         .approval_list(None, 100_000)
@@ -968,9 +1116,18 @@ pub(crate) async fn export_session(
 
     let fname = format!(
         "exm-session-{}-{}.{}",
-        session.title.replace('/', "-").chars().take(24).collect::<String>(),
+        session
+            .title
+            .replace('/', "-")
+            .chars()
+            .take(24)
+            .collect::<String>(),
         id.chars().take(8).collect::<String>(),
-        if q.format.as_deref() == Some("json") { "json" } else { "md" }
+        if q.format.as_deref() == Some("json") {
+            "json"
+        } else {
+            "md"
+        }
     );
 
     if q.format.as_deref() == Some("json") {
@@ -986,8 +1143,7 @@ pub(crate) async fn export_session(
                 ("content-type", "application/json; charset=utf-8"),
                 (
                     "content-disposition",
-                    Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str())
-                        as &str,
+                    Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str()) as &str,
                 ),
             ],
             body,
@@ -1071,13 +1227,74 @@ pub(crate) async fn export_session(
                 ("content-type", "text/markdown; charset=utf-8"),
                 (
                     "content-disposition",
-                    Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str())
-                        as &str,
+                    Box::leak(format!("attachment; filename=\"{fname}\"").into_boxed_str()) as &str,
                 ),
             ],
             md,
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod steering_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tower::ServiceExt;
+
+    fn core() -> exm_core::Core {
+        let dir = std::env::temp_dir().join(format!("exm-steer-http-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        exm_core::Core::with_config(cfg).expect("创建 Core 失败")
+    }
+
+    #[tokio::test]
+    async fn steer_endpoint_admits_without_stop_or_waiting_for_current_round() {
+        let core = Arc::new(core());
+        let session = core.create_session("steering-http").unwrap();
+        exm_core::round_trace::begin(&session.id);
+        let app = crate::build_router(core.clone());
+        let started = Instant::now();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/steer", session.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "text": "写入后再调整方向" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let payload: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["status"], "steering_accepted");
+        assert_eq!(payload["interrupted"], false);
+        assert_eq!(payload["running"], true);
+        assert!(!exm_core::round_trace::is_cancelled(&session.id));
+        assert!(core
+            .store
+            .list_messages(&session.id, 0)
+            .unwrap()
+            .iter()
+            .any(|message| message
+                .statements
+                .iter()
+                .any(|statement| statement.text == "写入后再调整方向")));
+        exm_core::round_trace::end(&session.id);
     }
 }
 

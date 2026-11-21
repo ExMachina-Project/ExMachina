@@ -9,7 +9,7 @@
 use crate::panel::{Flow, Panel, PanelState};
 use crossterm::{
     event::{
-        DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, DisableBracketedPaste,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         KeyCode, KeyEvent, KeyModifiers,
     },
     execute,
@@ -35,7 +35,12 @@ enum Msg {
     /// 智能体回答（最终陈述文本）
     Assistant { agent: String, text: String },
     /// 工具调用卡（名称 + 参数摘要 + 结果状态）
-    Tool { name: String, args: String, ok: bool, out: String },
+    Tool {
+        name: String,
+        args: String,
+        ok: bool,
+        out: String,
+    },
     /// 计划事件行
     Plan(String),
     /// 系统提示（斜杠命令输出、错误等）
@@ -163,7 +168,8 @@ async fn refresh_approvals(core: &Arc<exm_core::Core>, tui: &mut Tui) {
                 .collect();
             let sel = tui.approval_sel.selected().unwrap_or(0);
             let n = tui.approvals.len();
-            tui.approval_sel.select(if n == 0 { None } else { Some(sel.min(n - 1)) });
+            tui.approval_sel
+                .select(if n == 0 { None } else { Some(sel.min(n - 1)) });
         }
         Err(e) => {
             tui.approval_note = format!("审批列表读取失败：{e}");
@@ -175,13 +181,22 @@ async fn refresh_approvals(core: &Arc<exm_core::Core>, tui: &mut Tui) {
 fn event_to_msg(evt: &CoreEvent) -> Option<Msg> {
     match evt.kind.as_str() {
         "tool.call" => {
-            let name = evt.payload.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+            let name = evt
+                .payload
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let args = evt
                 .payload
                 .get("args")
                 .map(compact_args)
                 .unwrap_or_default();
-            Some(Msg::Tool { name: name.into(), args, ok: true, out: String::new() })
+            Some(Msg::Tool {
+                name: name.into(),
+                args,
+                ok: true,
+                out: String::new(),
+            })
         }
         "tool.result" => {
             // 结果合并进最后一张工具卡（由调用方处理）；此处独立行避免碎片
@@ -189,35 +204,69 @@ fn event_to_msg(evt: &CoreEvent) -> Option<Msg> {
         }
         "run.finished" => {
             let text = statements_text(&evt.payload);
-            Some(Msg::Assistant { agent: "主智能体".into(), text })
+            Some(Msg::Assistant {
+                agent: "主智能体".into(),
+                text,
+            })
         }
         "run.error" => {
-            let msg = evt.payload.get("message").and_then(|v| v.as_str()).unwrap_or("运行失败");
+            let msg = evt
+                .payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("运行失败");
             Some(Msg::System(format!("⚠ 运行失败：{msg}")))
         }
         "plan.item" | "plan.pending" | "plan.approved" | "plan.rejected" | "plan.applied" => {
             let line = match evt.kind.as_str() {
                 "plan.item" => {
-                    let t = evt.payload.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                    let t = evt
+                        .payload
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     format!("📋 计划条目：{t}（未执行，待批准）")
                 }
                 "plan.pending" => format!(
                     "📋 计划待审批（{} 条）—— 审批页或 /plan 处理",
-                    evt.payload.get("count").and_then(|v| v.as_u64()).unwrap_or(0)
+                    evt.payload
+                        .get("count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
                 ),
                 "plan.approved" => "✅ 计划已批准，回放执行".into(),
                 "plan.rejected" => "⛔ 计划已拒绝（清单保留）".into(),
                 _ => {
-                    let ok = evt.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let t = evt.payload.get("target").and_then(|v| v.as_str()).unwrap_or("");
-                    if ok { format!("✅ 已执行：{t}") } else { format!("❌ 执行失败：{t}") }
+                    let ok = evt
+                        .payload
+                        .get("ok")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let t = evt
+                        .payload
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if ok {
+                        format!("✅ 已执行：{t}")
+                    } else {
+                        format!("❌ 执行失败：{t}")
+                    }
                 }
             };
             Some(Msg::Plan(line))
         }
         "spawn.started" => {
-            let p = evt.payload.get("taskPreview").and_then(|v| v.as_str()).unwrap_or("");
-            let bg = evt.payload.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            let p = evt
+                .payload
+                .get("taskPreview")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let bg = evt
+                .payload
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if bg {
                 Some(Msg::Plan(format!("🚀 后台子任务启动：{p}（结果稍后可查）")))
             } else {
@@ -225,9 +274,21 @@ fn event_to_msg(evt: &CoreEvent) -> Option<Msg> {
             }
         }
         "spawn.finished" => {
-            let status = evt.payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            let bg = evt.payload.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
-            let suffix = if bg { "（后台，结果待收）" } else { "" };
+            let status = evt
+                .payload
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let bg = evt
+                .payload
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let suffix = if bg {
+                "（后台，结果待收）"
+            } else {
+                ""
+            };
             match status {
                 "done" => Some(Msg::Plan(format!("🚀 子任务完成（结论已回传）{suffix}"))),
                 "timeout" => Some(Msg::Plan(format!("🚀 子任务超时终止{suffix}"))),
@@ -235,9 +296,21 @@ fn event_to_msg(evt: &CoreEvent) -> Option<Msg> {
             }
         }
         "todo.updated" => {
-            let done = evt.payload.get("doneCount").and_then(|v| v.as_u64()).unwrap_or(0);
-            let total = evt.payload.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-            let all = evt.payload.get("allDone").and_then(|v| v.as_bool()).unwrap_or(false);
+            let done = evt
+                .payload
+                .get("doneCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total = evt
+                .payload
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let all = evt
+                .payload
+                .get("allDone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if total == 0 {
                 Some(Msg::Plan("📋 任务清单已清空".into()))
             } else if all {
@@ -261,7 +334,11 @@ fn statements_text(payload: &serde_json::Value) -> String {
             }
         }
     }
-    if lines.is_empty() { "（本轮无收束输出）".into() } else { lines.join("\n") }
+    if lines.is_empty() {
+        "（本轮无收束输出）".into()
+    } else {
+        lines.join("\n")
+    }
 }
 
 /// 工具参数 → 单行摘要（键=值 取前几个键）
@@ -315,7 +392,10 @@ fn msg_lines(m: &Msg, width: usize) -> Vec<Line<'static>> {
             )];
             for raw in t.split('\n') {
                 for chunk in wrap_chars(raw, w) {
-                    v.push(Line::styled(format!("│ {chunk}"), Style::new().fg(Color::Blue)));
+                    v.push(Line::styled(
+                        format!("│ {chunk}"),
+                        Style::new().fg(Color::Blue),
+                    ));
                 }
             }
             v.push(Line::styled("└─", Style::new().fg(Color::Blue)));
@@ -328,13 +408,21 @@ fn msg_lines(m: &Msg, width: usize) -> Vec<Line<'static>> {
             )];
             for raw in text.split('\n') {
                 for chunk in wrap_chars(raw, w) {
-                    v.push(Line::styled(format!("│ {chunk}"), Style::new().fg(Color::Green)));
+                    v.push(Line::styled(
+                        format!("│ {chunk}"),
+                        Style::new().fg(Color::Green),
+                    ));
                 }
             }
             v.push(Line::styled("└─", Style::new().fg(Color::Green)));
             v
         }
-        Msg::Tool { name, args, ok, out } => {
+        Msg::Tool {
+            name,
+            args,
+            ok,
+            out,
+        } => {
             let mark = if *ok { "✓" } else { "✗" };
             let mut v = vec![Line::styled(
                 format!("  {mark} ⚙ {name}  {args}"),
@@ -345,7 +433,10 @@ fn msg_lines(m: &Msg, width: usize) -> Vec<Line<'static>> {
                 v.extend(diff_lines(out));
             } else if !out.is_empty() {
                 let short: String = out.chars().take(120).collect();
-                v.push(Line::styled(format!("    {short}"), Style::new().fg(Color::DarkGray)));
+                v.push(Line::styled(
+                    format!("    {short}"),
+                    Style::new().fg(Color::DarkGray),
+                ));
             }
             v
         }
@@ -404,7 +495,12 @@ struct RestoreGuard;
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste);
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         ratatui::restore();
     }
 }
@@ -443,7 +539,10 @@ pub async fn run_tui_with_session(
             loop {
                 match rx.recv().await {
                     Ok(e) => {
-                        if e.session_id == sid || e.kind == "approval.required" || e.kind == "approval.resolved" {
+                        if e.session_id == sid
+                            || e.kind == "approval.required"
+                            || e.kind == "approval.resolved"
+                        {
                             let _ = tx.send(TuiEvent::Core(e)).await;
                         }
                     }
@@ -569,7 +668,13 @@ async fn handle_key(
         Page::Chat => {
             // 并排模式：Ctrl+Y/N 审批直达（先于输入框处理）；其余键照常
             if tui.side_by_side
-                && matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('n') | KeyCode::Char('N'))
+                && matches!(
+                    k.code,
+                    KeyCode::Char('y')
+                        | KeyCode::Char('Y')
+                        | KeyCode::Char('n')
+                        | KeyCode::Char('N')
+                )
                 && k.modifiers.contains(KeyModifiers::CONTROL)
             {
                 return handle_side_approval_key(core, tui, k).await;
@@ -681,7 +786,10 @@ async fn handle_chat_key(
             // 滚动：从底部回退一页（消息粒度；一页 ≈ 视口高度/3 行的估计）
             let n = tui.msgs.len();
             let page = 20;
-            let next = tui.scroll.map(|i| i.saturating_sub(page)).unwrap_or(n.saturating_sub(page));
+            let next = tui
+                .scroll
+                .map(|i| i.saturating_sub(page))
+                .unwrap_or(n.saturating_sub(page));
             tui.scroll = Some(next.min(n.saturating_sub(1)));
         }
         KeyCode::PageDown => {
@@ -716,7 +824,10 @@ async fn decide_approval(core: &Arc<exm_core::Core>, tui: &mut Tui, approve: boo
                         format!("已拒绝：{}", r.command)
                     };
                 }
-                Err(e) => tui.approval_note = format!("{}失败：{e}", if approve { "批准" } else { "拒绝" }),
+                Err(e) => {
+                    tui.approval_note =
+                        format!("{}失败：{e}", if approve { "批准" } else { "拒绝" })
+                }
             }
             refresh_approvals(core, tui).await;
         }
@@ -932,10 +1043,7 @@ mod platform_impl {
             return Err(());
         }
         unsafe { _dup2(fds[1], 1) };
-        Ok(super::StdoutCapture {
-            write: None,
-            saved,
-        })
+        Ok(super::StdoutCapture { write: None, saved })
     }
 
     pub(super) fn take_reader_fd() -> Raw {
@@ -979,7 +1087,6 @@ mod platform_impl {
     }
 }
 
-
 /// 核心事件 → 状态更新
 async fn handle_core(core: &Arc<exm_core::Core>, tui: &mut Tui, e: CoreEvent) {
     match e.kind.as_str() {
@@ -988,7 +1095,11 @@ async fn handle_core(core: &Arc<exm_core::Core>, tui: &mut Tui, e: CoreEvent) {
         }
         "tool.result" => {
             // 合并进最后一张工具卡
-            let ok = e.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+            let ok = e
+                .payload
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let out = e
                 .payload
                 .get("output")
@@ -1002,7 +1113,11 @@ async fn handle_core(core: &Arc<exm_core::Core>, tui: &mut Tui, e: CoreEvent) {
         }
         "run.error" => {
             if e.session_id == tui.session_id {
-                let msg = e.payload.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let msg = e
+                    .payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 tui.push(Msg::System(format!("⚠ {msg}")));
                 tui.running = false;
             }
@@ -1025,10 +1140,10 @@ async fn handle_core(core: &Arc<exm_core::Core>, tui: &mut Tui, e: CoreEvent) {
 fn draw(f: &mut Frame, tui: &mut Tui) {
     let area = f.area();
     let chunks = Layout::vertical([
-        Constraint::Length(1),      // 顶栏
-        Constraint::Min(10),        // 主区（消息流 / 审批 / 并排）
-        Constraint::Length(3),      // 输入区
-        Constraint::Length(1),      // 状态栏
+        Constraint::Length(1), // 顶栏
+        Constraint::Min(10),   // 主区（消息流 / 审批 / 并排）
+        Constraint::Length(3), // 输入区
+        Constraint::Length(1), // 状态栏
     ])
     .split(area);
 
@@ -1064,12 +1179,18 @@ fn draw_topbar(f: &mut Frame, tui: &Tui, area: Rect) {
     let pending = if tui.approvals.is_empty() {
         String::new()
     } else if tui.side_by_side {
-        format!("  待审 {}（Ctrl+Y 批准 · Ctrl+N 拒绝）", tui.approvals.len())
+        format!(
+            "  待审 {}（Ctrl+Y 批准 · Ctrl+N 拒绝）",
+            tui.approvals.len()
+        )
     } else {
         format!("  待审 {}", tui.approvals.len())
     };
     let line = Line::from(vec![
-        Span::styled(" EXMACHINA ", Style::new().fg(Color::Black).bg(Color::Cyan).bold()),
+        Span::styled(
+            " EXMACHINA ",
+            Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
+        ),
         Span::styled(tabs, Style::new().fg(Color::Cyan)),
         Span::raw(pending),
         Span::styled(
@@ -1154,12 +1275,18 @@ fn draw_chat(f: &mut Frame, tui: &mut Tui, area: Rect) {
         if let Some(Msg::Running(_)) = tui.msgs.last() {
             // 已含运行行
         } else {
-            lines.push(Line::styled("  ⏳ 运行中…", Style::new().fg(Color::Magenta)));
+            lines.push(Line::styled(
+                "  ⏳ 运行中…",
+                Style::new().fg(Color::Magenta),
+            ));
         }
     }
     if tui.scroll.is_some() && end < tui.msgs.len() {
         lines.push(Line::styled(
-            format!("  ⋯ 后续还有 {} 条消息（PgUp/PgDn 滚动，滚到底自动跟随）", tui.msgs.len() - end),
+            format!(
+                "  ⋯ 后续还有 {} 条消息（PgUp/PgDn 滚动，滚到底自动跟随）",
+                tui.msgs.len() - end
+            ),
             Style::new().fg(Color::DarkGray),
         ));
     }
@@ -1213,10 +1340,19 @@ fn draw_approvals(f: &mut Frame, tui: &mut Tui, area: Rect) {
                 .borders(Borders::ALL)
                 .title(format!(" 审批（{} 条待处理） ", tui.approvals.len())),
         )
-        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::new()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
     f.render_stateful_widget(list, area, &mut tui.approval_sel);
     // 操作提示（叠底行）
-    let hint = Rect { x: area.x + 1, y: area.y + area.height.saturating_sub(1), width: area.width.saturating_sub(2), height: 1 };
+    let hint = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
     f.render_widget(
         Paragraph::new(Line::styled(
             "y/Enter 批准 · n 拒绝 · Y/N 全部 · ↑↓ 选择",
@@ -1230,37 +1366,71 @@ fn draw_approvals(f: &mut Frame, tui: &mut Tui, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, tui: &mut Tui, area: Rect) {
-    let title = if tui.page == Page::Chat { " 输入（Enter 发送 · ↑↓ 历史 · PgUp/PgDn 滚动） " } else { " 输入（审批页只读） " };
-    let style = if tui.page == Page::Chat { Style::new().fg(Color::Cyan) } else { Style::new().fg(Color::DarkGray) };
+    let title = if tui.page == Page::Chat {
+        " 输入（Enter 发送 · ↑↓ 历史 · PgUp/PgDn 滚动） "
+    } else {
+        " 输入（审批页只读） "
+    };
+    let style = if tui.page == Page::Chat {
+        Style::new().fg(Color::Cyan)
+    } else {
+        Style::new().fg(Color::DarkGray)
+    };
     let prompt = "> ";
     let cursor = tui.cursor;
     let text = tui.input.clone();
     let line = Line::from(vec![Span::styled(prompt, style), Span::raw(text)]);
-    let para = Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(title).border_style(style));
+    let para = Paragraph::new(line).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(style),
+    );
     f.render_widget(para, area);
     // 光标绘制：计算 prompt 宽 + 前 cursor 个字符显示宽
     if tui.page == Page::Chat {
         let prefix: usize = 2; // "> "
         let before: String = tui.input.chars().take(cursor).collect();
-        let w: usize = before.chars().map(|c| if c.is_wide() { 2 } else { 1 }).sum();
+        let w: usize = before
+            .chars()
+            .map(|c| if c.is_wide() { 2 } else { 1 })
+            .sum();
         f.set_cursor_position((area.x + 1 + (prefix + w) as u16, area.y + 1));
     }
 }
 
 fn draw_status(f: &mut Frame, tui: &Tui, area: Rect) {
-    let note = if !tui.approval_note.is_empty() && (tui.page == Page::Approvals || tui.side_by_side) {
+    let note = if !tui.approval_note.is_empty() && (tui.page == Page::Approvals || tui.side_by_side)
+    {
         tui.approval_note.clone()
     } else if tui.running {
         "运行中…".into()
     } else {
         format!("就绪 · 轮次 {}", tui.turns)
     };
-    let mode = if exm_core::plan::is_plan_mode(&tui.session_id) { "PLAN" } else { "EXEC" };
+    let mode = if exm_core::plan::is_plan_mode(&tui.session_id) {
+        "PLAN"
+    } else {
+        "EXEC"
+    };
     let line = Line::from(vec![
-        Span::styled(format!(" [{mode}] "), Style::new().fg(Color::Black).bg(if mode == "PLAN" { Color::Yellow } else { Color::Green })),
-        Span::styled(format!("会话 {} ", &tui.session_id[..8.min(tui.session_id.len())]), Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" [{mode}] "),
+            Style::new().fg(Color::Black).bg(if mode == "PLAN" {
+                Color::Yellow
+            } else {
+                Color::Green
+            }),
+        ),
+        Span::styled(
+            format!("会话 {} ", &tui.session_id[..8.min(tui.session_id.len())]),
+            Style::new().fg(Color::DarkGray),
+        ),
         Span::styled(note, Style::new().fg(Color::DarkGray)),
-        Span::styled(format!("  {}", crate::term_caps::caps_summary()), Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            format!("  {}", crate::term_caps::caps_summary()),
+            Style::new().fg(Color::DarkGray),
+        ),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }

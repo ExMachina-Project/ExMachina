@@ -21,12 +21,22 @@ fn schema_fields() -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     if let Some(groups) = schema.get("groups").and_then(|v| v.as_array()) {
         for g in groups {
-            let label = g.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let label = g
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if let Some(fields) = g.get("fields").and_then(|v| v.as_array()) {
                 for f in fields {
                     out.push((
-                        f.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        f.get("kind").and_then(|v| v.as_str()).unwrap_or("string").to_string(),
+                        f.get("key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        f.get("kind")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("string")
+                            .to_string(),
                         label.clone(),
                     ));
                 }
@@ -37,7 +47,10 @@ fn schema_fields() -> Vec<(String, String, String)> {
 }
 
 fn kind_of(key: &str) -> Option<(String, String)> {
-    schema_fields().into_iter().find(|(k, _kind, _)| k == key).map(|(_, kind, label)| (kind, label))
+    schema_fields()
+        .into_iter()
+        .find(|(k, _kind, _)| k == key)
+        .map(|(_, kind, label)| (kind, label))
 }
 
 fn parse_bool(v: &str) -> anyhow::Result<bool> {
@@ -54,19 +67,52 @@ pub fn run_config_list(workspace_root: &Path) -> anyhow::Result<()> {
     println!("  {} {}", dim("配置文件"), cfg.config_path.display());
     println!("  {} {}", dim("结构版本"), cfg.config_version);
     println!("  {} {}", dim("LLM Base URL"), cfg.llm.base_url);
-    println!("  {} {}", dim("API Key"), if cfg.llm.api_key.is_empty() { "(未配置 —— 请在「提供商」页配置)".to_string() } else { "***已配置***".into() });
+    println!(
+        "  {} {}",
+        dim("API Key"),
+        if cfg.llm.api_key.is_empty() {
+            "(未配置 —— 请在「提供商」页配置)".to_string()
+        } else {
+            "***已配置***".into()
+        }
+    );
     println!("  {} {}", dim("默认模型"), cfg.llm.model);
     println!("  {} {}", dim("并发数"), cfg.max_concurrency);
-    println!("  {} {}", dim("记忆系统"), if cfg.memory_enabled { "启用" } else { "关闭" });
+    println!(
+        "  {} {}",
+        dim("记忆系统"),
+        if cfg.memory_enabled {
+            "启用"
+        } else {
+            "关闭"
+        }
+    );
     println!("  {} {}", dim("召回条数"), cfg.memory_recall_limit);
     println!("  {} {}", dim("衰减半衰期(天)"), cfg.memory_half_life_days);
-    println!("  {} {}", dim("语义检索模型"), if cfg.memory_semantic_model.is_empty() { "(未配置 → 仅词项召回)".to_string() } else { cfg.memory_semantic_model.clone() });
+    println!(
+        "  {} {}",
+        dim("语义检索模型"),
+        if cfg.memory_semantic_model.is_empty() {
+            "(未配置 → 仅词项召回)".to_string()
+        } else {
+            cfg.memory_semantic_model.clone()
+        }
+    );
     println!("  {} {}", dim("工作区"), cfg.workspace_root.display());
     println!("  {} {}", dim("编成目录"), cfg.agents_dir.display());
     if let Some(m) = cfg.load_manifest() {
-        println!("  {} {}（{}，安装于 {}）", dim("安装清单"), m.profile, m.channels.gateway_port, m.installed_at);
+        println!(
+            "  {} {}（{}，安装于 {}）",
+            dim("安装清单"),
+            m.profile,
+            m.channels.gateway_port,
+            m.installed_at
+        );
     }
-    println!("\n  {} `exm config schema` 查看全部 63 键；`exm config get/set <键> <值>` 读写单键", dim("提示"));
+    println!(
+        "\n  {} `exm config schema` 查看全部 63 键；`exm config get/set <键> <值>` 读写单键",
+        dim("提示")
+    );
     Ok(())
 }
 
@@ -79,7 +125,13 @@ pub fn run_config_schema() -> anyhow::Result<()> {
 fn cfg_read(cfg: &ExmConfig, key: &str) -> anyhow::Result<String> {
     let v = match key {
         "llm.baseUrl" => cfg.llm.base_url.clone(),
-        "llm.apiKey" => if cfg.llm.api_key.is_empty() { "(未配置)".into() } else { "***已配置***".into() },
+        "llm.apiKey" => {
+            if cfg.llm.api_key.is_empty() {
+                "(未配置)".into()
+            } else {
+                "***已配置***".into()
+            }
+        }
         "llm.model" => cfg.llm.model.clone(),
         "maxConcurrency" => cfg.max_concurrency.to_string(),
         "maxSessionTokens" => cfg.max_session_tokens.to_string(),
@@ -89,7 +141,13 @@ fn cfg_read(cfg: &ExmConfig, key: &str) -> anyhow::Result<String> {
         "memory.halfLifeDays" => cfg.memory_half_life_days.to_string(),
         "security.execApproval" => cfg.security.exec_approval.clone(),
         "security.execAllowlist" => cfg.security.exec_allowlist.join(","),
-        "security.authKey" => if cfg.security.auth_key.is_empty() { "(未配置)".into() } else { "***已配置***".into() },
+        "security.authKey" => {
+            if cfg.security.auth_key.is_empty() {
+                "(未配置)".into()
+            } else {
+                "***已配置***".into()
+            }
+        }
         "security.terminalTimeoutSecs" => cfg.security.terminal_timeout_secs.to_string(),
         "security.toolOutputSpillChars" => cfg.security.tool_output_spill_chars.to_string(),
         "security.approvalWaitSecs" => cfg.security.approval_wait_secs.to_string(),
@@ -98,14 +156,22 @@ fn cfg_read(cfg: &ExmConfig, key: &str) -> anyhow::Result<String> {
         "computer.maxEdge" => cfg.computer.max_edge.to_string(),
         "computer.actionIntervalMs" => cfg.computer.action_interval_ms.to_string(),
         "automation.heartbeatEnabled" => cfg.automation.heartbeat_enabled.to_string(),
-        "automation.heartbeatIntervalMinutes" => cfg.automation.heartbeat_interval_minutes.to_string(),
+        "automation.heartbeatIntervalMinutes" => {
+            cfg.automation.heartbeat_interval_minutes.to_string()
+        }
         "automation.autoAdapt" => cfg.automation.auto_adapt.to_string(),
         "automation.heartbeatPrompt" => cfg.automation.heartbeat_prompt.clone(),
         "automation.heartbeatAgent" => cfg.automation.heartbeat_agent.clone().unwrap_or_default(),
         "automation.unitMaxSteps" => cfg.automation.unit_max_steps.to_string(),
         "search.provider" => cfg.search.provider.clone(),
         "search.endpoint" => cfg.search.endpoint.clone(),
-        "search.apiKey" => if cfg.search.api_key.is_empty() { "(未配置)".into() } else { "***已配置***".into() },
+        "search.apiKey" => {
+            if cfg.search.api_key.is_empty() {
+                "(未配置)".into()
+            } else {
+                "***已配置***".into()
+            }
+        }
         "search.maxResults" => cfg.search.max_results.to_string(),
         "sandbox.mode" => cfg.sandbox.mode.clone(),
         "sandbox.allowNetwork" => cfg.sandbox.allow_network.to_string(),
@@ -116,7 +182,13 @@ fn cfg_read(cfg: &ExmConfig, key: &str) -> anyhow::Result<String> {
         "browser.headless" => cfg.browser.headless.to_string(),
         "browser.timeoutSecs" => cfg.browser.timeout_secs.to_string(),
         "browser.maxChars" => cfg.browser.max_chars.to_string(),
-        "tools.custom" => cfg.tools.custom.iter().map(|t| serde_json::to_string(t).unwrap_or_default()).collect::<Vec<_>>().join("\n"),
+        "tools.custom" => cfg
+            .tools
+            .custom
+            .iter()
+            .map(|t| serde_json::to_string(t).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n"),
         "hooks.preTool" => cfg.hooks.pre_tool.join(","),
         "hooks.postTool" => cfg.hooks.post_tool.join(","),
         "hooks.onRunEnd" => cfg.hooks.on_run_end.join(","),
@@ -134,7 +206,13 @@ fn cfg_read(cfg: &ExmConfig, key: &str) -> anyhow::Result<String> {
         "triggers.fileWatch.debounceMs" => cfg.triggers.file_watch.debounce_ms.to_string(),
         "triggers.fileWatch.exclude" => cfg.triggers.file_watch.exclude.join(","),
         "triggers.eventWebhook.enabled" => cfg.triggers.event_webhook.enabled.to_string(),
-        "triggers.eventWebhook.secret" => if cfg.triggers.event_webhook.secret.is_empty() { "(未配置)".into() } else { "***已配置***".into() },
+        "triggers.eventWebhook.secret" => {
+            if cfg.triggers.event_webhook.secret.is_empty() {
+                "(未配置)".into()
+            } else {
+                "***已配置***".into()
+            }
+        }
         "mcpServe.enabled" => cfg.mcp_serve.enabled.to_string(),
         "mcpServe.httpPath" => cfg.mcp_serve.http_path.clone(),
         "mcpServe.allowedGroups" => cfg.mcp_serve.allowed_groups.join(","),
@@ -154,8 +232,14 @@ pub fn run_config_get(workspace_root: &Path, key: &str) -> anyhow::Result<()> {
 
 /// 按键写值（值类型按 schema kind 归一），返回是否实际变更
 fn cfg_write(cfg: &mut ExmConfig, key: &str, value: &str) -> anyhow::Result<()> {
-    let (kind, _label) = kind_of(key).ok_or_else(|| anyhow::anyhow!("未知配置键：{key}（`exm config schema` 查看全部键）"))?;
-    let list = |v: &str| -> Vec<String> { v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect() };
+    let (kind, _label) = kind_of(key)
+        .ok_or_else(|| anyhow::anyhow!("未知配置键：{key}（`exm config schema` 查看全部键）"))?;
+    let list = |v: &str| -> Vec<String> {
+        v.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
     match key {
         // llm.* 顶层是种子值；存在生效档案时它才是真正生效值——双写保持一致（与 load 口径对齐）
         "llm.baseUrl" | "llm.apiKey" | "llm.model" => {
@@ -166,7 +250,11 @@ fn cfg_write(cfg: &mut ExmConfig, key: &str, value: &str) -> anyhow::Result<()> 
                 "model" => cfg.llm.model = value.to_string(),
                 _ => unreachable!(),
             }
-            if let Some(p) = cfg.llm_profiles.iter_mut().find(|p| p.id == cfg.active_profile) {
+            if let Some(p) = cfg
+                .llm_profiles
+                .iter_mut()
+                .find(|p| p.id == cfg.active_profile)
+            {
                 match field {
                     "baseUrl" => p.base_url = value.to_string(),
                     "apiKey" => p.api_key = value.to_string(),
@@ -192,10 +280,14 @@ fn cfg_write(cfg: &mut ExmConfig, key: &str, value: &str) -> anyhow::Result<()> 
         "computer.maxEdge" => cfg.computer.max_edge = value.parse()?,
         "computer.actionIntervalMs" => cfg.computer.action_interval_ms = value.parse()?,
         "automation.heartbeatEnabled" => cfg.automation.heartbeat_enabled = parse_bool(value)?,
-        "automation.heartbeatIntervalMinutes" => cfg.automation.heartbeat_interval_minutes = value.parse()?,
+        "automation.heartbeatIntervalMinutes" => {
+            cfg.automation.heartbeat_interval_minutes = value.parse()?
+        }
         "automation.autoAdapt" => cfg.automation.auto_adapt = parse_bool(value)?,
         "automation.heartbeatPrompt" => cfg.automation.heartbeat_prompt = value.to_string(),
-        "automation.heartbeatAgent" => cfg.automation.heartbeat_agent = Some(value.to_string()).filter(|s| !s.is_empty()),
+        "automation.heartbeatAgent" => {
+            cfg.automation.heartbeat_agent = Some(value.to_string()).filter(|s| !s.is_empty())
+        }
         "automation.unitMaxSteps" => cfg.automation.unit_max_steps = value.parse()?,
         "search.provider" => cfg.search.provider = value.to_string(),
         "search.endpoint" => cfg.search.endpoint = value.to_string(),
@@ -210,7 +302,10 @@ fn cfg_write(cfg: &mut ExmConfig, key: &str, value: &str) -> anyhow::Result<()> 
         "browser.headless" => cfg.browser.headless = parse_bool(value)?,
         "browser.timeoutSecs" => cfg.browser.timeout_secs = value.parse()?,
         "browser.maxChars" => cfg.browser.max_chars = value.parse()?,
-        "tools.custom" => { /* 自定义工具为 JSON 契约，CLI 直改易损坏——请用配置页（schema 渲染校验） */ anyhow::bail!("tools.custom 为结构化契约，请用 WebUI / 桌面端配置页修改"); }
+        "tools.custom" => {
+            /* 自定义工具为 JSON 契约，CLI 直改易损坏——请用配置页（schema 渲染校验） */
+            anyhow::bail!("tools.custom 为结构化契约，请用 WebUI / 桌面端配置页修改");
+        }
         "hooks.preTool" => cfg.hooks.pre_tool = list(value),
         "hooks.postTool" => cfg.hooks.post_tool = list(value),
         "hooks.onRunEnd" => cfg.hooks.on_run_end = list(value),
@@ -246,7 +341,16 @@ pub fn run_config_set(workspace_root: &Path, key: &str, value: &str) -> anyhow::
     cfg_write(&mut cfg, key, value)?;
     cfg.use_mock = cfg.use_mock || exm_core::config::mock_enabled_from_env();
     cfg.save()?;
-    println!("{} {} = {}", "✓ 已写入".green(), key.bright_cyan(), if kind_of(key).map(|(k, _)| k == "password").unwrap_or(false) && !value.is_empty() { "***已配置***".into() } else { value.to_string().bright_cyan().to_string() });
+    println!(
+        "{} {} = {}",
+        "✓ 已写入".green(),
+        key.bright_cyan(),
+        if kind_of(key).map(|(k, _)| k == "password").unwrap_or(false) && !value.is_empty() {
+            "***已配置***".into()
+        } else {
+            value.to_string().bright_cyan().to_string()
+        }
+    );
 
     // 运行中的网关持有内存态旧值：提示重启或改用 UI（PUT /config 即时生效）
     if let Some(m) = cfg.load_manifest() {

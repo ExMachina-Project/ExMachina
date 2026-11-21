@@ -494,11 +494,16 @@ pub async fn test_profile(
         Ok(r) => {
             let status = r.status().as_u16();
             let result = if (200..300).contains(&status) {
-                provider.parse_chat_http_response(r, stream).await.map(|_| ())
+                provider
+                    .parse_chat_http_response(r, stream)
+                    .await
+                    .map(|_| ())
                     .map_err(|_| anyhow::anyhow!("上游响应无效、未完成或包含错误事件"))
             } else {
                 let body = r.text().await.unwrap_or_default();
-                Err(anyhow::anyhow!(OpenAiCompatibleProvider::rejected_request_summary(status, &body)))
+                Err(anyhow::anyhow!(
+                    OpenAiCompatibleProvider::rejected_request_summary(status, &body)
+                ))
             };
             let latency_ms = t0.elapsed().as_millis() as u64;
             Json(json!({

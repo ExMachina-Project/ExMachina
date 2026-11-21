@@ -137,11 +137,23 @@ impl Core {
         let _guard = lock
             .try_lock()
             .map_err(|_| anyhow::anyhow!("会话正在处理中，请等待当前任务完成后再撤销"))?;
-        let session = self.store
+        let session = self
+            .store
             .get_session(session_id)?
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
-        anyhow::ensure!(session.collaboration_id.is_none(), "协作成员会话不能单独撤销");
-        let root = if restore_files { session.workspace.as_deref().map(crate::workspace::pinned).transpose()? } else { None };
+        anyhow::ensure!(
+            session.collaboration_id.is_none(),
+            "协作成员会话不能单独撤销"
+        );
+        let root = if restore_files {
+            session
+                .workspace
+                .as_deref()
+                .map(crate::workspace::pinned)
+                .transpose()?
+        } else {
+            None
+        };
         let cursor = self.cursor_at_turn(session_id, upto_turn)?;
 
         // 游标回退 + 归档（spec：被截断内容保留归档视图）
@@ -173,10 +185,16 @@ impl Core {
                     };
                     let outcome = if let Some(root) = &root {
                         (|| {
-                            let source = crate::workspace::checkpoint(root, date, std::path::Path::new(rel))?;
+                            let source = crate::workspace::checkpoint(
+                                root,
+                                date,
+                                std::path::Path::new(rel),
+                            )?;
                             anyhow::ensure!(source.is_file(), "检查点不存在");
                             let target = self.orchestrator().tools.editor_path_in(root, rel)?;
-                            if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+                            if let Some(parent) = target.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
                             std::fs::copy(source, target)?;
                             Ok(String::new())
                         })()
@@ -248,13 +266,13 @@ impl Core {
             workspace: src.workspace.clone(),
             collaboration_id: None,
             memory_partition: src.memory_partition.clone(), // 记忆分区随会话继承
-            rolling_summary: None,          // 摘要按副本历史重建
+            rolling_summary: None,                          // 摘要按副本历史重建
             summary_upto: None,
             parent_session: Some(src.id.clone()),
             parent_upto: Some(upto_turn),
             last_message_preview: None,
             last_active_at: None,
-            pinned: false, // 置顶不继承分支
+            pinned: false,     // 置顶不继承分支
             archived_at: None, // 归档态不继承分支（分支从活跃态开始）
             message_count: None,
             ledger: src.ledger.clone(),
@@ -286,32 +304,122 @@ impl Core {
             anyhow::bail!("该会话当前没有运行中的任务");
         }
         crate::round_trace::request_cancel(session_id);
+        self.orchestrator()
+            .tools
+            .cancel_background_session(session_id);
+        let cancelled_approvals = self.cancel_pending_approvals(session_id);
         let n = crate::round_trace::tool_count(session_id);
         self.store.audit_tool_best_effort(
             "system",
             "session_stop",
             &serde_json::json!({ "session": session_id }),
-            &format!("用户请求停止（当时已执行 {n} 次工具调用）"),
+            &format!(
+                "用户请求停止（当时已执行 {n} 次工具调用，取消 {cancelled_approvals} 条待审批动作）"
+            ),
             0,
         );
         Ok(n)
+    }
+
+    /// 非中断 steering admission：运行中只暂存并落库，不获取会话运行锁，
+    /// 也绝不设置取消令牌。输入由运行时在下一处安全检查点消费。
+    ///
+    /// 返回 `Idle` 时不写入消息；调用方应把原文交给普通 `chat`，以保持空闲
+    /// 会话没有虚假的 steering/中断状态。
+    pub fn admit_steering(
+        &self,
+        session_id: &str,
+        text: &str,
+        source: Option<&str>,
+    ) -> anyhow::Result<crate::SteeringAdmission> {
+        let text = text.trim();
+        anyhow::ensure!(!text.is_empty(), "steering 文本不能为空");
+        anyhow::ensure!(
+            text.chars().count() <= 20_000,
+            "steering 文本超过 20000 字符限制"
+        );
+        let session = self
+            .store
+            .get_session(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        anyhow::ensure!(
+            session.collaboration_id.is_none(),
+            "协作成员会话不能单独 steering"
+        );
+
+        let source = source.unwrap_or("unknown");
+        let marker = format!("steer:{source}");
+        let input = match crate::round_trace::admit_steering(session_id, text, || {
+            self.store.add_message(
+                session_id,
+                MessageRole::User,
+                Some(&marker),
+                vec![Statement::new(SpeechTag::要求, text)],
+            )?;
+            Ok(())
+        }) {
+            Ok(input) => input,
+            Err(crate::round_trace::SteeringAdmissionError::NotRunning)
+            | Err(crate::round_trace::SteeringAdmissionError::Closed)
+             => {
+                return Ok(crate::SteeringAdmission::Idle);
+            }
+            Err(crate::round_trace::SteeringAdmissionError::QueueFull) => {
+                anyhow::bail!("当前轮次 steering 已达上限，请等待安全检查点")
+            }
+            Err(crate::round_trace::SteeringAdmissionError::Persistence(error)) => {
+                return Err(error);
+            }
+        };
+
+        self.emit_session_event(
+            session_id,
+            "steering.accepted",
+            serde_json::json!({
+                "status": "steering_accepted",
+                "steeringId": &input.id,
+                "sequence": input.sequence,
+                "receivedAt": &input.received_at,
+                "source": source,
+                "running": true,
+            }),
+        );
+        self.store.audit_tool_best_effort(
+            source,
+            "session_steer",
+            &serde_json::json!({ "session": session_id, "steeringId": &input.id, "sequence": input.sequence }),
+            "已接收非中断 steering，将在安全检查点生效",
+            0,
+        );
+        Ok(crate::SteeringAdmission::Running)
     }
     pub fn list_sessions_in_group(&self, gid: &str) -> anyhow::Result<Vec<Session>> {
         self.store.list_sessions_in_group(gid)
     }
     /// 当前交互范围（组或智能体）的会话列表
     pub fn list_sessions_in_scope(&self) -> anyhow::Result<Vec<Session>> {
-        let mut sessions = self.store.list_sessions_in_group(&self.registry.active_scope())?;
+        let mut sessions = self
+            .store
+            .list_sessions_in_group(&self.registry.active_scope())?;
         sessions.retain(|s| s.workspace.is_none());
         Ok(sessions)
     }
     pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(self.store.get_session(id)?.is_none_or(|s| s.collaboration_id.is_none()), "协作成员会话不能单独删除");
+        anyhow::ensure!(
+            self.store
+                .get_session(id)?
+                .is_none_or(|s| s.collaboration_id.is_none()),
+            "协作成员会话不能单独删除"
+        );
         crate::orchestrator::unmark_im_session(id);
+        crate::round_trace::request_cancel(id);
+        crate::round_trace::clear_steering(id);
+        self.cancel_pending_approvals(id);
         // 会话删除连带清理审批授权与工具预算计数（生命周期 = 会话生命周期）
         self.session_grants.lock().remove(id);
-        self.orchestrator().tools.clear_tool_budget(id);
-        self.store.delete_session(id)
+        let orch = self.orchestrator();
+        orch.tools.clear_tool_budget(id);
+        orch.tools.delete_session_with_background(id)
     }
     /// 会话置顶切换（列表置顶分组数据源）
     pub fn toggle_session_pin(&self, id: &str, pinned: bool) -> anyhow::Result<()> {
@@ -319,7 +427,12 @@ impl Core {
     }
     /// 会话归档 / 恢复（可逆状态：归档移出主列表，恢复回原分组）
     pub fn set_session_archived(&self, id: &str, archived: bool) -> anyhow::Result<()> {
-        anyhow::ensure!(self.store.get_session(id)?.is_none_or(|s| s.collaboration_id.is_none()), "协作成员会话不能单独归档");
+        anyhow::ensure!(
+            self.store
+                .get_session(id)?
+                .is_none_or(|s| s.collaboration_id.is_none()),
+            "协作成员会话不能单独归档"
+        );
         self.store.set_session_archived(id, archived)
     }
     /// 归档区列表（只含归档态，按归档时间倒序；预览口径与主列表一致）
@@ -342,9 +455,14 @@ impl Core {
         self.attach_session_origins(&mut list);
         Ok(list)
     }
-    pub fn list_sessions_admin_in_workspace(&self, workspace: &str) -> anyhow::Result<Vec<Session>> {
+    pub fn list_sessions_admin_in_workspace(
+        &self,
+        workspace: &str,
+    ) -> anyhow::Result<Vec<Session>> {
         let mut list = self.store.list_sessions_in_workspace(workspace)?;
-        for session in &mut list { session.message_count = Some(self.store.message_count(&session.id)); }
+        for session in &mut list {
+            session.message_count = Some(self.store.message_count(&session.id));
+        }
         self.attach_session_origins(&mut list);
         Ok(list)
     }
@@ -363,7 +481,11 @@ impl Core {
     }
     /// 会话内容检索（标题 + 最近 200 条消息）：REST / 速查共用，
     /// 范围与消息读取窗口一致（命中片段可被聊天页加载并定位）。
-    pub fn search_sessions(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SessionSearchHit>> {
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SessionSearchHit>> {
         self.store.search_sessions(query, limit)
     }
     /// 登记会话的外部来源（闸门放行时由适配器调用；审批单创建时据此打升级标）
@@ -394,17 +516,16 @@ impl Core {
             if s.archived_at.is_some() {
                 continue;
             }
-            let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
-                crate::session_origin::parse_session_origin(&s.title)
+            let crate::session_origin::SessionOrigin::Channel {
+                channel_id,
+                chat_key,
+                ..
+            } = crate::session_origin::parse_session_origin(&s.title)
             else {
                 continue;
             };
             // 活跃绑定豁免：下条消息将继续复用该会话
-            if self
-                .flow_active_session(&channel_id, &chat_key)
-                .as_deref()
-                == Some(s.id.as_str())
-            {
+            if self.flow_active_session(&channel_id, &chat_key).as_deref() == Some(s.id.as_str()) {
                 skipped += 1;
                 continue;
             }
@@ -441,13 +562,13 @@ impl Core {
             if !scope.matches(&origin) {
                 continue;
             }
-            if let crate::session_origin::SessionOrigin::Channel { channel_id, chat_key, .. } =
-                &origin
+            if let crate::session_origin::SessionOrigin::Channel {
+                channel_id,
+                chat_key,
+                ..
+            } = &origin
             {
-                if self
-                    .flow_active_session(channel_id, chat_key)
-                    .as_deref()
-                    == Some(s.id.as_str())
+                if self.flow_active_session(channel_id, chat_key).as_deref() == Some(s.id.as_str())
                 {
                     skipped += 1;
                     continue;

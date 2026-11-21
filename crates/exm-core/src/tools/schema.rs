@@ -124,8 +124,12 @@ impl ToolGateway {
                 "command": { "type": "string", "description": "op=run 时必填；支持 | && || ; 链式命令（每段须都在白名单）；` $( > < & 等逃逸/重定向符不支持" },
                 "op": { "type": "string", "enum": ["run", "poll", "kill", "list"], "description": "默认 run；list 列出本会话后台任务（无需 taskId）" },
                 "taskId": { "type": "string", "description": "op=poll/kill 时的后台任务 id" },
-                "background": { "type": "boolean", "description": "true = 后台执行并立即返回任务 id（适合构建/测试等长任务）" },
-                "timeoutSecs": { "type": "integer", "description": "前台命令超时（秒），上限由安全设置决定" }
+                "cursor": { "type": "integer", "minimum": 0, "description": "op=poll 的输出字节游标，初次传 0，随后传结果的 nextCursor；不传分页参数时返回文本尾部" },
+                "limitBytes": { "type": "integer", "minimum": 4, "maximum": 8192, "description": "分页最多返回的 UTF-8 正文字节（默认 4096，不含 JSON 封套）" },
+                "waitMs": { "type": "integer", "minimum": 0, "maximum": 2000, "description": "游标已在运行中任务末尾时，最多等待新输出或终态的毫秒数（默认 0）" },
+                "background": { "type": "boolean", "description": "true = 后台执行并立即返回任务 id（实例最多 4 个运行项，默认 900 秒截止，超时后终止并回收）" },
+                "timeoutSecs": { "type": "integer", "description": "命令超时（秒）。前台上限由安全设置决定；后台默认及上限为 900 秒，可显式请求更短期限" },
+                "interactive": { "type": "boolean", "description": "显式请求交互终端；当前 PTY 尚未装配时明确拒绝，不会伪装成普通命令" }
             },
             "required": []
         }));

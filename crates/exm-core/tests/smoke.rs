@@ -271,7 +271,10 @@ async fn 执行审批_高危命令拦截与批准放行() {
     let pending = core.approval_list(Some("pending"), 10).unwrap();
     assert_eq!(pending.len(), 1, "应产生一张待审批单");
     // git reset 在 DENY 档（破坏性清单）→ 落 [红线] 前缀审批单（分档矩阵语义）
-    assert_eq!(pending[0].command, "[红线] git reset --hard blocked-test");
+    assert_eq!(
+        pending[0].command,
+        "[terminal] [红线] git reset --hard blocked-test"
+    );
 
     // 批准 → 系统代执行并记录结果
     let decided = core.approval_decide(&pending[0].id, true).await.unwrap();
@@ -398,7 +401,10 @@ async fn 审批决定并发互斥_命令只执行一次() {
     // 第二个：等先到者收束后返回最终单据（先到者代执行语义），不是报错
     let out2 = r2.expect("第二个决定也应返回");
     assert_eq!(out1.status, "executed");
-    assert_eq!(out2.status, "executed", "并发第二击拿到先到者结果: {out2:?}");
+    assert_eq!(
+        out2.status, "executed",
+        "并发第二击拿到先到者结果: {out2:?}"
+    );
     // 互斥生效：第二击拿到的是同一份执行结果（结果文本与决定时间戳一致），
     // 而非两次独立执行
     assert_eq!(
@@ -990,7 +996,9 @@ fn 默认模型_组与个体解析与持久化() {
     // ---- 组改名（group-rename）：显示名可改，id/编成不动；内置组同样放行 ----
     let reg = temp_registry("group-rename");
     // temp_registry 的内置组显示名是「测试组」——改名成功即内置组放行的直接证明
-    let m = reg.rename_group("exmachina", "新组名").expect("内置组改名失败");
+    let m = reg
+        .rename_group("exmachina", "新组名")
+        .expect("内置组改名失败");
     assert_eq!(m.name, "新组名");
     assert_eq!(
         reg.group_meta("exmachina").unwrap().name,
@@ -998,10 +1006,8 @@ fn 默认模型_组与个体解析与持久化() {
         "内存态应同步"
     );
     // 落盘校验：重新读 group.json
-    let raw = std::fs::read_to_string(
-        reg.group_dir("exmachina").unwrap().join("group.json"),
-    )
-    .unwrap();
+    let raw =
+        std::fs::read_to_string(reg.group_dir("exmachina").unwrap().join("group.json")).unwrap();
     assert!(raw.contains("新组名"), "group.json 应落盘新组名");
     // 空名拒绝
     assert!(reg.rename_group("exmachina", "  ").is_err());
@@ -1033,16 +1039,15 @@ fn 默认模型_组与个体解析与持久化() {
     reg.remove_agent("exmachina", "opt-unit")
         .expect("开关开启后应放行删除个体");
     // 落盘校验：开启态已写 group.json
-    let raw = std::fs::read_to_string(
-        reg.group_dir("exmachina").unwrap().join("group.json"),
-    )
-    .unwrap();
+    let raw =
+        std::fs::read_to_string(reg.group_dir("exmachina").unwrap().join("group.json")).unwrap();
     assert!(raw.contains("selfOptimize"), "group.json 应落盘开关");
     reg.set_group_self_optimize("exmachina", false)
         .expect("关闭自我优化失败");
     assert!(!reg.group_meta("exmachina").unwrap().self_optimize_enabled());
     assert!(
-        reg.upsert_agent("exmachina", sample_def("opt-unit"), None).is_err(),
+        reg.upsert_agent("exmachina", sample_def("opt-unit"), None)
+            .is_err(),
         "关闭后应重新锁定编成"
     );
 
@@ -1059,18 +1064,16 @@ fn 默认模型_组与个体解析与持久化() {
     let m = reg.group_meta("new-grp").expect("新 id 应存在");
     assert_eq!(m.id, "new-grp");
     assert_eq!(m.name, "迁移组", "显示名不变");
-    assert_eq!(
-        reg.agents_in_group("new-grp").len(),
-        1,
-        "编成应随目录迁移"
-    );
+    assert_eq!(reg.agents_in_group("new-grp").len(), 1, "编成应随目录迁移");
     // 编成目录确实改名（prompts/agents 全部随迁）
     assert!(reg.group_dir("new-grp").is_some());
     assert!(reg.group_dir("old-grp").is_none());
     // 同 id 幂等
-    reg.change_group_id("new-grp", "new-grp").expect("同 id 应幂等");
+    reg.change_group_id("new-grp", "new-grp")
+        .expect("同 id 应幂等");
     // 目标 id 已占用
-    reg.create_group(Some("busy".into()), "占用组", "").expect("建占用组失败");
+    reg.create_group(Some("busy".into()), "占用组", "")
+        .expect("建占用组失败");
     assert!(reg.change_group_id("new-grp", "busy").is_err());
     // 非法 id
     assert!(reg.change_group_id("new-grp", "非法 id!").is_err());
@@ -1360,7 +1363,10 @@ async fn mcp_调用超时_僵死端点不拖死其他服务器() {
         .expect("应返回结果（失败也返回）");
     assert!(!r.ok, "僵死端点应失败：{}", r.text);
     assert!(r.text.contains("超时"), "失败原因应为超时：{}", r.text);
-    assert!(t0.elapsed() < std::time::Duration::from_secs(5), "超时应及时返回");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(5),
+        "超时应及时返回"
+    );
 
     // 正常服务器不被拖死：立即可用
     let r2 = reg
@@ -1413,13 +1419,19 @@ async fn 流绑定_并发同流消息只建一个会话() {
         .iter()
         .filter(|s| s.title == "channel:ch-race:chat-race")
         .collect();
-    assert_eq!(ch_sessions.len(), 1, "应只有 1 个会话，实际 {}", ch_sessions.len());
+    assert_eq!(
+        ch_sessions.len(),
+        1,
+        "应只有 1 个会话，实际 {}",
+        ch_sessions.len()
+    );
     // 绑定稳定（touch 并发不抹 active_session）
     let handles2: Vec<_> = (0..10)
         .map(|i| {
             let c = core.clone();
             tokio::task::spawn_blocking(move || {
-                c.touch_flow_message("ch-race", "chat-race", &format!("消息{i}")).unwrap();
+                c.touch_flow_message("ch-race", "chat-race", &format!("消息{i}"))
+                    .unwrap();
             })
         })
         .collect();
@@ -1504,8 +1516,15 @@ async fn web_fetch工具与图片暂存() {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     // 规格注册：白名单内含 web_fetch
-    let specs =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebFetch], false, false, false, false, false, false);
+    let specs = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::WebFetch],
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
     assert!(
         specs.iter().any(|s| s.name == "web_fetch"),
         "web_fetch 应在规格中"
@@ -1535,34 +1554,69 @@ async fn web_fetch工具与图片暂存() {
         !full.iter().any(|s| s.name == "web_search"),
         "搜索未配置时不得下发 web_search（不承诺不存在的能力）"
     );
-    let with_search =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::WebSearch], true, false, false, false, false, false);
+    let with_search = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::WebSearch],
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
     assert!(
         with_search.iter().any(|s| s.name == "web_search"),
         "搜索就绪时应下发 web_search"
     );
     // 浏览器同理：探测不到浏览器可执行文件时不下发 browser
-    let no_browser =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, false, false, false, false, false);
+    let no_browser = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::Browser],
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
     assert!(
         !no_browser.iter().any(|s| s.name == "browser"),
         "无浏览器时不得下发 browser"
     );
-    let with_browser =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Browser], false, true, false, false, false, false);
+    let with_browser = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::Browser],
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+    );
     assert!(
         with_browser.iter().any(|s| s.name == "browser"),
         "浏览器就绪时应下发 browser"
     );
     // Computer Use 同理：总开关关闭时不下发 computer（整机输入权须显式交出）
-    let no_computer =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, false, false, false, false);
+    let no_computer = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::Computer],
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    );
     assert!(
         !no_computer.iter().any(|s| s.name == "computer"),
         "未启用时不得下发 computer"
     );
-    let with_computer =
-        exm_core::tools::ToolGateway::tool_specs(&[ToolName::Computer], false, false, true, false, false, false);
+    let with_computer = exm_core::tools::ToolGateway::tool_specs(
+        &[ToolName::Computer],
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+    );
     assert!(
         with_computer.iter().any(|s| s.name == "computer"),
         "启用后应下发 computer"
@@ -2366,6 +2420,19 @@ async fn 沙箱_环境净化与联网闸门_浏览器() {
         )
         .await;
     assert!(shot.ok, "截图应成功: {:?}", shot.error);
+    assert_eq!(
+        shot.images.len(),
+        1,
+        "browser screenshot must be an image artifact"
+    );
+    let screenshot_data_url = tools
+        .read_image_data_url(&shot.images[0])
+        .expect("real browser screenshot must convert to a validated data URL");
+    assert!(
+        screenshot_data_url.starts_with("data:image/png;base64,")
+            && screenshot_data_url.len() > 100,
+        "screenshot should return actual PNG bytes, not only an artifact path"
+    );
     assert!(
         tmp.join(".exmachina")
             .join("screenshots")
@@ -2660,7 +2727,12 @@ async fn 工具面声明_白名单裁剪与未声明全量() {
     // schema 下发同样只含声明工具
     let specs = exm_core::tools::ToolGateway::tool_specs(
         &[ToolName::Read],
-        false, false, false, false, false, false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
     );
     assert!(specs.iter().all(|s| s.name == "read"), "schema 只应含 read");
     assert_eq!(specs.len(), 1);
@@ -2741,11 +2813,9 @@ async fn 自主行动_eval通过开会被拒时保守回落() {
         "应有至少两条 auto.eval 事件（实际 {}）",
         evals.len()
     );
-    assert!(
-        evals
-            .iter()
-            .all(|e| e["payload"]["payload"]["ok"] == true && e["payload"]["payload"]["act"] == false)
-    );
+    assert!(evals
+        .iter()
+        .all(|e| e["payload"]["payload"]["ok"] == true && e["payload"]["payload"]["act"] == false));
 }
 
 #[tokio::test]
@@ -2768,7 +2838,11 @@ async fn 自主行动_eval通过_开会执行并落act事件() {
     assert!(
         sessions.iter().any(|s| s.title.starts_with("auto-agent:")),
         "应存在 auto-agent 会话（实际标题：{:?}）",
-        sessions.iter().map(|s| s.title.as_str()).take(3).collect::<Vec<_>>()
+        sessions
+            .iter()
+            .map(|s| s.title.as_str())
+            .take(3)
+            .collect::<Vec<_>>()
     );
 
     // auto.eval(act:true) 落全局（session 空）；auto.act 落行动会话自己的事件流
@@ -2788,7 +2862,8 @@ async fn 自主行动_eval通过_开会执行并落act事件() {
     assert!(
         sess_evts
             .iter()
-            .any(|e| e["payload"]["type"] == "auto.act" && e["payload"]["payload"]["status"] == "done"),
+            .any(|e| e["payload"]["type"] == "auto.act"
+                && e["payload"]["payload"]["status"] == "done"),
         "行动会话应落 auto.act(done) 事件"
     );
 }
@@ -2811,7 +2886,10 @@ async fn 自主记忆摘要_达标归纳与去重() {
                 &a.id,
                 MessageRole::User,
                 None,
-                vec![Statement::new(SpeechTag::要求, format!("问题{k}：部署配置怎么改"))],
+                vec![Statement::new(
+                    SpeechTag::要求,
+                    format!("问题{k}：部署配置怎么改"),
+                )],
             )
             .unwrap();
         core.store
@@ -2826,7 +2904,12 @@ async fn 自主记忆摘要_达标归纳与去重() {
     // 会话 B：2 条（未达标）
     let b = core.create_session("太短不摘要").expect("建会话失败");
     core.store
-        .add_message(&b.id, MessageRole::User, None, vec![Statement::new(SpeechTag::要求, "短")])
+        .add_message(
+            &b.id,
+            MessageRole::User,
+            None,
+            vec![Statement::new(SpeechTag::要求, "短")],
+        )
         .unwrap();
 
     let none = core.memory_digest_session(&b.id).await;
@@ -2839,11 +2922,19 @@ async fn 自主记忆摘要_达标归纳与去重() {
     assert!(second.is_some());
 
     // 记忆库断言：存在 kind=digest 且 sessionId 指向会话 A 的条目；且同内容只一条
-    let entries = core.memory.list(Some(exm_core::memory::MemoryKind::Digest), 50).unwrap_or_default();
+    let entries = core
+        .memory
+        .list(Some(exm_core::memory::MemoryKind::Digest), 50)
+        .unwrap_or_default();
     let a_digests: Vec<_> = entries
         .iter()
         .filter(|e| e.session_id.as_deref() == Some(a.id.as_str()))
         .collect();
-    assert_eq!(a_digests.len(), 1, "同内容二次归纳应去重为一条（实际 {}）", a_digests.len());
+    assert_eq!(
+        a_digests.len(),
+        1,
+        "同内容二次归纳应去重为一条（实际 {}）",
+        a_digests.len()
+    );
     assert!(a_digests[0].body.contains("E2E 会话主题归纳"));
 }

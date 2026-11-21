@@ -30,11 +30,17 @@ pub(crate) async fn selfcheck(State(st): State<AppState>) -> impl IntoResponse {
     // ---- LLM：密钥存在性（error 时给指引）+ 端点可达性（可达性探测，不发推理请求）----
     let key_set = !cfg.llm.api_key.trim().is_empty()
         || !cfg.llm.api_keys.is_empty()
-        || cfg.llm_profiles
+        || cfg
+            .llm_profiles
             .iter()
             .any(|p| !p.api_key.trim().is_empty() || !p.api_keys.is_empty());
     items.push(if st.core.is_mock() {
-        item("warn", "LLM 配置", "测试替身通道（EXM_LLM_MOCK=1）".into(), None)
+        item(
+            "warn",
+            "LLM 配置",
+            "测试替身通道（EXM_LLM_MOCK=1）".into(),
+            None,
+        )
     } else if !key_set {
         item(
             "error",
@@ -58,24 +64,26 @@ pub(crate) async fn selfcheck(State(st): State<AppState>) -> impl IntoResponse {
             false
         } else {
             let url = base.trim_end_matches('/').to_string() + "/models";
-            tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                async move {
-                    let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(8))
-                        .build()
-                        .ok()?;
-                    let resp = client.get(&url).send().await.ok()?;
-                    Some(resp.status().as_u16() < 500)
-                },
-            )
+            tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(8))
+                    .build()
+                    .ok()?;
+                let resp = client.get(&url).send().await.ok()?;
+                Some(resp.status().as_u16() < 500)
+            })
             .await
             .ok()
             .flatten()
             .unwrap_or(false)
         };
         if reachable {
-            item("ok", "LLM 配置", format!("密钥已配置，端点可达（{base}）"), None)
+            item(
+                "ok",
+                "LLM 配置",
+                format!("密钥已配置，端点可达（{base}）"),
+                None,
+            )
         } else {
             item(
                 "warn",
@@ -108,11 +116,20 @@ pub(crate) async fn selfcheck(State(st): State<AppState>) -> impl IntoResponse {
         item(
             "error",
             "通道配置",
-            format!("{} 个通道已启用，其中 {} 个连接异常", enabled.len(), degraded),
+            format!(
+                "{} 个通道已启用，其中 {} 个连接异常",
+                enabled.len(),
+                degraded
+            ),
             Some("到「通道」页查看异常通道的详细状态与修复指引"),
         )
     } else {
-        item("ok", "通道配置", format!("{} 个通道已启用且连接正常", enabled.len()), None)
+        item(
+            "ok",
+            "通道配置",
+            format!("{} 个通道已启用且连接正常", enabled.len()),
+            None,
+        )
     });
 
     // ---- 存储：数据目录可写 + 磁盘余量 ----
@@ -156,7 +173,13 @@ pub(crate) async fn selfcheck(State(st): State<AppState>) -> impl IntoResponse {
     // 汇总
     let errors = items.iter().filter(|i| i["level"] == "error").count();
     let warns = items.iter().filter(|i| i["level"] == "warn").count();
-    let overall = if errors > 0 { "error" } else if warns > 0 { "warn" } else { "ok" };
+    let overall = if errors > 0 {
+        "error"
+    } else if warns > 0 {
+        "warn"
+    } else {
+        "ok"
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -181,7 +204,12 @@ fn disk_free_note(dir: &std::path::Path) -> Option<String> {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let line = stdout.lines().nth(1)?.to_string();
     let avail = line.split_whitespace().nth(3)?.to_string();
-    let pct: u32 = line.split_whitespace().nth(4)?.trim_end_matches('%').parse().ok()?;
+    let pct: u32 = line
+        .split_whitespace()
+        .nth(4)?
+        .trim_end_matches('%')
+        .parse()
+        .ok()?;
     Some(if pct >= 85 {
         format!("低：{avail} 可用（{pct}% 已用）")
     } else {

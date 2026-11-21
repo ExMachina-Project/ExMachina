@@ -1,6 +1,5 @@
 //! gateway/platform/cron_scheduler —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
 
-
 use super::*;
 /// 闲置归档当日去重标记行 id（enabled=false 的哨兵行，只借 last_run_minute 记日期）
 const IDLE_ARCHIVE_MARKER: &str = "__idle_archive__";
@@ -16,7 +15,8 @@ pub fn spawn_cron_scheduler(core: std::sync::Arc<exm_core::Core>) {
             tick.tick().await;
             let core2 = core.clone();
             // JoinError = tick 内 panic：记日志吞掉，下轮继续（调度任务不死）
-            if let Err(join_err) = tokio::task::spawn(async move { tick_jobs(&core2).await }).await {
+            if let Err(join_err) = tokio::task::spawn(async move { tick_jobs(&core2).await }).await
+            {
                 eprintln!("[cron-scheduler] tick panic：{join_err}（已吞掉，下轮继续）");
             }
         }
@@ -110,8 +110,7 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
                 .unwrap_or_default();
             if last != minute_key {
                 let idle_days = core.config().automation.flow_idle_days;
-                if let Ok((archived, skipped)) = core.archive_idle_flow_sessions(idle_days, now)
-                {
+                if let Ok((archived, skipped)) = core.archive_idle_flow_sessions(idle_days, now) {
                     if archived > 0 {
                         let _ = core.events.send(CoreEvent {
                             kind: "cron.updated".into(),
@@ -287,7 +286,10 @@ pub(crate) fn group_of_agent(core: &exm_core::Core, identifier: &str) -> Option<
 /// 构造本次心跳任务（7.4 per-agent 粒度）：
 /// 配置了目标个体且其存在于某组 → 以该组为执行上下文（产出经 write_memories 进该组记忆体系，
 /// 会话独立「心跳巡检-<个体>」）；未配置或个体不存在 → 维持全局巡检（激活组 + 会话「心跳巡检」）。
-pub(crate) fn build_heartbeat_job(core: &exm_core::Core, minute_key: &str) -> exm_core::types::CronJob {
+pub(crate) fn build_heartbeat_job(
+    core: &exm_core::Core,
+    minute_key: &str,
+) -> exm_core::types::CronJob {
     let cfg = core.config();
     let target = cfg
         .automation
@@ -363,19 +365,21 @@ pub(crate) async fn notify_cron_result(
             attempts += 1;
         }
         if !ok {
-            eprintln!("[cron-notify] 通道 {} 推送失败（重试 {} 次后放弃）", ch.id, attempts);
-            core.orchestrator()
-                .emit(
-                    "",
-                    "notify.delivery_failed",
-                    serde_json::json!({
-                        "channel": ch.id,
-                        "job": job.id,
-                        "jobName": job.name,
-                        "attempts": attempts,
-                        "reason": "投递重试耗尽（端点超时或非 2xx 响应）",
-                    }),
-                );
+            eprintln!(
+                "[cron-notify] 通道 {} 推送失败（重试 {} 次后放弃）",
+                ch.id, attempts
+            );
+            core.orchestrator().emit(
+                "",
+                "notify.delivery_failed",
+                serde_json::json!({
+                    "channel": ch.id,
+                    "job": job.id,
+                    "jobName": job.name,
+                    "attempts": attempts,
+                    "reason": "投递重试耗尽（端点超时或非 2xx 响应）",
+                }),
+            );
         }
     }
 }
@@ -440,12 +444,19 @@ mod auto_decay_tests {
     async fn 事件_衰减执行后落全局事件库() {
         let core = test_core();
         assert!(core.config().memory_auto_decay, "缺省开启");
-        core.emit_session_event("", "memory.decay.ran", serde_json::json!({ "changed": 3, "floor": 0.05 }));
+        core.emit_session_event(
+            "",
+            "memory.decay.ran",
+            serde_json::json!({ "changed": 3, "floor": 0.05 }),
+        );
         let evts = core.store.list_events("").unwrap();
         let hit = evts.iter().any(|env| {
             env["payload"]["type"].as_str() == Some("memory.decay.ran")
                 && env["payload"]["payload"]["changed"].as_u64() == Some(3)
         });
-        assert!(hit, "memory.decay.ran 应广播并落全局事件库（空 session_id 文件）");
+        assert!(
+            hit,
+            "memory.decay.ran 应广播并落全局事件库（空 session_id 文件）"
+        );
     }
 }

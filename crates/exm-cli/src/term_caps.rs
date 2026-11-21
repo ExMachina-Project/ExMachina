@@ -54,14 +54,20 @@ impl TermCaps {
 }
 
 fn detect_color_tier() -> ColorTier {
-    let colorterm = std::env::var("COLORTERM").unwrap_or_default().to_lowercase();
+    let colorterm = std::env::var("COLORTERM")
+        .unwrap_or_default()
+        .to_lowercase();
     if colorterm == "truecolor" || colorterm == "24bit" {
         return ColorTier::TrueColor;
     }
     let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
     if term.contains("256color") || term.contains("direct") {
         ColorTier::Color256
-    } else if term.is_empty() || term == "dumb" || term.starts_with("vt100") || term.starts_with("vt220") {
+    } else if term.is_empty()
+        || term == "dumb"
+        || term.starts_with("vt100")
+        || term.starts_with("vt220")
+    {
         // 受限终端（vt100/dumb/无 TERM）：16 色基础档兜底——ratatui 基础色
         // 在任何终端都能呈现（退化加亮为普通），功能不缺失
         ColorTier::Color16
@@ -74,7 +80,10 @@ fn detect_color_tier() -> ColorTier {
 fn detect_wide_chars() -> bool {
     let lang = std::env::var("LANG").unwrap_or_default().to_lowercase();
     let lc_all = std::env::var("LC_ALL").unwrap_or_default().to_lowercase();
-    lang.contains("utf-8") || lang.contains("utf8") || lc_all.contains("utf-8") || lc_all.contains("utf8")
+    lang.contains("utf-8")
+        || lang.contains("utf8")
+        || lc_all.contains("utf-8")
+        || lc_all.contains("utf8")
 }
 
 fn detect_clipboard() -> ClipboardKind {
@@ -129,9 +138,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
         ClipboardKind::LocalTool(tool) => {
             let mut cmd = std::process::Command::new(tool);
             cmd.stdin(std::process::Stdio::piped());
-            let child = cmd
-                .spawn()
-                .map_err(|e| format!("启动 {tool} 失败：{e}"))?;
+            let child = cmd.spawn().map_err(|e| format!("启动 {tool} 失败：{e}"))?;
             if let Some(mut stdin) = child.stdin {
                 use std::io::Write;
                 let _ = stdin.write_all(text.as_bytes());
@@ -157,7 +164,11 @@ fn base64_nopad(data: &[u8]) -> String {
     const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(TBL[(n >> 18) as usize & 63] as char);
         out.push(TBL[(n >> 12) as usize & 63] as char);
@@ -179,7 +190,11 @@ pub fn caps_summary() -> String {
         ColorTier::Color256 => "256 色",
         ColorTier::Color16 => "16 色（降级）",
     };
-    let wide = if c.wide_chars { "宽字符 ✓" } else { "宽字符 ✗（CJK 可能错位）" };
+    let wide = if c.wide_chars {
+        "宽字符 ✓"
+    } else {
+        "宽字符 ✗（CJK 可能错位）"
+    };
     let clip = match c.clipboard {
         ClipboardKind::Osc52 => "剪贴板 OSC52",
         ClipboardKind::LocalTool(t) => return format!("{color} · {wide} · 剪贴板 {t}"),

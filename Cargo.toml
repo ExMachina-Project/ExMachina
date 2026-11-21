@@ -39,6 +39,15 @@ tar = "0.4"
 flate2 = "1"
 quick-xml = "0.36"
 
+# 磁盘友好：关闭增量编译、精简调试信息（防止 target/debug 膨胀至数 GB）
+[profile.dev]
+incremental = false
+debug = "line-tables-only"
+
+# 依赖不生成调试信息（体积大头），本地代码保留行号便于 backtrace
+[profile.dev.package."*"]
+debug = false
+
 # 低性能设备友好：LTO + 单元编译 + 符号剥离 → 更小的单文件二进制与更高运行吞吐
 [profile.release]
 lto = "fat"

@@ -115,6 +115,39 @@ async fn direct_chat_errors_and_aborted_futures_release_running_state() {
 }
 
 #[tokio::test]
+async fn steering_admission_does_not_cancel_running_round_and_idle_is_plain_chat() {
+    let f = Fixture::new(false);
+    let running = f.core.create_session("steering-running").unwrap();
+    round_trace::begin(&running.id);
+    let admission = f
+        .core
+        .admit_steering(&running.id, "继续但换一个安全方向", Some("test"))
+        .unwrap();
+    assert_eq!(admission, crate::SteeringAdmission::Running);
+    assert!(!round_trace::is_cancelled(&running.id));
+    let messages = f.core.store.list_messages(&running.id, 0).unwrap();
+    assert!(messages.iter().any(|message| {
+        message
+            .statements
+            .iter()
+            .any(|statement| statement.text == "继续但换一个安全方向")
+    }));
+    let pending = round_trace::take_steering(&running.id);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].text, "继续但换一个安全方向");
+    round_trace::end(&running.id);
+
+    let idle = f.core.create_session("steering-idle").unwrap();
+    assert_eq!(
+        f.core
+            .admit_steering(&idle.id, "空闲时的普通输入", Some("test"))
+            .unwrap(),
+        crate::SteeringAdmission::Idle
+    );
+    assert!(f.core.store.list_messages(&idle.id, 0).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn missing_sessions_never_leave_a_running_marker() {
     let f = Fixture::new(false);
     assert!(f.core.chat("missing", "hi").await.is_err());

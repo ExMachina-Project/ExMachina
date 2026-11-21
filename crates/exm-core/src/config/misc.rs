@@ -43,7 +43,7 @@ impl Default for BrowserConfig {
 ///    "parameters": { "type": "object", "properties": { "city": { "type": "string" } },
 ///                    "required": ["city"] },
 ///    "headers": { "Authorization": "Bearer …" }, "agents": [] }`
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomTool {
     /// 工具名（模型可见；字母开头，仅字母/数字/下划线/连字符）
@@ -419,4 +419,3 @@ impl Default for InstallManifest {
         }
     }
 }
-

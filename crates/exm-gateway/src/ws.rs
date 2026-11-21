@@ -84,8 +84,10 @@ pub(crate) async fn ws_handler(
             _ => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
         };
         match (session.workspace.as_deref(), q.workspace.as_deref()) {
-            (Some(expected), Some(raw)) if exm_core::workspace::pinned(raw).is_ok_and(|root| root.to_str() == Some(expected)) => {},
-            (None, None) => {},
+            (Some(expected), Some(raw))
+                if exm_core::workspace::pinned(raw)
+                    .is_ok_and(|root| root.to_str() == Some(expected)) => {}
+            (None, None) => {}
             _ => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
         }
     }
@@ -99,7 +101,12 @@ pub(crate) async fn ws_handler(
     ws.on_upgrade(move |socket| ws_loop(socket, st.core, q.session_id, workspace))
 }
 
-pub(crate) async fn ws_loop(mut socket: WebSocket, core: Arc<Core>, session_filter: Option<String>, workspace_filter: Option<String>) {
+pub(crate) async fn ws_loop(
+    mut socket: WebSocket,
+    core: Arc<Core>,
+    session_filter: Option<String>,
+    workspace_filter: Option<String>,
+) {
     let mut rx = core.subscribe();
     // 心跳保活：周期性协议层 Ping（浏览器自动 Pong）。空闲连接经 NAT/代理常被静默丢弃，
     // 且无事件流时客户端无从判活——Ping 既保活又让断连可感知。

@@ -2,7 +2,6 @@
 
 // ---------------------------------------------------------------- 通道网关（webhook 通道）
 
-
 use super::*;
 /// 支持的平台清单：
 /// - `webhook` / `qq` / `wechat`：webhook 桥接语义（社区桥把消息 POST 到 inbound，回复走回调）；
@@ -272,9 +271,7 @@ async fn bind_post_json(url: &str, body: &Value) -> anyhow::Result<Value> {
 /// 出绑定任务（POST /api/channels/qqbot-bind）：返回 taskId + 连接 URL（前端渲染二维码）。
 /// key 由网关生成并随 taskId 一起返回前端（轮询确认时回传用于解密）——网关无状态，
 /// 不持久化绑定会话；key 只在本轮HTTP响应中存在，落到前端表单内存。
-pub async fn qqbot_bind_start(
-    Json(b): Json<QQBotBindBody>,
-) -> impl IntoResponse {
+pub async fn qqbot_bind_start(Json(b): Json<QQBotBindBody>) -> impl IntoResponse {
     let host = if b.env.as_deref() == Some("test") {
         "test.q.qq.com"
     } else {
@@ -1076,8 +1073,7 @@ pub async fn channel_inbound(
                 Some(s)
             }
             Err(_) => None,
-        })
-    {
+        }) {
         Some(s) => s,
         None => {
             if switched {

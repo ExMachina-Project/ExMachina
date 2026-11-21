@@ -216,6 +216,12 @@ impl Orchestrator {
         let mut user_msg = ChatMessage::user(format!(
             "{context_block}{input_frame}\n\n【要求】按 OrchestratorPlan 契约输出 JSON。nodes 中的 agentIdentifier 必须来自上方可调度清单。"
         ));
+        if let Some(context) =
+            crate::command_extensions::take_skill_context(session_id, &primary.identifier)
+        {
+            user_msg.content.push_str("\n\n");
+            user_msg.content.push_str(&context);
+        }
         // 多模态输入：本轮附带的图片（data URL）。生效模型未标记视觉能力时，
         // 走「视觉转述」模型把图片转成文字描述注入；未配置转述且明确无视觉 → 丢弃并说明。
         let chain=self.resolve_agent_chain(&primary,crate::model_routing::ModelPurpose::Planning,text,session_id,None).await?;

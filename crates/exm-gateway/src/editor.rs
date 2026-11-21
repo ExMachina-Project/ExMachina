@@ -407,7 +407,10 @@ pub async fn operation(
     }
     let path = b.path.as_deref().unwrap_or(".");
     if matches!(b.op.as_str(), "stage" | "unstage" | "discard") {
-        st.core.orchestrator().tools.editor_path_in(&root, path)
+        st.core
+            .orchestrator()
+            .tools
+            .editor_path_in(&root, path)
             .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
     }
     let args: Vec<&str> = match b.op.as_str() {

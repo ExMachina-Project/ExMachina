@@ -14,10 +14,10 @@
 
 use crate::platform::{self, Channel, ChannelRun};
 use exm_core::Core;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use parking_lot::Mutex;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -329,7 +329,6 @@ fn state_path(core: &Core, channel_id: &str) -> std::path::PathBuf {
         .join("video_state")
         .join(format!("{safe}.json"))
 }
-
 
 // ---------------------------------------------------------------- 域分文件
 

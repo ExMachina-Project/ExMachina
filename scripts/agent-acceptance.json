@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "tempRoot": "/tmp/opencode/agent-practical-workbench",
+  "projectDir": "/tmp/opencode/agent-practical-workbench/project",
+  "minimumFreeDiskBytes": 536870912,
+  "minimumAvailableMemoryBytes": 536870912,
+  "memoryLimitBytes": 2147483648,
+  "projectDiskLimitBytes": 1073741824,
+  "cpuLimit": 2.0,
+  "processLimit": 128,
+  "timeoutSeconds": 900,
+  "image": "exm-agent-workbench:test"
+}

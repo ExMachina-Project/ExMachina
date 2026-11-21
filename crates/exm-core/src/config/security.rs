@@ -13,7 +13,7 @@ pub struct SecurityConfig {
     pub exec_allowlist: Vec<String>,
     /// 后台访问密钥：非空时 /api/* 全部要求鉴权（env EXM_AUTH_KEY 最高优先）
     pub auth_key: String,
-    /// 终端命令超时（秒）；后台任务不受此限
+    /// 前台终端命令超时（秒）；后台任务有独立默认总时长与更短期限覆盖
     pub terminal_timeout_secs: u32,
     /// 工具结果超过该字符数时落盘并回填路径（0 = 不落盘，仅截断）
     pub tool_output_spill_chars: usize,
@@ -201,4 +201,3 @@ impl SandboxConfig {
         self.mode.trim().eq_ignore_ascii_case("strict")
     }
 }
-

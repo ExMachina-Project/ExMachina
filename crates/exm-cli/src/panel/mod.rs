@@ -13,12 +13,12 @@ use crate::{chat, config_cmd, doctor, group_cmd, memory_cmd, persona_cmd, platfo
 use exm_core::types::Tier;
 use exm_core::Core;
 use owo_colors::OwoColorize;
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex;
-use std::sync::{Arc};
+use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -119,14 +119,23 @@ impl Panel {
         let width = term_width();
         let prefs = load_prefs(&prefs_root);
         let theme = Theme::parse(&prefs.theme).unwrap_or(Theme::Cyan);
-        Panel { theme, quiet: quiet || prefs.quiet, width, workspace, prefs_root }
+        Panel {
+            theme,
+            quiet: quiet || prefs.quiet,
+            width,
+            workspace,
+            prefs_root,
+        }
     }
 
     /// 主题 / 静默变更后落盘
     fn persist(&self) {
         save_prefs(
             &self.prefs_root,
-            &PanelPrefs { theme: self.theme.name().to_string(), quiet: self.quiet },
+            &PanelPrefs {
+                theme: self.theme.name().to_string(),
+                quiet: self.quiet,
+            },
         );
     }
 
@@ -166,7 +175,12 @@ impl Panel {
     }
 
     fn rule_mid(&self, content: &str) -> String {
-        format!("{} {} {}", self.accent("│"), fit(content, self.width.saturating_sub(4)), self.accent("│"))
+        format!(
+            "{} {} {}",
+            self.accent("│"),
+            fit(content, self.width.saturating_sub(4)),
+            self.accent("│")
+        )
     }
 
     fn rule_bottom(&self) -> String {
@@ -196,7 +210,10 @@ impl Panel {
             // 此时只留文字标识，不画字标
             println!(
                 "  {}",
-                self.accent(&format!("EX·MACHINA{}", " ".repeat(banner_w.saturating_sub(12))))
+                self.accent(&format!(
+                    "EX·MACHINA{}",
+                    " ".repeat(banner_w.saturating_sub(12))
+                ))
             );
         }
         println!(
@@ -215,20 +232,35 @@ impl Panel {
         let reg = core.registry();
         let mut rows: Vec<(&str, String)> = Vec::new();
 
-        rows.push(("工作区", shorten_path(&self.workspace, self.width.saturating_sub(16))));
+        rows.push((
+            "工作区",
+            shorten_path(&self.workspace, self.width.saturating_sub(16)),
+        ));
 
         match reg.active_single() {
             Some(id) => {
-                let name = reg.single(&id).map(|d| d.name).unwrap_or_else(|| id.clone());
+                let name = reg
+                    .single(&id)
+                    .map(|d| d.name)
+                    .unwrap_or_else(|| id.clone());
                 rows.push(("交互目标", format!("智能体 {name}（{id}）")));
-                rows.push(("说明", "不经调度，直接服务；回组用 /target group <id>".to_string()));
+                rows.push((
+                    "说明",
+                    "不经调度，直接服务；回组用 /target group <id>".to_string(),
+                ));
             }
             None => {
                 let gid = core.active_group();
                 let meta = core.group_meta(&gid);
-                let gname = meta.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| gid.clone());
+                let gname = meta
+                    .as_ref()
+                    .map(|m| m.name.clone())
+                    .unwrap_or_else(|| gid.clone());
                 let builtin = meta.as_ref().map(|m| m.builtin).unwrap_or(false);
-                let primary = meta.as_ref().and_then(|m| m.primary.clone()).unwrap_or_else(|| core.orchestrator_id());
+                let primary = meta
+                    .as_ref()
+                    .and_then(|m| m.primary.clone())
+                    .unwrap_or_else(|| core.orchestrator_id());
                 rows.push((
                     "交互目标",
                     format!("组 {gname}（{gid}）· {} 个体", reg.group_agent_count(&gid)),
@@ -252,7 +284,11 @@ impl Panel {
             if !configured {
                 "未配置 —— 用 /model 配置提供商".to_string()
             } else {
-                let profile = if cfg.active_profile.is_empty() { "（全局通道）".to_string() } else { cfg.active_profile.clone() };
+                let profile = if cfg.active_profile.is_empty() {
+                    "（全局通道）".to_string()
+                } else {
+                    cfg.active_profile.clone()
+                };
                 format!("{profile} / {} · 真实推理", cfg.llm.model)
             }
         };
@@ -260,7 +296,12 @@ impl Panel {
 
         rows.push((
             "会话",
-            format!("{} · {} 轮 · {}", short_id(&state.session_id), state.turns, state.session_title),
+            format!(
+                "{} · {} 轮 · {}",
+                short_id(&state.session_id),
+                state.turns,
+                state.session_title
+            ),
         ));
 
         let mem = if cfg.memory_enabled {
@@ -270,7 +311,10 @@ impl Panel {
         };
         rows.push((
             "策略",
-            format!("{}｜审批 {}｜并发 {}", mem, cfg.security.exec_approval, cfg.max_concurrency),
+            format!(
+                "{}｜审批 {}｜并发 {}",
+                mem, cfg.security.exec_approval, cfg.max_concurrency
+            ),
         ));
 
         rows.push((
@@ -298,15 +342,24 @@ impl Panel {
         let reg = core.registry();
         match reg.active_single() {
             Some(id) => {
-                let name = reg.single(&id).map(|d| d.name).unwrap_or_else(|| id.clone());
+                let name = reg
+                    .single(&id)
+                    .map(|d| d.name)
+                    .unwrap_or_else(|| id.clone());
                 format!("智能体 {name}（{id}）· 不经调度直接服务")
             }
             None => {
                 let gid = core.active_group();
                 let meta = core.group_meta(&gid);
-                let gname = meta.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| gid.clone());
+                let gname = meta
+                    .as_ref()
+                    .map(|m| m.name.clone())
+                    .unwrap_or_else(|| gid.clone());
                 let builtin = meta.as_ref().map(|m| m.builtin).unwrap_or(false);
-                let primary = meta.as_ref().and_then(|m| m.primary.clone()).unwrap_or_else(|| core.orchestrator_id());
+                let primary = meta
+                    .as_ref()
+                    .and_then(|m| m.primary.clone())
+                    .unwrap_or_else(|| core.orchestrator_id());
                 format!(
                     "组 {gname}（{gid}）· {} 个体{}｜指挥体 {primary}",
                     reg.group_agent_count(&gid),
@@ -324,12 +377,18 @@ impl Panel {
         let reg = core.registry();
         let target = match reg.active_single() {
             Some(id) => {
-                let name = reg.single(&id).map(|d| d.name).unwrap_or_else(|| id.clone());
+                let name = reg
+                    .single(&id)
+                    .map(|d| d.name)
+                    .unwrap_or_else(|| id.clone());
                 format!("智能体 {name}（{id}）")
             }
             None => {
                 let gid = core.active_group();
-                let gname = core.group_meta(&gid).map(|m| m.name).unwrap_or_else(|| gid.clone());
+                let gname = core
+                    .group_meta(&gid)
+                    .map(|m| m.name)
+                    .unwrap_or_else(|| gid.clone());
                 format!("组 {gname} · {}体", reg.group_agent_count(&gid))
             }
         };
@@ -349,7 +408,10 @@ impl Panel {
         let candidates = [
             self.chip("TARGET", &target),
             self.chip("MODEL", &model),
-            self.chip("SESS", &format!("{} · {}轮", short_id(&state.session_id), state.turns)),
+            self.chip(
+                "SESS",
+                &format!("{} · {}轮", short_id(&state.session_id), state.turns),
+            ),
             self.chip("TOK", &format!("≈{tokens}")),
         ];
 
@@ -395,7 +457,7 @@ impl Panel {
 
     // ---------------------------------------------------------------- 帮助
 
-    fn print_help(&self) {
+    fn print_help(&self, core: &Arc<Core>, state: &PanelState) {
         println!("{}", self.accent_bold("面板命令（所有设置都走 `/` 命令）"));
         let groups: &[(&str, &[(&str, &str)])] = HELP_GROUPS;
         for row in render_help(groups, self.width) {
@@ -407,27 +469,105 @@ impl Panel {
                 },
             }
         }
-        println!("\n{}", dim("  提示：Ctrl+C 中止当前轮次；空闲时再按一次退出面板。"));
+        self.print_directory_help(core, state);
+        println!(
+            "\n{}",
+            dim("  提示：Ctrl+C 中止当前轮次；空闲时再按一次退出面板。")
+        );
         println!();
+    }
+
+    /// 对静态帮助表没有覆盖的业务命令，从 Core 目录生成用法和可用性提示。
+    /// 这样新命令进入唯一目录后可发现，不必再在 panel 维护另一份业务表。
+    fn print_directory_help(&self, core: &Arc<Core>, state: &PanelState) {
+        let directory = match crate::command_cmd::command_directory(
+            core,
+            exm_core::command::CommandEntry::Tui,
+            Some(&state.session_id),
+        ) {
+            Ok(directory) => directory,
+            Err(error) => {
+                println!("\n{}", warn(format!("统一命令目录不可用：{error}")));
+                return;
+            }
+        };
+        let directory_entries = directory.entries.into_iter().filter(|entry| {
+            entry
+                .descriptor
+                .entries
+                .contains(&exm_core::command::CommandEntry::Tui)
+        });
+        println!(
+            "\n{}",
+            self.accent_bold("// 统一命令目录（当前入口与身份快照）")
+        );
+        for entry in directory_entries {
+            let descriptor = entry.descriptor;
+            let state = if entry.executable {
+                "目录允许（仍由入口 handler 执行）".to_string()
+            } else {
+                format!("目录拒绝：{:?}", entry.unavailable_reason)
+            };
+            println!(
+                "  {}{}",
+                self.accent(&format!("/{}", descriptor.usage)),
+                dim(format!("  {} · {}", descriptor.summary, state))
+            );
+        }
+        for diagnostic in directory.diagnostics {
+            println!("  {}", dim(format!("目录提示：{}", diagnostic.message)));
+        }
     }
 
     // ---------------------------------------------------------------- 分发
 
     /// 斜杠命令分派（TUI 复用同一命令面；输出走 println，TUI 侧捕获后入消息流）
-    pub async fn dispatch(&mut self, core: &Arc<Core>, state: &mut PanelState, line: &str) -> anyhow::Result<Flow> {
+    pub async fn dispatch(
+        &mut self,
+        core: &Arc<Core>,
+        state: &mut PanelState,
+        line: &str,
+    ) -> anyhow::Result<Flow> {
         let body = line.trim().trim_start_matches('/');
+        let (name, raw_args) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
+        if crate::command_cmd::is_extension(name) {
+            use exm_core::command::{CommandEntry, CommandOutputFormat};
+            let directory =
+                crate::command_cmd::directory(core, CommandEntry::Tui, Some(&state.session_id))?;
+            let version = directory
+                .entries
+                .iter()
+                .find(|entry| entry.descriptor.name == name)
+                .map_or(exm_core::command::COMMAND_DESCRIPTOR_VERSION, |entry| {
+                    entry.descriptor.version
+                });
+            let result = crate::command_cmd::execute(
+                core,
+                CommandEntry::Tui,
+                Some(&state.session_id),
+                name,
+                version,
+                raw_args,
+                CommandOutputFormat::Human,
+            )
+            .await;
+            println!(
+                "{}",
+                crate::command_cmd::render(&result, CommandOutputFormat::Human)
+            );
+            return Ok(Flow::Continue);
+        }
         let tokens = tokenize(body);
         if tokens.is_empty() {
-            self.print_help();
+            self.print_help(core, state);
             return Ok(Flow::Continue);
         }
         let cmd = tokens[0].to_lowercase();
         let rest = &tokens[1..];
         let args = parse_args(rest);
-
         match cmd.as_str() {
             // ---------------- 面板 ----------------
-            "help" | "h" | "?" => self.print_help(),
+            "help" | "h" | "?" => self.print_help(core, state),
             "exit" | "quit" | "q" => return Ok(Flow::Exit),
             "version" => {
                 println!("EXMACHINA v{VERSION}（exm-cli 终端面板）");
@@ -450,19 +590,24 @@ impl Panel {
                 println!(
                     "{} 静默模式：{}（已记忆，下次进入面板保持）",
                     ok("完成"),
-                    if self.quiet { "开（只输出最终结果）" } else { "关（完整过程）" }
+                    if self.quiet {
+                        "开（只输出最终结果）"
+                    } else {
+                        "关（完整过程）"
+                    }
                 );
             }
             "theme" => match rest.first().and_then(|s| Theme::parse(s)) {
                 Some(t) => {
                     self.theme = t;
                     self.persist();
-                    println!("{} 强调色已切换：{}（已记忆）", ok("完成"), self.theme.label());
+                    println!(
+                        "{} 强调色已切换：{}（已记忆）",
+                        ok("完成"),
+                        self.theme.label()
+                    );
                 }
-                None => println!(
-                    "{}",
-                    warn("用法：/theme cyan|green|amber|violet|ice")
-                ),
+                None => println!("{}", warn("用法：/theme cyan|green|amber|violet|ice")),
             },
             // 终端能力探测（spec cli-tui 7.4）：显示当前终端的色彩/宽字符/剪贴板
             // 探测结果与降级档位——受限终端（如 TERM=vt100）下的降级可见可诊断
@@ -497,12 +642,21 @@ impl Panel {
 
             // ---------------- 会话 ----------------
             "new" => {
-                let title = if rest.is_empty() { "CLI 面板会话".to_string() } else { rest.join(" ") };
+                let title = if rest.is_empty() {
+                    "CLI 面板会话".to_string()
+                } else {
+                    rest.join(" ")
+                };
                 let s = core.create_session(&title)?;
                 state.session_id = s.id.clone();
                 state.session_title = s.title.clone();
                 state.turns = 0;
-                println!("{} 已新建会话 {}（{}）", ok("完成"), short_id(&s.id), s.title);
+                println!(
+                    "{} 已新建会话 {}（{}）",
+                    ok("完成"),
+                    short_id(&s.id),
+                    s.title
+                );
             }
             "resume" => {
                 let list = core.list_sessions_in_scope()?;
@@ -528,7 +682,11 @@ impl Panel {
                     println!("{}", dim("（当前交互目标下暂无会话）"));
                 }
                 for (i, s) in list.iter().enumerate() {
-                    let mark = if s.id == state.session_id { "●".green().to_string() } else { " ".to_string() };
+                    let mark = if s.id == state.session_id {
+                        "●".green().to_string()
+                    } else {
+                        " ".to_string()
+                    };
                     let preview = s.last_message_preview.clone().unwrap_or_default();
                     println!(
                         "{} {:>2}. {} {} {}",
@@ -550,7 +708,12 @@ impl Panel {
                         state.session_id = s.id.clone();
                         state.session_title = s.title.clone();
                         state.turns = 0;
-                        println!("{} 已切换会话 {}（{}）", ok("完成"), short_id(&s.id), s.title);
+                        println!(
+                            "{} 已切换会话 {}（{}）",
+                            ok("完成"),
+                            short_id(&s.id),
+                            s.title
+                        );
                         self.print_status_bar(core, state);
                     }
                     None => println!("{}", err(format!("未找到会话：{token}"))),
@@ -567,7 +730,12 @@ impl Panel {
                             println!("{}", err("不能删除当前会话；请先 /session 切到别的会话"));
                         } else {
                             core.delete_session(&s.id)?;
-                            println!("{} 已删除会话 {}（{}）", ok("完成"), short_id(&s.id), s.title);
+                            println!(
+                                "{} 已删除会话 {}（{}）",
+                                ok("完成"),
+                                short_id(&s.id),
+                                s.title
+                            );
                         }
                     }
                     None => println!("{}", err(format!("未找到会话：{token}"))),
@@ -586,6 +754,260 @@ impl Panel {
                 Ok(n) => println!("{} 已请求停止（当时已执行 {n} 次工具调用）", ok("完成")),
                 Err(e) => println!("{}", err(format!("{e}"))),
             },
+            "queue" => match rest.first().map(|s| s.as_str()) {
+                None | Some("list") => {
+                    let items = exm_core::task_queue::list(&state.session_id);
+                    if items.is_empty() {
+                        println!("{}", dim("（当前会话没有明确排队任务）"));
+                    } else {
+                        println!("{}", self.accent_bold("后续任务队列（FIFO）"));
+                        for (idx, item) in items.iter().enumerate() {
+                            println!(
+                                "  {:>2}. {} [{}] {}",
+                                idx + 1,
+                                item.id,
+                                item.status,
+                                item.task.chars().take(100).collect::<String>()
+                            );
+                        }
+                    }
+                }
+                Some("add") | Some("enqueue") => {
+                    let task = rest.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+                    if task.trim().is_empty() {
+                        println!(
+                            "{}",
+                            warn("用法：/queue add <后续任务>；普通消息不会自动入队")
+                        );
+                    } else {
+                        match exm_core::task_queue::enqueue(&state.session_id, &task, "queued", "")
+                        {
+                            Ok(id) => println!("{} 已加入后续队列：{id}", ok("accepted")),
+                            Err(e) => println!("{}", err(e)),
+                        }
+                    }
+                }
+                Some("clear") => {
+                    exm_core::task_queue::clear(&state.session_id);
+                    println!("{} 已清空当前会话后续队列", ok("完成"));
+                }
+                Some(other) => println!(
+                    "{}",
+                    warn(format!("未知 queue 子命令：{other}（list / add / clear）"))
+                ),
+            },
+            "steer" => {
+                let instruction = rest.join(" ");
+                if instruction.trim().is_empty() {
+                    println!("{}", warn("用法：/steer <当前任务引导>"));
+                } else {
+                    core.emit_session_event(
+                        &state.session_id,
+                        "steering.accepted",
+                        serde_json::json!({"text": instruction, "source": "cli"}),
+                    );
+                    println!(
+                        "{} 已接收 steering，将在安全检查点生效；当前轮次不会因普通引导自动停止。",
+                        ok("accepted")
+                    );
+                }
+            }
+            "plan" => {
+                let sub = rest.first().map(|s| s.as_str());
+                match sub {
+                    None | Some("status") | Some("show") => {
+                        println!(
+                            "计划模式：{}",
+                            if exm_core::plan::is_plan_mode(&state.session_id) {
+                                "plan（只读）"
+                            } else {
+                                "execute"
+                            }
+                        );
+                        let items = core.plan_list(&state.session_id);
+                        if items.is_empty() {
+                            println!("{}", dim("（当前会话没有计划条目）"));
+                        } else {
+                            for item in items {
+                                println!(
+                                    "  {} [{}] {} → {}",
+                                    item.id, item.action, item.tool, item.target
+                                );
+                            }
+                        }
+                    }
+                    Some("start") | Some("on") => {
+                        core.set_plan_mode(&state.session_id, true);
+                        println!(
+                            "{} 已进入只读计划模式；写工具会转换为计划条目。",
+                            ok("完成")
+                        );
+                        if rest.len() > 1 {
+                            let text = rest[1..].join(" ");
+                            chat::run_round(core, &state.session_id, &text, self.quiet).await?;
+                        }
+                    }
+                    Some("approve") => match core.plan_approve(&state.session_id).await {
+                        Ok(results) => {
+                            println!("{} 已批准并回放 {} 个计划条目", ok("完成"), results.len())
+                        }
+                        Err(e) => println!("{}", err(format!("{e}"))),
+                    },
+                    Some("reject") => {
+                        let items = core.plan_reject(&state.session_id);
+                        println!(
+                            "{} 已拒绝计划；{} 个条目保留待修改",
+                            ok("完成"),
+                            items.len()
+                        );
+                    }
+                    Some("off") | Some("execute") => {
+                        core.set_plan_mode(&state.session_id, false);
+                        println!("{} 已切换执行模式", ok("完成"));
+                    }
+                    Some(other) => {
+                        core.set_plan_mode(&state.session_id, true);
+                        let text = rest.join(" ");
+                        println!(
+                            "{} 未知子命令 `{other}`；按 `/plan <任务>` 进入只读规划。",
+                            warn("提示")
+                        );
+                        if !text.trim().is_empty() {
+                            chat::run_round(core, &state.session_id, &text, self.quiet).await?;
+                        }
+                    }
+                }
+            }
+            "spec" => match rest.first().map(|s| s.as_str()) {
+                None | Some("show") => match core.spec_get(&state.session_id)? {
+                    Some(spec) => println!("{}", serde_json::to_string_pretty(&spec)?),
+                    None => println!(
+                        "{}",
+                        dim("（当前会话没有 spec；用 /spec draft <目标> 创建）")
+                    ),
+                },
+                Some("draft") | Some("edit") => {
+                    let objective = args
+                        .pos
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let revision = args
+                        .kv
+                        .get("revision")
+                        .map(|raw| raw.parse::<u64>())
+                        .transpose()
+                        .map_err(|_| anyhow::anyhow!("spec revision 必须是非负整数"))?;
+                    if objective.trim().is_empty() {
+                        println!("{}", warn("用法：/spec draft <目标>"));
+                    } else {
+                        let current = core.spec_get(&state.session_id)?;
+                        if rest.first().is_some_and(|sub| sub == "edit") && current.is_none() {
+                            println!("{}", warn("当前会话没有 spec；请先使用 /spec draft <目标>"));
+                        } else {
+                            let spec = core.spec_update(
+                                &state.session_id,
+                                &objective,
+                                current
+                                    .as_ref()
+                                    .map(|spec| spec.scope.clone())
+                                    .unwrap_or_default(),
+                                current
+                                    .as_ref()
+                                    .map(|spec| spec.constraints.clone())
+                                    .unwrap_or_default(),
+                                current
+                                    .as_ref()
+                                    .map(|spec| spec.acceptance.clone())
+                                    .unwrap_or_default(),
+                                current
+                                    .as_ref()
+                                    .map(|spec| spec.verification.clone())
+                                    .unwrap_or_default(),
+                                revision.or(current.as_ref().map(|spec| spec.revision)),
+                            )?;
+                            println!(
+                                "{} spec revision {}（仅会话状态，未写入工作区/OpenSpec）",
+                                ok("完成"),
+                                spec.revision
+                            );
+                        }
+                    }
+                }
+                Some("clear") => {
+                    let revision = args
+                        .kv
+                        .get("revision")
+                        .map(|raw| raw.parse::<u64>())
+                        .transpose()
+                        .map_err(|_| anyhow::anyhow!("spec revision 必须是非负整数"))?;
+                    core.spec_clear(
+                        &state.session_id,
+                        revision.or(core.spec_get(&state.session_id)?.map(|s| s.revision)),
+                    )?;
+                    println!("{} 已清除当前会话 spec", ok("完成"));
+                }
+                Some("export") => {
+                    let path = rest.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+                    if path.trim().is_empty() {
+                        println!("{}", warn("用法：/spec export <项目内相对路径>"));
+                    } else {
+                        let receipt = core.spec_export(&state.session_id, &path)?;
+                        println!(
+                            "{} spec 已导出到 {}（revision {}）",
+                            ok("完成"),
+                            receipt.path,
+                            receipt.revision
+                        );
+                    }
+                }
+                Some(other) => println!(
+                    "{}",
+                    warn(format!(
+                        "未知 spec 子命令：{other}（show / draft / edit / export / clear）"
+                    ))
+                ),
+            },
+            "goal" => {
+                let operation = rest.first().map(|s| s.as_str()).unwrap_or("status");
+                if operation == "status" || operation == "show" {
+                    match core.goal_get(&state.session_id)? {
+                        Some(goal) => println!("{}", serde_json::to_string_pretty(&goal)?),
+                        None => println!(
+                            "{}",
+                            dim("（当前会话没有 goal；用 /goal start <目标> 创建）")
+                        ),
+                    }
+                } else {
+                    let text = if matches!(operation, "start" | "edit" | "complete" | "block") {
+                        Some(rest.iter().skip(1).cloned().collect::<Vec<_>>().join(" "))
+                    } else {
+                        None
+                    };
+                    let current_revision =
+                        core.goal_get(&state.session_id)?.map(|goal| goal.revision);
+                    let goal = core.goal_update(
+                        &state.session_id,
+                        operation,
+                        text.as_deref(),
+                        None,
+                        if operation == "complete" {
+                            text.as_deref()
+                        } else {
+                            None
+                        },
+                        current_revision,
+                    )?;
+                    println!(
+                        "{} goal {} revision {}",
+                        ok("完成"),
+                        format!("{:?}", goal.status).to_lowercase(),
+                        goal.revision
+                    );
+                }
+            }
             "undo" => {
                 let Some(t) = rest.first().and_then(|s| s.parse::<usize>().ok()) else {
                     println!("{}", warn("用法：/undo <轮次>（0 = 回到会话起点）"));
@@ -611,8 +1033,18 @@ impl Panel {
                 };
                 match core.fork_session(&state.session_id, t) {
                     Ok(f) => {
-                        println!("{} 已派生分支会话 {}（截至第 {t} 轮）", ok("完成"), short_id(&f.id));
-                        println!("{}", dim(format!("  /session {} 切到分支继续；原会话保持不变。", f.id)));
+                        println!(
+                            "{} 已派生分支会话 {}（截至第 {t} 轮）",
+                            ok("完成"),
+                            short_id(&f.id)
+                        );
+                        println!(
+                            "{}",
+                            dim(format!(
+                                "  /session {} 切到分支继续；原会话保持不变。",
+                                f.id
+                            ))
+                        );
                     }
                     Err(e) => println!("{}", err(format!("{e}"))),
                 }
@@ -629,7 +1061,10 @@ impl Panel {
                         println!("{}", dim("（暂无外部聊天流；通道消息进入后自动建流）"));
                         return Ok(Flow::Continue);
                     }
-                    println!("{}", self.accent_bold("外部聊天流（通道 · 对端 · 预览 · 绑定/未读）"));
+                    println!(
+                        "{}",
+                        self.accent_bold("外部聊天流（通道 · 对端 · 预览 · 绑定/未读）")
+                    );
                     for (i, f) in flows.iter().enumerate() {
                         let unread = core.flow_unread_count(&f.channel_id, &f.chat_key);
                         let badge = if unread > 0 {
@@ -646,7 +1081,12 @@ impl Panel {
                             "  {:>2}. [{}] {} {} {} {}",
                             i + 1,
                             f.channel_id,
-                            if f.display_name.is_empty() { f.chat_key.as_str() } else { &f.display_name }.bold(),
+                            if f.display_name.is_empty() {
+                                f.chat_key.as_str()
+                            } else {
+                                &f.display_name
+                            }
+                            .bold(),
                             dim(format!("「{preview}」")),
                             bind,
                             badge,
@@ -661,7 +1101,10 @@ impl Panel {
                     };
                     let flows = sorted_flows(core);
                     let Some(f) = flows.get(idx.saturating_sub(1)) else {
-                        println!("{}", err(format!("序号越界：{idx}（共 {} 条流）", flows.len())));
+                        println!(
+                            "{}",
+                            err(format!("序号越界：{idx}（共 {} 条流）", flows.len()))
+                        );
                         return Ok(Flow::Continue);
                     };
                     // 绑定会话不存在时按通道语义开新会话并回写绑定
@@ -711,12 +1154,18 @@ impl Panel {
                 }
                 Some("sessions") => {
                     let Some(idx) = rest.get(1).and_then(|s| s.parse::<usize>().ok()) else {
-                        println!("{}", warn("用法：/flows sessions <序号>（/flows 查看列表）"));
+                        println!(
+                            "{}",
+                            warn("用法：/flows sessions <序号>（/flows 查看列表）")
+                        );
                         return Ok(Flow::Continue);
                     };
                     let flows = sorted_flows(core);
                     let Some(f) = flows.get(idx.saturating_sub(1)) else {
-                        println!("{}", err(format!("序号越界：{idx}（共 {} 条流）", flows.len())));
+                        println!(
+                            "{}",
+                            err(format!("序号越界：{idx}（共 {} 条流）", flows.len()))
+                        );
                         return Ok(Flow::Continue);
                     };
                     // 流内会话：与 REST /channels/flows/:id/sessions 同口径
@@ -740,7 +1189,10 @@ impl Panel {
                         println!("{}", dim("（该流暂无会话）"));
                         return Ok(Flow::Continue);
                     }
-                    println!("{}", self.accent_bold(&format!("流内会话（{} 条）", mine.len())));
+                    println!(
+                        "{}",
+                        self.accent_bold(&format!("流内会话（{} 条）", mine.len()))
+                    );
                     for (k, s) in mine.iter().enumerate() {
                         let mark = if f.active_session.as_deref() == Some(s.id.as_str()) {
                             "●".green().to_string()
@@ -753,7 +1205,13 @@ impl Panel {
                             .filter(|t| !t.is_empty())
                             .map(|t| t.to_string())
                             .unwrap_or_else(|| s.created_at.chars().take(10).collect::<String>());
-                        println!("{} {:>2}. {} {}", mark, k + 1, short_id(&s.id), label.bold());
+                        println!(
+                            "{} {:>2}. {} {}",
+                            mark,
+                            k + 1,
+                            short_id(&s.id),
+                            label.bold()
+                        );
                     }
                     println!("{}", dim("  /flows use <流序号> <会话序号> 切换绑定"));
                 }
@@ -786,7 +1244,10 @@ impl Panel {
                             .then_with(|| a.id.cmp(&b.id))
                     });
                     let Some(s) = mine.get(si.saturating_sub(1)) else {
-                        println!("{}", err(format!("会话序号越界：{si}（共 {} 条）", mine.len())));
+                        println!(
+                            "{}",
+                            err(format!("会话序号越界：{si}（共 {} 条）", mine.len()))
+                        );
                         return Ok(Flow::Continue);
                     };
                     match core.bind_flow_session(&f.channel_id, &f.chat_key, &s.id) {
@@ -806,7 +1267,10 @@ impl Panel {
                         Err(e) => println!("{}", err(format!("改绑失败：{e}"))),
                     }
                 }
-                Some(other) => println!("{}", warn(format!("未知子命令：{other}（open / sessions / use）"))),
+                Some(other) => println!(
+                    "{}",
+                    warn(format!("未知子命令：{other}（open / sessions / use）"))
+                ),
             },
 
             // ---------------- 交互目标与编成 ----------------
@@ -818,7 +1282,10 @@ impl Panel {
                 },
                 Some("single") | Some("s") | Some("agent") => match rest.get(1) {
                     Some(id) => self.switch_target_single(core, state, id)?,
-                    None => println!("{}", warn("用法：/target single <智能体id>（/singles 查看）")),
+                    None => println!(
+                        "{}",
+                        warn("用法：/target single <智能体id>（/singles 查看）")
+                    ),
                 },
                 // 简写 /target <id>：组优先，其次智能体
                 Some(id) => {
@@ -827,7 +1294,10 @@ impl Panel {
                     } else if core.registry().single(id).is_some() {
                         self.switch_target_single(core, state, id)?;
                     } else {
-                        println!("{}", err(format!("未找到组或智能体：{id}（/target 查看全部）")));
+                        println!(
+                            "{}",
+                            err(format!("未找到组或智能体：{id}（/target 查看全部）"))
+                        );
                     }
                 }
             },
@@ -838,7 +1308,11 @@ impl Panel {
                 }
                 let active = core.registry().active_single();
                 for s in singles {
-                    let mark = if active.as_deref() == Some(s.identifier.as_str()) { "●".green().to_string() } else { " ".to_string() };
+                    let mark = if active.as_deref() == Some(s.identifier.as_str()) {
+                        "●".green().to_string()
+                    } else {
+                        " ".to_string()
+                    };
                     println!(
                         "{} {} {} — {}",
                         mark,
@@ -863,7 +1337,10 @@ impl Panel {
                             let desc = args.kv.get("desc").cloned().unwrap_or_default();
                             group_cmd::run_create(core, name, args.kv.get("id").cloned(), &desc)?;
                         }
-                        None => println!("{}", warn("用法：/group create <名称> [--id id] [--desc 描述]")),
+                        None => println!(
+                            "{}",
+                            warn("用法：/group create <名称> [--id id] [--desc 描述]")
+                        ),
                     },
                     "info" => group_cmd::run_info(core, rest.get(1).cloned())?,
                     "delete" | "remove" => match rest.get(1) {
@@ -933,8 +1410,17 @@ impl Panel {
                     },
                     "set" => match rest.get(1) {
                         Some(id) => {
-                            let text = if rest.len() > 2 { Some(rest[2..].join(" ")) } else { args.kv.get("text").cloned() };
-                            persona_cmd::run_set(core, id, text, args.kv.get("file").map(PathBuf::from))?;
+                            let text = if rest.len() > 2 {
+                                Some(rest[2..].join(" "))
+                            } else {
+                                args.kv.get("text").cloned()
+                            };
+                            persona_cmd::run_set(
+                                core,
+                                id,
+                                text,
+                                args.kv.get("file").map(PathBuf::from),
+                            )?;
                         }
                         None => println!("{}", warn("用法：/persona set <identifier> <人设文本>")),
                     },
@@ -942,7 +1428,10 @@ impl Panel {
                         Some(id) => persona_cmd::run_reset(core, id)?,
                         None => println!("{}", warn("用法：/persona reset <identifier>")),
                     },
-                    _ => println!("{}", warn("用法：/persona get|set|reset <identifier> [文本]")),
+                    _ => println!(
+                        "{}",
+                        warn("用法：/persona get|set|reset <identifier> [文本]")
+                    ),
                 }
             }
 
@@ -1007,19 +1496,37 @@ impl Panel {
             "memory" | "mem" => {
                 let sub = rest.first().map(|s| s.as_str()).unwrap_or("list");
                 match sub {
-                    "list" => {
-                        memory_cmd::run_memory_list(core, args.kv.get("kind").cloned(), args.kv.get("agent").map(|s| s.as_str()), 20)?
-                    }
+                    "list" => memory_cmd::run_memory_list(
+                        core,
+                        args.kv.get("kind").cloned(),
+                        args.kv.get("agent").map(|s| s.as_str()),
+                        20,
+                    )?,
                     "search" => {
-                        let query = args.pos.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+                        let query = args
+                            .pos
+                            .iter()
+                            .skip(1)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         if query.trim().is_empty() {
                             println!("{}", warn("用法：/memory search <查询>"));
                         } else {
-                            memory_cmd::run_memory_search(core, &query, args.kv.get("agent").map(|s| s.as_str()), 5)?
+                            memory_cmd::run_memory_search(
+                                core,
+                                &query,
+                                args.kv.get("agent").map(|s| s.as_str()),
+                                5,
+                            )?
                         }
                     }
                     "add" => {
-                        let kind = args.kv.get("kind").cloned().unwrap_or_else(|| "fact".to_string());
+                        let kind = args
+                            .kv
+                            .get("kind")
+                            .cloned()
+                            .unwrap_or_else(|| "fact".to_string());
                         match (args.pos.get(1), args.pos.get(2)) {
                             (Some(title), Some(body)) => {
                                 let tags = args
@@ -1044,7 +1551,9 @@ impl Panel {
                         }
                     }
                     "pin" => match rest.get(1) {
-                        Some(id) => memory_cmd::run_memory_pin(core, id, !args.bools.contains("off"))?,
+                        Some(id) => {
+                            memory_cmd::run_memory_pin(core, id, !args.bools.contains("off"))?
+                        }
                         None => println!("{}", warn("用法：/memory pin <id> [--off]")),
                     },
                     "forget" => match rest.get(1) {
@@ -1114,9 +1623,11 @@ impl Panel {
                     _ => platform_cmd::run_cron_list(core)?,
                 }
             }
-            "approvals" | "approval" => {
-                platform_cmd::run_approval_list(core, args.kv.get("status").map(|s| s.as_str()), 50)?
-            }
+            "approvals" | "approval" => platform_cmd::run_approval_list(
+                core,
+                args.kv.get("status").map(|s| s.as_str()),
+                50,
+            )?,
             "approve" => match rest.first() {
                 Some(id) => platform_cmd::run_approval_decide(core, id, true).await?,
                 None => println!("{}", warn("用法：/approve <id>")),
@@ -1128,10 +1639,14 @@ impl Panel {
             "checkpoints" | "checkpoint" => print_checkpoints(core),
             "restore" => match rest.first() {
                 Some(path) => {
-                    let msg = core.restore_checkpoint(args.kv.get("date").map(|s| s.as_str()), path)?;
+                    let msg =
+                        core.restore_checkpoint(args.kv.get("date").map(|s| s.as_str()), path)?;
                     println!("{}", ok(msg));
                 }
-                None => println!("{}", warn("用法：/restore <工作区相对路径> [--date YYYY-MM-DD]")),
+                None => println!(
+                    "{}",
+                    warn("用法：/restore <工作区相对路径> [--date YYYY-MM-DD]")
+                ),
             },
             "doctor" => match doctor::run_doctor(&self.workspace) {
                 Ok(()) => {}
@@ -1141,7 +1656,10 @@ impl Panel {
             other => {
                 println!("{}", err(format!("未知命令：/{other}")));
                 match suggest_command(other) {
-                    Some(s) => println!("{}", dim(format!("  是否想用 /{s}？输入 /help 查看全部命令。"))),
+                    Some(s) => println!(
+                        "{}",
+                        dim(format!("  是否想用 /{s}？输入 /help 查看全部命令。"))
+                    ),
                     None => println!("{}", dim("  输入 /help 查看全部命令。")),
                 }
             }
@@ -1157,14 +1675,25 @@ impl Panel {
         println!("\n{}", self.accent_bold("// 智能体组（集群协作，经调度）"));
         let single_mode = core.registry().single_mode();
         for g in core.list_groups() {
-            let mark = if !single_mode && g.id == core.active_group() { "●".green().to_string() } else { " ".to_string() };
+            let mark = if !single_mode && g.id == core.active_group() {
+                "●".green().to_string()
+            } else {
+                " ".to_string()
+            };
             println!(
                 "{} {} {} {} {}",
                 mark,
                 g.id.cyan(),
                 g.name.bold(),
-                dim(format!("主智能体 {}", g.primary.clone().unwrap_or_else(|| "未设置".into()))),
-                if g.builtin { dim("内置") } else { String::new() }
+                dim(format!(
+                    "主智能体 {}",
+                    g.primary.clone().unwrap_or_else(|| "未设置".into())
+                )),
+                if g.builtin {
+                    dim("内置")
+                } else {
+                    String::new()
+                }
             );
         }
 
@@ -1175,7 +1704,11 @@ impl Panel {
         }
         let active = core.registry().active_single();
         for s in singles {
-            let mark = if active.as_deref() == Some(s.identifier.as_str()) { "●".green().to_string() } else { " ".to_string() };
+            let mark = if active.as_deref() == Some(s.identifier.as_str()) {
+                "●".green().to_string()
+            } else {
+                " ".to_string()
+            };
             println!(
                 "{} {} {} — {}",
                 mark,
@@ -1184,11 +1717,19 @@ impl Panel {
                 dim(s.description.chars().take(40).collect::<String>())
             );
         }
-        println!("\n{}", dim("  切换：/target group <id>（集群）或 /target single <id>（智能体）"));
+        println!(
+            "\n{}",
+            dim("  切换：/target group <id>（集群）或 /target single <id>（智能体）")
+        );
     }
 
     /// 切到某个组：退出智能体模式 → 设激活组 → 新会话
-    fn switch_target_group(&mut self, core: &Arc<Core>, state: &mut PanelState, id: &str) -> anyhow::Result<()> {
+    fn switch_target_group(
+        &mut self,
+        core: &Arc<Core>,
+        state: &mut PanelState,
+        id: &str,
+    ) -> anyhow::Result<()> {
         core.registry().set_active_single(None)?;
         group_cmd::run_switch(core, id)?;
         self.on_target_switched(core, state);
@@ -1196,10 +1737,23 @@ impl Panel {
     }
 
     /// 切到某个智能体（不经调度直接服务）
-    fn switch_target_single(&mut self, core: &Arc<Core>, state: &mut PanelState, id: &str) -> anyhow::Result<()> {
+    fn switch_target_single(
+        &mut self,
+        core: &Arc<Core>,
+        state: &mut PanelState,
+        id: &str,
+    ) -> anyhow::Result<()> {
         core.registry().set_active_single(Some(id))?;
-        let name = core.registry().single(id).map(|d| d.name).unwrap_or_else(|| id.to_string());
-        println!("{} 交互目标已切换：智能体 {}（{id}）· 不经调度直接服务", ok("完成"), name);
+        let name = core
+            .registry()
+            .single(id)
+            .map(|d| d.name)
+            .unwrap_or_else(|| id.to_string());
+        println!(
+            "{} 交互目标已切换：智能体 {}（{id}）· 不经调度直接服务",
+            ok("完成"),
+            name
+        );
         self.on_target_switched(core, state);
         Ok(())
     }
@@ -1211,7 +1765,10 @@ impl Panel {
                 state.session_id = s.id.clone();
                 state.session_title = s.title.clone();
                 state.turns = 0;
-                println!("{}", dim(format!("已随交互目标切换新建会话 {}", short_id(&s.id))));
+                println!(
+                    "{}",
+                    dim(format!("已随交互目标切换新建会话 {}", short_id(&s.id)))
+                );
             }
             Err(e) => println!("{}", err(format!("新建会话失败：{e}"))),
         }
@@ -1229,7 +1786,6 @@ impl Panel {
         );
     }
 }
-
 
 // ---------------------------------------------------------------- 域分文件
 

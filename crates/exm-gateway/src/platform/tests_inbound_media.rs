@@ -47,7 +47,11 @@ mod inbound_media_tests {
         let rels = exm_core::inbox_stash::take("ses-inb");
         assert_eq!(rels.len(), 2, "图片+文件都应登记");
         assert_eq!(rels[0].kind, "image");
-        assert!(!rels[0].path.starts_with('/'), "应为工作区相对路径：{}", rels[0].path);
+        assert!(
+            !rels[0].path.starts_with('/'),
+            "应为工作区相对路径：{}",
+            rels[0].path
+        );
         assert!(rels[0].path.contains("shot.png"), "{}", rels[0].path);
         assert_eq!(rels[1].name, "report.txt");
     }
@@ -105,11 +109,7 @@ mod inbound_media_tests {
         crate::ambient_media::push(
             &ch.id,
             "996979629",
-            vec![(
-                "image".into(),
-                img2.display().to_string(),
-                "old.png".into(),
-            )],
+            vec![("image".into(), img2.display().to_string(), "old.png".into())],
         );
         // 旁听占位消息（未 @ 的纯图 → 占位文本）；本条消息自带的媒体是 pic.png
         let ctx = InboundCtx {
@@ -120,11 +120,7 @@ mod inbound_media_tests {
             mentioned: false,
             chat_key: "996979629",
             flow_name: Some("测试群"),
-            media: &[(
-                "image".into(),
-                img.display().to_string(),
-                "pic.png".into(),
-            )],
+            media: &[("image".into(), img.display().to_string(), "pic.png".into())],
         };
         super::super::record_ambient(&core, &ch, &ctx).await;
         // 占位消息应带附件元数据（工作区相对路径），且**只有本条的 pic.png**
@@ -143,7 +139,10 @@ mod inbound_media_tests {
             "只挂本条消息自带的媒体: {:?}",
             m.attachments
         );
-        assert!(!m.attachments[0].path.starts_with('/'), "应为工作区相对路径");
+        assert!(
+            !m.attachments[0].path.starts_with('/'),
+            "应为工作区相对路径"
+        );
         assert!(m.attachments[0].path.contains("pic.png"));
         assert!(
             !m.attachments.iter().any(|a| a.path.contains("old.png")),
@@ -177,11 +176,7 @@ mod inbound_media_tests {
         crate::ambient_media::push(
             &ch.id,
             "996979629",
-            vec![(
-                "image".into(),
-                img.display().to_string(),
-                "pic.png".into(),
-            )],
+            vec![("image".into(), img.display().to_string(), "pic.png".into())],
         );
         let remain = crate::ambient_media::take(&ch.id, "996979629");
         assert_eq!(remain.len(), 2, "窗口条目应保留给 @ 轮次");
@@ -227,8 +222,12 @@ mod dedup_tests {
         let core = test_core();
         let ch = ch();
         let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
-        let p1 = save_inbound_media(&core, &ch, "a.png", png.clone()).await.unwrap();
-        let p2 = save_inbound_media(&core, &ch, "b.png", png.clone()).await.unwrap();
+        let p1 = save_inbound_media(&core, &ch, "a.png", png.clone())
+            .await
+            .unwrap();
+        let p2 = save_inbound_media(&core, &ch, "b.png", png.clone())
+            .await
+            .unwrap();
         assert_eq!(p1, p2, "同字节不同名 → 同指纹路径");
         // 同轮收集层语义（qqbot 侧 seen_fp 判重）也在指纹上：
         let fp = crate::platform::media_fingerprint(&png);
@@ -245,9 +244,13 @@ mod dedup_tests {
         let core = test_core();
         let ch = ch();
         let jpg = vec![0xFF, 0xD8, 0xFF, 0xE0, 7, 8, 9];
-        let first = save_inbound_media(&core, &ch, "photo-1234.jpg", jpg.clone()).await.unwrap();
+        let first = save_inbound_media(&core, &ch, "photo-1234.jpg", jpg.clone())
+            .await
+            .unwrap();
         // 平台重推改名：文件名字段变化，字节相同
-        let second = save_inbound_media(&core, &ch, "photo-9999.jpg", jpg.clone()).await.unwrap();
+        let second = save_inbound_media(&core, &ch, "photo-9999.jpg", jpg.clone())
+            .await
+            .unwrap();
         assert_eq!(first, second, "重推复用已落盘路径");
         let bytes = tokio::fs::read(&first).await.unwrap();
         assert_eq!(bytes, jpg, "复用文件内容一致");
@@ -260,8 +263,12 @@ mod dedup_tests {
     async fn 不同内容_各自落盘() {
         let core = test_core();
         let ch = ch();
-        let a = save_inbound_media(&core, &ch, "1.png", vec![1, 2, 3]).await.unwrap();
-        let b = save_inbound_media(&core, &ch, "2.png", vec![4, 5, 6]).await.unwrap();
+        let a = save_inbound_media(&core, &ch, "1.png", vec![1, 2, 3])
+            .await
+            .unwrap();
+        let b = save_inbound_media(&core, &ch, "2.png", vec![4, 5, 6])
+            .await
+            .unwrap();
         assert_ne!(a, b, "不同字节不同指纹路径");
     }
 
@@ -272,6 +279,9 @@ mod dedup_tests {
         let deduped: Vec<(String, Vec<u8>)> = vec![("image".into(), vec![1, 2, 3])];
         let kinds: Vec<&str> = deduped.iter().map(|(k, _)| k.as_str()).collect();
         let placeholder = crate::channel_util::media_placeholder(&kinds);
-        assert!(!placeholder.trim().is_empty(), "占位正文正常生成: {placeholder}");
+        assert!(
+            !placeholder.trim().is_empty(),
+            "占位正文正常生成: {placeholder}"
+        );
     }
 }

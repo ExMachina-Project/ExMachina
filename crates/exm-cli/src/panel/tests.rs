@@ -9,7 +9,10 @@ mod tests {
 
     #[test]
     fn 分词_支持引号与普通词() {
-        assert_eq!(tokenize("create \"研发 组\" --id dev"), vec!["create", "研发 组", "--id", "dev"]);
+        assert_eq!(
+            tokenize("create \"研发 组\" --id dev"),
+            vec!["create", "研发 组", "--id", "dev"]
+        );
         assert!(tokenize("   ").is_empty());
     }
 
@@ -27,7 +30,10 @@ mod tests {
     #[test]
     fn 参数解析_等号写法() {
         let a = parse_args(&tokenize("--base-url=https://x/v1 --model m"));
-        assert_eq!(a.kv.get("base-url").map(String::as_str), Some("https://x/v1"));
+        assert_eq!(
+            a.kv.get("base-url").map(String::as_str),
+            Some("https://x/v1")
+        );
         assert_eq!(a.kv.get("model").map(String::as_str), Some("m"));
     }
 
@@ -108,11 +114,23 @@ mod tests {
 
     #[test]
     fn 命令建议_前缀优先再编辑距离() {
-        assert_eq!(suggest_command("sess"), Some("session"));
-        assert_eq!(suggest_command("sessons"), Some("sessions"));
-        assert_eq!(suggest_command("targt"), Some("target"));
+        assert_eq!(suggest_command("sess").as_deref(), Some("session"));
+        assert_eq!(suggest_command("sessons").as_deref(), Some("sessions"));
+        assert_eq!(suggest_command("targt").as_deref(), Some("target"));
         assert_eq!(suggest_command("zzzzzz"), None);
         assert_eq!(suggest_command(""), None);
+    }
+
+    #[test]
+    fn 面板纠错命令来自统一目录并保留本地兼容命令() {
+        let names = panel_command_names();
+        assert!(names.iter().any(|name| name == "model"));
+        assert!(names.iter().any(|name| name == "config"));
+        assert!(names.iter().any(|name| name == "queue"));
+        assert!(names.iter().any(|name| name == "steer"));
+        assert!(names.iter().any(|name| name == "goal"));
+        assert!(names.iter().any(|name| name == "copy"));
+        assert_eq!(suggest_command("qeuue").as_deref(), Some("queue"));
     }
 
     #[test]
@@ -124,7 +142,13 @@ mod tests {
         assert_eq!(empty.theme, "");
         assert!(!empty.quiet);
         // 落盘 → 读回
-        save_prefs(&dir, &PanelPrefs { theme: "violet".into(), quiet: true });
+        save_prefs(
+            &dir,
+            &PanelPrefs {
+                theme: "violet".into(),
+                quiet: true,
+            },
+        );
         let back = load_prefs(&dir);
         assert_eq!(back.theme, "violet");
         assert!(back.quiet);
@@ -193,6 +217,33 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn spec_export_tui_requires_explicit_export_and_writes_project_file() {
+        let root = std::env::temp_dir().join(format!("exm-panel-spec-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let core = std::sync::Arc::new(exm_core::Core::create(root.clone()).unwrap());
+        let session = core.create_session("panel spec export").unwrap();
+        let mut panel = Panel::new(root.clone(), root.join(".exmachina"), true);
+        let mut state = PanelState {
+            session_id: session.id.clone(),
+            session_title: session.title,
+            turns: 0,
+        };
+
+        panel
+            .dispatch(&core, &mut state, "/spec draft TUI 导出验收")
+            .await
+            .unwrap();
+        assert!(!root.join("docs/tui-spec.md").exists());
+        panel
+            .dispatch(&core, &mut state, "/spec export docs/tui-spec.md")
+            .await
+            .unwrap();
+        let content = std::fs::read_to_string(root.join("docs/tui-spec.md")).unwrap();
+        assert!(content.contains("TUI 导出验收"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// 折行必须按显示列算：中文占 2 列，否则中文行会实际超宽
     #[test]
     fn 折行_按显示宽度且不丢字符() {
@@ -204,10 +255,7 @@ mod tests {
             assert!(disp_width(l) <= 10, "超宽：{l}");
         }
         // 折行不丢字符（忽略空白后与原文一致：空格折行处的空格即断点）
-        assert_eq!(
-            out.join("").replace(' ', ""),
-            src.replace(' ', "")
-        );
+        assert_eq!(out.join("").replace(' ', ""), src.replace(' ', ""));
         // 优先在空格处断，不把英文单词劈开
         assert_eq!(
             wrap_disp("read config schema now", 12),
@@ -225,10 +273,7 @@ mod tests {
             let last = l.rsplit(' ').next().unwrap_or_default();
             assert!(!dangling_value(last), "行尾是被劈开的参数：{l}");
         }
-        assert_eq!(
-            out.join("").replace(' ', ""),
-            cmd.replace(' ', "")
-        );
+        assert_eq!(out.join("").replace(' ', ""), cmd.replace(' ', ""));
     }
 
     #[test]
@@ -247,9 +292,16 @@ mod tests {
             last_active_at: at.into(),
             created_at: at.into(),
         };
-        let mut v = [mk("a", "2026-11-06T01:00:00Z"), mk("b", "2026-11-06T03:00:00Z"), mk("c", "2026-11-05T00:00:00Z")];
+        let mut v = [
+            mk("a", "2026-11-06T01:00:00Z"),
+            mk("b", "2026-11-06T03:00:00Z"),
+            mk("c", "2026-11-05T00:00:00Z"),
+        ];
         v.sort_by(|x, y| y.last_active_at.cmp(&x.last_active_at));
-        assert_eq!(v.iter().map(|f| f.chat_key.clone()).collect::<Vec<_>>(), vec!["b", "a", "c"]);
+        assert_eq!(
+            v.iter().map(|f| f.chat_key.clone()).collect::<Vec<_>>(),
+            vec!["b", "a", "c"]
+        );
     }
 
     #[test]
@@ -262,7 +314,10 @@ mod tests {
         cfg.data_dir = base.join("data");
         let core = exm_core::Core::with_config(cfg).expect("Core 创建失败");
         let scope = flow_scope(&core, "no-such-channel");
-        assert!(!scope.is_empty(), "回落链必须给出非空 scope（实际 {scope}）");
+        assert!(
+            !scope.is_empty(),
+            "回落链必须给出非空 scope（实际 {scope}）"
+        );
         assert!(
             scope.starts_with("single:") || !scope.contains(':'),
             "回落应为单智能体 scope 或组 id（实际 {scope}）"

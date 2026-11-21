@@ -16,9 +16,16 @@ pub fn run_skill_list(core: &Core) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    println!("{}", format!("技能包（全体组共用，共 {} 个）", skills.len()).bold());
+    println!(
+        "{}",
+        format!("技能包（全体组共用，共 {} 个）", skills.len()).bold()
+    );
     for s in skills {
-        let agents = if s.agents.is_empty() { "全体".to_string() } else { s.agents.join("、") };
+        let agents = if s.agents.is_empty() {
+            "全体".to_string()
+        } else {
+            s.agents.join("、")
+        };
         println!(
             "  {} {} {}",
             s.id.cyan(),
@@ -31,9 +38,16 @@ pub fn run_skill_list(core: &Core) -> anyhow::Result<()> {
         println!(
             "    {} {}",
             dim("触发:"),
-            if s.triggers.is_empty() { "—".to_string() } else { s.triggers.join("、") }
+            if s.triggers.is_empty() {
+                "—".to_string()
+            } else {
+                s.triggers.join("、")
+            }
         );
-        println!("    {}", s.instructions.chars().take(120).collect::<String>());
+        println!(
+            "    {}",
+            s.instructions.chars().take(120).collect::<String>()
+        );
     }
     Ok(())
 }
@@ -61,7 +75,10 @@ pub fn run_skill_add(
     };
     core.add_skill(skill)?;
     println!("{} 技能包已创建：{}（全体组共用）", ok("完成"), id.cyan());
-    println!("{}", dim("派发时任务目标命中触发词即自动携带该指令；热装载，无需重启。"));
+    println!(
+        "{}",
+        dim("派发时任务目标命中触发词即自动携带该指令；热装载，无需重启。")
+    );
     Ok(())
 }
 
@@ -76,8 +93,8 @@ pub fn run_skill_remove(core: &Core, id: &str) -> anyhow::Result<()> {
 
 /// 从 SKILL.md 文件导入（标准 frontmatter + Markdown 正文；同 id 覆盖）
 pub fn run_skill_import(core: &Core, file: &str) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(file)
-        .map_err(|e| anyhow::anyhow!("读取文件失败 {file}: {e}"))?;
+    let raw =
+        std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("读取文件失败 {file}: {e}"))?;
     let skill = core.import_skill_md(&raw)?;
     println!(
         "{} 技能包已导入：{}（{}，触发词 {} 个，适用 {}）",
@@ -150,7 +167,10 @@ pub fn run_trajectory(
 // ---------------------------------------------------------------- 经验优化（子个体自适应）
 
 pub async fn run_agent_optimize(core: &Core, identifier: &str) -> anyhow::Result<()> {
-    println!("{}", dim(format!("基于历史教训合成经验改进要点（{}）…", identifier)));
+    println!(
+        "{}",
+        dim(format!("基于历史教训合成经验改进要点（{}）…", identifier))
+    );
     let a = core.orchestrator().optimize_agent(identifier).await?;
     println!(
         "{} {} 已更新至 rev{}（教训计入 {} 条）",
@@ -160,7 +180,10 @@ pub async fn run_agent_optimize(core: &Core, identifier: &str) -> anyhow::Result
         a.lessons_seen
     );
     println!("{}", a.content);
-    println!("{}", dim("要点将常驻注入该个体的后续派发；agent reset-adaptation 可重置。"));
+    println!(
+        "{}",
+        dim("要点将常驻注入该个体的后续派发；agent reset-adaptation 可重置。")
+    );
     Ok(())
 }
 
@@ -179,10 +202,17 @@ pub fn run_agent_adaptation(core: &Core, identifier: &str) -> anyhow::Result<()>
             }
             println!("{}", a.content);
             if !a.previous.is_empty() {
-                println!("  {} {:?}", dim("历史版本"), a.previous.iter().map(|v| v.revision).collect::<Vec<_>>());
+                println!(
+                    "  {} {:?}",
+                    dim("历史版本"),
+                    a.previous.iter().map(|v| v.revision).collect::<Vec<_>>()
+                );
             }
         }
-        None => println!("{}", dim("该个体尚无经验要点；agent optimize <id> 可手动合成。")),
+        None => println!(
+            "{}",
+            dim("该个体尚无经验要点；agent optimize <id> 可手动合成。")
+        ),
     }
     Ok(())
 }
@@ -199,7 +229,11 @@ pub fn run_agent_reset_adaptation(core: &Core, identifier: &str) -> anyhow::Resu
 // ---------------------------------------------------------------- 模型档案（多厂商）
 
 fn masked(key: &str) -> String {
-    if key.trim().is_empty() { "（空 = Mock 通道）".to_string() } else { "已配置".to_string() }
+    if key.trim().is_empty() {
+        "（空 = Mock 通道）".to_string()
+    } else {
+        "已配置".to_string()
+    }
 }
 
 pub fn run_model_list(core: &Core) -> anyhow::Result<()> {
@@ -209,7 +243,11 @@ pub fn run_model_list(core: &Core) -> anyhow::Result<()> {
         format!("模型档案（生效：{}）", cfg.active_profile.cyan()).bold()
     );
     for p in &cfg.llm_profiles {
-        let mark = if p.id == cfg.active_profile { "●".green().to_string() } else { " ".into() };
+        let mark = if p.id == cfg.active_profile {
+            "●".green().to_string()
+        } else {
+            " ".into()
+        };
         println!(
             "{} {} {} {}",
             mark,
@@ -217,8 +255,18 @@ pub fn run_model_list(core: &Core) -> anyhow::Result<()> {
             p.name.bold(),
             dim(format!("{}｜{}", p.base_url, p.model))
         );
-        let key_count = p.api_keys.len().max(if p.api_key.is_empty() { 0 } else { 1 });
-        println!("    {}", dim(format!("apiKey: {}｜Key 池 {} 把", masked(&p.api_key), key_count)));
+        let key_count = p
+            .api_keys
+            .len()
+            .max(if p.api_key.is_empty() { 0 } else { 1 });
+        println!(
+            "    {}",
+            dim(format!(
+                "apiKey: {}｜Key 池 {} 把",
+                masked(&p.api_key),
+                key_count
+            ))
+        );
     }
     let configured = !cfg.llm.api_key.trim().is_empty() || !cfg.llm.api_keys.is_empty();
     println!(
@@ -255,8 +303,12 @@ pub fn run_model_add(
         api_key: api_key.trim().to_string(),
         api_keys: Vec::new(),
         api_format: String::new(),
-        client_identity: cfg.llm_profiles.iter().find(|p| p.id == id.trim())
-            .map(|p| p.client_identity.clone()).unwrap_or_default(),
+        client_identity: cfg
+            .llm_profiles
+            .iter()
+            .find(|p| p.id == id.trim())
+            .map(|p| p.client_identity.clone())
+            .unwrap_or_default(),
         model: model.trim().to_string(),
         models: Vec::new(),
     };
@@ -302,7 +354,12 @@ pub fn run_model_use(core: &Core, id: &str) -> anyhow::Result<()> {
     cfg.use_mock = cfg.use_mock || exm_core::config::mock_enabled_from_env();
     let base = cfg.llm.base_url.clone();
     core.apply_config(cfg)?;
-    println!("{} 已切换到档案 {}（{}）", ok("完成"), id.cyan(), dim(&base));
+    println!(
+        "{} 已切换到档案 {}（{}）",
+        ok("完成"),
+        id.cyan(),
+        dim(&base)
+    );
     Ok(())
 }
 
@@ -341,7 +398,11 @@ pub async fn run_model_test(core: &Core, id: Option<&str>) -> anyhow::Result<()>
     let cfg = core.config();
     let profile = match id {
         Some(x) => cfg.llm_profiles.iter().find(|p| p.id == x).cloned(),
-        None => cfg.llm_profiles.iter().find(|p| p.id == cfg.active_profile).cloned(),
+        None => cfg
+            .llm_profiles
+            .iter()
+            .find(|p| p.id == cfg.active_profile)
+            .cloned(),
     };
     let Some(p) = profile else {
         anyhow::bail!("档案不存在");
@@ -353,8 +414,12 @@ pub async fn run_model_test(core: &Core, id: Option<&str>) -> anyhow::Result<()>
         keys.push(p.api_key.clone());
     }
     let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(
-        exm_core::provider::OpenAiCompatibleProvider::with_format(p.base_url.clone(), keys, &p.api_format)
-            .with_client_identity(&p.client_identity)?,
+        exm_core::provider::OpenAiCompatibleProvider::with_format(
+            p.base_url.clone(),
+            keys,
+            &p.api_format,
+        )
+        .with_client_identity(&p.client_identity)?,
     );
     let req = exm_core::provider::ChatRequest::new(
         p.model.clone(),
@@ -383,9 +448,16 @@ pub fn run_cron_list(core: &Core) -> anyhow::Result<()> {
     }
     println!("{}", "定时任务（exm gateway 常驻时自动调度）".bold());
     for j in jobs {
-        let state = if j.enabled { "启用".green().to_string() } else { "停用".dimmed().to_string() };
+        let state = if j.enabled {
+            "启用".green().to_string()
+        } else {
+            "停用".dimmed().to_string()
+        };
         // 任务三类型（v0.4.0）：cron 周期 / at 一次性 / queue 连续；缺省按 cron/at 推断
-        let kind = j.kind.as_deref().unwrap_or(if j.cron.is_some() { "cron" } else { "at" });
+        let kind = j
+            .kind
+            .as_deref()
+            .unwrap_or(if j.cron.is_some() { "cron" } else { "at" });
         let schedule = match kind {
             "queue" => format!("连续[{}]", j.steps.join(" → ")),
             _ => match (&j.cron, &j.at) {
@@ -405,7 +477,14 @@ pub fn run_cron_list(core: &Core) -> anyhow::Result<()> {
                 j.last_run_at.clone().unwrap_or_else(|| "未运行".into())
             ))
         );
-        println!("    {}", dim(format!("组: {}｜会话: {}", j.group.as_deref().unwrap_or("(激活组)"), j.session_title.as_deref().unwrap_or("job-<id>"))));
+        println!(
+            "    {}",
+            dim(format!(
+                "组: {}｜会话: {}",
+                j.group.as_deref().unwrap_or("(激活组)"),
+                j.session_title.as_deref().unwrap_or("job-<id>")
+            ))
+        );
         println!("    {}", j.prompt.chars().take(100).collect::<String>());
     }
     Ok(())
@@ -431,7 +510,11 @@ pub fn run_cron_add(
     }
     let steps: Vec<String> = steps
         .into_iter()
-        .flat_map(|s| s.split(',').map(|x| x.trim().to_string()).collect::<Vec<_>>())
+        .flat_map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .collect::<Vec<_>>()
+        })
         .filter(|s| !s.is_empty())
         .collect();
     if is_queue && steps.is_empty() {
@@ -443,7 +526,13 @@ pub fn run_cron_add(
         prompt: prompt.trim().to_string(),
         cron: if is_queue { None } else { cron },
         at: if is_queue { None } else { at },
-        kind: kind.or_else(|| Some(if is_queue { "queue".into() } else { "cron".into() })),
+        kind: kind.or_else(|| {
+            Some(if is_queue {
+                "queue".into()
+            } else {
+                "cron".into()
+            })
+        }),
         target_session,
         steps,
         group,
@@ -455,8 +544,16 @@ pub fn run_cron_add(
         notify_channels: Vec::new(),
         created_at: String::new(),
     })?;
-    println!("{} 定时任务已创建：{}（{}）", ok("完成"), job.name, job.id.cyan());
-    println!("{}", dim("exm gateway 常驻时由网关调度器自动触发；exm cron run <id> 可手动执行。"));
+    println!(
+        "{} 定时任务已创建：{}（{}）",
+        ok("完成"),
+        job.name,
+        job.id.cyan()
+    );
+    println!(
+        "{}",
+        dim("exm gateway 常驻时由网关调度器自动触发；exm cron run <id> 可手动执行。")
+    );
     Ok(())
 }
 
@@ -467,7 +564,11 @@ pub fn run_cron_enable(core: &Core, id: &str, enabled: bool) -> anyhow::Result<(
         .ok_or_else(|| anyhow::anyhow!("任务不存在: {id}"))?;
     job.enabled = enabled;
     core.cron.upsert(job)?;
-    println!("{} 任务 {id} 已{}", ok("完成"), if enabled { "启用" } else { "停用" });
+    println!(
+        "{} 任务 {id} 已{}",
+        ok("完成"),
+        if enabled { "启用" } else { "停用" }
+    );
     Ok(())
 }
 
@@ -508,7 +609,11 @@ pub fn run_cron_runs(core: &Core, job: Option<&str>, limit: usize) -> anyhow::Re
             "  {} {} {} {}",
             r.started_at.dimmed(),
             r.job_name.bold(),
-            if r.status == "done" { "done".green().to_string() } else { "failed".red().to_string() },
+            if r.status == "done" {
+                "done".green().to_string()
+            } else {
+                "failed".red().to_string()
+            },
             dim(&r.summary)
         );
     }
@@ -538,10 +643,19 @@ fn print_approval(r: &ApprovalRequest) {
         "failed" => "执行失败".red().to_string(),
         other => other.to_string(),
     };
-    println!("  {} {} {} {}", r.id.cyan(), status, dim(format!("个体 {}", r.agent_id)), dim(&r.created_at));
+    println!(
+        "  {} {} {} {}",
+        r.id.cyan(),
+        status,
+        dim(format!("个体 {}", r.agent_id)),
+        dim(&r.created_at)
+    );
     println!("    $ {}", r.command);
     if let Some(out) = &r.result {
-        println!("    {}", dim(out.replace('\n', " ").chars().take(200).collect::<String>()));
+        println!(
+            "    {}",
+            dim(out.replace('\n', " ").chars().take(200).collect::<String>())
+        );
     }
 }
 
@@ -552,7 +666,13 @@ pub async fn run_approval_decide(core: &Core, id: &str, approve: bool) -> anyhow
         "executed" => {
             println!("{} 审批单 {id} 已批准并代执行", ok("完成"));
             if let Some(out) = &r.result {
-                println!("{}", dim(format!("输出：{}", out.chars().take(600).collect::<String>())));
+                println!(
+                    "{}",
+                    dim(format!(
+                        "输出：{}",
+                        out.chars().take(600).collect::<String>()
+                    ))
+                );
             }
         }
         other => println!("{} 审批单 {id} 状态：{other}", ok("完成")),

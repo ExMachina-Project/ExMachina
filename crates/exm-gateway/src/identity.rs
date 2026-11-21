@@ -155,7 +155,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/identity/list", get(list))
         .route("/api/identity/code", post(issue))
-        .route("/api/identity/code/:code", axum::routing::delete(revoke_code))
+        .route(
+            "/api/identity/code/:code",
+            axum::routing::delete(revoke_code),
+        )
         .route("/api/identity/codes/purge", post(purge_expired_codes))
         .route("/api/identity/role", post(set_role))
         .route("/api/identity/:id", axum::routing::delete(unbind))

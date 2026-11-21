@@ -175,18 +175,18 @@ pub(crate) fn media_placeholder(kinds: &[&str]) -> String {
 /// 「[用户·名字]」。
 ///
 /// 私聊返回 None（双方固定，标注是噪音）；名字缺省只用 id；全空同样 None。
-pub(crate) fn sender_origin(
-    is_group: bool,
-    display_name: &str,
-    sender_id: &str,
-) -> Option<String> {
+pub(crate) fn sender_origin(is_group: bool, display_name: &str, sender_id: &str) -> Option<String> {
     if !is_group {
         return None;
     }
     let name = display_name.trim();
     let id = sender_id.trim();
     if name.is_empty() {
-        return if id.is_empty() { None } else { Some(format!("im:{id}")) };
+        return if id.is_empty() {
+            None
+        } else {
+            Some(format!("im:{id}"))
+        };
     }
     if name == id {
         return Some(format!("im:{id}"));
@@ -229,7 +229,10 @@ pub(crate) async fn voice_transcript_note(
     if bytes.is_empty() {
         return String::new();
     }
-    match core.transcribe_for_target(channel.group.as_deref(),&bytes, name).await {
+    match core
+        .transcribe_for_target(channel.group.as_deref(), &bytes, name)
+        .await
+    {
         Ok(t) if !t.trim().is_empty() => format!("\n（语音转写：{}）", t.trim()),
         _ => String::new(),
     }
@@ -271,7 +274,10 @@ mod tests {
         // 群聊：无显示名只留 id（身份仍可区分）
         assert_eq!(sender_origin(true, "", "10086"), Some("im:10086".into()));
         // 显示名与 id 相同（telegram username = id 形态）：不重复展示
-        assert_eq!(sender_origin(true, "10086", "10086"), Some("im:10086".into()));
+        assert_eq!(
+            sender_origin(true, "10086", "10086"),
+            Some("im:10086".into())
+        );
         // 两者全空：不标注（适配器兜底，不应发生）
         assert_eq!(sender_origin(true, "  ", ""), None);
     }
@@ -283,10 +289,7 @@ mod tests {
             "",
             "无附件不给占位（调用方应直接丢弃）"
         );
-        assert_eq!(
-            media_placeholder(&["image"]),
-            "（图片 x1）"
-        );
+        assert_eq!(media_placeholder(&["image"]), "（图片 x1）");
         let multi = media_placeholder(&["image", "image", "file"]);
         assert!(
             multi.contains("图片 x2") && multi.contains("文件 x1"),
@@ -382,7 +385,9 @@ mod tests {
         // /new 不再由 builtin_command 处理（流指令在 admit 内统一收口）
         assert!(builtin_command(&core, &ch, "100", "/new").await.is_none());
         // /status 仍在此处理
-        assert!(builtin_command(&core, &ch, "100", "/status").await.is_some());
+        assert!(builtin_command(&core, &ch, "100", "/status")
+            .await
+            .is_some());
     }
 
     /// /status：能报出通道与连接口径（无运行时上报 = 桥接类属正常）

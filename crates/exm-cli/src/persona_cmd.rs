@@ -30,8 +30,14 @@ pub fn run_set(
         (None, None) => anyhow::bail!("请用 --text <内容> 或 --file <路径> 提供人设内容"),
     };
     core.set_persona(identifier, &content)?;
-    println!("{} 个体 {identifier} 的人设已更新（下一次派发热生效）", ok("完成"));
-    println!("{}", dim("查看：exm persona get <identifier>｜恢复默认：exm persona reset <identifier>"));
+    println!(
+        "{} 个体 {identifier} 的人设已更新（下一次派发热生效）",
+        ok("完成")
+    );
+    println!(
+        "{}",
+        dim("查看：exm persona get <identifier>｜恢复默认：exm persona reset <identifier>")
+    );
     Ok(())
 }
 

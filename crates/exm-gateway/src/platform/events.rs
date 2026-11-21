@@ -1,6 +1,5 @@
 //! gateway/platform/events —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
 
-
 use super::*;
 /// 会话事件溯源（活动页用，取最近 limit 条）
 #[derive(Deserialize)]

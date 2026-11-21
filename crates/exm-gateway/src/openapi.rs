@@ -33,12 +33,26 @@ pub struct Endpoint {
 impl Endpoint {
     /// 档 1 精度的快捷构造（绝大多数端点）
     const fn new(method: &'static str, path: &'static str, summary: &'static str) -> Self {
-        Endpoint { method, path, summary, auth: true, request: None, response: None }
+        Endpoint {
+            method,
+            path,
+            summary,
+            auth: true,
+            request: None,
+            response: None,
+        }
     }
 
     /// 无鉴权端点（契约文档/首启鉴权入口）
     const fn public(method: &'static str, path: &'static str, summary: &'static str) -> Self {
-        Endpoint { method, path, summary, auth: false, request: None, response: None }
+        Endpoint {
+            method,
+            path,
+            summary,
+            auth: false,
+            request: None,
+            response: None,
+        }
     }
 
     fn json_request(mut self, schema: &str, example: Value) -> Self {
@@ -89,6 +103,12 @@ pub fn endpoints() -> Vec<Endpoint> {
     vec![
         // ---------------- OpenAPI 自身（公共面：契约文档无需鉴权即可发现）
         Endpoint::public("get", "/api/openapi.json", "OpenAPI 3.1 契约文档"),
+        Endpoint::new(
+            "get",
+            "/api/commands",
+            "按 HTTP 身份与作用域查询版本化命令目录",
+        ),
+        Endpoint::new("get", "/api/capabilities", "查询当前 HTTP 身份的能力快照"),
         // ---------------- 系统（authKey 启用时与其他 API 一致）
         Endpoint::new("get", "/api/health", "存活探测"),
         Endpoint::new("get", "/api/version", "版本信息"),
@@ -96,9 +116,21 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/sessions", "会话列表（含末条预览）"),
         Endpoint::new("get", "/api/collaborations", "列出当前项目的协作群聊"),
         Endpoint::new("post", "/api/collaborations", "创建同实例、多项目协作群聊"),
-        Endpoint::new("get", "/api/collaborations/:id", "协作群聊记录、成员状态与待审批"),
-        Endpoint::new("post", "/api/collaborations/:id/turns", "向明确选中的成员发送任务（支持 requestId 幂等重试）"),
-        Endpoint::new("post", "/api/collaborations/:id/turns/:turn_id/stop", "停止指定协作轮次（可指定单个成员）"),
+        Endpoint::new(
+            "get",
+            "/api/collaborations/:id",
+            "协作群聊记录、成员状态与待审批",
+        ),
+        Endpoint::new(
+            "post",
+            "/api/collaborations/:id/turns",
+            "向明确选中的成员发送任务（支持 requestId 幂等重试）",
+        ),
+        Endpoint::new(
+            "post",
+            "/api/collaborations/:id/turns/:turn_id/stop",
+            "停止指定协作轮次（可指定单个成员）",
+        ),
         Endpoint::new("post", "/api/sessions", "新建会话"),
         Endpoint::new("get", "/api/sessions/search", "会话内容检索（标题+消息）"),
         Endpoint::new("post", "/api/sessions/batch", "会话批量操作"),
@@ -106,7 +138,11 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/sessions/:id", "会话详情"),
         Endpoint::new("delete", "/api/sessions/:id", "删除会话（连带派生数据）"),
         Endpoint::new("get", "/api/sessions/:id/messages", "消息列表"),
-        Endpoint::new("get", "/api/sessions/:id/events", "事件溯源（最近 limit 条）"),
+        Endpoint::new(
+            "get",
+            "/api/sessions/:id/events",
+            "事件溯源（最近 limit 条）",
+        ),
         Endpoint::new("get", "/api/sessions/:id/export", "导出会话"),
         Endpoint::new("get", "/api/sessions/:id/trajectory", "导出训练轨迹"),
         Endpoint::new("get", "/api/sessions/:id/tokens", "token 用量统计"),
@@ -123,7 +159,11 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("put", "/api/sessions/:id/title", "会话重命名"),
         Endpoint::new("put", "/api/sessions/:id/pin", "会话置顶切换"),
         Endpoint::new("get", "/api/sessions/:id/plan", "规划模式：待决清单"),
-        Endpoint::new("post", "/api/sessions/:id/plan", "规划模式：决策（批准/修改/拒绝）"),
+        Endpoint::new(
+            "post",
+            "/api/sessions/:id/plan",
+            "规划模式：决策（批准/修改/拒绝）",
+        ),
         // ---------------- 智能体与组
         Endpoint::new("get", "/api/agents", "智能体列表"),
         Endpoint::new("post", "/api/agents", "创建智能体"),
@@ -151,9 +191,21 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("put", "/api/groups/:id/workspace", "设置组工作目录"),
         Endpoint::new("get", "/api/groups/:id/overview", "组总览"),
         Endpoint::new("put", "/api/groups/:id/self-optimize", "组自优化开关"),
-        Endpoint::new("delete", "/api/groups/:gid/agents/:identifier", "从组移除智能体"),
-        Endpoint::new("get", "/api/groups/:gid/agents/:identifier/prompt", "智能体提示词查看"),
-        Endpoint::new("put", "/api/groups/:gid/agents/:identifier/prompt", "智能体提示词修改"),
+        Endpoint::new(
+            "delete",
+            "/api/groups/:gid/agents/:identifier",
+            "从组移除智能体",
+        ),
+        Endpoint::new(
+            "get",
+            "/api/groups/:gid/agents/:identifier/prompt",
+            "智能体提示词查看",
+        ),
+        Endpoint::new(
+            "put",
+            "/api/groups/:gid/agents/:identifier/prompt",
+            "智能体提示词修改",
+        ),
         Endpoint::new("get", "/api/templates", "智能体模板列表"),
         // ---------------- 通道
         Endpoint::new("get", "/api/channels", "通道列表"),
@@ -167,7 +219,11 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("post", "/api/channels/bili-qr", "B 站扫码登录发起"),
         Endpoint::new("get", "/api/channels/bili-qr/:key", "B 站扫码状态轮询"),
         Endpoint::new("post", "/api/channels/qqbot-bind", "QQ 官方机器人配对发起"),
-        Endpoint::new("get", "/api/channels/qqbot-bind/:task_id", "QQ 官方机器人配对轮询"),
+        Endpoint::new(
+            "get",
+            "/api/channels/qqbot-bind/:task_id",
+            "QQ 官方机器人配对轮询",
+        ),
         Endpoint::new("post", "/api/channels/:id/inbound", "入站消息注入"),
         // ---------------- LLM 与模型
         Endpoint::new("get", "/api/llm/profiles", "模型档案列表"),
@@ -182,15 +238,35 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/llm/capabilities", "能力模型槽位查看"),
         Endpoint::new("put", "/api/llm/capabilities", "能力模型槽位设置"),
         Endpoint::new("get", "/api/llm/catalog", "模型用途与成本目录"),
-        Endpoint::new("get", "/api/singles/:id/model-routing", "独立智能体模型分配与生效来源"),
-        Endpoint::new("put", "/api/singles/:id/model-routing", "保存独立智能体模型分配"),
+        Endpoint::new(
+            "get",
+            "/api/singles/:id/model-routing",
+            "独立智能体模型分配与生效来源",
+        ),
+        Endpoint::new(
+            "put",
+            "/api/singles/:id/model-routing",
+            "保存独立智能体模型分配",
+        ),
         Endpoint::new("put", "/api/groups/:id/model-routing", "保存组默认模型分配"),
-        Endpoint::new("get", "/api/groups/:gid/agents/:identifier/model-routing", "组内成员模型分配与生效来源"),
-        Endpoint::new("put", "/api/groups/:gid/agents/:identifier/model-routing", "保存组内成员模型分配"),
+        Endpoint::new(
+            "get",
+            "/api/groups/:gid/agents/:identifier/model-routing",
+            "组内成员模型分配与生效来源",
+        ),
+        Endpoint::new(
+            "put",
+            "/api/groups/:gid/agents/:identifier/model-routing",
+            "保存组内成员模型分配",
+        ),
         // ---------------- 记忆
         Endpoint::new("get", "/api/memory", "记忆列表"),
         Endpoint::new("post", "/api/memory", "新增记忆"),
-        Endpoint::new("get", "/api/memory/export", "记忆全量导出（JSONL；?agent= 过滤）"),
+        Endpoint::new(
+            "get",
+            "/api/memory/export",
+            "记忆全量导出（JSONL；?agent= 过滤）",
+        ),
         Endpoint::new("post", "/api/memory/search", "记忆检索"),
         Endpoint::new("get", "/api/memory/stats", "记忆统计"),
         Endpoint::new("post", "/api/memory/reindex", "重建记忆索引"),
@@ -328,20 +404,26 @@ fn error_response(description: &str) -> Value {
 
 /// 生成 OpenAPI 3.1 文档（JSON Value）
 pub fn generate() -> Value {
-    let mut schemas=llm::schemas();
-    schemas.as_object_mut().unwrap().extend(model_routing::schemas().as_object().unwrap().clone());
+    let mut schemas = llm::schemas();
+    schemas
+        .as_object_mut()
+        .unwrap()
+        .extend(model_routing::schemas().as_object().unwrap().clone());
     let mut paths = serde_json::Map::new();
     for ep in endpoints() {
         let entry = paths
             .entry(document_path(ep.path))
             .or_insert_with(|| json!({}));
-        let parameters: Vec<Value> = ep.path
+        let parameters: Vec<Value> = ep
+            .path
             .split('/')
             .filter_map(|segment| {
-                segment.strip_prefix(':').map(|name| json!({
-                    "name": name, "in": "path", "required": true,
-                    "schema": { "type": "string" },
-                }))
+                segment.strip_prefix(':').map(|name| {
+                    json!({
+                        "name": name, "in": "path", "required": true,
+                        "schema": { "type": "string" },
+                    })
+                })
             })
             .collect();
         if !parameters.is_empty() {
@@ -367,13 +449,17 @@ pub fn generate() -> Value {
             op["responses"]["400"] = error_response("请求参数或请求体无效");
         }
         if ep.path.split('/').any(|segment| segment.starts_with(':'))
-            || matches!(ep.path, "/api/llm/active" | "/api/llm/test" | "/api/llm/models" | "/api/llm/identity")
+            || matches!(
+                ep.path,
+                "/api/llm/active" | "/api/llm/test" | "/api/llm/models" | "/api/llm/identity"
+            )
         {
             op["responses"]["404"] = error_response("指定资源不存在");
         }
         if matches!(
             (ep.method, ep.path),
-            ("post", "/api/llm/profiles") | ("delete", "/api/llm/profiles/:id")
+            ("post", "/api/llm/profiles")
+                | ("delete", "/api/llm/profiles/:id")
                 | ("put", "/api/llm/active" | "/api/llm/capabilities")
         ) {
             op["responses"]["500"] = error_response("配置保存或运行时更新失败");
@@ -384,12 +470,46 @@ pub fn generate() -> Value {
         if let Some(resp) = ep.response {
             op["responses"]["200"]["content"] = resp;
         }
+        if matches!(ep.path, "/api/commands" | "/api/capabilities") {
+            op["parameters"] = json!([
+                {
+                    "name": "protocolVersion", "in": "query", "required": false,
+                    "schema": {"type": "integer", "minimum": 1},
+                    "description": "命令协议主版本；省略时使用服务端当前版本"
+                },
+                {
+                    "name": "sessionId", "in": "query", "required": false,
+                    "schema": {"type": "string"},
+                    "description": "绑定会话；项目固定会话还必须提交 X-Exm-Workspace"
+                },
+                {
+                    "name": "scope", "in": "query", "required": false,
+                    "schema": {"type": "string", "enum": ["global", "project", "session", "flow"]}
+                },
+                {
+                    "name": "includeDeprecated", "in": "query", "required": false,
+                    "schema": {"type": "boolean", "default": false}
+                },
+                {
+                    "name": "X-Exm-Workspace", "in": "header", "required": false,
+                    "schema": {"type": "string"},
+                    "description": "项目固定会话绑定的绝对项目目录"
+                }
+            ]);
+            op["responses"]["400"] = error_response("协议版本或查询参数无效");
+            op["responses"]["403"] = error_response("鉴权失败或会话需要项目连接");
+            op["responses"]["404"] = error_response("会话不存在或不属于当前项目");
+        }
         if ep.path.starts_with("/api/collaborations") {
-            let mut parameters = vec![json!({"name": "X-Exm-Workspace", "in": "header", "required": true,
-                "schema": {"type": "string"}, "description": "百分号编码后的群聊归属项目绝对目录"})];
+            let mut parameters = vec![
+                json!({"name": "X-Exm-Workspace", "in": "header", "required": true,
+                "schema": {"type": "string"}, "description": "百分号编码后的群聊归属项目绝对目录"}),
+            ];
             if (ep.method, ep.path) == ("get", "/api/collaborations/:id") {
-                parameters.push(json!({"name": "before", "in": "query", "schema": {"type": "string"},
-                    "description": "上一页返回的 nextBefore（独占游标）"}));
+                parameters.push(
+                    json!({"name": "before", "in": "query", "schema": {"type": "string"},
+                    "description": "上一页返回的 nextBefore（独占游标）"}),
+                );
             }
             op["parameters"] = json!(parameters);
             op["responses"]["400"] = error_response("项目请求头或参数无效");
@@ -456,14 +576,18 @@ pub async fn serve_openapi() -> axum::Json<Value> {
 pub fn router_paths(router: &axum::Router) -> std::collections::BTreeMap<String, Vec<String>> {
     let dbg = format!("{router:?}");
     let id_to_path = parse_route_id_paths(&dbg);
-    let mut out: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (id, body) in parse_method_routers(&dbg) {
-        let Some(path) = id_to_path.get(&id) else { continue };
+        let Some(path) = id_to_path.get(&id) else {
+            continue;
+        };
         let mut methods = Vec::new();
-        for m in ["get", "post", "put", "delete", "patch", "head", "options", "trace"] {
+        for m in [
+            "get", "post", "put", "delete", "patch", "head", "options", "trace",
+        ] {
             // 已注册方法：`get: Route` 或 `get: BoxedHandler`（boxed 路由形态）；None 跳过
-            if body.contains(&format!("{m}: Route"))
-                || body.contains(&format!("{m}: BoxedHandler"))
+            if body.contains(&format!("{m}: Route")) || body.contains(&format!("{m}: BoxedHandler"))
             {
                 methods.push(m.to_uppercase());
             }
@@ -478,10 +602,14 @@ pub fn router_paths(router: &axum::Router) -> std::collections::BTreeMap<String,
 fn parse_route_id_paths(dbg: &str) -> std::collections::BTreeMap<String, String> {
     let mut map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     // 截取首个 paths: { ... } 段（path_router 的 node；终止于 `} }`（Node 结束））
-    let Some(pstart) = dbg.find("paths: {") else { return map };
+    let Some(pstart) = dbg.find("paths: {") else {
+        return map;
+    };
     let seg = &dbg[pstart + "paths: {".len()..];
     // Node 的 Debug：`paths: {RouteId(1): "/a", RouteId(2): "/b"} }`——首个 `}` 前（嵌套无 braces）
-    let Some(peend) = seg.find('}') else { return map };
+    let Some(peend) = seg.find('}') else {
+        return map;
+    };
     let seg = &seg[..peend];
     let mut rest = seg;
     while let Some(start) = rest.find("RouteId(") {
@@ -489,7 +617,9 @@ fn parse_route_id_paths(dbg: &str) -> std::collections::BTreeMap<String, String>
         let Some(close) = rest.find(')') else { break };
         let id = rest[..close].to_string();
         let after = &rest[close + 1..];
-        let Some(colon_quote) = after.find(": \"") else { continue };
+        let Some(colon_quote) = after.find(": \"") else {
+            continue;
+        };
         let tail = &after[colon_quote + 3..];
         let Some(endq) = tail.find('"') else { break };
         map.insert(id, tail[..endq].to_string());
@@ -507,10 +637,14 @@ fn parse_method_routers(dbg: &str) -> Vec<(String, String)> {
         let Some(close) = rest.find(')') else { break };
         let id = rest[..close].to_string();
         let after = &rest[close + 1..];
-        let Some(mr) = after.find("MethodRouter { ") else { continue };
+        let Some(mr) = after.find("MethodRouter { ") else {
+            continue;
+        };
         let body_start = &after[mr + "MethodRouter { ".len()..];
         // 方法体以 `})` 或 `}` 收尾（allow_header 在最后一个字段）
-        let Some(end) = body_start.find("}") else { break };
+        let Some(end) = body_start.find("}") else {
+            break;
+        };
         out.push((id, body_start[..end].to_string()));
         rest = body_start;
     }
@@ -532,14 +666,15 @@ mod tests {
     fn 路由对账_清单与实路由一致() {
         let router = crate::build_router(test_core());
         let actual = router_paths(&router);
-        let listed: std::collections::BTreeMap<String, Vec<String>> = endpoints()
-            .into_iter()
-            .fold(std::collections::BTreeMap::new(), |mut acc, ep| {
-                acc.entry(ep.path.to_string())
-                    .or_default()
-                    .push(ep.method.to_uppercase());
-                acc
-            });
+        let listed: std::collections::BTreeMap<String, Vec<String>> =
+            endpoints()
+                .into_iter()
+                .fold(std::collections::BTreeMap::new(), |mut acc, ep| {
+                    acc.entry(ep.path.to_string())
+                        .or_default()
+                        .push(ep.method.to_uppercase());
+                    acc
+                });
         // 幽灵端点（清单有路由无）
         let ghosts: Vec<&String> = listed.keys().filter(|k| !actual.contains_key(*k)).collect();
         assert!(ghosts.is_empty(), "清单中存在未注册路由：{ghosts:?}");
@@ -554,7 +689,10 @@ mod tests {
             if let Some(actual_methods) = actual.get(path) {
                 let want: std::collections::BTreeSet<&String> = methods.iter().collect();
                 let got: std::collections::BTreeSet<&String> = actual_methods.iter().collect();
-                assert_eq!(want, got, "方法集不一致：{path} 清单 {methods:?} 实际 {actual_methods:?}");
+                assert_eq!(
+                    want, got,
+                    "方法集不一致：{path} 清单 {methods:?} 实际 {actual_methods:?}"
+                );
             }
         }
     }
@@ -565,7 +703,10 @@ mod tests {
         let doc = generate();
         assert_eq!(doc["openapi"], "3.1.0");
         assert!(doc["paths"].is_object());
-        assert_eq!(doc["components"]["securitySchemes"]["authKey"]["name"], "X-Auth-Key");
+        assert_eq!(
+            doc["components"]["securitySchemes"]["authKey"]["name"],
+            "X-Auth-Key"
+        );
         // 每个操作有 summary 与 401 响应（错误族必填档）
         for (_, entry) in doc["paths"].as_object().unwrap() {
             for (method, op) in entry.as_object().unwrap() {
@@ -573,8 +714,29 @@ mod tests {
                     continue;
                 }
                 assert!(op["summary"].is_string(), "缺 summary：{method} {entry}");
-                assert!(op["responses"]["401"].is_object(), "缺 401：{method} {entry}");
+                assert!(
+                    op["responses"]["401"].is_object(),
+                    "缺 401：{method} {entry}"
+                );
             }
+        }
+        for path in ["/api/commands", "/api/capabilities"] {
+            let operation = &doc["paths"][path]["get"];
+            let parameters = operation["parameters"].as_array().unwrap();
+            for name in [
+                "protocolVersion",
+                "sessionId",
+                "scope",
+                "includeDeprecated",
+                "X-Exm-Workspace",
+            ] {
+                assert!(
+                    parameters.iter().any(|parameter| parameter["name"] == name),
+                    "{path} OpenAPI omitted {name}"
+                );
+            }
+            assert!(operation["responses"]["400"].is_object());
+            assert!(operation["responses"]["403"].is_object());
         }
     }
 
@@ -582,10 +744,19 @@ mod tests {
     #[test]
     fn 提取器_路径与方法() {
         let router: axum::Router = axum::Router::new()
-            .route("/api/a", axum::routing::get(|| async { "a" }).post(|| async { "b" }))
+            .route(
+                "/api/a",
+                axum::routing::get(|| async { "a" }).post(|| async { "b" }),
+            )
             .route("/api/b/:id", axum::routing::put(|| async { "c" }));
         let paths = router_paths(&router);
-        assert_eq!(paths.get("/api/a").map(|v| v.as_slice()), Some(&["GET".to_string(), "POST".to_string()][..]));
-        assert_eq!(paths.get("/api/b/:id").map(|v| v.as_slice()), Some(&["PUT".to_string()][..]));
+        assert_eq!(
+            paths.get("/api/a").map(|v| v.as_slice()),
+            Some(&["GET".to_string(), "POST".to_string()][..])
+        );
+        assert_eq!(
+            paths.get("/api/b/:id").map(|v| v.as_slice()),
+            Some(&["PUT".to_string()][..])
+        );
     }
 }
