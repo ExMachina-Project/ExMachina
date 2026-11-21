@@ -27,6 +27,10 @@ use std::sync::Arc;
 pub trait ToolProvider: Send + Sync {
     /// 工具定义（名字已含命名空间前缀 `<plugin>__<tool>`）
     fn tool_specs(&self) -> Vec<CustomTool>;
+    /// 只读就绪检查；进程工具的发现快照不能代替当前运行状态。
+    fn ready(&self) -> bool {
+        true
+    }
     /// 执行（name 为命名空间全名）；返回工具结果文本或错误
     fn call_tool(&self, name: &str, args: &Value) -> anyhow::Result<String>;
 }
@@ -264,6 +268,18 @@ impl PluginManager {
         let mut rejected = 0usize;
         // 覆盖快照（late 注册读同一口径）
         *self.overrides.write() = enabled_overrides.clone();
+        {
+            let mut entries = self.entries.write();
+            let mut providers = self.providers.write();
+            for (id, entry) in entries.iter_mut().filter(|(_, entry)| entry.form != "virtual") {
+                if enabled_overrides.get(id) == Some(&false) {
+                    entry.enabled = false;
+                    providers.remove(id);
+                } else if entry.error.is_none() && enabled_overrides.get(id) == Some(&true) {
+                    entry.enabled = true;
+                }
+            }
+        }
 
         // builtin：静态注册表 + plugins/<id>/plugin.json（清单可选——缺省用注册表内置清单）
         for (id, (manifest, build)) in &self.builtin {
@@ -638,6 +654,16 @@ fn validate(m: &PluginManifest, dir_id: &str, host: &str) -> Result<(), String> 
     for t in &m.tools {
         if !t.valid() {
             return Err(format!("内联工具名不合法：{:?}", t.name));
+        }
+    }
+    for (name, declaration) in &m.commands {
+        let valid = crate::command::valid_namespace_part(name)
+            && !m.id.contains("__")
+            && (m.is_process() || m.tools.iter().any(|tool| &tool.name == name));
+        if !valid || declaration.version == 0 || declaration.requires.iter().any(|name| {
+            name.trim().is_empty() || name.starts_with("command.handler.")
+        }) {
+            return Err(format!("插件命令声明非法：{name} 必须引用本插件工具、使用正整数版本及合法依赖"));
         }
     }
     Ok(())

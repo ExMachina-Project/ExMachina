@@ -21,44 +21,44 @@ use std::sync::OnceLock;
 // 跨子模块共享的内部项与通道面符号较多，用 glob 再导出保持
 // `crate::platform::X` 与六个通道适配器（telegram/qqbot/napcat/discord/slack/matrix）
 // 及 lib.rs / channel_test.rs 的既有引用路径完全兼容。
-pub use channels::*;
+pub use approvals::*;
 pub use channel::*;
-pub use skills::*;
-pub use groups::*;
-pub use events::*;
+pub use channels::*;
 pub use cron_admin::*;
 pub use cron_scheduler::*;
-pub use approvals::*;
-pub use workbench::*;
+pub use events::*;
+pub use groups::*;
 pub use plan::*;
 pub use routes::routes;
+pub use skills::*;
+pub use workbench::*;
 
-mod skills;
-mod groups;
-mod events;
+mod approvals;
+pub mod channel;
+pub mod channels;
 mod cron_admin;
 mod cron_scheduler;
-mod approvals;
-mod workbench;
+mod events;
+mod groups;
 mod plan;
 mod proactive;
-pub mod channels;
-pub mod channel;
 mod routes;
+mod skills;
+mod workbench;
 
+#[cfg(test)]
+mod tests_channel_approval;
+#[cfg(test)]
+mod tests_channel_boundary;
+#[cfg(test)]
+mod tests_cron_notify;
+#[cfg(test)]
+mod tests_heartbeat;
 #[cfg(test)]
 mod tests_identity_gate;
 #[cfg(test)]
 mod tests_inbound_media;
 #[cfg(test)]
-mod tests_heartbeat;
-#[cfg(test)]
-mod tests_cron_notify;
-#[cfg(test)]
 mod tests_plan;
-#[cfg(test)]
-mod tests_channel_boundary;
-#[cfg(test)]
-mod tests_channel_approval;
 #[cfg(test)]
 mod tests_plugin_secret_mask;

@@ -140,8 +140,7 @@ pub(crate) fn expected_scope_of(core: &exm_core::Core, target: &str) -> Option<S
             None
         };
     }
-    group
-        .filter(|g| core.group_meta(g).is_some())
+    group.filter(|g| core.group_meta(g).is_some())
 }
 
 /// 切换全局交互上下文到通道绑定目标（单智能体或组），返回是否发生了切换。
@@ -443,7 +442,6 @@ mod reply_split_tests {
         assert_eq!(media_fallback("webhook", "image"), MediaFallback::LinkNote);
     }
 }
-
 
 // ---------------------------------------------------------------- 域分文件
 

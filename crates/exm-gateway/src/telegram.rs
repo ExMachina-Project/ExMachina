@@ -7,8 +7,8 @@ use crate::platform::{
     MediaItem,
 };
 use exm_core::Core;
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::task::JoinHandle;
 
@@ -204,7 +204,14 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             );
                             match download_voice(&api, file_id).await {
                                 Ok(bytes) if !bytes.is_empty() => {
-                                    match core.transcribe_for_target(ch.group.as_deref(),&bytes, "voice.ogg").await {
+                                    match core
+                                        .transcribe_for_target(
+                                            ch.group.as_deref(),
+                                            &bytes,
+                                            "voice.ogg",
+                                        )
+                                        .await
+                                    {
                                         Ok(t) if !t.trim().is_empty() => Some(t),
                                         Ok(_) => None,
                                         Err(e) => {
@@ -345,11 +352,8 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                 GateDecision::Allow(clean, _proactive) => {
                     text = clean;
                     // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）
-                    let sender_mark = crate::channel_util::sender_origin(
-                        is_group,
-                        &display,
-                        &from_id,
-                    );
+                    let sender_mark =
+                        crate::channel_util::sender_origin(is_group, &display, &from_id);
                     // 内置命令（/new /status）：闸门放行后、进入会话执行前拦截——与其他适配器同口径
                     if let Some(reply) =
                         crate::channel_util::builtin_command(&core, &ch, &chat_key, &text).await

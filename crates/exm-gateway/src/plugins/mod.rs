@@ -26,6 +26,7 @@ pub fn video_manifest() -> PluginManifest {
         description: "B站/YouTube 自动观看与互动（通道适配 + 轮询 watcher）".into(),
         exm_min: String::new(),
         tools: vec![],
+        commands: Default::default(),
         channel: Some(PluginChannelDecl {
             kinds: vec!["bilibili".into(), "youtube".into()],
             credentials: vec![

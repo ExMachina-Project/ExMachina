@@ -35,7 +35,9 @@ pub fn status_text(status: TaskStatus) -> String {
     let s = status.label();
     match status {
         TaskStatus::Done => s.green().to_string(),
-        TaskStatus::Running | TaskStatus::Dispatched | TaskStatus::Syncing => s.yellow().to_string(),
+        TaskStatus::Running | TaskStatus::Dispatched | TaskStatus::Syncing => {
+            s.yellow().to_string()
+        }
         TaskStatus::Failed => s.bright_red().to_string(),
         TaskStatus::Blocked => s.red().to_string(),
         TaskStatus::Ready => s.blue().to_string(),

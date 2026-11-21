@@ -249,8 +249,8 @@ impl ChannelRun {
                 // 消息自带句式前缀（【报告】/【警告】等）时不再包裹——
                 // emit_run_error 的调用方文案已按语言纪律定稿，二次包裹会产生
                 // 「【警告】【报告】…」双层前缀（部署实测）
-                let already = msg.starts_with('【')
-                    && msg.chars().skip(1).take(4).any(|c| c == '】');
+                let already =
+                    msg.starts_with('【') && msg.chars().skip(1).take(4).any(|c| c == '】');
                 let text = if already {
                     msg.to_string()
                 } else {
@@ -269,14 +269,20 @@ impl ChannelRun {
                     .unwrap_or("工具调用预算已耗尽");
                 let key = format!("budget-notified:{}", evt.session_id);
                 if self.core.consume_once_flag(&key) {
-                    Some(format!("【警告】{reason}").chars().take(max_chars).collect())
+                    Some(
+                        format!("【警告】{reason}")
+                            .chars()
+                            .take(max_chars)
+                            .collect(),
+                    )
                 } else {
                     None
                 }
             }
             // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
             // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
-            "plan.pending" => {                let count = evt
+            "plan.pending" => {
+                let count = evt
                     .payload
                     .get("count")
                     .and_then(|v| v.as_u64())
@@ -307,18 +313,12 @@ impl ChannelRun {
                     .get("command")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let wait = self
-                    .core
-                    .config()
-                    .security
-                    .approval_wait_secs;
+                let wait = self.core.config().security.approval_wait_secs;
                 let cmd_short: String = cmd.chars().take(120).collect();
                 let mut lines = vec![
                     format!("⛔ 审批请求（单号 {id}）："),
                     cmd_short,
-                    format!(
-                        "{wait} 秒内回复 ok:{id} 批准 / no:{id} 拒绝，或到控制台裁决"
-                    ),
+                    format!("{wait} 秒内回复 ok:{id} 批准 / no:{id} 拒绝，或到控制台裁决"),
                 ];
                 if cmd.len() > 120 {
                     lines.insert(2, "…（命令已截断）".into());
@@ -366,9 +366,7 @@ impl ChannelRun {
         };
         // 聊天流预览回写（列表展示最新一条；失败不影响执行）
         if let Some((ch_id, chat_key)) = &self.flow {
-            let _ = self
-                .core
-                .touch_flow_message(ch_id, chat_key, text.trim());
+            let _ = self.core.touch_flow_message(ch_id, chat_key, text.trim());
         }
         let _restore = GroupRestore {
             core: self.core.clone(),
@@ -508,7 +506,8 @@ pub(crate) async fn quick_directive_reply(
                 .any(|c| c.admins.iter().any(|a| a.trim() == caller));
         if !caller.is_empty() && origin_user != caller && !is_admin {
             return Some(
-                "【报告】计划裁决被拒绝：发送者无权批准/拒绝该会话的计划（仅发起用户或管理员）。".to_string(),
+                "【报告】计划裁决被拒绝：发送者无权批准/拒绝该会话的计划（仅发起用户或管理员）。"
+                    .to_string(),
             );
         }
         if approve {
@@ -542,7 +541,10 @@ pub(crate) async fn quick_directive_reply(
                 "【报告】单号前缀 {} 命中 {} 张待审单（{}），请补全单号。",
                 id_input,
                 hits.len(),
-                hits.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(" / ")
+                hits.iter()
+                    .map(|a| a.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
             ))
         }
     };
@@ -574,7 +576,11 @@ pub(crate) async fn quick_directive_reply(
             .await
         {
             Ok(r) => {
-                let head = if approve { "已批准并执行" } else { "已拒绝" };
+                let head = if approve {
+                    "已批准并执行"
+                } else {
+                    "已拒绝"
+                };
                 let detail = r.result.as_deref().unwrap_or("");
                 let note: String = detail.chars().take(300).collect();
                 format!("【报告】审批单 {id} {head}。{note}")

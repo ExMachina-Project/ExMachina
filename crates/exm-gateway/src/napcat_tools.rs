@@ -130,7 +130,10 @@ async fn group_files(
             "get_group_files_by_folder",
             serde_json::json!({ "group_id": gid, "folder_id": fid }),
         ),
-        None => ("get_group_root_files", serde_json::json!({ "group_id": gid })),
+        None => (
+            "get_group_root_files",
+            serde_json::json!({ "group_id": gid }),
+        ),
     };
     let resp = api_call(&ch.id, action, params)
         .await
@@ -175,11 +178,7 @@ async fn group_files(
     if lines.is_empty() {
         return Ok("群文件为空（或该目录无文件）。".into());
     }
-    Ok(format!(
-        "群文件 {} 条：\n{}",
-        lines.len(),
-        lines.join("\n")
-    ))
+    Ok(format!("群文件 {} 条：\n{}", lines.len(), lines.join("\n")))
 }
 
 /// 下载群文件：get_group_file_url 取直链 → reqwest 下载 → 工作区 downloads/ 落盘。
@@ -336,7 +335,10 @@ mod tests {
     fn 文件名清洗_路径符替换() {
         assert_eq!(sanitize_name("a/b.txt"), "a_b.txt");
         assert_eq!(sanitize_name("../../etc/passwd"), ".._.._etc_passwd");
-        assert!(!sanitize_name("小爱人格提示词.docx").is_empty(), "中文名保留");
+        assert!(
+            !sanitize_name("小爱人格提示词.docx").is_empty(),
+            "中文名保留"
+        );
         assert_eq!(
             sanitize_name(".."),
             format!("qqfile-{}.bin", exm_core::types::now_ms()),

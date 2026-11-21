@@ -351,9 +351,7 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                                     &text,
                                 )
                                 .await
-                                .unwrap_or_else(|| {
-                                    "【报告】当前无待审批计划或审批单。".into()
-                                });
+                                .unwrap_or_else(|| "【报告】当前无待审批计划或审批单。".into());
                                 let client2 = client.clone();
                                 let hs2 = hs.clone();
                                 let token2 = token.clone();
@@ -372,8 +370,17 @@ async fn poll_loop(core: Arc<Core>, ch: Channel) {
                             let self2 = self_user.clone();
                             tokio::spawn(async move {
                                 handle_message(
-                                    &core, &ch2, &client2, &hs2, &token2, &room, &sender2, &self2,
-                                    saved, &text, sender_mark.as_deref(),
+                                    &core,
+                                    &ch2,
+                                    &client2,
+                                    &hs2,
+                                    &token2,
+                                    &room,
+                                    &sender2,
+                                    &self2,
+                                    saved,
+                                    &text,
+                                    sender_mark.as_deref(),
                                 )
                                 .await;
                             });

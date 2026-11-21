@@ -17,6 +17,31 @@ pub type SpawnExec = Arc<
 /// 插件凭据解析闭包：(插件 id, 键) → 真值（None = 未配置）
 pub type PluginCredResolver = Box<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
 
+pub(crate) struct PluginCommandTarget<'a> {
+    pub manager: &'a crate::plugin::PluginManager,
+    pub plugin: &'a str,
+    pub version: u16,
+    pub credentials: Option<&'a std::collections::BTreeMap<String, String>>,
+}
+
+impl PluginCommandTarget<'_> {
+    fn redact_result(&self, text: &str) -> String {
+        // 插件响应可能回显请求中的真实凭据；替换配置值后才做通用脱敏和持久化。
+        let mut secrets: Vec<_> = self.credentials.into_iter().flat_map(|values| values.values())
+            .map(String::as_str).filter(|secret| !secret.is_empty()).collect();
+        secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+        crate::tools::redact_str(&secrets.into_iter().fold(text.to_owned(), |text, secret| {
+            text.replace(secret, "***")
+        }))
+    }
+}
+
+enum PluginCommandBinding {
+    Declarative(crate::config::CustomTool),
+    Process(Arc<dyn crate::plugin::ToolProvider>),
+    Builtin(DynamicToolExec),
+}
+
 /// 跨会话投递执行器：(目标会话 id, 文本, 来源标记, 是否等待本轮完成) → 结果说明。
 /// Core 装配后回接（闭包持 Weak 引用，避免与 orchestrator 成环）。
 pub type SessionSendExec = Arc<
@@ -31,8 +56,7 @@ pub type SessionSendExec = Arc<
 >;
 
 /// 会话授权查询闭包（approval-ergonomics）：(会话 id, 命令全文) → 是否命中会话授权
-pub type SessionGrantProbe =
-    std::sync::Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+pub type SessionGrantProbe = std::sync::Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 /// 语音合成执行器（speech_reply 工具）：文本 → mp3 字节。
 /// Core 装配后回接 orchestrator speak_audio（能力槽位链）。
@@ -83,10 +107,17 @@ impl ToolCallCounter {
 /// config 的 ToolCallBudget 是 computer 档全量值；低档位按比例收严：
 /// chat 取 1/4（对话优先,工具只做轻量补充）、tools 取 1/2。
 /// 0 值单项在低档位同样收严为 0 内保留（只在全量档关闭才关闭）。
-pub fn scope_budget(full: &crate::config::ToolCallBudget, scope: crate::types::ToolScope) -> crate::config::ToolCallBudget {
+pub fn scope_budget(
+    full: &crate::config::ToolCallBudget,
+    scope: crate::types::ToolScope,
+) -> crate::config::ToolCallBudget {
     let (t, s, w) = match scope {
-        crate::types::ToolScope::Chat => (full.per_turn / 4, full.per_session / 4, full.per_window / 4),
-        crate::types::ToolScope::Tools => (full.per_turn / 2, full.per_session / 2, full.per_window / 2),
+        crate::types::ToolScope::Chat => {
+            (full.per_turn / 4, full.per_session / 4, full.per_window / 4)
+        }
+        crate::types::ToolScope::Tools => {
+            (full.per_turn / 2, full.per_session / 2, full.per_window / 2)
+        }
         crate::types::ToolScope::Computer => (full.per_turn, full.per_session, full.per_window),
     };
     crate::config::ToolCallBudget {
@@ -98,7 +129,8 @@ pub fn scope_budget(full: &crate::config::ToolCallBudget, scope: crate::types::T
 }
 
 pub struct ToolGateway {
-    pub(crate) model_router: parking_lot::RwLock<std::sync::Weak<crate::orchestrator::Orchestrator>>,
+    pub(crate) model_router:
+        parking_lot::RwLock<std::sync::Weak<crate::orchestrator::Orchestrator>>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) store: Arc<Store>,
     pub(crate) registry: Arc<LocalRegistry>,
@@ -141,8 +173,8 @@ pub struct ToolGateway {
     pub(crate) spawn_semaphore: Arc<tokio::sync::Semaphore>,
     /// spawn 子任务超时（秒；默认 300）
     pub(crate) spawn_timeout_secs: u64,
-    /// 后台任务注册表（长命令：启动后返回 id，可轮询/终止）
-    pub(crate) background: Arc<parking_lot::Mutex<std::collections::HashMap<String, BgTask>>>,
+    pub(crate) background_limits: super::BackgroundLimits,
+    pub(crate) background_accepting: Arc<std::sync::atomic::AtomicBool>,
     /// 后台 spawn 子任务注册表（spec: subagent-spawn 异步并行）：
     /// background=true 派生后立即返回，终态暂存供 op=status/list 回收
     pub(crate) spawns_bg: Arc<parking_lot::Mutex<std::collections::HashMap<String, SpawnBgTask>>>,
@@ -152,6 +184,8 @@ pub struct ToolGateway {
     /// Computer Use 配置与机械执行器（懒初始化；串行化访问）
     pub(crate) computer_cfg: crate::config::ComputerUseConfig,
     pub(crate) computer: Arc<tokio::sync::Mutex<Option<crate::computer::ComputerSession>>>,
+    /// 测试/工作台可注入的机械动作替身；生产为空时调用真实 ComputerSession。
+    pub(crate) computer_executor: parking_lot::RwLock<Option<crate::tools::ComputerActionExecutor>>,
     /// MCP 服务器池（第三方工具：mcp:server:tool 全名空间）
     pub(crate) mcp: Arc<crate::mcp::McpRegistry>,
     /// 声明式自定义工具（配置驱动，免写 MCP 服务器；按 agents 可见性放行）
@@ -204,14 +238,19 @@ pub struct ToolGateway {
     pub(crate) memory_md_path: Option<PathBuf>,
 }
 
-/// computer 输入动作：在既有会话上执行一次鼠标/键盘操作
-pub(crate) type InputAction =
-    Box<dyn FnOnce(&mut crate::computer::ComputerSession) -> anyhow::Result<()> + Send>;
 impl ToolGateway {
     pub(crate) fn workspace_for_session(&self, session_id: &str) -> PathBuf {
-        if let Some(root) = crate::workspace::current() { return root; }
-        if let Some(root) = self.store.get_session(session_id).ok().flatten()
-            .and_then(|session| session.workspace).and_then(|raw| crate::workspace::pinned(&raw).ok()) {
+        if let Some(root) = crate::workspace::current() {
+            return root;
+        }
+        if let Some(root) = self
+            .store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|session| session.workspace)
+            .and_then(|raw| crate::workspace::pinned(&raw).ok())
+        {
             return root;
         }
         self.effective_root()
@@ -223,6 +262,11 @@ impl ToolGateway {
         events: tokio::sync::broadcast::Sender<CoreEvent>,
         security: SecurityConfig,
     ) -> Self {
+        let background_accepting = super::terminal_jobs::background_admission(&store);
+        if let Err(error) = super::terminal_jobs::recover_records(&store) {
+            background_accepting.store(false, std::sync::atomic::Ordering::Release);
+            eprintln!("[terminal] 无法安全恢复后台任务元数据，已关闭后台命令准入: {error}");
+        }
         ToolGateway {
             workspace_root: workspace_root.as_ref().to_path_buf(),
             store,
@@ -245,12 +289,14 @@ impl ToolGateway {
             chart_endpoint: parking_lot::RwLock::new(String::new()),
             spawn_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             spawn_timeout_secs: 300,
-            background: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            background_limits: super::BackgroundLimits::default(),
+            background_accepting,
             spawns_bg: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             browser_cfg: crate::config::BrowserConfig::default(),
             browser: Arc::new(tokio::sync::Mutex::new(None)),
             computer_cfg: crate::config::ComputerUseConfig::default(),
             computer: Arc::new(tokio::sync::Mutex::new(None)),
+            computer_executor: parking_lot::RwLock::new(None),
             mcp: crate::mcp::McpRegistry::shared(),
             custom: Vec::new(),
             plugin_credentials: parking_lot::RwLock::new(None),
@@ -309,14 +355,30 @@ impl ToolGateway {
         *self.model_router.write() = router;
     }
 
-    pub(crate) async fn agent_aux_model(&self, purpose: crate::model_routing::ModelPurpose, task: &str,
-        fallback: Option<(Arc<dyn LlmProvider>,String)>) -> anyhow::Result<(Arc<dyn LlmProvider>,String)> {
-        let router=self.model_router.read().upgrade();
-        match router { Some(router)=>router.caller_model(purpose,task).await, None=>fallback.ok_or_else(||anyhow::anyhow!("模型路由未装配")) }
+    pub(crate) async fn agent_aux_model(
+        &self,
+        purpose: crate::model_routing::ModelPurpose,
+        task: &str,
+        fallback: Option<(Arc<dyn LlmProvider>, String)>,
+    ) -> anyhow::Result<(Arc<dyn LlmProvider>, String)> {
+        let router = self.model_router.read().upgrade();
+        match router {
+            Some(router) => router.caller_model(purpose, task).await,
+            None => fallback.ok_or_else(|| anyhow::anyhow!("模型路由未装配")),
+        }
     }
 
-    pub(crate) fn agent_purpose_ready(&self, def: &AgentDefinition, purpose: crate::model_routing::ModelPurpose, fallback: bool) -> bool {
-        self.model_router.read().upgrade().map(|r|r.purpose_ready(def,purpose)).unwrap_or(fallback)
+    pub(crate) fn agent_purpose_ready(
+        &self,
+        def: &AgentDefinition,
+        purpose: crate::model_routing::ModelPurpose,
+        fallback: bool,
+    ) -> bool {
+        self.model_router
+            .read()
+            .upgrade()
+            .map(|r| r.purpose_ready(def, purpose))
+            .unwrap_or(fallback)
     }
 
     /// 注入深度研究 LLM 通道（research_report 计划与聚合两阶段）
@@ -421,6 +483,89 @@ impl ToolGateway {
         self.plugin_tools.read().clone()
     }
 
+    pub(crate) fn plugin_command_status(
+        &self,
+        agent_id: &str,
+        name: &str,
+        target: &PluginCommandTarget<'_>,
+    ) -> crate::command::CapabilityStatus {
+        self.plugin_command_binding(agent_id, name, target)
+            .err()
+            .unwrap_or(crate::command::CapabilityStatus::Available)
+    }
+
+    fn plugin_command_binding(
+        &self,
+        agent_id: &str,
+        name: &str,
+        target: &PluginCommandTarget<'_>,
+    ) -> Result<PluginCommandBinding, crate::command::CapabilityStatus> {
+        use crate::command::CapabilityStatus as Status;
+
+        let local = name.strip_prefix(&format!("{}__", target.plugin)).ok_or(Status::Forbidden)?;
+        let entry = target.manager.get(target.plugin).ok_or(Status::Unavailable)?;
+        if !entry.enabled {
+            return Err(Status::Disabled);
+        }
+        if entry.error.is_some() {
+            return Err(Status::Unavailable);
+        }
+        let version = entry.manifest.commands.get(local).ok_or(Status::Unavailable)?.version;
+        if version != target.version {
+            return Err(Status::Unavailable);
+        }
+        match entry.form.as_str() {
+            "declarative" => {
+                let manifest_tool = entry.manifest.tools.iter().find(|tool| tool.name == local)
+                    .ok_or(Status::MissingDependency)?;
+                if !manifest_tool.visible_to(agent_id) {
+                    return Err(Status::Forbidden);
+                }
+                let mut tool = manifest_tool.clone();
+                tool.name = name.into();
+                if !self.plugin_tools.read().contains(&tool) {
+                    return Err(Status::MissingDependency);
+                }
+                if tool.kind_norm() == "http" && std::iter::once(tool.target.as_str())
+                    .chain(tool.headers.values().map(String::as_str))
+                    .any(|value| !self.resolve_credential_vars(target.plugin, value).1.is_empty())
+                {
+                    return Err(Status::MissingDependency);
+                }
+                Ok(PluginCommandBinding::Declarative(tool))
+            }
+            "process" => {
+                let active_provider = target.manager.provider_of(target.plugin)
+                    .and_then(|provider| provider.tool_provider()).ok_or(Status::MissingDependency)?;
+                if !active_provider.ready() {
+                    return Err(Status::MissingDependency);
+                }
+                let declared = active_provider.tool_specs().into_iter().find(|tool| tool.name == name)
+                    .ok_or(Status::MissingDependency)?;
+                if !declared.visible_to(agent_id) || entry.manifest.tools.iter()
+                    .any(|tool| tool.name == local && !tool.visible_to(agent_id))
+                {
+                    return Err(Status::Forbidden);
+                }
+                // 执行使用管理器当前 provider，不会因 ToolGateway 同名表项而绕到旧进程或别的插件。
+                let attached = self.plugin_runtime_tools.read().get(target.plugin).cloned()
+                    .is_some_and(|provider| provider.tool_specs().contains(&declared));
+                if !attached {
+                    return Err(Status::MissingDependency);
+                }
+                Ok(PluginCommandBinding::Process(active_provider))
+            }
+            "builtin" => {
+                let (tool, exec) = self.dynamic_tool(name).ok_or(Status::MissingDependency)?;
+                if !tool.visible_to(agent_id) {
+                    return Err(Status::Forbidden);
+                }
+                Ok(PluginCommandBinding::Builtin(exec))
+            }
+            _ => Err(Status::Unavailable),
+        }
+    }
+
     /// 注入插件凭据解析面（Core 装配后回接：查 `plugins.credentials.<插件id>.<键>`）
     pub fn set_plugin_credentials_resolver(&self, f: PluginCredResolver) {
         *self.plugin_credentials.write() = Some(f);
@@ -428,7 +573,11 @@ impl ToolGateway {
 
     /// 解析文本中的 `${credentials.<key>}` 变量（插件工具执行期）。
     /// 返回 (解析后文本, 缺失键列表)——缺失时不发部分鉴权请求，由调用方拒绝。
-    pub(crate) fn resolve_credential_vars(&self, plugin_id: &str, text: &str) -> (String, Vec<String>) {
+    pub(crate) fn resolve_credential_vars(
+        &self,
+        plugin_id: &str,
+        text: &str,
+    ) -> (String, Vec<String>) {
         let mut missing = Vec::new();
         // 形如 ${credentials.api_token}（键名：字母/数字/_/-）
         let mut out = String::with_capacity(text.len());
@@ -847,6 +996,9 @@ impl ToolGateway {
         full_name: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
+        if crate::round_trace::is_cancelled(session_id) {
+            return ToolResult::err("本轮已被用户停止，拒绝迟到工具调用");
+        }
         let started = Instant::now();
         let call_id = format!("t{}", &crate::types::new_id()[..12]);
         let _ = self.events.send(CoreEvent {
@@ -909,12 +1061,26 @@ impl ToolGateway {
 
     /// 生效工作区根：显式工作目录（干活的项目）> 激活组声明 > 全局根（统一走注册表口径）
     pub(crate) fn effective_root(&self) -> PathBuf {
-        self.registry.effective_workspace(&self.workspace_root)
+        let root = self.registry.effective_workspace(&self.workspace_root);
+        let has_explicit_workspace = self.registry.active_workspace().is_some()
+            || self
+                .registry
+                .active_group_meta()
+                .and_then(|group| group.workspace)
+                .is_some();
+        if !has_explicit_workspace
+            && root == self.workspace_root
+            && !self.security.exec_user.trim().is_empty()
+        {
+            if let Ok(Some(identity)) = crate::config::resolve_exec_identity(
+                &self.security.exec_user,
+                &self.security.exec_home,
+            ) {
+                return PathBuf::from(identity.home);
+            }
+        }
+        root
     }
-
-
-
-
 
     /// 工具层事件发双层：实时广播（WS 推流）+ 事件库落盘（历史可回放）。
     /// 此前 tool.call/tool.result 只广播不落库——历史会话的事件页看不到任何工具过程，
@@ -957,18 +1123,64 @@ impl ToolGateway {
         name: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
+        self.execute_named_bound(agent_id, session_id, allowlist, name, args, None).await
+    }
+
+    pub(crate) async fn execute_plugin_command(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        name: &str,
+        args: &serde_json::Value,
+        target: PluginCommandTarget<'_>,
+    ) -> ToolResult {
+        self.execute_named_bound(agent_id, session_id, &[], name, args, Some(target)).await
+    }
+
+    async fn execute_named_bound(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        allowlist: &[ToolName],
+        name: &str,
+        args: &serde_json::Value,
+        plugin_command: Option<PluginCommandTarget<'_>>,
+    ) -> ToolResult {
         let workspace = match self.store.get_session(session_id).and_then(|session| {
-            session.and_then(|s| s.workspace).as_deref().map(crate::workspace::pinned).transpose()
+            session
+                .and_then(|s| s.workspace)
+                .as_deref()
+                .map(crate::workspace::pinned)
+                .transpose()
         }) {
             Ok(workspace) => workspace.or_else(crate::workspace::current),
             Err(e) => return ToolResult::err(format!("读取项目作用域失败：{e}")),
         };
-        crate::workspace::scope(workspace, crate::model_routing::MODEL_CALLER.scope(crate::model_routing::ModelCaller {
-            agent_id:agent_id.to_string(),session_id:session_id.to_string(),
-        },self.execute_named_inner(agent_id,session_id,allowlist,name,args))).await
+        crate::workspace::scope(
+            workspace,
+            crate::model_routing::MODEL_CALLER.scope(
+                crate::model_routing::ModelCaller {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                },
+                self.execute_named_inner(agent_id, session_id, allowlist, name, args, plugin_command),
+            ),
+        )
+        .await
     }
 
-    async fn execute_named_inner(&self,agent_id:&str,session_id:&str,allowlist:&[ToolName],name:&str,args:&serde_json::Value)->ToolResult {
+    async fn execute_named_inner(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        allowlist: &[ToolName],
+        name: &str,
+        args: &serde_json::Value,
+        plugin_command: Option<PluginCommandTarget<'_>>,
+    ) -> ToolResult {
+        if crate::round_trace::is_cancelled(session_id) {
+            return ToolResult::err("本轮已被用户停止，拒绝迟到工具调用");
+        }
         let started = Instant::now();
         let call_id = format!("t{}", &crate::types::new_id()[..12]);
         // 工具执行事件（call）：文件操作 / 终端命令 / 截屏对用户全程可见——编程软件式的过程透明
@@ -1030,7 +1242,7 @@ impl ToolGateway {
                         decided_at: None,
                         origin_user: None,
                         origin_role: None,
-                    
+
                         meta_json: None,
                     };
                     let _ = self.store.add_approval(&req);
@@ -1086,15 +1298,15 @@ impl ToolGateway {
                         started.elapsed().as_millis() as u64,
                         false,
                     ) {
-            eprintln!("[audit] 审计落库失败：{}", e);
-        }
+                        eprintln!("[audit] 审计落库失败：{}", e);
+                    }
                     self.emit_tool_result(session_id, &call_id, agent_id, name, &blocked, &started);
                     return blocked;
                 }
             }
         }
 
-        let result = match ToolName::parse(name) {
+        let mut result = match ToolName::parse(name) {
             Some(tool) => {
                 if !allowlist.contains(&tool) && tool != ToolName::ContextCompact {
                     ToolResult::err(format!("工具 {} 不在本节点放行白名单内", tool.key()))
@@ -1120,8 +1332,27 @@ impl ToolGateway {
             }
             // 非内置名：会话级注入（视频观看会话）→ 动态命名空间工具（T3 内置插件）→ 声明式自定义工具
             None => {
-                // 会话级注入优先（按会话收窄的插件工具：video__* 等）
-                if let Some((spec, exec)) = self.session_tool(session_id, name) {
+                if let Some(target) = &plugin_command {
+                    if crate::plan::is_plan_mode(session_id) {
+                        ToolResult::err("计划模式不直接执行效果未分类的插件工具")
+                    } else if crate::round_trace::is_cancelled(session_id) {
+                        ToolResult::err("本轮已被用户停止，拒绝迟到插件命令")
+                    } else {
+                        match self.plugin_command_binding(agent_id, name, target) {
+                            Ok(PluginCommandBinding::Declarative(tool)) => self.run_custom(agent_id, session_id, &tool, args).await,
+                            Ok(PluginCommandBinding::Process(provider)) => match provider.call_tool(name, args) {
+                                Ok(text) => ToolResult::ok(text),
+                                Err(_) => ToolResult::err("插件进程工具未成功执行"),
+                            },
+                            Ok(PluginCommandBinding::Builtin(exec)) => {
+                                let out = exec(agent_id, session_id, args.clone()).await;
+                                if out.ok { ToolResult::ok_with_images(out.text, out.images) } else { ToolResult::err(out.text) }
+                            }
+                            Err(_) => ToolResult::err("插件命令的工具授权或运行依赖已改变"),
+                        }
+                    }
+                // 普通工具调用继续按会话级注入优先（视频观看会话等）。
+                } else if let Some((spec, exec)) = self.session_tool(session_id, name) {
                     if spec.visible_to(agent_id) {
                         let out = exec(agent_id, session_id, args.clone()).await;
                         if out.ok {
@@ -1190,10 +1421,25 @@ impl ToolGateway {
                 }
             }
         };
-        let result = self.spill_if_large(name, result);
+        if let Some(target) = &plugin_command {
+            result.output = target.redact_result(&result.output);
+            result.error = result.error.as_deref().map(|error| target.redact_result(error));
+        }
+        let terminal_op = (name == ToolName::Terminal.key())
+            .then(|| args.get("op").and_then(|v| v.as_str()))
+            .flatten();
+        let structured_page =
+            terminal_op == Some("poll") && super::terminal_output::wants_output_page(args);
+        // 后台日志已经在受限存储内；查询不再向工作区复制日志，分页也必须保留完整 JSON。
+        let result = if matches!(terminal_op, Some("poll" | "list" | "kill")) {
+            result
+        } else {
+            self.spill_if_large(name, result)
+        };
         // postTool 钩子：仅留痕（失败不改变工具结果，但会追加到输出末尾提示）
         let mut result = result;
         if !self.hooks.post_tool.is_empty() {
+            let mut page_warning = None;
             let root = self.effective_root();
             let root_s = root.display().to_string();
             let ok_s = if result.ok { "true" } else { "false" };
@@ -1222,6 +1468,15 @@ impl ToolGateway {
                     ],
                 );
                 if !hook_ok {
+                    if structured_page && result.ok {
+                        page_warning.get_or_insert_with(|| {
+                            super::redact_str(&out)
+                                .chars()
+                                .take(300)
+                                .collect::<String>()
+                        });
+                        continue;
+                    }
                     let tail = format!(
                         "\n[postTool 钩子失败] {}",
                         out.chars().take(300).collect::<String>()
@@ -1231,6 +1486,14 @@ impl ToolGateway {
                     } else if let Some(e) = result.error.as_mut() {
                         e.push_str(&tail);
                     }
+                }
+            }
+            if let Some(warning) = page_warning {
+                if let Ok(serde_json::Value::Object(mut page)) =
+                    serde_json::from_str(&result.output)
+                {
+                    page.insert("postToolWarning".into(), serde_json::Value::String(warning));
+                    result.output = serde_json::Value::Object(page).to_string();
                 }
             }
         }
@@ -1341,11 +1604,15 @@ impl ToolGateway {
             "{head}\n\n…（结果共 {total} 字符 / {lines} 行，已截断）\n完整内容已落盘：{rel}\n可用 read 工具按 offset/limit 分段读取。",
             total = text.chars().count()
         );
-        if is_err {
+        let mut spilled = if is_err {
             ToolResult::err(note)
         } else {
             ToolResult::ok(note)
-        }
+        };
+        // 文本结果超限不能丢掉同一工具调用携带的真实图像附件；否则
+        // runtime 只会看到“已落盘”的文字而无法把图片传给视觉模型。
+        spilled.images = result.images;
+        spilled
     }
 
     pub(crate) async fn dispatch(
@@ -1380,15 +1647,9 @@ impl ToolGateway {
             ToolName::Speech => self.tool_speech(session_id, args).await,
             ToolName::ImageGen => self.tool_image_gen(session_id, args).await,
             ToolName::RenderChart => self.tool_render_chart(session_id, args).await,
-            ToolName::ResearchReport => {
-                self.tool_research_report(agent_id, session_id, args).await
-            }
-            ToolName::KnowledgeWrite => {
-                self.tool_knowledge_write(agent_id, session_id, args).await
-            }
-            ToolName::KnowledgeRead => {
-                self.tool_knowledge_read(agent_id, session_id, args).await
-            }
+            ToolName::ResearchReport => self.tool_research_report(agent_id, session_id, args).await,
+            ToolName::KnowledgeWrite => self.tool_knowledge_write(agent_id, session_id, args).await,
+            ToolName::KnowledgeRead => self.tool_knowledge_read(agent_id, session_id, args).await,
             ToolName::MetaObserve | ToolName::MetaPropose | ToolName::MetaBuild => {
                 self.tool_meta(agent_id, session_id, tool, args).await
             }

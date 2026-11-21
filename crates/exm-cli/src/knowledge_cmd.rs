@@ -4,26 +4,32 @@
 //! 通用客观结论（全局共享）。
 
 use crate::render::*;
-use exm_core::Core;
 use exm_core::knowledge::KnowledgeDraft;
+use exm_core::Core;
 use owo_colors::OwoColorize;
 
 pub fn run_knowledge_list(core: &Core, limit: usize) -> anyhow::Result<()> {
     let entries = core.knowledge.recent(limit);
     if entries.is_empty() {
-        println!("{}", dim("（知识库为空；`exm knowledge add` 或模型 knowledge_write 后写入）"));
+        println!(
+            "{}",
+            dim("（知识库为空；`exm knowledge add` 或模型 knowledge_write 后写入）")
+        );
         return Ok(());
     }
-    println!("{}", format!("共享知识库最近 {} 条（createdAt 倒序）", entries.len()).bold());
+    println!(
+        "{}",
+        format!("共享知识库最近 {} 条（createdAt 倒序）", entries.len()).bold()
+    );
     for e in entries {
-        println!(
-            "  {} {}",
-            e.title.bold(),
-            dim(format!("hits={}", e.hits))
-        );
+        println!("  {} {}", e.title.bold(), dim(format!("hits={}", e.hits)));
         println!(
             "   {}",
-            e.body.replace('\n', " ").chars().take(160).collect::<String>()
+            e.body
+                .replace('\n', " ")
+                .chars()
+                .take(160)
+                .collect::<String>()
         );
         println!(
             "   {}",
@@ -45,19 +51,34 @@ pub fn run_knowledge_search(core: &Core, query: &str, limit: usize) -> anyhow::R
         println!("{}", dim("（无命中）"));
         return Ok(());
     }
-    println!("{}", format!("检索「{query}」命中 {} 条", hits.len()).bold());
+    println!(
+        "{}",
+        format!("检索「{query}」命中 {} 条", hits.len()).bold()
+    );
     for e in hits {
         println!("  {}（hits={}）", e.title.bold(), e.hits);
         println!(
             "     {}",
-            e.body.replace('\n', " ").chars().take(200).collect::<String>()
+            e.body
+                .replace('\n', " ")
+                .chars()
+                .take(200)
+                .collect::<String>()
         );
-        println!("     {}", dim(format!("id={}  来源={}", e.id, e.source_agent)));
+        println!(
+            "     {}",
+            dim(format!("id={}  来源={}", e.id, e.source_agent))
+        );
     }
     Ok(())
 }
 
-pub fn run_knowledge_add(core: &Core, title: &str, body: &str, tags: Vec<String>) -> anyhow::Result<()> {
+pub fn run_knowledge_add(
+    core: &Core,
+    title: &str,
+    body: &str,
+    tags: Vec<String>,
+) -> anyhow::Result<()> {
     let draft = KnowledgeDraft {
         title: title.to_string(),
         body: body.to_string(),

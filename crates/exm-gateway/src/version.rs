@@ -52,7 +52,10 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$branch" "$remote" "$head_sha" "$up_sha" "$up
 "#;
     let exec = tokio::time::timeout(
         std::time::Duration::from_secs(12),
-        tokio::process::Command::new("sh").arg("-c").arg(script).output(),
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output(),
     )
     .await;
     let lines: Vec<String> = match exec {
@@ -123,7 +126,10 @@ async fn version_check_image(mut out: serde_json::Value) -> serde_json::Value {
     );
     let exec = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::process::Command::new("sh").arg("-c").arg(script).output(),
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output(),
     )
     .await;
     let up_sha = match exec {
@@ -214,7 +220,11 @@ fn resolve_image_ref() -> Option<String> {
         .output()
         .ok()?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.get("services")?.get("exmachina")?.get("image")?.as_str().map(String::from)
+    v.get("services")?
+        .get("exmachina")?
+        .get("image")?
+        .as_str()
+        .map(String::from)
 }
 
 pub(crate) async fn version_apply() -> impl IntoResponse {
@@ -429,7 +439,11 @@ fn judge_update_state(
                 // 脚本收尾已写 exitCode:0 = Done,非 0 = Failed
                 UpdateState {
                     running: false,
-                    phase: if code == 0 { UpdatePhase::Done } else { UpdatePhase::Failed },
+                    phase: if code == 0 {
+                        UpdatePhase::Done
+                    } else {
+                        UpdatePhase::Failed
+                    },
                     exit_code: Some(code),
                 }
             } else {
@@ -444,9 +458,17 @@ fn judge_update_state(
         None => {
             // 无 state:脚本可能在「已 spawn 但未写 state」窗口,pgrep 兜底(自匹配免疫)
             if pgrep_alive {
-                UpdateState { running: true, phase: UpdatePhase::Pulling, exit_code: None }
+                UpdateState {
+                    running: true,
+                    phase: UpdatePhase::Pulling,
+                    exit_code: None,
+                }
             } else {
-                UpdateState { running: false, phase: UpdatePhase::Idle, exit_code: None }
+                UpdateState {
+                    running: false,
+                    phase: UpdatePhase::Idle,
+                    exit_code: None,
+                }
             }
         }
     }
@@ -498,14 +520,29 @@ fn pgrep_update_script() -> bool {
 mod tests {
     use super::*;
 
-    fn file(pid: u32, started: u64, exit: Option<i32>, phase: Option<UpdatePhase>) -> UpdateStateFile {
-        UpdateStateFile { pid, started_at: started, exit_code: exit, phase }
+    fn file(
+        pid: u32,
+        started: u64,
+        exit: Option<i32>,
+        phase: Option<UpdatePhase>,
+    ) -> UpdateStateFile {
+        UpdateStateFile {
+            pid,
+            started_at: started,
+            exit_code: exit,
+            phase,
+        }
     }
 
     #[test]
     fn judge_running_script_keeps_phase() {
         // 脚本存活(pid 活 + 未写 exitCode + 未超时):running,phase 取落盘值
-        let st = judge_update_state(Some(file(1, 1000, None, Some(UpdatePhase::Recreating))), |_| true, 1100, false);
+        let st = judge_update_state(
+            Some(file(1, 1000, None, Some(UpdatePhase::Recreating))),
+            |_| true,
+            1100,
+            false,
+        );
         assert!(st.running);
         assert_eq!(st.phase, UpdatePhase::Recreating);
         assert_eq!(st.exit_code, None);
@@ -520,7 +557,12 @@ mod tests {
 
     #[test]
     fn judge_done_when_exit_zero() {
-        let st = judge_update_state(Some(file(1, 1000, Some(0), Some(UpdatePhase::Recreating))), |_| true, 1100, false);
+        let st = judge_update_state(
+            Some(file(1, 1000, Some(0), Some(UpdatePhase::Recreating))),
+            |_| true,
+            1100,
+            false,
+        );
         assert!(!st.running);
         assert_eq!(st.phase, UpdatePhase::Done);
         assert_eq!(st.exit_code, Some(0));
@@ -546,7 +588,12 @@ mod tests {
     fn judge_timeout_is_failed() {
         // 超过 30min 硬超时:即使 pid 活着也判失败(僵死任务可重新发起)
         let now = 1000 + UPDATE_TIMEOUT_SECS + 1;
-        let st = judge_update_state(Some(file(1, 1000, None, Some(UpdatePhase::Pulling))), |_| true, now, false);
+        let st = judge_update_state(
+            Some(file(1, 1000, None, Some(UpdatePhase::Pulling))),
+            |_| true,
+            now,
+            false,
+        );
         assert!(!st.running);
         assert_eq!(st.phase, UpdatePhase::Failed);
     }

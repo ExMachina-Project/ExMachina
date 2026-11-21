@@ -7,25 +7,42 @@ use owo_colors::OwoColorize;
 
 fn parse_kind(s: &str) -> anyhow::Result<MemoryKind> {
     MemoryKind::parse(s).ok_or_else(|| {
-        anyhow::anyhow!("未知记忆类型：{s}（可选 fact|decision|preference|evidence|digest|lesson|stat）")
+        anyhow::anyhow!(
+            "未知记忆类型：{s}（可选 fact|decision|preference|evidence|digest|lesson|stat）"
+        )
     })
 }
 
-pub fn run_memory_list(core: &Core, kind: Option<String>, agent: Option<&str>, limit: usize) -> anyhow::Result<()> {
+pub fn run_memory_list(
+    core: &Core,
+    kind: Option<String>,
+    agent: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<()> {
     let kind = match kind {
         Some(k) => Some(parse_kind(&k)?),
         None => None,
     };
     let entries = core.memory_list_filtered(kind, agent, limit)?;
     if let Some(id) = agent {
-        println!("{}", format!("个体 {} 可见的记忆（私有 + 群体共享）", id).bold());
+        println!(
+            "{}",
+            format!("个体 {} 可见的记忆（私有 + 群体共享）", id).bold()
+        );
     }
     if entries.is_empty() {
-        println!("{}", dim("（记忆库为空；执行任务或 `exm memory add` 后写入）"));
+        println!(
+            "{}",
+            dim("（记忆库为空；执行任务或 `exm memory add` 后写入）")
+        );
         return Ok(());
     }
     for e in entries {
-        let pin = if e.pinned { "📌 ".to_string() } else { String::new() };
+        let pin = if e.pinned {
+            "📌 ".to_string()
+        } else {
+            String::new()
+        };
         let layer = if e.agent_id.is_some() {
             "个体".cyan().to_string()
         } else if let Some(g) = &e.group_id {
@@ -45,15 +62,38 @@ pub fn run_memory_list(core: &Core, kind: Option<String>, agent: Option<&str>, l
         }
         println!(
             "   {}",
-            dim(format!("重要性 {:.2}｜置信度 {:.2}｜访问 {}", e.importance, e.confidence, e.access_count))
+            dim(format!(
+                "重要性 {:.2}｜置信度 {:.2}｜访问 {}",
+                e.importance, e.confidence, e.access_count
+            ))
         );
-        println!("   {}", e.body.replace('\n', " ").chars().take(160).collect::<String>());
-        println!("   {}", dim(format!("id={}  tags={}  {}", e.id, e.tags.join(","), e.updated_at)));
+        println!(
+            "   {}",
+            e.body
+                .replace('\n', " ")
+                .chars()
+                .take(160)
+                .collect::<String>()
+        );
+        println!(
+            "   {}",
+            dim(format!(
+                "id={}  tags={}  {}",
+                e.id,
+                e.tags.join(","),
+                e.updated_at
+            ))
+        );
     }
     Ok(())
 }
 
-pub fn run_memory_search(core: &Core, query: &str, agent: Option<&str>, limit: usize) -> anyhow::Result<()> {
+pub fn run_memory_search(
+    core: &Core,
+    query: &str,
+    agent: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<()> {
     let hits = match agent {
         Some(id) => core.memory_recall_for_agent(id, query, Some(limit))?,
         None => core.memory_recall_all(query, Some(limit))?,
@@ -66,7 +106,10 @@ pub fn run_memory_search(core: &Core, query: &str, agent: Option<&str>, limit: u
     let scope = agent
         .map(|a| format!("个体 {a} 可见范围（私有 + 共享，激活组 {gid}）"))
         .unwrap_or_else(|| format!("全部记忆（激活组 {gid} + 全局条目）"));
-    println!("{}", format!("检索「{query}」命中 {} 条（{}）", hits.len(), scope).bold());
+    println!(
+        "{}",
+        format!("检索「{query}」命中 {} 条（{}）", hits.len(), scope).bold()
+    );
     for h in hits {
         println!(
             "  {} {} {}",
@@ -74,7 +117,15 @@ pub fn run_memory_search(core: &Core, query: &str, agent: Option<&str>, limit: u
             h.entry.kind.key().cyan(),
             h.entry.title.bold()
         );
-        println!("     {}", h.entry.body.replace('\n', " ").chars().take(200).collect::<String>());
+        println!(
+            "     {}",
+            h.entry
+                .body
+                .replace('\n', " ")
+                .chars()
+                .take(200)
+                .collect::<String>()
+        );
         println!("     {}", dim(format!("理由：{}", h.reasons.join("；"))));
     }
     Ok(())
@@ -97,7 +148,11 @@ pub fn run_memory_add(
     if let Some(a) = agent {
         draft.agent_id = Some(a.to_string());
     }
-    let entry = if global { core.memory_remember_global(draft)? } else { core.memory_remember(draft)? };
+    let entry = if global {
+        core.memory_remember_global(draft)?
+    } else {
+        core.memory_remember(draft)?
+    };
     if pin {
         core.memory_pin(&entry.id, true)?;
     }
@@ -108,7 +163,12 @@ pub fn run_memory_add(
     } else {
         "全局记忆".to_string()
     };
-    println!("{} {}（{layer}，id={}）", ok("已记忆"), entry.title, entry.id);
+    println!(
+        "{} {}（{layer}，id={}）",
+        ok("已记忆"),
+        entry.title,
+        entry.id
+    );
     Ok(())
 }
 
@@ -133,13 +193,7 @@ pub fn run_memory_edit(
     if title.is_none() && body.is_none() && tags.is_none() && kind.is_none() {
         anyhow::bail!("至少提供 --title / --body / --tags / --kind 之一");
     }
-    match core.memory_update(
-        id,
-        title.as_deref(),
-        body.as_deref(),
-        tags,
-        kind.as_deref(),
-    )? {
+    match core.memory_update(id, title.as_deref(), body.as_deref(), tags, kind.as_deref())? {
         Some(e) => {
             println!("{} {}（{}）", ok("已更新"), e.id, e.title);
             Ok(())
@@ -210,7 +264,11 @@ pub fn run_memory_render(core: &Core) -> anyhow::Result<()> {
 /// 全量导出为 JSONL（memory-lifecycle 6.3）：每行一条完整条目 JSON，
 /// 字段与 list 单条一致；--agent 过滤同口径；不含派生索引数据。
 /// file 缺省打印 stdout（管道友好）；传 file 落盘并回显路径。
-pub fn run_memory_export(core: &Core, file: Option<&str>, agent: Option<&str>) -> anyhow::Result<()> {
+pub fn run_memory_export(
+    core: &Core,
+    file: Option<&str>,
+    agent: Option<&str>,
+) -> anyhow::Result<()> {
     let entries = core.memory_list_filtered(None, agent, usize::MAX)?;
     let jsonl: String = entries
         .iter()

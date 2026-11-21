@@ -42,7 +42,11 @@ pub(crate) fn build_exec(core: Arc<Core>) -> DynamicToolExec {
 }
 
 /// 工具分发
-async fn dispatch(core: &Arc<Core>, session_id: &str, args: serde_json::Value) -> anyhow::Result<String> {
+async fn dispatch(
+    core: &Arc<Core>,
+    session_id: &str,
+    args: serde_json::Value,
+) -> anyhow::Result<String> {
     let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
     match op {
         "set" => op_set(core, session_id, &args).await,
@@ -52,7 +56,11 @@ async fn dispatch(core: &Arc<Core>, session_id: &str, args: serde_json::Value) -
 }
 
 /// op=set：切换模式并广播事件（前端 plan 徽标实时刷新）
-async fn op_set(core: &Arc<Core>, session_id: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+async fn op_set(
+    core: &Arc<Core>,
+    session_id: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<String> {
     let plan = args
         .get("plan")
         .and_then(|v| v.as_bool())
@@ -69,7 +77,11 @@ async fn op_set(core: &Arc<Core>, session_id: &str, args: &serde_json::Value) ->
         }),
     );
     let pending = exm_core::plan::list_items(session_id).len();
-    let suffix = if reason.is_empty() { "。".to_string() } else { format!("（{reason}）。") };
+    let suffix = if reason.is_empty() {
+        "。".to_string()
+    } else {
+        format!("（{reason}）。")
+    };
     Ok(if plan {
         format!("已进入计划模式{suffix}写操作将累积为计划条目呈现给用户审批（当前待审批 {pending} 条）。读类操作照常执行；计划攒齐后停止本轮并告知用户等待审批。")
     } else {
@@ -83,6 +95,10 @@ fn op_get(session_id: &str) -> String {
     let pending = exm_core::plan::list_items(session_id).len();
     format!(
         "当前模式：{}；待审批计划条目：{pending} 条",
-        if plan { "计划模式（写操作转计划条目）" } else { "执行模式（写操作直接执行）" }
+        if plan {
+            "计划模式（写操作转计划条目）"
+        } else {
+            "执行模式（写操作直接执行）"
+        }
     )
 }

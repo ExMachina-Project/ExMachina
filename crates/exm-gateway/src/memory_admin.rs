@@ -42,7 +42,10 @@ pub(crate) async fn export_memory(
     State(st): State<AppState>,
     Query(q): Query<MemoryQuery>,
 ) -> impl IntoResponse {
-    match st.core.memory_list_filtered(None, q.agent.as_deref(), usize::MAX) {
+    match st
+        .core
+        .memory_list_filtered(None, q.agent.as_deref(), usize::MAX)
+    {
         Ok(items) => {
             let body = items
                 .iter()
@@ -94,7 +97,10 @@ pub(crate) struct MemoryBody {
     global: bool,
 }
 
-pub(crate) async fn add_memory(State(st): State<AppState>, Json(b): Json<MemoryBody>) -> impl IntoResponse {
+pub(crate) async fn add_memory(
+    State(st): State<AppState>,
+    Json(b): Json<MemoryBody>,
+) -> impl IntoResponse {
     let kind = b
         .kind
         .as_deref()
@@ -140,7 +146,10 @@ pub(crate) struct SearchBody {
     agent: Option<String>,
 }
 
-pub(crate) async fn search_memory(State(st): State<AppState>, Json(b): Json<SearchBody>) -> impl IntoResponse {
+pub(crate) async fn search_memory(
+    State(st): State<AppState>,
+    Json(b): Json<SearchBody>,
+) -> impl IntoResponse {
     // 调试检索（8.4）：语义检索启用时与对话内召回同口径（词项+语义混合），
     // 并透出命中词项明细与语义分数数值，供记忆页调试开关呈现
     let result = st
@@ -266,7 +275,10 @@ pub(crate) async fn memory_render(State(st): State<AppState>) -> impl IntoRespon
     }
 }
 
-pub(crate) async fn forget_memory(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn forget_memory(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.memory_forget(&id) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
@@ -320,10 +332,13 @@ pub(crate) async fn update_memory(
     // 空串视为「未提供」：面板清空编辑框不等于清空正文（删除走 forget）
     let title = b.title.filter(|s| !s.trim().is_empty());
     let body = b.body.filter(|s| !s.trim().is_empty());
-    match st
-        .core
-        .memory_update(&id, title.as_deref(), body.as_deref(), b.tags, b.kind.as_deref())
-    {
+    match st.core.memory_update(
+        &id,
+        title.as_deref(),
+        body.as_deref(),
+        b.tags,
+        b.kind.as_deref(),
+    ) {
         Ok(Some(e)) => Json(serde_json::to_value(e).unwrap_or_default()).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,

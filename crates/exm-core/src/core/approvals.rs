@@ -14,42 +14,147 @@ struct EditorGitAction {
 }
 
 fn editor_git_args_valid(args: &[String]) -> bool {
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["push"] | ["reset", "--hard"] => true,
-        ["restore", "--", path] => !path.is_empty() && !path.starts_with(['/', '\\'])
-            && !path.contains(':') && !path.replace('\\', "/").split('/').any(|s| s == ".."),
+        ["restore", "--", path] => {
+            !path.is_empty()
+                && !path.starts_with(['/', '\\'])
+                && !path.contains(':')
+                && !path.replace('\\', "/").split('/').any(|s| s == "..")
+        }
         _ => false,
     }
 }
 
 async fn execute_editor_git(req: &ApprovalRequest) -> anyhow::Result<String> {
-    let action: EditorGitAction = serde_json::from_str(req.meta_json.as_deref().ok_or_else(|| anyhow::anyhow!("Git 审批缺少工作区信息"))?)?;
+    let action: EditorGitAction = serde_json::from_str(
+        req.meta_json
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Git 审批缺少工作区信息"))?,
+    )?;
     anyhow::ensure!(editor_git_args_valid(&action.args), "Git 审批参数无效");
     let root = crate::workspace::pinned(&action.root.to_string_lossy())?;
-    anyhow::ensure!(action.root.join(".git").exists(), "审批来源工作区已不是 Git 仓库");
-    let out = tokio::time::timeout(std::time::Duration::from_secs(60), tokio::process::Command::new("git")
-        .arg("--literal-pathspecs").args(&action.args).current_dir(root).env("GIT_TERMINAL_PROMPT", "0")
-        .kill_on_drop(true).output()).await.map_err(|_| anyhow::anyhow!("Git 操作超时"))??;
-    anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    Ok(String::from_utf8_lossy(&out.stdout).chars().take(4000).collect())
+    anyhow::ensure!(
+        action.root.join(".git").exists(),
+        "审批来源工作区已不是 Git 仓库"
+    );
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tokio::process::Command::new("git")
+            .arg("--literal-pathspecs")
+            .args(&action.args)
+            .current_dir(root)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Git 操作超时"))??;
+    anyhow::ensure!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .chars()
+        .take(4000)
+        .collect())
 }
 
 impl Core {
+    /// Cancel pending approvals owned by a stopped session. The per-approval
+    /// lock is taken before changing the row so a late click cannot race an
+    /// approval that is already being executed.
+    pub(crate) fn cancel_pending_approvals(&self, session_id: &str) -> usize {
+        let pending = match self.store.list_approvals(Some("pending"), 200) {
+            Ok(rows) => rows,
+            Err(_) => return 0,
+        };
+        let mut cancelled = 0;
+        for mut req in pending {
+            if req.session_id != session_id {
+                continue;
+            }
+            let lock = {
+                let mut locks = self.approval_locks.lock();
+                locks
+                    .entry(req.id.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone()
+            };
+            let Ok(_guard) = lock.try_lock() else {
+                continue;
+            };
+            let Ok(Some(latest)) = self.store.get_approval(&req.id) else {
+                continue;
+            };
+            if latest.status != "pending" {
+                continue;
+            }
+            req = latest;
+            req.status = "cancelled".into();
+            req.decided_at = Some(now_iso());
+            req.result = Some("本轮已被用户停止，审批动作已取消；迟到批准不得执行".into());
+            if self.store.update_approval(&req).is_ok() {
+                self.emit_approval_resolved(&req);
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
     pub fn approval_workspace(&self, req: &ApprovalRequest) -> anyhow::Result<Option<String>> {
         if req.agent_id == "desktop" && req.command.starts_with("[git]") {
-            let meta: EditorGitAction = serde_json::from_str(req.meta_json.as_deref().unwrap_or(""))?;
+            let meta: EditorGitAction =
+                serde_json::from_str(req.meta_json.as_deref().unwrap_or(""))?;
             return Ok(Some(meta.root.to_string_lossy().into_owned()));
         }
-        if req.session_id.is_empty() { return Ok(None); }
-        Ok(self.store.get_session(&req.session_id)?.and_then(|s| s.workspace))
+        if let Some(workspace) = req
+            .meta_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|meta| {
+                meta.get("projectWorkspace")
+                    .and_then(|path| path.as_str())
+                    .map(str::to_owned)
+            })
+        {
+            return Ok(Some(workspace));
+        }
+        if req.session_id.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .store
+            .get_session(&req.session_id)?
+            .and_then(|s| s.workspace))
     }
 
     fn approved_command_root(&self, req: &ApprovalRequest) -> anyhow::Result<std::path::PathBuf> {
-        let root = req.meta_json.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|meta| meta.get("projectWorkspace").or_else(|| meta.get("root"))?.as_str().map(str::to_string));
-        if let Some(root) = root { return crate::workspace::pinned(&root); }
-        self.approval_workspace(req)?.as_deref().map(crate::workspace::pinned).transpose()
-            .map(|root| root.unwrap_or_else(|| self.config().workspace_root.clone()))
+        let root = req
+            .meta_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|meta| {
+                meta.get("projectWorkspace")
+                    .or_else(|| meta.get("root"))?
+                    .as_str()
+                    .map(str::to_string)
+            });
+        if let Some(root) = root {
+            return crate::workspace::pinned(&root);
+        }
+        let fallback = self.orchestrator().tools.effective_root();
+        self.approval_workspace(req)?
+            .as_deref()
+            .map(crate::workspace::pinned)
+            .transpose()
+            .map(|root| root.unwrap_or(fallback))
     }
     /// 会话审批授权写入（approval-ergonomics「本会话允许」档）：
     /// 前缀口径见 allowlist::command_head。红线校验在 approval_decide 调用侧——
@@ -93,7 +198,8 @@ impl Core {
         id: &str,
         approve: bool,
     ) -> anyhow::Result<ApprovalRequest> {
-        self.approval_decide_scoped(id, ApprovalScope::Once { approve }).await
+        self.approval_decide_scoped(id, ApprovalScope::Once { approve })
+            .await
     }
     /// 审批决定（approval-ergonomics 三档粒度）：
     /// - Once：本次执行（旧行为，缺省档）
@@ -139,13 +245,26 @@ impl Core {
         }
         // 红线校验：特殊前缀单与破坏性命令不允许升档（拒绝类决定不受限）
         let effective = if decision.is_approve() {
-            let special = req.command.starts_with('[');
+            let terminal_command = req
+                .meta_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|meta| {
+                    meta.get("terminalAction")
+                        .and_then(|action| action.get("command"))
+                        .and_then(|command| command.as_str())
+                        .map(str::to_owned)
+                });
+            let command_for_policy = terminal_command.as_deref().unwrap_or(req.command.as_str());
+            let special = req
+                .command
+                .strip_prefix("[terminal] ")
+                .map(|label| label.starts_with('['))
+                .unwrap_or_else(|| req.command.starts_with('['));
             let destructive =
-                crate::tools::is_destructive_command(&req.command.to_lowercase());
-            if matches!(
-                decision,
-                ApprovalScope::Session | ApprovalScope::Allowlist
-            ) && (special || destructive)
+                crate::tools::is_destructive_command(&command_for_policy.to_lowercase());
+            if matches!(decision, ApprovalScope::Session | ApprovalScope::Allowlist)
+                && (special || destructive)
             {
                 ApprovalScope::Once { approve: true }
             } else {
@@ -155,6 +274,193 @@ impl Core {
             ApprovalScope::Once { approve: false }
         };
         let approve = effective.is_approve();
+        // Computer Use 输入审批必须在普通终端审批分支之前收口。旧版若只有
+        // `[computer]` 文本而没有结构化动作，宁可失败也不能把描述交给 shell。
+        let has_computer_action = req.command.starts_with("[computer]")
+            || req.meta_json.as_deref().is_some_and(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .and_then(|value| value.get("computerAction").cloned())
+                    .is_some()
+            });
+        let computer_action = match crate::tools::computer_action_from_approval(&req) {
+            Ok(action) => action,
+            Err(error) if has_computer_action => {
+                req.decided_at = Some(now_iso());
+                req.status = "failed".into();
+                req.result = Some(format!("Computer Use 审批参数无效，未执行：{error}"));
+                self.store.update_approval(&req)?;
+                self.emit_approval_resolved(&req);
+                return Ok(req);
+            }
+            Err(_) => None,
+        };
+        if req.command.starts_with("[computer]") && computer_action.is_none() {
+            req.decided_at = Some(now_iso());
+            req.status = "failed".into();
+            req.result = Some("Computer Use 旧审批缺少类型化动作，未执行".into());
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
+        }
+        if let Some(action) = computer_action {
+            req.decided_at = Some(now_iso());
+            if !approve {
+                req.status = "denied".into();
+                req.result = Some("Computer Use 动作被拒绝（未执行）".into());
+            } else if req.command != format!("[computer] {}", action.description) {
+                req.status = "failed".into();
+                req.result = Some("Computer Use 审批描述与结构化动作不一致，未执行".into());
+            } else {
+                match self
+                    .orchestrator()
+                    .tools
+                    .execute_computer_approval(&action)
+                    .await
+                {
+                    Ok(result) => {
+                        req.status = "executed".into();
+                        req.result = Some(result);
+                    }
+                    Err(error) => {
+                        req.status = "failed".into();
+                        req.result = Some(format!("Computer Use 审批未执行：{error}"));
+                    }
+                }
+            }
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
+        }
+        // 新终端审批单保留结构化调用语义。必须在所有旧的字符串分支前收口，
+        // 否则后台请求会被错误地当成前台 shell 回放，或因元数据损坏而降级执行。
+        let has_terminal_action = req.command.starts_with("[terminal] ")
+            || req.meta_json.as_deref().is_some_and(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .is_some_and(|value| value.get("terminalAction").is_some())
+            });
+        let terminal_action = match crate::tools::terminal_action_from_approval(&req) {
+            Ok(action) => action,
+            Err(error) if has_terminal_action => {
+                req.decided_at = Some(now_iso());
+                req.status = "failed".into();
+                req.result = Some(format!("终端审批参数无效，未执行：{error}"));
+                self.store.update_approval(&req)?;
+                self.emit_approval_resolved(&req);
+                return Ok(req);
+            }
+            // 旧审批可能没有结构化元数据；保留其原有普通前台回放语义。
+            Err(_) => None,
+        };
+        if req.command.starts_with("[terminal] ") && terminal_action.is_none() {
+            req.decided_at = Some(now_iso());
+            req.status = "failed".into();
+            req.result = Some("终端审批缺少有效的类型化动作，未执行".into());
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
+        }
+        if let Some(action) = terminal_action {
+            req.decided_at = Some(now_iso());
+            if !approve {
+                req.status = "denied".into();
+                req.result = Some("终端命令被拒绝（未执行）".into());
+            } else if req.command != format!("[terminal] {}", action.approval_command) {
+                req.status = "failed".into();
+                req.result = Some("终端审批卡与结构化参数不一致，未执行".into());
+            } else if req
+                .meta_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|meta| {
+                    meta.get("projectWorkspace")
+                        .and_then(|path| path.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                != Some(action.workspace.as_str())
+            {
+                req.status = "failed".into();
+                req.result = Some("终端审批项目元数据不一致，未执行".into());
+            } else {
+                match self
+                    .orchestrator()
+                    .tools
+                    .execute_terminal_approval(&req.session_id, &action)
+                    .await
+                {
+                    Ok(out) if out.ok => {
+                        req.status = "executed".into();
+                        req.result = Some(out.output.chars().take(4000).collect());
+                    }
+                    Ok(out) => {
+                        req.status = "failed".into();
+                        req.result = Some(
+                            out.error
+                                .or_else(|| (!out.output.is_empty()).then_some(out.output))
+                                .unwrap_or_else(|| "终端审批代执行失败".into())
+                                .chars()
+                                .take(4000)
+                                .collect(),
+                        );
+                    }
+                    Err(error) => {
+                        req.status = "failed".into();
+                        req.result = Some(
+                            format!("终端审批未执行：{error}")
+                                .chars()
+                                .take(4000)
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            if req.status == "executed" {
+                let prefix = crate::tools::command_head(&action.command);
+                match effective {
+                    ApprovalScope::Session if !prefix.is_empty() => {
+                        self.grant_session(&req.session_id, &prefix);
+                        if let Some(result) = req.result.as_mut() {
+                            result.push_str(&format!(
+                                "\n[会话授权] 同前缀命令「{prefix}」本会话内自动放行"
+                            ));
+                        }
+                    }
+                    ApprovalScope::Allowlist if !prefix.is_empty() => {
+                        let mut config = self.config().as_ref().clone();
+                        if !config
+                            .security
+                            .exec_allowlist
+                            .iter()
+                            .any(|old| old == &prefix)
+                        {
+                            config.security.exec_allowlist.push(prefix.clone());
+                            match self.apply_config(config) {
+                                Ok(()) => {
+                                    if let Some(result) = req.result.as_mut() {
+                                        result.push_str(&format!(
+                                            "\n[白名单] 前缀「{prefix}」已写入全局白名单"
+                                        ));
+                                    }
+                                }
+                                Err(error) => {
+                                    if let Some(result) = req.result.as_mut() {
+                                        result.push_str(&format!(
+                                            "\n[白名单] 写入失败，执行已完成但未授权后续命令：{error}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.store.update_approval(&req)?;
+            self.emit_approval_resolved(&req);
+            return Ok(req);
+        }
         if req.command.starts_with("[git] ") {
             req.decided_at = Some(now_iso());
             if !approve {
@@ -162,10 +468,19 @@ impl Core {
             } else {
                 let result = execute_editor_git(&req).await;
                 req.status = if result.is_ok() { "executed" } else { "failed" }.into();
-                req.result = Some(match result { Ok(text) => text, Err(e) => e.to_string() });
-                self.store.audit_tool_best_effort("desktop", "git", &serde_json::json!({
-                    "approvalId": req.id, "command": req.command,
-                }), req.result.as_deref().unwrap_or(""), 0);
+                req.result = Some(match result {
+                    Ok(text) => text,
+                    Err(e) => e.to_string(),
+                });
+                self.store.audit_tool_best_effort(
+                    "desktop",
+                    "git",
+                    &serde_json::json!({
+                        "approvalId": req.id, "command": req.command,
+                    }),
+                    req.result.as_deref().unwrap_or(""),
+                    0,
+                );
             }
             self.store.update_approval(&req)?;
             self.emit_approval_resolved(&req);
@@ -252,8 +567,14 @@ impl Core {
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                 .map(|v| {
                     (
-                        v.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        v.get("target").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        v.get("kind")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        v.get("target")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     )
                 })
                 .unwrap_or_default();
@@ -287,19 +608,32 @@ impl Core {
             let workspace = self.approved_command_root(&req)?;
             // root 代执行：ShellOpts::plain（不降权——审批的就是提权本身）
             let opts = crate::tools::ShellOpts::plain();
-            let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
-            req.status = if out.ok { "executed".into() } else { "failed".into() };
-            let text = if out.ok { out.output } else { out.error.unwrap_or_default() };
+            let out = crate::tools::execute_shell_for_session(
+                &workspace,
+                &eff_cmd,
+                300,
+                &opts,
+                &req.session_id,
+            )
+            .await;
+            req.status = if out.ok {
+                "executed".into()
+            } else {
+                "failed".into()
+            };
+            let text = if out.ok {
+                out.output
+            } else {
+                out.error.unwrap_or_default()
+            };
             // 红线降级注明（approval-ergonomics）：[root] 提权单不允许升档,
             // 越权档位自动降级 once——审批结果注明让裁决者知情
-            let downgrade_note = if matches!(
-                decision,
-                ApprovalScope::Session | ApprovalScope::Allowlist
-            ) {
-                "\n[红线] 提权单不支持会话授权/白名单档，已按本次执行"
-            } else {
-                ""
-            };
+            let downgrade_note =
+                if matches!(decision, ApprovalScope::Session | ApprovalScope::Allowlist) {
+                    "\n[红线] 提权单不支持会话授权/白名单档，已按本次执行"
+                } else {
+                    ""
+                };
             req.result = Some(
                 format!("[root 执行] {eff_cmd}\n{}{downgrade_note}", text)
                     .chars()
@@ -328,7 +662,14 @@ impl Core {
             .unwrap_or_else(|| req.command.clone());
         let workspace = self.approved_command_root(&req)?;
         let opts = self.orchestrator().tools.shell_opts(&eff_cmd);
-        let out = crate::tools::execute_shell_with(&workspace, &eff_cmd, 300, &opts).await;
+        let out = crate::tools::execute_shell_for_session(
+            &workspace,
+            &eff_cmd,
+            300,
+            &opts,
+            &req.session_id,
+        )
+        .await;
         req.status = if out.ok {
             "executed".into()
         } else {
@@ -410,11 +751,26 @@ impl Core {
     ) -> anyhow::Result<ApprovalRequest> {
         anyhow::ensure!(editor_git_args_valid(&args), "不支持的 Git 审批动作");
         let root = root.canonicalize()?;
-        let command = format!("[git] {} · git {}", root.display(), args.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(" "));
+        let command = format!(
+            "[git] {} · git {}",
+            root.display(),
+            args.iter()
+                .map(|a| format!("{a:?}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         let req = ApprovalRequest {
-            id: crate::types::new_id(), session_id: String::new(), node_id: None,
-            agent_id: "desktop".into(), command, status: "pending".into(), result: None,
-            created_at: now_iso(), decided_at: None, origin_user: None, origin_role: None,
+            id: crate::types::new_id(),
+            session_id: String::new(),
+            node_id: None,
+            agent_id: "desktop".into(),
+            command,
+            status: "pending".into(),
+            result: None,
+            created_at: now_iso(),
+            decided_at: None,
+            origin_user: None,
+            origin_role: None,
             meta_json: Some(serde_json::to_string(&EditorGitAction { root, args })?),
         };
         self.store.add_approval(&req)?;

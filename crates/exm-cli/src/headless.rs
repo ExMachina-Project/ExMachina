@@ -51,7 +51,10 @@ pub struct HeadlessOutcome {
 
 impl HeadlessOutcome {
     fn usage_err(msg: impl Into<String>) -> Self {
-        HeadlessOutcome { code: 2, error: Some(msg.into()) }
+        HeadlessOutcome {
+            code: 2,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -119,7 +122,10 @@ pub async fn run_headless(core: &Arc<Core>, opts: HeadlessOptions) -> HeadlessOu
     if !collector.finished {
         let msg = "事件流提前结束".to_string();
         return match fmt {
-            OutputFormat::Text => HeadlessOutcome { code: 1, error: Some(msg) },
+            OutputFormat::Text => HeadlessOutcome {
+                code: 1,
+                error: Some(msg),
+            },
             _ => render_failure(fmt, &sid, msg),
         };
     }
@@ -127,7 +133,10 @@ pub async fn run_headless(core: &Arc<Core>, opts: HeadlessOptions) -> HeadlessOu
     if let Some(errmsg) = &collector.error {
         let msg = errmsg.clone();
         return match fmt {
-            OutputFormat::Text => HeadlessOutcome { code: 1, error: Some(msg) },
+            OutputFormat::Text => HeadlessOutcome {
+                code: 1,
+                error: Some(msg),
+            },
             _ => render_failure(fmt, &sid, msg),
         };
     }
@@ -138,7 +147,10 @@ pub async fn run_headless(core: &Arc<Core>, opts: HeadlessOptions) -> HeadlessOu
     match fmt {
         OutputFormat::Text => {
             println!("{text}");
-            HeadlessOutcome { code: 0, error: None }
+            HeadlessOutcome {
+                code: 0,
+                error: None,
+            }
         }
         OutputFormat::Json => {
             let mut payload = serde_json::json!({
@@ -153,11 +165,17 @@ pub async fn run_headless(core: &Arc<Core>, opts: HeadlessOptions) -> HeadlessOu
                 });
             }
             println!("{}", serde_json::to_string(&payload).unwrap_or_default());
-            HeadlessOutcome { code: 0, error: None }
+            HeadlessOutcome {
+                code: 0,
+                error: None,
+            }
         }
         OutputFormat::StreamJson => {
             // turn.end 终态行已在 consume 内打印（含收束正文）
-            HeadlessOutcome { code: 0, error: None }
+            HeadlessOutcome {
+                code: 0,
+                error: None,
+            }
         }
     }
 }
@@ -165,7 +183,10 @@ pub async fn run_headless(core: &Arc<Core>, opts: HeadlessOptions) -> HeadlessOu
 /// 失败终态按格式分流输出（core.chat 报错 / 超时 / run.error 共用）
 fn render_failure(fmt: OutputFormat, sid: &str, msg: String) -> HeadlessOutcome {
     match fmt {
-        OutputFormat::Text => HeadlessOutcome { code: 1, error: Some(msg) },
+        OutputFormat::Text => HeadlessOutcome {
+            code: 1,
+            error: Some(msg),
+        },
         OutputFormat::Json => {
             let payload = serde_json::json!({
                 "sessionId": sid,
@@ -173,7 +194,10 @@ fn render_failure(fmt: OutputFormat, sid: &str, msg: String) -> HeadlessOutcome 
                 "error": msg,
             });
             println!("{}", serde_json::to_string(&payload).unwrap_or_default());
-            HeadlessOutcome { code: 1, error: None }
+            HeadlessOutcome {
+                code: 1,
+                error: None,
+            }
         }
         OutputFormat::StreamJson => {
             let payload = serde_json::json!({
@@ -182,7 +206,10 @@ fn render_failure(fmt: OutputFormat, sid: &str, msg: String) -> HeadlessOutcome 
                 "error": msg,
             });
             println!("{}", serde_json::to_string(&payload).unwrap_or_default());
-            HeadlessOutcome { code: 1, error: None }
+            HeadlessOutcome {
+                code: 1,
+                error: None,
+            }
         }
     }
 }
@@ -247,7 +274,11 @@ impl EventCollector {
         }
         match evt.kind.as_str() {
             "orchestrator.token" if self.stream() => {
-                let delta = evt.payload.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                let delta = evt
+                    .payload
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 self.token_buf.push_str(delta);
                 if self.token_window.elapsed().as_millis() as u64 >= TOKEN_AGG_MS {
                     if let Some(l) = self.take_token_line() {
@@ -332,7 +363,9 @@ impl EventCollector {
             return None;
         }
         let text = std::mem::take(&mut self.token_buf);
-        Some(Self::line(&serde_json::json!({ "type": "token", "text": text })))
+        Some(Self::line(
+            &serde_json::json!({ "type": "token", "text": text }),
+        ))
     }
 
     /// 工具/收束事件前清空 token 缓冲（保序：缓冲内文本先于后续事件行）
@@ -443,7 +476,10 @@ mod tests {
     fn 输出格式_解析三态与非法值() {
         assert_eq!(OutputFormat::parse("text").unwrap(), OutputFormat::Text);
         assert_eq!(OutputFormat::parse("json").unwrap(), OutputFormat::Json);
-        assert_eq!(OutputFormat::parse("stream-json").unwrap(), OutputFormat::StreamJson);
+        assert_eq!(
+            OutputFormat::parse("stream-json").unwrap(),
+            OutputFormat::StreamJson
+        );
         assert!(OutputFormat::parse("yaml").is_err(), "非法格式必须报错");
     }
 

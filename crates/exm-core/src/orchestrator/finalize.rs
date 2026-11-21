@@ -65,7 +65,7 @@ impl Orchestrator {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let messages = vec![
+        let mut messages = vec![
             ChatMessage::system(system_prompt),
             ChatMessage::user(format!(
                 "【收束请求】\n目标：{}\n验收：{}\n\n各节点回流摘要：\n{digest}\n\n【要求】综合各节点结果，直接向用户交付最终回复。表达形态完全由上方系统提示决定（IM 会话 = 聊天消息体：结论先行、几句话说清、禁止标题/清单/分节；控制台 = 正常陈述文）。任务有缺口就说明缺什么、卡在哪；完成就交付结果本身。禁止输出「任务边界/已启用链路/关键结论/冲突裁决/残余未知/最终交付」这类审计分节结构——那是内部过程，不是用户要看的回复。",
@@ -73,24 +73,48 @@ impl Orchestrator {
                 plan.acceptance.join("；")
             )),
         ];
-        // 收束阶段：输出为用户面最终结果，流式可见
-        match self.call_orch_stream(session_id, &messages, true).await {
-            Ok(text) => Ok(text),
-            Err(e) => {
-                if !reports.values().any(|report|matches!(report.status,SyncStatus::Done)) {
-                    return Err(e.context("收束失败，且没有已完成的节点结果"));
+        // 收束阶段是最后一个安全检查点：模型等待期间到达的 steering 会追加为
+        // 新上下文并重试收束；队列为空时以同一状态锁关闭本轮 admission，避免
+        // “回执已接收、但轮次刚好结束而输入没有生效”的竞态。
+        for _ in 0..=32 {
+            let text = match self.call_orch_stream(session_id, &messages, true).await {
+                Ok(text) => text,
+                Err(e) => {
+                    if !reports.values().any(|report|matches!(report.status,SyncStatus::Done)) {
+                        return Err(e.context("收束失败，且没有已完成的节点结果"));
+                    }
+                    // 降级路径：候选链耗尽 / 网络断等导致收束 LLM 不可用时，不把本轮直接判死——
+                    // 各节点已回流的真实成果（摘要 / 阻塞项 / 状态）改用确定性聚合收口，
+                    // 失败原因显式注入残余未知段，用户仍能拿到可执行的结构化结论。
+                    eprintln!("[orchestrator] 收束 LLM 调用失败，降级为结构化回流聚合: {e}");
+                    self.emit(
+                        session_id,
+                        "converge.fallback",
+                        serde_json::json!({ "reason": e.to_string() }),
+                    );
+                    return Ok(fallback_converge_text(plan, reports, graph, &e.to_string()));
                 }
-                // 降级路径：候选链耗尽 / 网络断等导致收束 LLM 不可用时，不把本轮直接判死——
-                // 各节点已回流的真实成果（摘要 / 阻塞项 / 状态）改用确定性聚合收口，
-                // 失败原因显式注入残余未知段，用户仍能拿到可执行的结构化结论。
-                eprintln!("[orchestrator] 收束 LLM 调用失败，降级为结构化回流聚合: {e}");
-                self.emit(
-                    session_id,
-                    "converge.fallback",
-                    serde_json::json!({ "reason": e.to_string() }),
-                );
-                Ok(fallback_converge_text(plan, reports, graph, &e.to_string()))
+            };
+            let pending = crate::round_trace::take_or_close_steering(session_id);
+            if pending.is_empty() {
+                return Ok(text);
             }
+            let ids: Vec<String> = pending.iter().map(|input| input.id.clone()).collect();
+            let body = pending
+                .iter()
+                .map(|input| format!("#{}：{}", input.sequence, input.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.emit(
+                session_id,
+                "steering.applied",
+                serde_json::json!({ "status": "steering_applied", "steeringIds": ids, "checkpoint": "convergence" }),
+            );
+            messages.push(ChatMessage::assistant(text));
+            messages.push(ChatMessage::user(format!(
+                "【运行中 steering｜已到安全检查点】请在当前任务结果收束前处理以下用户补充方向；如与已完成的安全写入冲突，不要假称已撤销：\n{body}"
+            )));
         }
+        anyhow::bail!("收束期间 steering 输入过于频繁，已达到安全收束上限")
     }
 }

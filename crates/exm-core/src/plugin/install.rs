@@ -463,26 +463,7 @@ fn validate_lenient(root: &Path) -> Result<PluginManifest, String> {
     let Some(m) = super::read_manifest(root) else {
         return Err("plugin.json 不可读或不可解析".into());
     };
-    if !m.valid_id() {
-        return Err(format!("id 不合法：{:?}", m.id));
-    }
-    if !m.has_any_capability() {
-        return Err("未声明任何能力（tools/channel/watch/resources 至少一类）".into());
-    }
-    let host = super::host_version();
-    if !m.exm_min.trim().is_empty() && !super::version_ok(&m.exm_min, &host) {
-        return Err(format!("需要宿主 ≥ {}，当前 {}", m.exm_min, host));
-    }
-    if let Some(p) = &m.process {
-        if p.command.iter().any(|c| c.contains("..")) {
-            return Err("process.command 不允许包含 ..".into());
-        }
-    }
-    for t in &m.tools {
-        if !t.valid() {
-            return Err(format!("内联工具名不合法：{:?}", t.name));
-        }
-    }
+    validate(&m, &m.id, &super::host_version())?;
     Ok(m)
 }
 

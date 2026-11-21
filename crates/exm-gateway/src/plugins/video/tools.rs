@@ -11,10 +11,10 @@
 use super::*;
 use exm_core::config::CustomTool;
 use exm_core::tools::{dynamic_exec_images, DynamicToolExec};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use parking_lot::Mutex;
-use std::sync::{Arc};
+use std::sync::Arc;
 
 /// 单个观看会话的运行期状态（工具间共享：已见评论/视频/步数/配额引用）
 #[derive(Default)]
@@ -36,9 +36,10 @@ pub(crate) struct WatchSession {
 
 impl WatchSession {
     fn cached_subtitle(&mut self, channel: &str, video: &str) -> Option<Arc<BiliSubtitleSnapshot>> {
-        let i = self.subtitle_snapshots.iter().position(|s| {
-            s.channel_id == channel && matches_bvid(Some(&s.video_id), video)
-        })?;
+        let i = self
+            .subtitle_snapshots
+            .iter()
+            .position(|s| s.channel_id == channel && matches_bvid(Some(&s.video_id), video))?;
         let snapshot = self.subtitle_snapshots.remove(i);
         self.subtitle_snapshots.push(snapshot.clone());
         Some(snapshot)
@@ -430,7 +431,12 @@ fn build_injections_for(
     out
 }
 
-fn build_exec(core: Arc<Core>, ch: Channel, name: String, trigger: WatchTrigger) -> DynamicToolExec {
+fn build_exec(
+    core: Arc<Core>,
+    ch: Channel,
+    name: String,
+    trigger: WatchTrigger,
+) -> DynamicToolExec {
     // 执行闭包：路由到具体工具实现；错误统一为结构化文本（工具结果 ok=false）
     dynamic_exec_images(move |_agent, session, args| {
         let core = core.clone();
@@ -438,15 +444,10 @@ fn build_exec(core: Arc<Core>, ch: Channel, name: String, trigger: WatchTrigger)
         let name = name.clone();
         let session = session.to_string();
         async move {
-            with_live_guard(
-                &core,
-                &ch,
-                trigger,
-                async {
-                    let st = session_state(&session);
-                    dispatch_tool(&core, &name, &ch, &session, &st, trigger, args).await
-                },
-            )
+            with_live_guard(&core, &ch, trigger, async {
+                let st = session_state(&session);
+                dispatch_tool(&core, &name, &ch, &session, &st, trigger, args).await
+            })
             .await
         }
     })
@@ -588,7 +589,9 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
             let desc = exm_core::tools::wrap_external_for(
                 "视频简介",
                 &format!("bilibili {video_id}"),
-                d.get("desc").and_then(|v| v.as_str()).unwrap_or("（无简介）"),
+                d.get("desc")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("（无简介）"),
                 4000,
             );
             let out = format!(
@@ -624,18 +627,42 @@ async fn tool_summary(ch: &Channel, video_id: String) -> anyhow::Result<String> 
             let desc = exm_core::tools::wrap_external_for(
                 "视频简介",
                 &format!("youtube {video_id}"),
-                item.pointer("/snippet/description").and_then(|v| v.as_str()).unwrap_or("（无简介）"),
+                item.pointer("/snippet/description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("（无简介）"),
                 4000,
             );
             let out = format!(
                 "标题：{}\n频道：{}\n时长：{}\n播放：{}\n评论：{}\n点赞：{}\n发布：{}\n\n{desc}",
-                placeholder(item.pointer("/snippet/title").and_then(|v| v.as_str()).unwrap_or("")),
-                placeholder(item.pointer("/snippet/channelTitle").and_then(|v| v.as_str()).unwrap_or("")),
-                placeholder(item.pointer("/contentDetails/duration").and_then(|v| v.as_str()).unwrap_or("")),
-                item.pointer("/statistics/viewCount").and_then(as_u64).unwrap_or(0),
-                item.pointer("/statistics/commentCount").and_then(as_u64).unwrap_or(0),
-                item.pointer("/statistics/likeCount").and_then(as_u64).unwrap_or(0),
-                placeholder(item.pointer("/snippet/publishedAt").and_then(|v| v.as_str()).unwrap_or("")),
+                placeholder(
+                    item.pointer("/snippet/title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                ),
+                placeholder(
+                    item.pointer("/snippet/channelTitle")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                ),
+                placeholder(
+                    item.pointer("/contentDetails/duration")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                ),
+                item.pointer("/statistics/viewCount")
+                    .and_then(as_u64)
+                    .unwrap_or(0),
+                item.pointer("/statistics/commentCount")
+                    .and_then(as_u64)
+                    .unwrap_or(0),
+                item.pointer("/statistics/likeCount")
+                    .and_then(as_u64)
+                    .unwrap_or(0),
+                placeholder(
+                    item.pointer("/snippet/publishedAt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                ),
             );
             Ok(out)
         }
@@ -668,8 +695,12 @@ impl BiliSubtitleSnapshot {
 fn matches_bvid(actual: Option<&str>, expected: &str) -> bool {
     let Some(actual) = actual else { return false };
     match (
-        actual.strip_prefix("BV").or_else(|| actual.strip_prefix("bv")),
-        expected.strip_prefix("BV").or_else(|| expected.strip_prefix("bv")),
+        actual
+            .strip_prefix("BV")
+            .or_else(|| actual.strip_prefix("bv")),
+        expected
+            .strip_prefix("BV")
+            .or_else(|| expected.strip_prefix("bv")),
     ) {
         (Some(a), Some(b)) => a == b,
         _ => actual == expected,
@@ -682,35 +713,54 @@ fn bili_video_identity(view: &Value, video_id: &str) -> anyhow::Result<(u64, u64
         matches_bvid(view.pointer("/data/bvid").and_then(Value::as_str), video_id),
         "来源视频不匹配（请求 {video_id}），已拒绝将响应作为观看依据"
     );
-    let cid = view.pointer("/data/pages/0/cid").and_then(as_u64)
+    let cid = view
+        .pointer("/data/pages/0/cid")
+        .and_then(as_u64)
         .or_else(|| view.pointer("/data/cid").and_then(as_u64))
         .filter(|cid| *cid > 0)
         .ok_or_else(|| anyhow::anyhow!("无法取得视频 cid"))?;
-    let duration = view.pointer("/data/pages/0/duration").and_then(as_u64)
+    let duration = view
+        .pointer("/data/pages/0/duration")
+        .and_then(as_u64)
         .or_else(|| view.pointer("/data/duration").and_then(as_u64))
         .filter(|duration| *duration > 0)
         .ok_or_else(|| anyhow::anyhow!("无法取得视频时长，不能校验观看材料来源"))?;
     Ok((cid, duration))
 }
 
-fn subtitle_track<'a>(player: &'a Value, video_id: &str, cid: u64) -> anyhow::Result<Option<&'a Value>> {
+fn subtitle_track<'a>(
+    player: &'a Value,
+    video_id: &str,
+    cid: u64,
+) -> anyhow::Result<Option<&'a Value>> {
     // 风控/鉴权错误不能被吞成「无字幕」，否则模型会把取材失败当成正常无轨。
     api_ok(player)?;
     anyhow::ensure!(
-        matches_bvid(player.pointer("/data/bvid").and_then(Value::as_str), video_id)
-            && player.pointer("/data/cid").and_then(as_u64) == Some(cid),
+        matches_bvid(
+            player.pointer("/data/bvid").and_then(Value::as_str),
+            video_id
+        ) && player.pointer("/data/cid").and_then(as_u64) == Some(cid),
         "字幕播放器响应的视频/cid 不匹配（请求 {video_id}，cid={cid}），已拒绝作为观看依据"
     );
-    let subs = player.pointer("/data/subtitle/subtitles").and_then(Value::as_array)
+    let subs = player
+        .pointer("/data/subtitle/subtitles")
+        .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("平台响应缺少字幕轨列表，无法确认是否有字幕"))?;
-    Ok(subs.iter().find(|s| {
-        s.get("lan").and_then(Value::as_str).is_some_and(|lan| lan.contains("zh"))
-    }).or_else(|| subs.first()))
+    Ok(subs
+        .iter()
+        .find(|s| {
+            s.get("lan")
+                .and_then(Value::as_str)
+                .is_some_and(|lan| lan.contains("zh"))
+        })
+        .or_else(|| subs.first()))
 }
 
 fn validate_subtitle_lines(lines: &[Value], duration: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
-        lines.iter().any(|line| line.get("content").and_then(Value::as_str)
+        lines.iter().any(|line| line
+            .get("content")
+            .and_then(Value::as_str)
             .is_some_and(|content| !content.trim().is_empty())),
         "字幕正文没有可用文本，不能作为观看依据"
     );
@@ -743,11 +793,13 @@ mod manual_watch_tests {
         serde_json::from_value(json!({
             "id": "manual-bili", "type": "bilibili", "enabled": true,
             "createdAt": "", "config": { "watch": "false", "comment": "false", "reply": "false" }
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     fn core() -> Arc<Core> {
-        let dir = std::env::temp_dir().join(format!("exm-manual-video-{}", exm_core::types::new_id()));
+        let dir =
+            std::env::temp_dir().join(format!("exm-manual-video-{}", exm_core::types::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = exm_core::config::ExmConfig::load(&dir);
         cfg.use_mock = true;
@@ -763,10 +815,14 @@ mod manual_watch_tests {
             duration: 335,
             track_id: track.into(),
             language: "zh-CN".into(),
-            lines: (0..line_count).map(|i| json!({
-                "from": i as f64 / 2.0, "to": (i + 1) as f64 / 2.0,
-                "content": format!("{track} 第{i}句"),
-            })).collect(),
+            lines: (0..line_count)
+                .map(|i| {
+                    json!({
+                        "from": i as f64 / 2.0, "to": (i + 1) as f64 / 2.0,
+                        "content": format!("{track} 第{i}句"),
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -784,8 +840,14 @@ mod manual_watch_tests {
             "pages": [{"cid": CID, "duration": 335}]
         }});
         assert_eq!(bili_video_identity(&view, VIDEO).unwrap(), (CID, 335));
-        assert_eq!(bili_video_identity(&view, "bv1qDHF69EiZ").unwrap(), (CID, 335));
-        assert!(bili_video_identity(&view, "BV1qdHF69EiZ").is_err(), "BV 号主体大小写不能混同");
+        assert_eq!(
+            bili_video_identity(&view, "bv1qDHF69EiZ").unwrap(),
+            (CID, 335)
+        );
+        assert!(
+            bili_video_identity(&view, "BV1qdHF69EiZ").is_err(),
+            "BV 号主体大小写不能混同"
+        );
         assert!(bili_video_identity(&view, "BV1xx411c7mD").is_err());
         let player = json!({"code": 0, "data": {
             "bvid": VIDEO, "cid": CID,
@@ -793,12 +855,19 @@ mod manual_watch_tests {
                 {"id_str": "en", "lan": "en"}, {"id_str": "zh", "lan": "zh-CN"}
             ]}
         }});
-        assert_eq!(subtitle_track(&player, VIDEO, CID).unwrap().unwrap()["id_str"], "zh");
+        assert_eq!(
+            subtitle_track(&player, VIDEO, CID).unwrap().unwrap()["id_str"],
+            "zh"
+        );
         assert!(subtitle_track(&player, VIDEO, CID + 1).is_err());
         assert!(subtitle_track(&player, "BV1xx411c7mD", CID).is_err());
         let error = subtitle_track(&json!({"code": -352, "message": "风控"}), VIDEO, CID)
-            .unwrap_err().to_string();
-        assert!(error.contains("code=-352"), "平台失败不能伪报无字幕：{error}");
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("code=-352"),
+            "平台失败不能伪报无字幕：{error}"
+        );
         let no_tracks = json!({"code": 0, "data": {
             "bvid": VIDEO, "cid": CID, "subtitle": {"subtitles": []}
         }});
@@ -807,12 +876,19 @@ mod manual_watch_tests {
 
     #[test]
     fn manual_subtitle_拒绝超过335秒的视频串轨材料() {
-        let valid = vec![json!({"from": 0.0, "to": 2.0, "content": "开场"}),
-            json!({"from": 333.0, "to": 335.8, "content": "结束"})];
+        let valid = vec![
+            json!({"from": 0.0, "to": 2.0, "content": "开场"}),
+            json!({"from": 333.0, "to": 335.8, "content": "结束"}),
+        ];
         assert!(validate_subtitle_lines(&valid, 335).is_ok());
         let mismatch = vec![json!({"from": 393.0, "to": 438.0, "content": "其他视频的解说"})];
-        let error = validate_subtitle_lines(&mismatch, 335).unwrap_err().to_string();
-        assert!(error.contains("视频 335 秒") && error.contains("已拒绝作为观看依据"), "{error}");
+        let error = validate_subtitle_lines(&mismatch, 335)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("视频 335 秒") && error.contains("已拒绝作为观看依据"),
+            "{error}"
+        );
         for line in [
             json!({"from": -1.0, "to": 2.0, "content": "异常"}),
             json!({"from": 2.0, "to": 1.0, "content": "异常"}),
@@ -831,9 +907,15 @@ mod manual_watch_tests {
         let changed = st.pin_subtitle(snapshot(VIDEO, "changed", 300));
         assert!(Arc::ptr_eq(&first, &changed), "不能随翻页换轨道和总页数");
         let page = changed.page(2).unwrap();
-        assert!(page.contains("第 2/4 页") && page.contains("original 第120句"), "{page}");
+        assert!(
+            page.contains("第 2/4 页") && page.contains("original 第120句"),
+            "{page}"
+        );
         assert!(!page.contains("changed"));
-        assert!(page.contains(VIDEO) && page.contains(&format!("cid={CID}")), "应带来源标识");
+        assert!(
+            page.contains(VIDEO) && page.contains(&format!("cid={CID}")),
+            "应带来源标识"
+        );
         assert!(st.cached_subtitle("manual-bili", "bv1qDHF69EiZ").is_some());
         assert!(st.cached_subtitle("manual-bili", "BV1qdHF69EiZ").is_none());
         assert!(st.cached_subtitle("manual-bili", "BV1xx411c7mD").is_none());
@@ -866,7 +948,10 @@ mod manual_watch_tests {
         disabled.enabled = false;
         platform::save_channels(&core, &[disabled]).unwrap();
         reconcile_ondemand(&core);
-        assert!(new.dynamic_tool_names().iter().all(|name| !name.starts_with("video__")));
+        assert!(new
+            .dynamic_tool_names()
+            .iter()
+            .all(|name| !name.starts_with("video__")));
     }
 
     #[tokio::test]
@@ -876,17 +961,35 @@ mod manual_watch_tests {
         platform::save_channels(&core, &[ch]).unwrap();
         reconcile_ondemand(&core);
         let sid = format!("manual-subtitle-{}", exm_core::types::new_id());
-        session_state(&sid).lock().pin_subtitle(snapshot(VIDEO, "manual", 400));
-        let (_, exec) = core.orchestrator().tools.dynamic_tool("video__subtitle").unwrap();
+        session_state(&sid)
+            .lock()
+            .pin_subtitle(snapshot(VIDEO, "manual", 400));
+        let (_, exec) = core
+            .orchestrator()
+            .tools
+            .dynamic_tool("video__subtitle")
+            .unwrap();
         for page in [1, 2] {
             let output = exec("machina", &sid, json!({"videoId": VIDEO, "page": page})).await;
             assert!(output.ok, "watch=false 不能禁用手动观看：{}", output.text);
-            assert!(output.text.contains(&format!("第 {page}/4 页")), "{}", output.text);
+            assert!(
+                output.text.contains(&format!("第 {page}/4 页")),
+                "{}",
+                output.text
+            );
             assert!(output.images.is_empty());
         }
-        let different = exec("machina", &sid, json!({"videoId": "BV1xx411c7mD", "page": 2})).await;
-        assert!(!different.ok && different.text.contains("同一个 videoId"),
-            "不能把别的视频当成目标视频的第 2 页：{}", different.text);
+        let different = exec(
+            "machina",
+            &sid,
+            json!({"videoId": "BV1xx411c7mD", "page": 2}),
+        )
+        .await;
+        assert!(
+            !different.ok && different.text.contains("同一个 videoId"),
+            "不能把别的视频当成目标视频的第 2 页：{}",
+            different.text
+        );
         let mut replacement = channel();
         replacement.id = "manual-bili-replacement".into();
         let mut replaced_snapshot = snapshot(VIDEO, "replacement", 400);
@@ -894,10 +997,17 @@ mod manual_watch_tests {
         session_state(&sid).lock().pin_subtitle(replaced_snapshot);
         platform::save_channels(&core, &[replacement]).unwrap();
         reconcile_ondemand(&core);
-        let (_, new_exec) = core.orchestrator().tools.dynamic_tool("video__subtitle").unwrap();
+        let (_, new_exec) = core
+            .orchestrator()
+            .tools
+            .dynamic_tool("video__subtitle")
+            .unwrap();
         let output = new_exec("machina", &sid, json!({"videoId": VIDEO})).await;
-        assert!(output.ok && output.text.contains("replacement 第0句"),
-            "配置相同但通道 id 更换也必须重绑：{}", output.text);
+        assert!(
+            output.ok && output.text.contains("replacement 第0句"),
+            "配置相同但通道 id 更换也必须重绑：{}",
+            output.text
+        );
         drop_session(&sid);
     }
 
@@ -911,11 +1021,16 @@ mod manual_watch_tests {
             assert_eq!(dir, project.join(".exmachina/video_shots"));
             std::fs::create_dir_all(&dir).unwrap();
             image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3]))
-                .save(dir.join("manual-test.png")).unwrap();
-            let data = core.orchestrator().tools
-                .read_image_data_url(".exmachina/video_shots/manual-test.png").unwrap();
+                .save(dir.join("manual-test.png"))
+                .unwrap();
+            let data = core
+                .orchestrator()
+                .tools
+                .read_image_data_url(".exmachina/video_shots/manual-test.png")
+                .unwrap();
             assert!(data.starts_with("data:image/png;base64,"));
-        }).await;
+        })
+        .await;
     }
 }
 
@@ -954,7 +1069,9 @@ async fn tool_subtitle(
             let Some(track) = subtitle_track(&player, &video_id, cid)? else {
                 return Ok(format!("未获取字幕正文（{video_id}，cid={cid}；当前登录态未返回可用字幕轨）。可用 video__shots 查看抽样画面；简介/弹幕/评论只是辅助资料，不能据此声称已听取对白或完整观看视频。"));
             };
-            let mut url = track.get("subtitle_url").and_then(Value::as_str)
+            let mut url = track
+                .get("subtitle_url")
+                .and_then(Value::as_str)
                 .filter(|url| !url.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("字幕轨缺少正文地址，未获取可核验字幕"))?
                 .to_string();
@@ -977,7 +1094,9 @@ async fn tool_subtitle(
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("字幕正文缺少 body 数组，未获取可核验字幕"))?;
             if lines.is_empty() {
-                return Ok(format!("未获取字幕正文（{video_id}，cid={cid}；字幕轨为空），不能作为已观看依据"));
+                return Ok(format!(
+                    "未获取字幕正文（{video_id}，cid={cid}；字幕轨为空），不能作为已观看依据"
+                ));
             }
             validate_subtitle_lines(&lines, duration)?;
             let snapshot = st.lock().pin_subtitle(BiliSubtitleSnapshot {
@@ -985,10 +1104,17 @@ async fn tool_subtitle(
                 video_id,
                 cid,
                 duration,
-                track_id: track.get("id_str").and_then(Value::as_str).map(str::to_string)
+                track_id: track
+                    .get("id_str")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
                     .or_else(|| track.get("id").and_then(as_u64).map(|id| id.to_string()))
                     .unwrap_or_else(|| "未知".into()),
-                language: track.get("lan").and_then(Value::as_str).unwrap_or("未知").to_string(),
+                language: track
+                    .get("lan")
+                    .and_then(Value::as_str)
+                    .unwrap_or("未知")
+                    .to_string(),
                 lines,
             });
             snapshot.page(page)
@@ -1498,7 +1624,10 @@ async fn tool_uploader(ch: &Channel, uploader_id: String) -> anyhow::Result<Stri
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            let mut out = format!("频道：{name}\n订阅：{subs}\n简介：{}\n\n近期投稿：\n", exm_core::tools::wrap_external_for("频道简介", name, desc, 2000));
+            let mut out = format!(
+                "频道：{name}\n订阅：{subs}\n简介：{}\n\n近期投稿：\n",
+                exm_core::tools::wrap_external_for("频道简介", name, desc, 2000)
+            );
             for x in items.iter().take(8) {
                 let t = x
                     .pointer("/snippet/title")
@@ -1627,8 +1756,10 @@ fn act_gates() -> &'static Mutex<std::collections::HashMap<String, Arc<ActGate>>
 
 fn shots_directory(core: &Core) -> std::path::PathBuf {
     // 与 ToolGateway::read_image_data_url 使用同一生效根，否则项目/组工作区会静默丢图。
-    core.registry.effective_workspace(&core.config().workspace_root)
-        .join(".exmachina").join("video_shots")
+    core.registry
+        .effective_workspace(&core.config().workspace_root)
+        .join(".exmachina")
+        .join("video_shots")
 }
 
 /// video__shots：B 站官方 videoshot 雪碧图抽帧——视觉模态直看画面。
@@ -2145,7 +2276,10 @@ pub(crate) async fn execute_act_payload(core: &Arc<Core>, payload: &str) -> anyh
         .map(str::to_string);
     let trigger = approval_trigger(core, ch, payload, &v)?;
     let ch = live_act_channel(core, ch, trigger, reply_to.is_some())?;
-    anyhow::ensure!(!Settings::from_channel(&ch).dry_run, "演练模式已开启，已取消审批代发");
+    anyhow::ensure!(
+        !Settings::from_channel(&ch).dry_run,
+        "演练模式已开启，已取消审批代发"
+    );
     let ch = &ch;
     let mut item = VideoItem {
         platform: ch.kind.clone(),
@@ -2168,7 +2302,10 @@ pub(crate) async fn execute_act_payload(core: &Arc<Core>, payload: &str) -> anyh
         bili_prime_buvid(ch).await;
     }
     let latest = live_act_channel(core, ch, trigger, reply_to.is_some())?;
-    anyhow::ensure!(!Settings::from_channel(&latest).dry_run, "演练模式已开启，已取消审批代发");
+    anyhow::ensure!(
+        !Settings::from_channel(&latest).dry_run,
+        "演练模式已开启，已取消审批代发"
+    );
     post_comment(&latest, &item, &text, reply_to.as_deref()).await?;
     Ok(format!(
         "已代发（审批通过）：{}",
@@ -2377,9 +2514,9 @@ mod tests {
                 token: None,
                 config: std::collections::BTreeMap::new(),
                 group_gate: None,
-            proactive_reply: None,
-            proactive_rate: None,
-            mention_reply: None,
+                proactive_reply: None,
+                proactive_rate: None,
+                mention_reply: None,
                 capability: "computer".into(),
                 memory_isolation: false,
                 created_at: String::new(),

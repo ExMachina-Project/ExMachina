@@ -51,7 +51,23 @@ impl LocalRegistry {
     /// 装载全局技能包（SKILL.md 优先 + 旧 `*.json` 兼容读，热装载，全体组共用）。
     /// 同 id 同时存在 SKILL.md 与 json 时 SKILL.md 优先（json 视为待迁移旧档）。
     pub fn load_skills(&self) -> anyhow::Result<Vec<crate::types::SkillDef>> {
-        let Some(dir) = self.skills_dir() else {
+        self.load_skills_from(self.skills_dir())
+    }
+
+    /// 命令目录查询不得触发旧技能目录迁移，也不更新使用统计。
+    pub fn load_skills_readonly(&self) -> anyhow::Result<Vec<crate::types::SkillDef>> {
+        let root = self.dir.parent().unwrap_or(&self.dir);
+        let current = root.join("entities/skills");
+        let legacy = root.join("skills");
+        self.load_skills_from(Some(if current.is_dir() || !legacy.is_dir() {
+            current
+        } else {
+            legacy
+        }))
+    }
+
+    fn load_skills_from(&self, dir: Option<PathBuf>) -> anyhow::Result<Vec<crate::types::SkillDef>> {
+        let Some(dir) = dir else {
             return Ok(vec![]);
         };
         if !dir.exists() {
@@ -89,7 +105,7 @@ impl LocalRegistry {
             }
         }
         // 运行期统计（侧车聚合；SKILL.md 保持纯内容，统计不污染可分享的技能文件）
-        let usage = self.skill_usage_map();
+        let usage = Self::skill_usage_map_at(&dir.join(".usage.jsonl"));
         for s in out.iter_mut() {
             if s.source.trim().is_empty() {
                 s.source = "manual".into();
@@ -113,6 +129,10 @@ impl LocalRegistry {
         let Some(path) = self.skill_usage_path() else {
             return Default::default();
         };
+        Self::skill_usage_map_at(&path)
+    }
+
+    fn skill_usage_map_at(path: &Path) -> std::collections::HashMap<String, (u64, u64, String)> {
         let Ok(raw) = std::fs::read_to_string(path) else {
             return Default::default();
         };

@@ -12,10 +12,14 @@ pub mod bus;
 pub mod autonomy;
 pub mod compaction;
 pub mod collaboration;
+pub mod command;
+mod command_extensions;
+pub mod command_service;
 pub mod computer;
 pub mod config;
 pub mod config_schema;
 pub mod cron;
+pub mod execution_context;
 pub mod fsdb;
 pub mod image_stash;
 pub mod inbox_stash;
@@ -44,6 +48,7 @@ pub mod store_sqlite;
 pub mod task_queue;
 pub mod task;
 pub mod todo;
+pub mod workflow;
 pub mod tools;
 pub mod trajectory;
 pub mod trash;
@@ -83,6 +88,14 @@ pub struct AutoAgentState {
 /// tick 状态（周期互不干扰）
 pub struct MetaAgentState {
     pub last_tick_minute: i64,
+}
+
+/// 非中断 steering 的 admission 结果。`Running` 表示文本已进入当前轮次的
+/// 安全检查点暂存；`Idle` 表示没有正在运行的轮次，调用方应按普通输入启动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteeringAdmission {
+    Running,
+    Idle,
 }
 
 /// 核心句柄：所有渠道（CLI / Gateway / 未来桌面端）共用同一实例。
@@ -185,6 +198,14 @@ fn session_send_exec(weak: std::sync::Weak<Core>) -> crate::tools::SessionSendEx
     })
 }
 
+// 初次装配和配置重建共用同一个凭据事实源。
+fn bind_plugin_credentials(gateway: &ToolGateway, config: &Arc<RwLock<Arc<ExmConfig>>>) {
+    let config = config.clone();
+    gateway.set_plugin_credentials_resolver(Box::new(move |pid, key| {
+        config.read().plugins.credentials.get(pid).and_then(|keys| keys.get(key)).cloned()
+    }));
+}
+
 impl Core {
     pub fn create(workspace_root: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         Self::with_config(ExmConfig::load(workspace_root))
@@ -239,25 +260,9 @@ impl Core {
                 gateway.append_plugin_tools(plugin_tools);
             }
         }
-        // 插件凭据解析面回接（T1 `${credentials.<key>}` 变量：查 config.plugins.credentials）。
-        // config 真身 = 共享句柄：Core.config 字段与 gateway 闭包同源——
-        // apply_config 换 config 时两者同步看到新凭据（热更新即时生效，无循环引用）。
         let config_shared: Arc<RwLock<Arc<ExmConfig>>> =
             Arc::new(RwLock::new(Arc::new(cfg.clone())));
-        {
-            let orch = orchestrator.clone();
-            let gateway = orch.tools.clone();
-            let snapshot = config_shared.clone();
-            gateway.set_plugin_credentials_resolver(Box::new(move |pid, key| {
-                snapshot
-                    .read()
-                    .plugins
-                    .credentials
-                    .get(pid)
-                    .and_then(|m| m.get(key))
-                    .cloned()
-            }));
-        }
+        bind_plugin_credentials(&orchestrator.tools, &config_shared);
 
         Ok(Core {
             bus,
@@ -632,7 +637,22 @@ impl Core {
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
         anyhow::ensure!(session.collaboration_id.is_none(), "请从协作群聊向该成员发消息");
         let _round = crate::round_trace::RoundGuard::begin(session_id);
-        self.execute_chat_round(&session, text, scope, origin, agent).await
+        let result = self.execute_chat_round(&session, text, scope, origin, agent).await;
+        let unreconciled = crate::round_trace::take_or_close_steering(session_id);
+        if !unreconciled.is_empty() {
+            let ids: Vec<String> = unreconciled.iter().map(|input| input.id.clone()).collect();
+            self.emit_session_event(
+                session_id,
+                "steering.pending_recovery",
+                serde_json::json!({
+                    "status": "pending_recovery",
+                    "steeringIds": ids,
+                    "count": unreconciled.len(),
+                    "reason": "当前轮次未能到达消费该 steering 的安全检查点",
+                }),
+            );
+        }
+        result
     }
 
     /// Caller owns the session run lock and round trace (including cancellation).
@@ -871,6 +891,7 @@ impl Core {
     /// 所有换 orchestrator 的路径（apply_config / set_remote 等）重建后必调——
     /// 否则进程工具的会话面注册随旧 ToolGateway 一起丢失。
     fn rebind_plugin_tools(&self, orch: &Orchestrator) {
+        bind_plugin_credentials(&orch.tools, &self.config);
         let pm = self.plugins.read().clone();
         // T1：声明式内联工具
         let plugin_tools: Vec<_> = pm

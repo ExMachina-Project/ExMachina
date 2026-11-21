@@ -6,7 +6,10 @@ use super::*;
 
 /// 工作区资产读取（GET /api/asset?path=）：截图 / 工具输出落盘的内联预览。
 /// 安全边界：拒绝绝对路径与 `..`；规范化后必须落在工作区内；扩展名白名单；8MB 上限。
-pub(crate) async fn get_asset(State(st): State<AppState>, Query(q): Query<AssetQuery>) -> impl IntoResponse {
+pub(crate) async fn get_asset(
+    State(st): State<AppState>,
+    Query(q): Query<AssetQuery>,
+) -> impl IntoResponse {
     use axum::response::AppendHeaders;
     // 鉴权纵深（中间件已校验请求头或 /api/asset 的查询参数密钥）：
     // <img> 标签只带查询参数不带头，此处保留查询参数通道校验（与 /ws 同款）；
@@ -24,7 +27,8 @@ pub(crate) async fn get_asset(State(st): State<AppState>, Query(q): Query<AssetQ
     if raw.is_empty() {
         return (StatusCode::BAD_REQUEST, "path 不能为空").into_response();
     }
-    let root = exm_core::workspace::current().unwrap_or_else(|| st.core.config().workspace_root.clone());
+    let root =
+        exm_core::workspace::current().unwrap_or_else(|| st.core.config().workspace_root.clone());
     let candidate = root.join(raw);
     // 词法 + 规范化双重校验（与工具面 resolve_safe 同口径）
     let ok = std::path::Path::new(raw).is_relative()
@@ -90,7 +94,8 @@ pub(crate) async fn download_asset(
     if raw.is_empty() {
         return (StatusCode::BAD_REQUEST, "path 不能为空").into_response();
     }
-    let root = exm_core::workspace::current().unwrap_or_else(|| st.core.config().workspace_root.clone());
+    let root =
+        exm_core::workspace::current().unwrap_or_else(|| st.core.config().workspace_root.clone());
     let candidate = root.join(raw);
     // 路径校验与 /api/asset 同口径（相对路径 + 无 .. + 目标必须已存在于工作区内）
     // 语义区分（REST 通用约定）：不存在的文件 → 404；路径越界（绝对路径/..）→ 403
@@ -102,7 +107,10 @@ pub(crate) async fn download_asset(
     if !candidate.exists() {
         return (StatusCode::NOT_FOUND, "文件不存在").into_response();
     }
-    if !candidate.canonicalize().is_ok_and(|p| p.starts_with(root.canonicalize().unwrap_or(root.clone()))) {
+    if !candidate
+        .canonicalize()
+        .is_ok_and(|p| p.starts_with(root.canonicalize().unwrap_or(root.clone())))
+    {
         return (StatusCode::FORBIDDEN, "路径越界（仅允许工作区内的文件）").into_response();
     }
     let meta = match tokio::fs::metadata(&candidate).await {
@@ -159,7 +167,11 @@ pub(crate) async fn download_asset(
 
 pub(crate) async fn health(State(st): State<AppState>) -> impl IntoResponse {
     let running_sessions = exm_core::round_trace::running_count();
-    let pending_approvals = st.core.approval_list(Some("pending"), 1000).map(|approvals| approvals.len()).unwrap_or(0);
+    let pending_approvals = st
+        .core
+        .approval_list(Some("pending"), 1000)
+        .map(|approvals| approvals.len())
+        .unwrap_or(0);
     Json(json!({
         "ok": true,
         "mock": st.core.is_mock(),

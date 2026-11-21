@@ -2,7 +2,7 @@
 //! take_reply 推送摘要 / ok:no 裁决权限 / 无关方裁决被拒 / 非 flow 会话天然隔离。
 #[cfg(test)]
 mod channel_approval_tests {
-    use crate::platform::channel::{ChannelRun, parse_approval_directive};
+    use crate::platform::channel::{parse_approval_directive, ChannelRun};
     use exm_core::types::{now_iso, ApprovalRequest, CoreEvent};
 
     fn core() -> exm_core::Core {
@@ -38,7 +38,12 @@ mod channel_approval_tests {
     }
 
     /// 审批单工厂：指定 origin 用户（member 会话来源标记形态）
-    fn ap(core: &exm_core::Core, sid: &str, cmd: &str, origin_user: Option<&str>) -> ApprovalRequest {
+    fn ap(
+        core: &exm_core::Core,
+        sid: &str,
+        cmd: &str,
+        origin_user: Option<&str>,
+    ) -> ApprovalRequest {
         let ap = ApprovalRequest {
             id: exm_core::types::new_id()[..8].to_string(),
             session_id: sid.into(),
@@ -103,7 +108,10 @@ mod channel_approval_tests {
             serde_json::json!({ "approvalId": "abcd1234", "command": long_cmd, "agentId": "a1" }),
         );
         let text = run.take_reply(&e, 500).expect("应产生推送文本");
-        assert!(text.contains("…（命令已截断）"), "超长命令应注明截断: {text}");
+        assert!(
+            text.contains("…（命令已截断）"),
+            "超长命令应注明截断: {text}"
+        );
         assert!(text.chars().count() <= 500, "推送文本不超平台上限");
     }
 
@@ -127,7 +135,10 @@ mod channel_approval_tests {
     // ---------------- run() 裁决 ----------------
 
     /// 裁决后回帖经 run.error 事件;本工具收集该事件文本
-    async fn setup_run(admins: Vec<&str>, external: &str) -> (ChannelRun, tokio::sync::broadcast::Receiver<CoreEvent>) {
+    async fn setup_run(
+        admins: Vec<&str>,
+        external: &str,
+    ) -> (ChannelRun, tokio::sync::broadcast::Receiver<CoreEvent>) {
         let core = core();
         let c = ch(admins);
         // 通道配置落盘（跨通道 admins 判定读 data_dir/channels.json）
@@ -164,7 +175,11 @@ mod channel_approval_tests {
         run.run(&format!("ok:{}", ap.id)).await;
         let decided = core.approval_get(&ap.id).unwrap().unwrap();
         assert_eq!(decided.status, "executed", "origin 用户应能批准");
-        assert!(decided.result.as_deref().unwrap_or("").contains("channel-approve"));
+        assert!(decided
+            .result
+            .as_deref()
+            .unwrap_or("")
+            .contains("channel-approve"));
         // 回帖包含裁决结果
         let msg = next_reply(&mut rx).await;
         assert!(msg.contains("已批准"), "回帖应含裁决结果: {msg}");
@@ -219,7 +234,11 @@ mod channel_approval_tests {
         // 前 4 位作为输入（真前缀,非补全）
         run.run(&format!("ok:{}", &ap.id[..4])).await;
         let decided = core.approval_get(&ap.id).unwrap().unwrap();
-        assert_eq!(decided.status, "executed", "唯一前缀命中应裁决（完整单号 {} 的前 4 位）", ap.id);
+        assert_eq!(
+            decided.status, "executed",
+            "唯一前缀命中应裁决（完整单号 {} 的前 4 位）",
+            ap.id
+        );
         let _ = next_reply(&mut rx).await;
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
@@ -279,10 +298,10 @@ mod channel_approval_tests {
             })
             .unwrap();
         // 新回帖契约（重复回复根治）：收束事件只对本轮有效 = run() 已返回
-    //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
-    run.round_done
-        .store(true, std::sync::atomic::Ordering::Release);
-    core.events
+        //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
+        run.round_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        core.events
             .send(CoreEvent {
                 kind: "run.finished".into(),
                 session_id: sid.clone(),
@@ -351,10 +370,10 @@ mod channel_approval_tests {
             })
             .unwrap();
         // 新回帖契约（重复回复根治）：收束事件只对本轮有效 = run() 已返回
-    //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
-    run.round_done
-        .store(true, std::sync::atomic::Ordering::Release);
-    core.events
+        //（round_done 置位）后到达。测试直接注入事件，须先模拟轮次完成。
+        run.round_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        core.events
             .send(CoreEvent {
                 kind: "run.finished".into(),
                 session_id: sid.clone(),
@@ -456,8 +475,7 @@ mod reply_speaker_tests {
         let reply2 = spawn_reply(&run2, rx2, 500, mk_send(sent.clone()), |_i| async { false });
 
         // 前一轮（任务①的轮次）收束：事件广播，两个任务都收得到
-        run1
-            .round_done
+        run1.round_done
             .store(true, std::sync::atomic::Ordering::Release);
         core.events
             .send(CoreEvent {
@@ -468,8 +486,7 @@ mod reply_speaker_tests {
             .unwrap();
 
         // 第二轮随后收束
-        run2
-            .round_done
+        run2.round_done
             .store(true, std::sync::atomic::Ordering::Release);
         core.events
             .send(CoreEvent {
@@ -485,15 +502,12 @@ mod reply_speaker_tests {
         .await;
 
         let sent = sent.lock().unwrap();
-        let count_first = sent
-            .iter()
-            .filter(|t| t.contains("第一轮答复"))
-            .count();
-        let count_second = sent
-            .iter()
-            .filter(|t| t.contains("第二轮答复"))
-            .count();
-        assert_eq!(count_first, 1, "前一轮答复只发一遍（重复回复根治）: {sent:?}");
+        let count_first = sent.iter().filter(|t| t.contains("第一轮答复")).count();
+        let count_second = sent.iter().filter(|t| t.contains("第二轮答复")).count();
+        assert_eq!(
+            count_first, 1,
+            "前一轮答复只发一遍（重复回复根治）: {sent:?}"
+        );
         assert_eq!(count_second, 1, "第二轮答复不丢失: {sent:?}");
         drop(sent);
         let ws = core.config().workspace_root.clone();

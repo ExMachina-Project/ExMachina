@@ -4,14 +4,68 @@ use super::*;
 
 // ---------------------------------------------------------------- 面板入口
 
-/// 全部面板命令（用于未知命令纠错建议）
-const COMMANDS: &[&str] = &[
-    "help", "exit", "quit", "version", "workspace", "clear", "status", "quiet", "theme", "caps",
-    "copy", "new",
-    "resume", "sessions", "session", "del", "tasks", "stop", "undo", "fork", "flows", "target", "singles",
-    "groups", "group", "agents", "agent", "persona", "model", "config", "memory", "skills", "cron",
-    "approvals", "approve", "deny", "checkpoints", "restore", "doctor",
+/// Panel-only commands remain local presentation adapters; shared business commands are
+/// sourced from exm-core's canonical command directory.
+const PANEL_ONLY_COMMANDS: &[&str] = &[
+    "exit",
+    "quit",
+    "version",
+    "workspace",
+    "clear",
+    "quiet",
+    "theme",
+    "caps",
+    "copy",
+    "del",
+    "tasks",
+    "undo",
+    "fork",
+    "flows",
+    "target",
+    "session",
+    "singles",
+    "groups",
+    "group",
+    "agents",
+    "agent",
+    "persona",
+    "memory",
+    "checkpoints",
+    "restore",
+    "doctor",
+    "models",
+    "mem",
+    "checkpoint",
+    "t",
+    "pwd",
+    "cls",
+    "h",
+    "q",
 ];
+
+/// 从 Core 规范目录构造面板可发现命令集合，再并入纯 UI/兼容别名。
+/// 目录名称以规范命令及显式 alias 为源，不再维护第二份业务命令清单。
+pub(crate) fn panel_command_names() -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    if let Ok(registry) = exm_core::command::CommandRegistry::with_builtins() {
+        for descriptor in registry.descriptors() {
+            names.insert(
+                descriptor
+                    .name
+                    .split('.')
+                    .next()
+                    .unwrap_or(&descriptor.name)
+                    .to_string(),
+            );
+            for alias in &descriptor.aliases {
+                names.insert(alias.clone());
+            }
+        }
+    }
+    names.extend(PANEL_ONLY_COMMANDS.iter().map(|name| (*name).to_string()));
+    names.insert("help".into());
+    names.into_iter().filter(|name| !name.is_empty()).collect()
+}
 
 /// 流列表统一排序（最后活跃倒序；/flows 与子命令序号寻址一致性由同一函数保证）
 pub(crate) fn sorted_flows(core: &exm_core::Core) -> Vec<exm_core::types::ChannelFlow> {
@@ -23,11 +77,10 @@ pub(crate) fn sorted_flows(core: &exm_core::Core) -> Vec<exm_core::types::Channe
 /// 流归属 scope（与 REST /channels/flows/:id/sessions 同口径）：通道绑定组 →
 /// 缺省回落默认单智能体（machina 优先），再缺省激活组
 pub(crate) fn flow_scope(core: &exm_core::Core, channel_id: &str) -> String {
-    let channels: Option<Vec<serde_json::Value>> = std::fs::read_to_string(
-        core.config().data_dir.join("channels.json"),
-    )
-    .ok()
-    .and_then(|s| serde_json::from_str(&s).ok());
+    let channels: Option<Vec<serde_json::Value>> =
+        std::fs::read_to_string(core.config().data_dir.join("channels.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
     if let Some(group) = channels
         .unwrap_or_default()
         .iter()
@@ -47,22 +100,24 @@ pub(crate) fn flow_scope(core: &exm_core::Core, channel_id: &str) -> String {
 }
 
 /// 未知命令 → 最接近的命令（前缀优先，其次编辑距离 ≤2）
-pub(crate) fn suggest_command(input: &str) -> Option<&'static str> {    let q = input.trim().to_lowercase();
+pub(crate) fn suggest_command(input: &str) -> Option<String> {
+    let q = input.trim().to_lowercase();
     if q.is_empty() {
         return None;
     }
-    let prefixed: Vec<&'static str> = COMMANDS
+    let commands = panel_command_names();
+    let prefixed: Vec<String> = commands
         .iter()
-        .copied()
-        .filter(|c| c.starts_with(&q) || q.starts_with(*c))
+        .filter(|c| c.starts_with(&q) || (c.len() >= 2 && q.starts_with(c.as_str())))
+        .cloned()
         .collect();
     if let Some(best) = prefixed.iter().min_by_key(|c| c.len()) {
-        return Some(best);
+        return Some(best.clone());
     }
-    COMMANDS
+    commands
         .iter()
-        .copied()
-        .map(|c| (levenshtein(&q, c), c))
+        .filter(|c| q.len() <= 2 || c.len() >= 2)
+        .map(|c| (levenshtein(&q, c), c.clone()))
         .filter(|(d, _)| *d <= 2)
         .min_by_key(|(d, c)| (*d, c.len()))
         .map(|(_, c)| c)
@@ -103,10 +158,7 @@ pub fn run_preview(core: &Arc<Core>, quiet: bool) -> anyhow::Result<()> {
     panel.print_input_bottom();
     panel.print_status_bar(core, &state);
     println!();
-    println!(
-        "{}",
-        dim("—— 版式预览结束（未进入交互）")
-    );
+    println!("{}", dim("—— 版式预览结束（未进入交互）"));
     println!(
         "{}",
         dim("  `exm` / `exmachina` 裸命令即进面板；完整运行状态用 /status 调出。")
@@ -198,4 +250,3 @@ pub async fn run_panel_with_session(
     panel.print_farewell(&state);
     Ok(())
 }
-

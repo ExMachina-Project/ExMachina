@@ -25,6 +25,9 @@ pub struct PluginManifest {
     /// process 形态时留空经协议 tools/list 发现
     #[serde(default)]
     pub tools: Vec<CustomTool>,
+    /// 面向用户的工具命令声明；键为本插件工具名，不接受跨插件或核心命令绑定。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub commands: std::collections::BTreeMap<String, PluginCommandDecl>,
     /// 通道适配声明（平台 kind 与凭据字段清单）
     #[serde(default)]
     pub channel: Option<PluginChannelDecl>,
@@ -37,6 +40,16 @@ pub struct PluginManifest {
     /// 进程插件声明（存在即 process 形态）
     #[serde(default)]
     pub process: Option<PluginProcessDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginCommandDecl {
+    /// 命令参数/语义版本，独立于插件包版本和主机协议版本。
+    pub version: u16,
+    /// 仅引用宿主/入口已确认的能力，不因清单声明而授予权限。
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// 通道能力声明：凭据字段清单供 WebUI 通道配置页按清单渲染
@@ -160,4 +173,3 @@ pub struct PluginInstallation {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub r#ref: String,
 }
-

@@ -11,10 +11,10 @@
 //!     写入只重写受影响的分桶 → 避免整表重写
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 
 pub const TERM_BUCKETS: usize = 64;
 
@@ -127,6 +127,14 @@ impl FsDb {
         Ok(())
     }
 
+    pub fn delete_lines(&self, collection: &str, key: &str) -> Result<()> {
+        let path = self
+            .coll_dir(collection)?
+            .join(format!("{}.jsonl", sanitize(key)));
+        remove_if_exists(&path.with_extension("jsonl.tmp"))?;
+        Ok(remove_if_exists(&path)?)
+    }
+
     /// 读取追加日志；`tail` 为 0 表示全部
     pub fn read_lines<T: DeserializeOwned>(
         &self,
@@ -142,20 +150,42 @@ impl FsDb {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(e.into()),
         };
-        let mut items: Vec<T> = Vec::new();
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<T>(line) {
-                Ok(v) => items.push(v),
-                Err(_) => continue, // 容忍尾部半行（崩溃残留）
-            }
-        }
+        let mut items = parse_lines(&content);
         if tail > 0 && items.len() > tail {
             items = items.split_off(items.len() - tail);
         }
         Ok(items)
+    }
+
+    /// 在解码前按实际字节限制日志读取，不能信任调用方保存的大小。
+    pub(crate) fn read_lines_bounded<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        key: &str,
+        limit: usize,
+    ) -> Result<Vec<T>> {
+        use std::io::Read;
+
+        let path = self
+            .root
+            .join(collection)
+            .join(format!("{}.jsonl", sanitize(key)));
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        let file = match open_bounded_log(options, &path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) => return Err(error.into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= limit, "日志超过读取上限（{limit} 字节）");
+        // 只容忍末尾未写完的一行；中间损坏不可伪装成连续的输出。
+        let complete = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        std::str::from_utf8(&bytes[..complete])?
+            .lines()
+            .map(|line| Ok(serde_json::from_str(line)?))
+            .collect()
     }
 
     /// 重写追加日志（用于容量裁剪）
@@ -170,10 +200,55 @@ impl FsDb {
             .join(format!("{}.jsonl", sanitize(key)));
         let mut buf = Vec::new();
         for it in items {
-            buf.extend_from_slice(&serde_json::to_vec(it)?);
+            serde_json::to_writer(&mut buf, it)?;
             buf.push(b'\n');
         }
         atomic_write(&path, &buf)
+    }
+
+    /// 单写者日志：有空间就追加，否则把有界尾部写入固定暂存文件后替换。
+    pub(crate) fn write_lines_bounded<'a, T: Serialize + 'a>(
+        &self,
+        collection: &str,
+        key: &str,
+        items: impl IntoIterator<Item = &'a T>,
+        append_at: Option<usize>,
+        limit: usize,
+    ) -> Result<()> {
+        use std::io::Write;
+
+        let path = self
+            .coll_dir(collection)?
+            .join(format!("{}.jsonl", sanitize(key)));
+        let capacity = limit.saturating_sub(append_at.unwrap_or(0));
+        let mut buf = Vec::new();
+        for item in items {
+            serde_json::to_writer(&mut buf, item)?;
+            buf.push(b'\n');
+            anyhow::ensure!(buf.len() <= capacity, "后台日志写入超过字节上限");
+        }
+        if let Some(offset) = append_at {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(offset == 0).append(true);
+            let mut file = open_bounded_log(options, &path)?;
+            anyhow::ensure!(
+                file.metadata()?.len() == offset as u64,
+                "后台日志未处于预期追加位置"
+            );
+            return Ok(file.write_all(&buf)?);
+        }
+        let scratch = path.with_extension("jsonl.tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&scratch)?;
+        let result = file.write_all(&buf);
+        drop(file);
+        let result = result.and_then(|()| replace_file(&scratch, &path));
+        if result.is_err() {
+            let _ = remove_if_exists(&scratch);
+        }
+        result.map_err(Into::into)
     }
 
     /// 枚举集合内全部追加日志的行（跨 key 合并；坏行跳过不致命）。
@@ -287,6 +362,14 @@ impl FsDb {
     }
 }
 
+fn parse_lines<T: DeserializeOwned>(content: &str) -> Vec<T> {
+    // 容忍崩溃残留的半行；需要连续序号的读者另行验证日志范围。
+    content
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
 /// 原子写：同目录唯一临时文件 + rename。
 /// tmp 带唯一后缀（`{name}.{new_id()}.tmp`）：并发写同目标不共用同一 tmp 文件，
 /// 避免交错后 rename 出半截内容（审计竞态 P1-5 场景B）。
@@ -295,17 +378,45 @@ impl FsDb {
 /// Windows rename 到已存在目标需先删（std 保持 errno 行为），保留回退。
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = path.with_extension(format!("{}.tmp", crate::types::new_id()));
-    std::fs::write(&tmp, data)?;
-    #[cfg(unix)]
-    std::fs::rename(&tmp, path)?;
-    #[cfg(not(unix))]
-    {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-        std::fs::rename(&tmp, path)?;
+    let result = std::fs::write(&tmp, data).and_then(|()| replace_file(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    Ok(())
+    result.map_err(Into::into)
+}
+
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    remove_if_exists(to)?;
+    std::fs::rename(from, to)
+}
+
+fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn open_bounded_log(options: std::fs::OpenOptions, path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    let options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = options;
+        // 不跟随末端符号链接，也不因意外的 FIFO 阻塞读写。
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options
+    };
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(std::io::Error::other("后台日志不是普通文件"));
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("后台日志不是普通文件"));
+    }
+    Ok(file)
 }
 
 /// 文件名安全化：路径分隔符与保留字符替换

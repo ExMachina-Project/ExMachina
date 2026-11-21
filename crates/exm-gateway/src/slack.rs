@@ -308,9 +308,8 @@ async fn session_loop(core: Arc<Core>, ch: Channel) {
                     // 群聊发送者标记（消息头显示 + 模型上下文区分发言人）。
                     // Slack 事件载荷只带 user id，显示名需另查 users.info——
                     // 此处先以 id 标注（身份可区分），显示名增强留待后续
-                    let sender_mark = crate::channel_util::sender_origin(
-                        is_group, "", &external_id,
-                    );
+                    let sender_mark =
+                        crate::channel_util::sender_origin(is_group, "", &external_id);
                     let gate_ctx = InboundCtx {
                         text: &text,
                         external_id: &external_id,

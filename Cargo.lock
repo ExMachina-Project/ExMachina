@@ -771,6 +771,7 @@ dependencies = [
  "futures-util",
  "ignore",
  "image 0.25.10",
+ "libc",
  "parking_lot",
  "regex",
  "reqwest",

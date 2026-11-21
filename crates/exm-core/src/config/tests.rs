@@ -142,7 +142,10 @@ mod config_tests {
         let schema = config_schema();
         let text = serde_json::to_string(&schema).unwrap();
         assert!(text.contains("llmDrivenMemory"), "schema 缺自主记忆开关");
-        assert!(text.contains("slidingContextWindow"), "schema 缺滑动窗口开关");
+        assert!(
+            text.contains("slidingContextWindow"),
+            "schema 缺滑动窗口开关"
+        );
     }
 }
 
@@ -166,7 +169,9 @@ mod exec_identity_tests {
 
     #[test]
     fn 数字uid_home覆盖() {
-        let id = resolve_exec_identity("1000", "/srv/exm-home").unwrap().unwrap();
+        let id = resolve_exec_identity("1000", "/srv/exm-home")
+            .unwrap()
+            .unwrap();
         assert_eq!(id.home, "/srv/exm-home");
     }
 
@@ -181,6 +186,16 @@ mod exec_identity_tests {
         let r = resolve_exec_identity("no-such-user-xyz-911", "");
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("不存在"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 用户名按argv查询_不执行shell片段() {
+        let marker =
+            std::env::temp_dir().join(format!("exm-identity-injection-{}", crate::types::new_id()));
+        let hostile_name = format!("no-such-user'; touch {}; echo '", marker.display());
+        assert!(resolve_exec_identity(&hostile_name, "").is_err());
+        assert!(!marker.exists(), "用户名配置不能经 shell 执行");
     }
 
     #[cfg(unix)]

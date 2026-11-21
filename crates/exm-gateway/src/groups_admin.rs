@@ -96,15 +96,23 @@ pub(crate) async fn switch_group(
     }
 }
 
-pub(crate) async fn activate_group(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn activate_group(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     switch_group(State(st), Json(SwitchGroupBody { id })).await
 }
 
-pub(crate) async fn delete_group(State(st): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+pub(crate) async fn delete_group(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match st.core.delete_group(&id) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         // 幂等 200（D4 决议推广，审计 REST P1-2）：重复删除目标已不在 → 成功而非 404/400
-        Err(e) if e.to_string().contains("组不存在") => Json(json!({ "ok": true })).into_response(),
+        Err(e) if e.to_string().contains("组不存在") => {
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),

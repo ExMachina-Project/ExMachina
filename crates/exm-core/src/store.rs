@@ -23,9 +23,13 @@ use parking_lot::Mutex;
 use std::path::Path;
 
 fn project_memory_partition(group: &str, workspace: &str) -> String {
-    let hash = group.bytes().chain([0]).chain(workspace.bytes()).fold(0xcbf29ce484222325_u64, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-    });
+    let hash = group
+        .bytes()
+        .chain([0])
+        .chain(workspace.bytes())
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
     format!("project-{hash:016x}")
 }
 
@@ -36,6 +40,44 @@ pub struct Store {
 }
 
 const MAX_AUDIT_LINES: usize = 2000;
+pub(crate) const MAX_TERMINAL_LOG_BYTES: usize = 4 * 1024 * 1024;
+
+/// Persisted metadata for a supervised terminal process. PIDs and control
+/// handles are deliberately excluded: they are never valid across restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TerminalJobRecord {
+    pub id: String,
+    pub session_id: String,
+    pub workspace: String,
+    pub command: String,
+    pub started_at_ms: u64,
+    pub deadline_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+    /// running | exited | cancelled | timedOut | failed | interrupted
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub output_bytes: usize,
+    pub log_bytes: usize,
+    /// 新日志的下一个块序号；旧记录为已保留的块数。
+    pub output_chunks: u64,
+    pub output_truncated: bool,
+    /// 新日志的末尾游标；None 表示旧版前缀日志，旧截断量不可推算。
+    #[serde(default)]
+    pub output_end_byte: Option<u64>,
+    #[serde(default)]
+    pub output_preview: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TerminalJobOutputChunk {
+    pub sequence: u64,
+    pub stream: String,
+    pub text: String,
+    /// 脱敏后 UTF-8 输出的起始字节。旧日志没有独立偏移。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_byte: Option<u64>,
+}
 
 impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
@@ -55,7 +97,12 @@ impl Store {
         self.create_session_in(title, group_id, None)
     }
 
-    pub fn create_session_in(&self, title: &str, group_id: &str, workspace: Option<String>) -> Result<Session> {
+    pub fn create_session_in(
+        &self,
+        title: &str,
+        group_id: &str,
+        workspace: Option<String>,
+    ) -> Result<Session> {
         self.create_bound_session(title, group_id, workspace, None)
     }
 
@@ -71,7 +118,9 @@ impl Store {
         let memory_partition = if collaboration_id.is_some() {
             Some(format!("collaboration-{id}"))
         } else {
-            workspace.as_deref().map(|workspace| project_memory_partition(group_id, workspace))
+            workspace
+                .as_deref()
+                .map(|workspace| project_memory_partition(group_id, workspace))
         };
         let s = Session {
             id,
@@ -188,19 +237,28 @@ impl Store {
         self.db.list("collaborations")
     }
 
-    pub(crate) fn put_collaboration_turn(&self, room: &str, turn: &CollaborationTurn) -> Result<()> {
-        self.db.put(&format!("collaboration_turns/{room}"), &turn.id, turn)
+    pub(crate) fn put_collaboration_turn(
+        &self,
+        room: &str,
+        turn: &CollaborationTurn,
+    ) -> Result<()> {
+        self.db
+            .put(&format!("collaboration_turns/{room}"), &turn.id, turn)
     }
 
     pub(crate) fn get_collaboration_turn(&self, room: &str, id: &str) -> Result<CollaborationTurn> {
-        self.db.get(&format!("collaboration_turns/{room}"), id)?
+        self.db
+            .get(&format!("collaboration_turns/{room}"), id)?
             .ok_or_else(|| anyhow::anyhow!("协作轮次记录不存在"))
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
         // 主列表不含归档态（归档区走 list_archived_sessions 专用视图）
-        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_none() && s.collaboration_id.is_none()).collect();
+        let mut list: Vec<Session> = all
+            .into_iter()
+            .filter(|s| s.archived_at.is_none() && s.collaboration_id.is_none())
+            .collect();
         // 置顶优先，组内按活跃时间倒序（列表结构 = 置顶分组 + 时间分组）
         list.sort_by(|a, b| {
             b.pinned
@@ -215,10 +273,19 @@ impl Store {
     /// disappear behind more recently updated sessions from another project.
     pub fn list_sessions_in_workspace(&self, workspace: &str) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
-        let mut list: Vec<Session> = all.into_iter()
-            .filter(|session| session.archived_at.is_none() && session.collaboration_id.is_none() && session.workspace.as_deref() == Some(workspace))
+        let mut list: Vec<Session> = all
+            .into_iter()
+            .filter(|session| {
+                session.archived_at.is_none()
+                    && session.collaboration_id.is_none()
+                    && session.workspace.as_deref() == Some(workspace)
+            })
             .collect();
-        list.sort_by(|a, b| b.pinned.cmp(&a.pinned).then_with(|| b.updated_at.cmp(&a.updated_at)));
+        list.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
         list.truncate(200);
         Ok(list)
     }
@@ -226,7 +293,10 @@ impl Store {
     /// 归档区视图：只含归档态，按归档时间倒序（最近归档在前）
     pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
-        let mut list: Vec<Session> = all.into_iter().filter(|s| s.archived_at.is_some() && s.collaboration_id.is_none()).collect();
+        let mut list: Vec<Session> = all
+            .into_iter()
+            .filter(|s| s.archived_at.is_some() && s.collaboration_id.is_none())
+            .collect();
         list.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
         Ok(list)
     }
@@ -458,7 +528,12 @@ impl Store {
 
     /// 按消息 id 回填入站附件（im-inbound-attach）：落库与暂存取走之间无原子性，
     /// 回填失败静默降级（占位文本仍在，只是缩略图缺失）——不阻塞消息主链。
-    pub fn attach_inbound(&self, session_id: &str, message_id: &str, items: Vec<crate::types::InboundAttachment>) {
+    pub fn attach_inbound(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        items: Vec<crate::types::InboundAttachment>,
+    ) {
         if items.is_empty() {
             return;
         }
@@ -491,7 +566,12 @@ impl Store {
         self.search_sessions_in(query, limit, None)
     }
 
-    pub fn search_sessions_in(&self, query: &str, limit: usize, workspace: Option<&str>) -> Result<Vec<SessionSearchHit>> {
+    pub fn search_sessions_in(
+        &self,
+        query: &str,
+        limit: usize,
+        workspace: Option<&str>,
+    ) -> Result<Vec<SessionSearchHit>> {
         let q = query.trim();
         if q.is_empty() {
             return Ok(Vec::new());
@@ -501,7 +581,10 @@ impl Store {
         let mut sessions = if let Some(root) = workspace {
             self.list_sessions_in_workspace(root)?
         } else {
-            self.list_sessions()?.into_iter().filter(|s| s.workspace.is_none()).collect()
+            self.list_sessions()?
+                .into_iter()
+                .filter(|s| s.workspace.is_none())
+                .collect()
         };
         sessions.truncate(200);
         let mut hits: Vec<SessionSearchHit> = Vec::new();
@@ -759,7 +842,8 @@ impl Store {
     pub fn audit_dispatch(&self, session_id: &str, entry: &serde_json::Value) -> Result<()> {
         self.db.append_line("dispatch_audit", session_id, entry)?;
         // 容量裁剪与 tool_audit 同口径
-        let mut lines: Vec<serde_json::Value> = self.db.read_lines("dispatch_audit", session_id, 0)?;
+        let mut lines: Vec<serde_json::Value> =
+            self.db.read_lines("dispatch_audit", session_id, 0)?;
         if lines.len() > MAX_AUDIT_LINES {
             let keep = lines.split_off(lines.len() - MAX_AUDIT_LINES / 2);
             self.db.rewrite_lines("dispatch_audit", session_id, &keep)?;
@@ -768,7 +852,11 @@ impl Store {
     }
 
     /// 派发审计查询（按会话；时间倒序 limit 封顶）
-    pub fn list_dispatch_audit(&self, session_id: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+    pub fn list_dispatch_audit(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
         self.db.read_lines("dispatch_audit", session_id, limit)
     }
 
@@ -883,12 +971,62 @@ impl Store {
         self.db.put("approvals", &req.id, req)
     }
 
+    pub fn put_terminal_job(&self, job: &TerminalJobRecord) -> Result<()> {
+        self.db.put("terminal_jobs", &job.id, job)
+    }
+
+    pub fn get_terminal_job(&self, id: &str) -> Result<Option<TerminalJobRecord>> {
+        self.db.get("terminal_jobs", id)
+    }
+
+    pub fn list_terminal_jobs(&self) -> Result<Vec<TerminalJobRecord>> {
+        self.db.list("terminal_jobs")
+    }
+
+    pub fn append_terminal_output(&self, id: &str, chunk: &TerminalJobOutputChunk) -> Result<()> {
+        self.db.append_line("terminal_job_output", id, chunk)
+    }
+
+    pub fn list_terminal_output(&self, id: &str) -> Result<Vec<TerminalJobOutputChunk>> {
+        self.db
+            .read_lines_bounded("terminal_job_output", id, MAX_TERMINAL_LOG_BYTES)
+    }
+
+    pub(crate) fn write_terminal_output<'a>(
+        &self,
+        id: &str,
+        chunks: impl IntoIterator<Item = &'a TerminalJobOutputChunk>,
+        append_at: Option<usize>,
+        limit: usize,
+    ) -> Result<()> {
+        self.db
+            .write_lines_bounded("terminal_job_output", id, chunks, append_at, limit)
+    }
+
+    pub fn delete_terminal_job(&self, id: &str) -> Result<()> {
+        self.db.delete_lines("terminal_job_output", id)?;
+        self.db.delete("terminal_jobs", id)
+    }
+
+    fn delete_terminal_jobs_for_session(&self, session_id: &str) -> Result<()> {
+        for job in self
+            .list_terminal_jobs()?
+            .into_iter()
+            .filter(|job| job.session_id == session_id)
+        {
+            self.delete_terminal_job(&job.id)?;
+        }
+        Ok(())
+    }
+
     /// 按组列出会话（组是交互对象：会话归属创建时的激活组）
     pub fn list_sessions_in_group(&self, group_id: &str) -> Result<Vec<Session>> {
         let all: Vec<Session> = self.db.list("sessions")?;
         let mut list: Vec<Session> = all
             .into_iter()
-            .filter(|s| s.group_id == group_id && s.archived_at.is_none() && s.collaboration_id.is_none())
+            .filter(|s| {
+                s.group_id == group_id && s.archived_at.is_none() && s.collaboration_id.is_none()
+            })
             .collect();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list.truncate(200);
@@ -897,6 +1035,7 @@ impl Store {
 
     /// 删除会话及其派生数据（消息/任务图/事件/证据/归档/快照）
     pub fn delete_session(&self, id: &str) -> Result<()> {
+        self.delete_terminal_jobs_for_session(id)?;
         self.db.delete("sessions", id)?;
         for (col, key) in [
             ("messages", id),
@@ -1177,7 +1316,12 @@ pub(crate) fn snippet_around(text: &str, q_lower: &str, max: usize) -> String {
         }
     }
     if let Some((start, end)) = find_char_window(&flat, q_lower) {
-        return cut_window(&flat, char_to_byte(&flat, start), char_to_byte(&flat, end), max);
+        return cut_window(
+            &flat,
+            char_to_byte(&flat, start),
+            char_to_byte(&flat, end),
+            max,
+        );
     }
     flat.chars().take(max).collect()
 }
@@ -1229,7 +1373,10 @@ fn find_char_window(text: &str, q_lower: &str) -> Option<(usize, usize)> {
 }
 
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
-    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
 }
 
 #[cfg(test)]
@@ -1279,7 +1426,10 @@ mod store_tests {
         );
         // 读出即清空：子会话与主会话都不留残余
         assert!(store.outbox_drain(&child.id).unwrap().is_empty());
-        assert!(store.outbox_drain_with_children(&main.id).unwrap().is_empty());
+        assert!(store
+            .outbox_drain_with_children(&main.id)
+            .unwrap()
+            .is_empty());
     }
 
     /// 审计追加日志：写入后过滤读回（回归——list() 只扫 .json 文档曾致审计面永远为空）
@@ -1443,7 +1593,10 @@ mod store_tests {
         let read = store.list_messages(&s.id, 10).unwrap();
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].attachments.len(), 1, "回填后应能读回附件");
-        assert_eq!(read[0].attachments[0].path, ".exmachina/inbox/napcat-exm/pic.png");
+        assert_eq!(
+            read[0].attachments[0].path,
+            ".exmachina/inbox/napcat-exm/pic.png"
+        );
         assert_eq!(read[0].attachments[0].name, "pic.png");
         // 空回填（无附件通道）不影响消息
         store.attach_inbound(&s.id, &msg.id, Vec::new());
@@ -1461,7 +1614,10 @@ mod store_tests {
                 &a.id,
                 MessageRole::User,
                 None,
-                vec![Statement::new(SpeechTag::要求, "周末讨论 Kubernetes 滚动发布（同步）")],
+                vec![Statement::new(
+                    SpeechTag::要求,
+                    "周末讨论 Kubernetes 滚动发布（同步）",
+                )],
             )
             .unwrap();
         store
@@ -1489,7 +1645,10 @@ mod store_tests {
         assert!(!hits[0].title_match);
         assert_eq!(hits[0].message_matches, 1);
         assert_eq!(hits[0].snippets.len(), 1);
-        assert!(hits[0].snippets[0].text.contains("Kubernetes"), "片段应含关键词");
+        assert!(
+            hits[0].snippets[0].text.contains("Kubernetes"),
+            "片段应含关键词"
+        );
         assert!(!hits[0].snippets[0].message_id.is_empty());
 
         // 标题命中优先于仅正文命中
@@ -1501,7 +1660,6 @@ mod store_tests {
         assert_eq!(store.search_sessions("同步", 20).unwrap().len(), 2);
         assert_eq!(store.search_sessions("同步", 0).unwrap().len(), 1);
     }
-
 
     /// 检索性能上界（手动运行，默认 ignore）：200 会话 × 200 条消息，单次 <1s。
     #[test]
@@ -1540,11 +1698,21 @@ mod store_tests {
         let store = test_store();
         let s = store.create_session("幂等归档", "exmachina").unwrap();
         store.set_session_archived(&s.id, true).unwrap();
-        let first = store.get_session(&s.id).unwrap().unwrap().archived_at.clone();
+        let first = store
+            .get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .clone();
         assert!(first.is_some());
         // 同状态重复归档：成功且时间戳不变（归档区排序稳定，批量重试安全）
         store.set_session_archived(&s.id, true).unwrap();
-        let second = store.get_session(&s.id).unwrap().unwrap().archived_at.clone();
+        let second = store
+            .get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .clone();
         assert_eq!(first, second, "重复归档不刷新 archived_at");
         // 重复恢复同理
         store.set_session_archived(&s.id, false).unwrap();
@@ -1569,7 +1737,10 @@ mod store_tests {
             .unwrap();
         store.set_session_archived(&archived.id, true).unwrap();
         assert!(
-            store.search_sessions("unique-needle-archived", 20).unwrap().is_empty(),
+            store
+                .search_sessions("unique-needle-archived", 20)
+                .unwrap()
+                .is_empty(),
             "归档会话不得命中"
         );
 
@@ -1595,7 +1766,10 @@ mod store_tests {
         }
         // 现在共 201 条：最近 200 条窗口不含最旧的 outside-window
         assert!(
-            store.search_sessions("outside-window", 20).unwrap().is_empty(),
+            store
+                .search_sessions("outside-window", 20)
+                .unwrap()
+                .is_empty(),
             "窗口外消息不得命中"
         );
         store
@@ -1608,7 +1782,10 @@ mod store_tests {
             .unwrap();
         let hits = store.search_sessions("window-needle", 20).unwrap();
         assert_eq!(hits.len(), 1, "窗口内最新消息应命中");
-        assert!(store.search_sessions("   ", 20).unwrap().is_empty(), "空查询无结果");
+        assert!(
+            store.search_sessions("   ", 20).unwrap().is_empty(),
+            "空查询无结果"
+        );
 
         // Unicode 小写展开（İ → i̇，字节变长）：不得 panic，仍能定位/截取
         let u = store.create_session("Unicode", "exmachina").unwrap();
@@ -1624,5 +1801,4 @@ mod store_tests {
         assert_eq!(hits.len(), 1, "Unicode 展开文本应能命中");
         assert!(!hits[0].snippets.is_empty());
     }
-
 }

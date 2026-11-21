@@ -178,14 +178,18 @@ pub async fn graph(State(st): State<AppState>) -> impl IntoResponse {
     };
     for a in st.core.registry().list_singles() {
         if let Some(link) = a.link.as_deref() {
-            if link.is_empty() { continue; }
+            if link.is_empty() {
+                continue;
+            }
             push_edge(&a, link);
         }
     }
     for g in st.core.registry().list_groups() {
         for a in st.core.registry().agents_in_group(&g.id) {
             if let Some(link) = a.link.as_deref() {
-                if link.is_empty() { continue; }
+                if link.is_empty() {
+                    continue;
+                }
                 push_edge(&a, link);
             }
         }
@@ -208,10 +212,7 @@ pub struct EdgeBody {
     pub link_id: String,
 }
 
-pub async fn edit_edge(
-    State(st): State<AppState>,
-    Json(b): Json<EdgeBody>,
-) -> impl IntoResponse {
+pub async fn edit_edge(State(st): State<AppState>, Json(b): Json<EdgeBody>) -> impl IntoResponse {
     if b.agent_id.trim().is_empty() || b.link_id.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -275,9 +276,7 @@ pub async fn edit_edge(
             .registry()
             .set_agent_link(&b.agent_id, Some(&b.link_id), &valid)
     } else {
-        st.core
-            .registry()
-            .set_agent_link(&b.agent_id, None, &valid)
+        st.core.registry().set_agent_link(&b.agent_id, None, &valid)
     };
     match result {
         Ok(def) => Json(json!({
@@ -518,9 +517,13 @@ mod tests {
         // bind：建立边 → graph 1 边
         let (code, v) = call(
             mk_app(&st),
-            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
-                "action": "bind", "agentId": "edge-agent", "linkId": "l1"
-            }))),
+            json_req(
+                "PUT",
+                "/api/nexus/edges",
+                Some(serde_json::json!({
+                    "action": "bind", "agentId": "edge-agent", "linkId": "l1"
+                })),
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{v:?}");
@@ -533,9 +536,13 @@ mod tests {
         // 重复 bind 同一连结体 → 409
         let (code, v) = call(
             mk_app(&st),
-            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
-                "action": "bind", "agentId": "edge-agent", "linkId": "l1"
-            }))),
+            json_req(
+                "PUT",
+                "/api/nexus/edges",
+                Some(serde_json::json!({
+                    "action": "bind", "agentId": "edge-agent", "linkId": "l1"
+                })),
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::CONFLICT, "{v:?}");
@@ -543,9 +550,13 @@ mod tests {
         // 不存在的连结体 → 404
         let (code, _) = call(
             mk_app(&st),
-            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
-                "action": "bind", "agentId": "edge-agent", "linkId": "no-such"
-            }))),
+            json_req(
+                "PUT",
+                "/api/nexus/edges",
+                Some(serde_json::json!({
+                    "action": "bind", "agentId": "edge-agent", "linkId": "no-such"
+                })),
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::NOT_FOUND);
@@ -553,17 +564,25 @@ mod tests {
         // unbind → 边清零；再 unbind → 409
         let (code, _) = call(
             mk_app(&st),
-            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
-                "action": "unbind", "agentId": "edge-agent", "linkId": "l1"
-            }))),
+            json_req(
+                "PUT",
+                "/api/nexus/edges",
+                Some(serde_json::json!({
+                    "action": "unbind", "agentId": "edge-agent", "linkId": "l1"
+                })),
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::OK);
         let (code, _) = call(
             mk_app(&st),
-            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
-                "action": "unbind", "agentId": "edge-agent", "linkId": "l1"
-            }))),
+            json_req(
+                "PUT",
+                "/api/nexus/edges",
+                Some(serde_json::json!({
+                    "action": "unbind", "agentId": "edge-agent", "linkId": "l1"
+                })),
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::CONFLICT);
@@ -571,12 +590,15 @@ mod tests {
         // 未知动作 → 400
         let (code, _) = call(
             mk_app(&st),
-            json_req("PUT", "/api/nexus/edges", Some(serde_json::json!({
-                "action": "rebind", "agentId": "edge-agent", "linkId": "l1"
-            }))),
+            json_req(
+                "PUT",
+                "/api/nexus/edges",
+                Some(serde_json::json!({
+                    "action": "rebind", "agentId": "edge-agent", "linkId": "l1"
+                })),
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
     }
-
 }

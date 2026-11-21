@@ -3,22 +3,23 @@
 //! 命令规范见 docs/07 §2：两个名字互为别名，参数、行为、退出码完全一致。
 
 pub mod chat;
+mod command_cmd;
 pub mod config_cmd;
 pub mod doctor;
-pub mod headless;
 pub mod group_cmd;
+pub mod headless;
 pub mod install;
-pub mod memory_cmd;
 pub mod knowledge_cmd;
+pub mod memory_cmd;
 pub mod panel;
-pub mod tui;
-pub mod term_caps;
 pub mod persona_cmd;
 pub mod platform_cmd;
 pub mod plugin_cmd;
 pub mod render;
+pub mod term_caps;
+pub mod tui;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use exm_core::Core;
 use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use std::sync::Arc;
 #[command(
     name = "exm",
     bin_name = "exm | exmachina",
+    disable_help_subcommand = true,
     version,
     about = "EXMACHINA 多智能体系统 CLI（`exm` 与 `exmachina` 为同一命令的两个入口名）",
     long_about = "EXMACHINA CLI\n\n用法场景：\n  · `exm`        日常简洁调用（脚本、Pipeline、快速对话）\n  · `exmachina`  同一实现的完整名称（文档、CI、教学场景更自解释）\n\n两者行为、参数、退出码完全一致；差异仅体现在帮助信息的命令名回显。"
@@ -75,6 +77,11 @@ enum Commands {
     },
     /// 体检：配置 / 编成 / 记忆 / 通道 / WebUI
     Doctor,
+    /// 查询规范命令目录生成的帮助；标准 `--help` 仍提供参数级用法
+    Help {
+        /// 可选规范名、别名或命令前缀（例如 `spec.export`、`model`）
+        command: Option<String>,
+    },
     /// 与指挥体对话（进程内直挂 core）；省略子命令时裸命令等价于 `exm chat`
     Chat {
         /// 任务输入；缺省进入终端交互面板（TTY：横幅 + 对话流 + 输入框 + `/` 命令）
@@ -96,8 +103,40 @@ enum Commands {
         capability: Option<String>,
     },
     /// 查看会话最新编排图（任务依赖 DAG）
-    Tasks {
+    Tasks { session_id: String },
+    /// 查看会话运行、目标、规格、计划和后续队列状态
+    Status { session_id: String },
+    /// 明确管理后续任务队列；普通 chat 不会隐式入队
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+    /// 会话新建、列表与恢复
+    Sessions {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+    /// 停止指定会话当前运行轮次
+    Stop { session_id: String },
+    /// 向当前运行提交非中断引导
+    Steer {
         session_id: String,
+        instruction: String,
+    },
+    /// 只读计划模式与审批回放
+    Plan {
+        #[command(subcommand)]
+        action: PlanAction,
+    },
+    /// 会话内编程规格（默认不写工作区/OpenSpec）
+    Spec {
+        #[command(subcommand)]
+        action: SpecAction,
+    },
+    /// 会话持久目标生命周期
+    Goal {
+        #[command(subcommand)]
+        action: GoalAction,
     },
     /// 导出会话训练轨迹（按轮次切分；JSON 或 JSONL）
     Trajectory {
@@ -168,6 +207,7 @@ enum Commands {
         action: KnowledgeAction,
     },
     /// 技能包：派发时按触发词自动携带的指令包（数据化技能）
+    #[command(alias = "skills")]
     Skill {
         #[command(subcommand)]
         action: SkillAction,
@@ -197,6 +237,11 @@ enum Commands {
         #[command(subcommand)]
         action: plugin_cmd::PluginAction,
     },
+    /// 查询或运行当前会话的动态技能/插件命令
+    Command {
+        #[command(subcommand)]
+        action: ExtensionCommandAction,
+    },
     /// MCP 服务端：把启用的内置工具按 ACL 暴露给外部 MCP 客户端（默认关闭，配置 mcpServe.enabled 开启）
     Mcp {
         #[command(subcommand)]
@@ -207,6 +252,137 @@ enum Commands {
         /// 输出文件（缺省打印到 stdout）
         #[arg(long, default_value = "")]
         out: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExtensionCommandAction {
+    /// 列出动态命令；可加顶层 --session 查看当前会话可执行命令
+    List,
+    /// 输出由版本化规范目录生成的入口矩阵（text/json/markdown）
+    Catalog {
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// 运行命名空间命令（plugin.<id>.<tool> 或 skill.<id>）
+    Run {
+        name: String,
+        #[arg(long, default_value_t = exm_core::command::COMMAND_DESCRIPTOR_VERSION)]
+        command_version: u16,
+        /// 命令参数（JSON 对象）
+        #[arg(long, default_value = "{}")]
+        args: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum QueueAction {
+    /// 查询队列
+    List { session_id: String },
+    /// 明确加入队列
+    Add {
+        session_id: String,
+        instruction: String,
+    },
+    /// 清空指定会话队列
+    Clear { session_id: String },
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    New { title: Option<String> },
+    List,
+    Resume { session_id: String },
+}
+
+#[derive(Subcommand)]
+enum PlanAction {
+    Status {
+        session_id: String,
+    },
+    Start {
+        session_id: String,
+        task: Option<String>,
+    },
+    Approve {
+        session_id: String,
+    },
+    Reject {
+        session_id: String,
+    },
+    Execute {
+        session_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpecAction {
+    Show {
+        session_id: String,
+    },
+    Draft {
+        session_id: String,
+        objective: String,
+    },
+    Edit {
+        session_id: String,
+        objective: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    /// 显式导出到当前项目内的相对路径；不会写入 openspec/。
+    Export {
+        session_id: String,
+        path: String,
+    },
+    Clear {
+        session_id: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GoalAction {
+    Status {
+        session_id: String,
+    },
+    Start {
+        session_id: String,
+        objective: String,
+    },
+    Edit {
+        session_id: String,
+        objective: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    Pause {
+        session_id: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    Resume {
+        session_id: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    Complete {
+        session_id: String,
+        verification: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    Block {
+        session_id: String,
+        note: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    Clear {
+        session_id: String,
+        #[arg(long)]
+        revision: Option<u64>,
     },
 }
 
@@ -373,7 +549,10 @@ enum GroupAction {
     /// 切换激活组
     Switch { id: String },
     /// 组详情
-    Info { #[arg(long)] id: Option<String> },
+    Info {
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// 删除自定义组
     Delete { id: String },
     /// 导出组为可分享的 bundle（组元信息 + 个体定义 + 提示词）
@@ -574,6 +753,111 @@ fn build_core(workspace: &Path) -> anyhow::Result<Arc<Core>> {
     Ok(core)
 }
 
+/// 顶层 Clap 命令与规范目录的兼容映射。Clap 仍负责参数解析和既有领域 handler，
+/// 规范目录负责跨入口名称/别名事实源；映射漂移在进入任何副作用前失败。
+fn validate_cli_command_catalog() -> anyhow::Result<()> {
+    let registry = cli_command_registry()?;
+    let mappings = [
+        ("help", "help"),
+        ("model", "model.list"),
+        ("config", "config.show"),
+        ("memory", "memory.list"),
+        ("skill", "skills.list"),
+        ("cron", "cron.list"),
+        ("approval", "approval.list"),
+        ("checkpoint", "checkpoint.list"),
+        ("sessions", "sessions.list"),
+        ("stop", "stop"),
+        ("status", "status"),
+        ("queue", "queue.add"),
+        ("steer", "steer"),
+        ("plan", "plan.status"),
+        ("spec", "spec.show"),
+        ("goal", "goal.status"),
+    ];
+    for (entry_name, canonical) in mappings {
+        if Cli::command().find_subcommand(entry_name).is_none()
+            || registry.resolve(entry_name).is_none()
+            || registry.resolve(canonical).is_none()
+            || registry.resolve(&format!("cli.{entry_name}")).is_none()
+        {
+            anyhow::bail!("CLI 命令目录漂移：顶层 `{entry_name}` 未映射到规范命令 `{canonical}`");
+        }
+    }
+    Ok(())
+}
+
+fn core_session(workspace: &Path, session_id: &str) -> anyhow::Result<exm_core::types::Session> {
+    let core = build_core(workspace)?;
+    core.store
+        .get_session(session_id)?
+        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))
+}
+
+/// 把 clap 实际声明的顶层子命令注册到统一目录；它们作为 `cli.<name>` 入口记录，
+/// 原有 Clap 分派仍是 handler owner。CLI-only 条目显式携带 handler-ready capability
+/// 占位，因此不会被面板或其他入口错误地展示为可执行命令。
+pub(crate) fn cli_command_registry() -> anyhow::Result<exm_core::command::CommandRegistry> {
+    use exm_core::command::{
+        CommandDescriptor, CommandEntry, CommandErrorCategory, CommandOutputFormat,
+        CommandPermission, CommandRegistry, CommandScope, CommandSideEffect,
+        COMMAND_DESCRIPTOR_VERSION, COMMAND_PROTOCOL_VERSION,
+    };
+    let mut registry = CommandRegistry::with_builtins()
+        .map_err(|diagnostic| anyhow::anyhow!("命令目录初始化失败：{}", diagnostic.code))?;
+    for command in Cli::command().get_subcommands() {
+        let name = command.get_name().to_string();
+        let canonical = format!("cli.{name}");
+        let summary = command
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("现有 CLI 子命令 `{name}` 的兼容入口"));
+        let descriptor = CommandDescriptor {
+            protocol_version: COMMAND_PROTOCOL_VERSION,
+            name: canonical,
+            aliases: Vec::new(),
+            version: COMMAND_DESCRIPTOR_VERSION,
+            summary,
+            usage: format!("exm {name} …"),
+            argument_schema: serde_json::json!({
+                "type": "object",
+                "description": "由 Clap 子命令定义解析；本目录项不替代原参数 parser",
+                "additionalProperties": true
+            }),
+            scope: CommandScope::Global,
+            permissions: vec![CommandPermission::Read],
+            side_effect: CommandSideEffect::None,
+            entries: vec![CommandEntry::Cli],
+            output_formats: vec![CommandOutputFormat::Human, CommandOutputFormat::Json],
+            error_categories: vec![
+                CommandErrorCategory::Forbidden,
+                CommandErrorCategory::Unsupported,
+                CommandErrorCategory::InvalidArgs,
+                CommandErrorCategory::Unavailable,
+            ],
+            required_capabilities: vec![format!("cli.handler.{name}")],
+            owner: "cli".into(),
+            deprecated: false,
+            replacement: None,
+        };
+        registry
+            .register(descriptor)
+            .map_err(|diagnostic| anyhow::anyhow!("CLI 命令目录注册失败：{}", diagnostic.code))?;
+    }
+    Ok(registry)
+}
+
+pub(crate) fn cli_command_capabilities() -> Vec<exm_core::command::CapabilityItem> {
+    Cli::command()
+        .get_subcommands()
+        .map(|command| exm_core::command::CapabilityItem {
+            name: format!("cli.handler.{}", command.get_name()),
+            status: exm_core::command::CapabilityStatus::Available,
+            reason: None,
+        })
+        .collect()
+}
+
 /// 无头分派：参数校验 → 文本获取（参数/stdin/TTY 防护）→ 会话定位 → run_headless。
 /// 返回值直接作为进程退出码（0/1/2）；使用错误信息走 stderr（text 模式契约）。
 async fn run_headless_dispatch(cli: &Cli, workspace: &Path) -> i32 {
@@ -590,7 +874,9 @@ async fn run_headless_dispatch(cli: &Cli, workspace: &Path) -> i32 {
         None => {
             use std::io::IsTerminal;
             if std::io::stdin().is_terminal() {
-                eprintln!("错误：-p 需要文本参数或管道输入（例：exm -p \"任务\" 或 echo 任务 | exm -p）");
+                eprintln!(
+                    "错误：-p 需要文本参数或管道输入（例：exm -p \"任务\" 或 echo 任务 | exm -p）"
+                );
                 return 2;
             }
             let mut buf = String::new();
@@ -618,14 +904,23 @@ async fn run_headless_dispatch(cli: &Cli, workspace: &Path) -> i32 {
     };
 
     // 会话定位：--session 显式 > -r 匹配 > -c 最近 > 新建（spec 优先序）
-    let session = match resolve_resume_session(&core, cli.session.as_deref(), cli.resume.as_deref(), cli.continue_last) {
+    let session = match resolve_resume_session(
+        &core,
+        cli.session.as_deref(),
+        cli.resume.as_deref(),
+        cli.continue_last,
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("错误：{e}");
             return 2;
         }
     };
-    let opts = headless::HeadlessOptions { text, session, format };
+    let opts = headless::HeadlessOptions {
+        text,
+        session,
+        format,
+    };
     let outcome = headless::run_headless(&core, opts).await;
     if let Some(err) = outcome.error {
         // text 模式的执行失败信息走 stderr；json/stream-json 已并入终态 stdout 行
@@ -660,18 +955,24 @@ fn resolve_resume_session(
         let hits: Vec<&exm_core::types::Session> = sessions
             .iter()
             .filter(|s| {
-                s.title.to_lowercase().contains(&needle)
-                    || s.id.to_lowercase().contains(&needle)
+                s.title.to_lowercase().contains(&needle) || s.id.to_lowercase().contains(&needle)
             })
             .collect();
         return match hits.len() {
             0 => Err(anyhow::anyhow!("-r 无匹配会话：{pattern}")),
             1 => Ok(Some(hits[0].id.clone())),
             _ => {
-                let mut msg = format!("-r 命中 {} 个会话，请改用更精确匹配或 --session <id>：", hits.len());
+                let mut msg = format!(
+                    "-r 命中 {} 个会话，请改用更精确匹配或 --session <id>：",
+                    hits.len()
+                );
                 for s in hits.iter().take(10) {
                     let short = &s.id[..s.id.len().min(8)];
-                    msg.push_str(&format!("\n  {short}  {}（{}）", s.title, relative_time(&s.updated_at)));
+                    msg.push_str(&format!(
+                        "\n  {short}  {}（{}）",
+                        s.title,
+                        relative_time(&s.updated_at)
+                    ));
                 }
                 Err(anyhow::anyhow!(msg))
             }
@@ -717,14 +1018,36 @@ fn chrono_time_iso(iso: &str) -> anyhow::Result<i64> {
         anyhow::bail!("过短");
     }
     let s = iso;
-    let year: i64 = s.get(0..4).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("年"))?;
-    let month: i64 = s.get(5..7).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("月"))?;
-    let day: i64 = s.get(8..10).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("日"))?;
-    let hour: i64 = s.get(11..13).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("时"))?;
-    let min: i64 = s.get(14..16).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("分"))?;
-    let sec: i64 = s.get(17..19).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("秒"))?;
+    let year: i64 = s
+        .get(0..4)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("年"))?;
+    let month: i64 = s
+        .get(5..7)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("月"))?;
+    let day: i64 = s
+        .get(8..10)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("日"))?;
+    let hour: i64 = s
+        .get(11..13)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("时"))?;
+    let min: i64 = s
+        .get(14..16)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("分"))?;
+    let sec: i64 = s
+        .get(17..19)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("秒"))?;
     // 简化儒略日算法（days_from_civil）：UTC 视角
-    let (y, m) = if month <= 2 { (year - 1, month + 12) } else { (year, month) };
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 12)
+    } else {
+        (year, month)
+    };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let doy = (153 * (m - 3) + 2) / 5 + day - 1;
@@ -736,12 +1059,74 @@ fn chrono_time_iso(iso: &str) -> anyhow::Result<i64> {
 pub fn run() -> anyhow::Result<()> {
     // --version 由 clap 自动生成（CARGO_PKG_VERSION，随发布 bump）——审计补面：
     // 此前 exm-gateway/exm 无版本参数，--version 会直接拉起实例
-    let cli = Cli::parse();
+    let args: Vec<String> = std::env::args().collect();
+    let json_requested = requested_json_output(&args);
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if json_requested {
+                println!("{}", cli_error_result("invalid_args", &error.to_string()));
+                std::process::exit(2);
+            }
+            error.exit();
+        }
+    };
+    let output_format = cli.output_format.clone();
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async { dispatch(cli).await })
+    match rt.block_on(async { dispatch(cli).await }) {
+        Ok(()) => Ok(()),
+        Err(error) if error.is::<command_cmd::ReportedCommandFailure>() => std::process::exit(1),
+        Err(error) if output_format == "json" => {
+            println!(
+                "{}",
+                cli_error_result(classify_cli_error(&error.to_string()), &error.to_string())
+            );
+            std::process::exit(1);
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn requested_json_output(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        arg == "--output-format=json"
+            || arg == "--output-format" && args.get(index + 1).is_some_and(|value| value == "json")
+    })
+}
+
+fn cli_error_result(category: &str, message: &str) -> String {
+    serde_json::json!({
+        "ok": false,
+        "status": if category == "invalid_args" { "rejected" } else { "failed" },
+        "error": {
+            "category": category,
+            "message": exm_core::tools::redact_str(message)
+        },
+        "requestId": exm_core::types::new_id()
+    })
+    .to_string()
+}
+
+fn classify_cli_error(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("permission") || message.contains("权限") || message.contains("禁止") {
+        "forbidden"
+    } else if lower.contains("unsupported") || message.contains("不支持") {
+        "unsupported"
+    } else if message.contains("不存在") || lower.contains("not found") {
+        "not_found"
+    } else if message.contains("冲突") || lower.contains("conflict") {
+        "conflict"
+    } else if message.contains("模型") && (message.contains("不可用") || message.contains("未配置"))
+    {
+        "unavailable"
+    } else {
+        "internal"
+    }
 }
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    validate_cli_command_catalog()?;
     let workspace = cli.workspace.clone();
     // 无头单轮（-p）：顶层前置分派——不进任何交互 UI，执行完按退出码契约退出。
     // 使用错误（2）不能走 anyhow::Err（那是 1 的语义），直接 process::exit 落码
@@ -753,8 +1138,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     // `exm chat` 保留 readline 面板（ BREAKING：裸命令旧版进 readline 面板）
     // 会话参数（-c/-r/--session）在交互形态同样生效：定位到会话作为初始会话载入。
     // 会话定位放在 match 之前（TUI/panel/chat 三分支共用），command 只 move 一次
-    let has_session_args =
-        cli.session.is_some() || cli.resume.is_some() || cli.continue_last;
+    let has_session_args = cli.session.is_some() || cli.resume.is_some() || cli.continue_last;
     let initial_session: Option<exm_core::types::Session> = if has_session_args {
         let core = build_core(&workspace)?;
         let located = resolve_resume_session(
@@ -794,15 +1178,77 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let root = normalize_root(&workspace);
             doctor::run_doctor(&root)
         }
-        Commands::Chat { text, session, quiet, preview } => {
+        Commands::Help { command } => {
+            let core = build_core(&workspace)?;
+            let session = initial_session.as_ref().map(|session| session.id.as_str());
+            let directory = command_cmd::command_directory(
+                &core,
+                exm_core::command::CommandEntry::Cli,
+                session,
+            )?;
+            if cli.output_format == "json" {
+                if let Some(name) = command.as_deref() {
+                    let value = directory
+                        .entries
+                        .iter()
+                        .find(|entry| {
+                            entry.descriptor.name == name
+                                || entry.descriptor.aliases.iter().any(|alias| alias == name)
+                        })
+                        .map(|entry| {
+                            serde_json::json!({
+                                "protocolVersion": directory.protocol_version,
+                                "entry": entry,
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            serde_json::json!({
+                                "ok": false,
+                                "error": {"category":"unsupported", "message":"命令不在目录中"}
+                            })
+                        });
+                    println!("{}", serde_json::to_string_pretty(&value)?);
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&directory)?);
+                }
+            } else if let Some(name) = command.as_deref() {
+                let Some(entry) = directory.entries.iter().find(|entry| {
+                    entry.descriptor.name == name
+                        || entry.descriptor.aliases.iter().any(|alias| alias == name)
+                }) else {
+                    anyhow::bail!("命令不在目录中：{name}");
+                };
+                println!(
+                    "{}\n  用法：exm {}\n  说明：{}\n  状态：{}",
+                    entry.descriptor.name,
+                    entry.descriptor.usage,
+                    entry.descriptor.summary,
+                    if entry.executable {
+                        "目录允许"
+                    } else {
+                        "目录拒绝"
+                    }
+                );
+            } else {
+                println!("{}", command_cmd::render_directory_text(&directory));
+                for diagnostic in directory.diagnostics {
+                    eprintln!("目录提示：{}", diagnostic.message);
+                }
+            }
+            Ok(())
+        }
+        Commands::Chat {
+            text,
+            session,
+            quiet,
+            preview,
+        } => {
             let core = build_core(&workspace)?;
             if preview {
                 return panel::run_preview(&core, quiet);
             }
             match text {
-                Some(t) => {
-                    chat::run_chat(core, &t, &chat::ChatOptions { session, quiet }).await
-                }
+                Some(t) => chat::run_chat(core, &t, &chat::ChatOptions { session, quiet }).await,
                 None => {
                     // TTY：进入终端交互面板（字符画横幅 + 对话流 + 输入框 + `/` 命令）
                     // 非 TTY（管道 / 重定向）：退回逐行交互，避免控制字符污染日志
@@ -818,7 +1264,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Commands::Agents { capability } => {
             let core = build_core(&workspace)?;
             let defs = match capability {
-                Some(cap) => core.registry.find_by_capability(&cap).into_iter().collect::<Vec<_>>(),
+                Some(cap) => core
+                    .registry
+                    .find_by_capability(&cap)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
                 None => core.agents(),
             };
             let mut last_domain = String::new();
@@ -843,11 +1293,21 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             println!(
                 "\n{}",
-                render::dim(format!("共 {}（指挥体 1 + 子个体 {}）", core.registry.count(), core.registry.units().len()))
+                render::dim(format!(
+                    "共 {}（指挥体 1 + 子个体 {}）",
+                    core.registry.count(),
+                    core.registry.units().len()
+                ))
             );
             Ok(())
         }
-        Commands::Trajectory { session_id, out, jsonl, include_thinking, max_tool_chars } => {
+        Commands::Trajectory {
+            session_id,
+            out,
+            jsonl,
+            include_thinking,
+            max_tool_chars,
+        } => {
             let core = build_core(&workspace)?;
             platform_cmd::run_trajectory(
                 &core,
@@ -871,12 +1331,459 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Commands::Status { session_id } => {
+            let core = build_core(&workspace)?;
+            let session = core
+                .store
+                .get_session(&session_id)?
+                .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+            let relation = core.workflow_relation(&session_id)?;
+            let output = serde_json::json!({
+                "sessionId": session.id,
+                "title": session.title,
+                "goal": relation.goal,
+                "spec": relation.spec,
+                "plan": {
+                    "mode": if relation.plan_mode { "plan" } else { "execute" },
+                    "items": core.plan_list(&session_id),
+                    "count": relation.plan_items,
+                },
+                "todoPresent": relation.todo_present,
+                "queue": exm_core::task_queue::list(&session_id),
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            Ok(())
+        }
+        Commands::Queue { action } => {
+            match action {
+                QueueAction::List { session_id } => {
+                    let session = core_session(&workspace, &session_id)?;
+                    let output = serde_json::json!({
+                        "sessionId": session.id,
+                        "items": exm_core::task_queue::list(&session_id),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                QueueAction::Add {
+                    session_id,
+                    instruction,
+                } => {
+                    core_session(&workspace, &session_id)?;
+                    let id = exm_core::task_queue::enqueue(&session_id, &instruction, "queued", "")
+                        .map_err(anyhow::Error::msg)?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"accepted","queueId":id})
+                    );
+                }
+                QueueAction::Clear { session_id } => {
+                    core_session(&workspace, &session_id)?;
+                    exm_core::task_queue::clear(&session_id);
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","sessionId":session_id})
+                    );
+                }
+            }
+            Ok(())
+        }
+        Commands::Sessions { action } => {
+            let core = build_core(&workspace)?;
+            match action {
+                SessionAction::New { title } => {
+                    let session = core.create_session(title.as_deref().unwrap_or("CLI 会话"))?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ok": true,
+                            "status": "succeeded",
+                            "session": session,
+                        })
+                    );
+                }
+                SessionAction::List => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&core.list_sessions_in_scope()?)?
+                    );
+                }
+                SessionAction::Resume { session_id } => {
+                    let session = core
+                        .store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                        return tui::run_tui_with_session(core, Some(session), false).await;
+                    }
+                    return chat::run_interactive_with_session(core, session, false).await;
+                }
+            }
+            Ok(())
+        }
+        Commands::Stop { session_id } => {
+            let core = build_core(&workspace)?;
+            let stopped_tools = core.stop_session(&session_id)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "status": "accepted",
+                    "sessionId": session_id,
+                    "stoppedTools": stopped_tools,
+                })
+            );
+            Ok(())
+        }
+        Commands::Steer {
+            session_id,
+            instruction,
+        } => {
+            let core = build_core(&workspace)?;
+            core.store
+                .get_session(&session_id)?
+                .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+            if instruction.trim().is_empty() {
+                anyhow::bail!("steer 指令不能为空");
+            }
+            match core.admit_steering(&session_id, &instruction, Some("cli"))? {
+                exm_core::SteeringAdmission::Running => println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "status": "steering_accepted",
+                        "running": true,
+                        "interrupted": false,
+                        "sessionId": session_id,
+                    })
+                ),
+                exm_core::SteeringAdmission::Idle => {
+                    core.chat(&session_id, &instruction).await?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ok": true,
+                            "status": "accepted",
+                            "mode": "chat",
+                            "running": false,
+                            "interrupted": false,
+                            "sessionId": session_id,
+                        })
+                    );
+                }
+            }
+            Ok(())
+        }
+        Commands::Plan { action } => {
+            let core = build_core(&workspace)?;
+            match action {
+                PlanAction::Status { session_id } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    let output = serde_json::json!({
+                        "sessionId": session_id,
+                        "mode": if exm_core::plan::is_plan_mode(&session_id) { "plan" } else { "execute" },
+                        "items": core.plan_list(&session_id),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
+                PlanAction::Start { session_id, task } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    core.set_plan_mode(&session_id, true);
+                    if let Some(task) = task {
+                        let message = chat::run_chat(
+                            core.clone(),
+                            &task,
+                            &chat::ChatOptions {
+                                session: Some(session_id.clone()),
+                                quiet: false,
+                            },
+                        )
+                        .await;
+                        message?;
+                    }
+                    println!("计划模式已启用；写工具调用会被转换为计划条目。你可用 `exm plan status {session_id}` 查看。 ");
+                }
+                PlanAction::Approve { session_id } => {
+                    let applied = core.plan_approve(&session_id).await?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","applied":applied.len()})
+                    );
+                }
+                PlanAction::Reject { session_id } => {
+                    let retained = core.plan_reject(&session_id);
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","retained":retained.len()})
+                    );
+                }
+                PlanAction::Execute { session_id } => {
+                    core.set_plan_mode(&session_id, false);
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","mode":"execute"})
+                    );
+                }
+            }
+            Ok(())
+        }
+        Commands::Spec { action } => {
+            let core = build_core(&workspace)?;
+            match action {
+                SpecAction::Show { session_id } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&core.spec_get(&session_id)?)?
+                    );
+                }
+                SpecAction::Draft {
+                    session_id,
+                    objective,
+                } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    let current = core.spec_get(&session_id)?;
+                    let spec = core.spec_update(
+                        &session_id,
+                        &objective,
+                        current
+                            .as_ref()
+                            .map(|spec| spec.scope.clone())
+                            .unwrap_or_default(),
+                        current
+                            .as_ref()
+                            .map(|spec| spec.constraints.clone())
+                            .unwrap_or_default(),
+                        current
+                            .as_ref()
+                            .map(|spec| spec.acceptance.clone())
+                            .unwrap_or_default(),
+                        current
+                            .as_ref()
+                            .map(|spec| spec.verification.clone())
+                            .unwrap_or_default(),
+                        current.as_ref().map(|spec| spec.revision),
+                    )?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","spec":spec,"writtenToProject":false})
+                    );
+                }
+                SpecAction::Edit {
+                    session_id,
+                    objective,
+                    revision,
+                } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    let current = core
+                        .spec_get(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("当前会话没有 spec；请先使用 spec draft"))?;
+                    let spec = core.spec_update(
+                        &session_id,
+                        &objective,
+                        current.scope,
+                        current.constraints,
+                        current.acceptance,
+                        current.verification,
+                        revision.or(Some(current.revision)),
+                    )?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","spec":spec,"writtenToProject":false})
+                    );
+                }
+                SpecAction::Export { session_id, path } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    let receipt = core.spec_export(&session_id, &path)?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","export":receipt})
+                    );
+                }
+                SpecAction::Clear {
+                    session_id,
+                    revision,
+                } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    core.spec_clear(
+                        &session_id,
+                        revision.or(core.spec_get(&session_id)?.map(|spec| spec.revision)),
+                    )?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"succeeded","cleared":true})
+                    );
+                }
+            }
+            Ok(())
+        }
+        Commands::Goal { action } => {
+            let core = build_core(&workspace)?;
+            let (session_id, operation, text, revision) = match action {
+                GoalAction::Status { session_id } => {
+                    core.store
+                        .get_session(&session_id)?
+                        .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&core.goal_get(&session_id)?)?
+                    );
+                    return Ok(());
+                }
+                GoalAction::Start {
+                    session_id,
+                    objective,
+                } => (session_id, "start", Some(objective), None),
+                GoalAction::Edit {
+                    session_id,
+                    objective,
+                    revision,
+                } => (session_id, "edit", Some(objective), revision),
+                GoalAction::Pause {
+                    session_id,
+                    revision,
+                } => (session_id, "pause", None, revision),
+                GoalAction::Resume {
+                    session_id,
+                    revision,
+                } => (session_id, "resume", None, revision),
+                GoalAction::Complete {
+                    session_id,
+                    verification,
+                    revision,
+                } => (session_id, "complete", Some(verification), revision),
+                GoalAction::Block {
+                    session_id,
+                    note,
+                    revision,
+                } => (session_id, "block", Some(note), revision),
+                GoalAction::Clear {
+                    session_id,
+                    revision,
+                } => (session_id, "clear", None, revision),
+            };
+            core.store
+                .get_session(&session_id)?
+                .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+            let goal = core.goal_update(
+                &session_id,
+                operation,
+                text.as_deref(),
+                if operation == "block" {
+                    text.as_deref()
+                } else {
+                    None
+                },
+                if operation == "complete" {
+                    text.as_deref()
+                } else {
+                    None
+                },
+                revision.or_else(|| {
+                    core.goal_get(&session_id)
+                        .ok()
+                        .flatten()
+                        .map(|goal| goal.revision)
+                }),
+            )?;
+            println!(
+                "{}",
+                serde_json::json!({"ok":true,"status":"succeeded","goal":goal})
+            );
+            Ok(())
+        }
         Commands::Gateway { port, host } => {
             let core = build_core(&workspace)?;
-            let host_ref = if host.is_empty() { None } else { Some(host.as_str()) };
+            let host_ref = if host.is_empty() {
+                None
+            } else {
+                Some(host.as_str())
+            };
             exm_gateway::serve(core, port, host_ref).await
         }
         Commands::Plugin { action } => plugin_cmd::run_plugin_action(&workspace, action).await,
+        Commands::Command { action } => {
+            use exm_core::command::{CommandEntry, CommandOutputFormat};
+            let core = build_core(&workspace)?;
+            let session = initial_session.as_ref().map(|session| session.id.as_str());
+            let format = if cli.output_format == "json" {
+                CommandOutputFormat::Json
+            } else {
+                CommandOutputFormat::Human
+            };
+            match action {
+                ExtensionCommandAction::List => {
+                    let directory = command_cmd::directory(&core, CommandEntry::Cli, session)?;
+                    if format == CommandOutputFormat::Json {
+                        println!("{}", serde_json::to_string(&directory)?);
+                    } else {
+                        for entry in directory.entries {
+                            let descriptor = entry.descriptor;
+                            if entry.executable {
+                                println!(
+                                    "{} (v{}) — {}",
+                                    descriptor.name, descriptor.version, descriptor.summary
+                                );
+                            } else {
+                                let reason = serde_json::to_value(entry.unavailable_reason)?;
+                                println!(
+                                    "{}（不可用：{}）",
+                                    descriptor.name,
+                                    reason.as_str().unwrap_or("unavailable")
+                                );
+                            }
+                        }
+                    }
+                }
+                ExtensionCommandAction::Catalog { markdown } => {
+                    let directory =
+                        command_cmd::command_directory(&core, CommandEntry::Cli, session)?;
+                    let rendered = if markdown {
+                        command_cmd::render_directory_markdown(&directory)
+                    } else if format == CommandOutputFormat::Json {
+                        serde_json::to_string_pretty(&directory)?
+                    } else {
+                        command_cmd::render_directory_text(&directory)
+                    };
+                    println!("{rendered}");
+                }
+                ExtensionCommandAction::Run {
+                    name,
+                    command_version,
+                    args,
+                } => {
+                    let result = command_cmd::execute(
+                        &core,
+                        CommandEntry::Cli,
+                        session,
+                        &name,
+                        command_version,
+                        &args,
+                        format,
+                    )
+                    .await;
+                    println!("{}", command_cmd::render(&result, format));
+                    if !result.ok {
+                        return Err(command_cmd::ReportedCommandFailure.into());
+                    }
+                }
+            }
+            Ok(())
+        }
         Commands::Mcp { action } => {
             let core = build_core(&workspace)?;
             let McpAction::Serve { session, client } = action;
@@ -923,8 +1830,13 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                                 }
                             }
                             None => {
-                                if let Some(params) = req.get_mut("params").and_then(|p| p.as_object_mut()) {
-                                    params.insert("arguments".into(), serde_json::json!({ "session": default_sid }));
+                                if let Some(params) =
+                                    req.get_mut("params").and_then(|p| p.as_object_mut())
+                                {
+                                    params.insert(
+                                        "arguments".into(),
+                                        serde_json::json!({ "session": default_sid }),
+                                    );
                                 }
                             }
                             _ => {}
@@ -946,7 +1858,13 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 println!("{pretty}");
             } else {
                 std::fs::write(&out, pretty)?;
-                println!("{}", crate::render::ok(format!("OpenAPI 契约已写入 {out}（{} 端点）", doc["paths"].as_object().map(|m| m.len()).unwrap_or(0))));
+                println!(
+                    "{}",
+                    crate::render::ok(format!(
+                        "OpenAPI 契约已写入 {out}（{} 端点）",
+                        doc["paths"].as_object().map(|m| m.len()).unwrap_or(0)
+                    ))
+                );
             }
             Ok(())
         }
@@ -959,7 +1877,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             } else {
                 id
             };
-            eprintln!("[worker] 本地就绪（模型：{}），接入 {url}", if core.is_mock() { "Mock" } else { "已配置" });
+            eprintln!(
+                "[worker] 本地就绪（模型：{}），接入 {url}",
+                if core.is_mock() { "Mock" } else { "已配置" }
+            );
             exm_core::remote::WorkerSession::run(&url, &token, &worker_id, core).await
         }
         Commands::Config { action } => {
@@ -977,16 +1898,39 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 MemoryAction::List { kind, agent, limit } => {
                     memory_cmd::run_memory_list(&core, kind, agent.as_deref(), limit)
                 }
-                MemoryAction::Search { query, agent, limit } => {
-                    memory_cmd::run_memory_search(&core, &query, agent.as_deref(), limit)
-                }
-                MemoryAction::Add { kind, title, body, pin, importance, agent, tags, global } => {
-                    memory_cmd::run_memory_add(&core, &kind, &title, &body, pin, agent.as_deref(), tags, importance, global)
-                }
+                MemoryAction::Search {
+                    query,
+                    agent,
+                    limit,
+                } => memory_cmd::run_memory_search(&core, &query, agent.as_deref(), limit),
+                MemoryAction::Add {
+                    kind,
+                    title,
+                    body,
+                    pin,
+                    importance,
+                    agent,
+                    tags,
+                    global,
+                } => memory_cmd::run_memory_add(
+                    &core,
+                    &kind,
+                    &title,
+                    &body,
+                    pin,
+                    agent.as_deref(),
+                    tags,
+                    importance,
+                    global,
+                ),
                 MemoryAction::Pin { id, off } => memory_cmd::run_memory_pin(&core, &id, !off),
-                MemoryAction::Edit { id, title, body, tags, kind } => {
-                    memory_cmd::run_memory_edit(&core, &id, title, body, tags, kind)
-                }
+                MemoryAction::Edit {
+                    id,
+                    title,
+                    body,
+                    tags,
+                    kind,
+                } => memory_cmd::run_memory_edit(&core, &id, title, body, tags, kind),
                 MemoryAction::Forget { id } => memory_cmd::run_memory_forget(&core, &id),
                 MemoryAction::Reindex => memory_cmd::run_memory_reindex(&core),
                 MemoryAction::Decay { floor } => memory_cmd::run_memory_decay(&core, floor),
@@ -1014,9 +1958,22 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let core = build_core(&workspace)?;
             match action {
                 SkillAction::List => platform_cmd::run_skill_list(&core),
-                SkillAction::Add { id, name, instructions, description, trigger, agent } => {
-                    platform_cmd::run_skill_add(&core, &id, &name, &instructions, &description, trigger, agent)
-                }
+                SkillAction::Add {
+                    id,
+                    name,
+                    instructions,
+                    description,
+                    trigger,
+                    agent,
+                } => platform_cmd::run_skill_add(
+                    &core,
+                    &id,
+                    &name,
+                    &instructions,
+                    &description,
+                    trigger,
+                    agent,
+                ),
                 SkillAction::Remove { id } => platform_cmd::run_skill_remove(&core, &id),
                 SkillAction::Import { file } => platform_cmd::run_skill_import(&core, &file),
                 SkillAction::Export { id, out } => platform_cmd::run_skill_export(&core, &id, &out),
@@ -1026,25 +1983,35 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let core = build_core(&workspace)?;
             match action {
                 CronAction::List => platform_cmd::run_cron_list(&core),
-                CronAction::Add { name, prompt, cron, at, kind, target_session, steps, group, session_title } => {
-                    platform_cmd::run_cron_add(
-                        &core,
-                        &name,
-                        &prompt,
-                        cron,
-                        at,
-                        group,
-                        session_title,
-                        kind,
-                        target_session,
-                        steps,
-                    )
-                }
+                CronAction::Add {
+                    name,
+                    prompt,
+                    cron,
+                    at,
+                    kind,
+                    target_session,
+                    steps,
+                    group,
+                    session_title,
+                } => platform_cmd::run_cron_add(
+                    &core,
+                    &name,
+                    &prompt,
+                    cron,
+                    at,
+                    group,
+                    session_title,
+                    kind,
+                    target_session,
+                    steps,
+                ),
                 CronAction::Run { id } => platform_cmd::run_cron_now(&core, &id).await,
                 CronAction::Enable { id } => platform_cmd::run_cron_enable(&core, &id, true),
                 CronAction::Disable { id } => platform_cmd::run_cron_enable(&core, &id, false),
                 CronAction::Remove { id } => platform_cmd::run_cron_remove(&core, &id),
-                CronAction::Runs { job, limit } => platform_cmd::run_cron_runs(&core, job.as_deref(), limit),
+                CronAction::Runs { job, limit } => {
+                    platform_cmd::run_cron_runs(&core, job.as_deref(), limit)
+                }
             }
         }
         Commands::Approval { action } => {
@@ -1053,20 +2020,30 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 ApprovalAction::List { status, limit } => {
                     platform_cmd::run_approval_list(&core, status.as_deref(), limit)
                 }
-                ApprovalAction::Approve { id } => platform_cmd::run_approval_decide(&core, &id, true).await,
-                ApprovalAction::Deny { id } => platform_cmd::run_approval_decide(&core, &id, false).await,
+                ApprovalAction::Approve { id } => {
+                    platform_cmd::run_approval_decide(&core, &id, true).await
+                }
+                ApprovalAction::Deny { id } => {
+                    platform_cmd::run_approval_decide(&core, &id, false).await
+                }
             }
         }
         Commands::Model { action } => {
             let core = build_core(&workspace)?;
             match action {
                 ModelAction::List => platform_cmd::run_model_list(&core),
-                ModelAction::Add { id, name, base_url, api_key, model } => {
-                    platform_cmd::run_model_add(&core, &id, &name, &base_url, &api_key, &model)
-                }
+                ModelAction::Add {
+                    id,
+                    name,
+                    base_url,
+                    api_key,
+                    model,
+                } => platform_cmd::run_model_add(&core, &id, &name, &base_url, &api_key, &model),
                 ModelAction::Use { id } => platform_cmd::run_model_use(&core, &id),
                 ModelAction::Remove { id } => platform_cmd::run_model_remove(&core, &id),
-                ModelAction::Test { id } => platform_cmd::run_model_test(&core, id.as_deref()).await,
+                ModelAction::Test { id } => {
+                    platform_cmd::run_model_test(&core, id.as_deref()).await
+                }
             }
         }
         Commands::Checkpoint { action } => {
@@ -1096,24 +2073,41 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let core = build_core(&workspace)?;
             match action {
                 GroupAction::List => group_cmd::run_list(&core),
-                GroupAction::Create { name, id, description } => {
-                    group_cmd::run_create(&core, &name, id, &description)
-                }
+                GroupAction::Create {
+                    name,
+                    id,
+                    description,
+                } => group_cmd::run_create(&core, &name, id, &description),
                 GroupAction::Switch { id } => group_cmd::run_switch(&core, &id),
                 GroupAction::Info { id } => group_cmd::run_info(&core, id),
                 GroupAction::Delete { id } => group_cmd::run_delete(&core, &id),
                 GroupAction::Export { id, out } => group_cmd::run_export(&core, &id, &out),
-                GroupAction::Import { file, id } => group_cmd::run_import(&core, &file, id.as_deref()),
+                GroupAction::Import { file, id } => {
+                    group_cmd::run_import(&core, &file, id.as_deref())
+                }
             }
         }
         Commands::Agent { action } => {
             let core = build_core(&workspace)?;
             match action {
-                AgentAction::Create { name, identifier, description, domain, tier, group, prompt } => {
-                    group_cmd::run_agent_create(
-                        &core, &name, &identifier, &description, &domain, &tier, group.as_deref(), prompt,
-                    )
-                }
+                AgentAction::Create {
+                    name,
+                    identifier,
+                    description,
+                    domain,
+                    tier,
+                    group,
+                    prompt,
+                } => group_cmd::run_agent_create(
+                    &core,
+                    &name,
+                    &identifier,
+                    &description,
+                    &domain,
+                    &tier,
+                    group.as_deref(),
+                    prompt,
+                ),
                 AgentAction::Remove { identifier, group } => {
                     group_cmd::run_agent_remove(&core, &identifier, group.as_deref())
                 }
@@ -1132,9 +2126,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let core = build_core(&workspace)?;
             match action {
                 PersonaAction::Get { identifier } => persona_cmd::run_get(&core, &identifier),
-                PersonaAction::Set { identifier, text, file } => {
-                    persona_cmd::run_set(&core, &identifier, text, file)
-                }
+                PersonaAction::Set {
+                    identifier,
+                    text,
+                    file,
+                } => persona_cmd::run_set(&core, &identifier, text, file),
                 PersonaAction::Reset { identifier } => persona_cmd::run_reset(&core, &identifier),
             }
         }
@@ -1144,6 +2140,36 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_error_output_has_stable_category_and_redacts_inline_credentials() {
+        let output = cli_error_result(
+            "invalid_args",
+            "missing option with token Bearer superSecretCredential123456",
+        );
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["status"], "rejected");
+        assert_eq!(value["error"]["category"], "invalid_args");
+        assert!(value["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(!output.contains("superSecretCredential123456"));
+    }
+
+    #[test]
+    fn json_output_flag_detection_handles_equals_and_separate_forms() {
+        assert!(requested_json_output(&[
+            "exm".into(),
+            "--output-format=json".into(),
+            "status".into(),
+        ]));
+        assert!(requested_json_output(&[
+            "exm".into(),
+            "--output-format".into(),
+            "json".into(),
+            "status".into(),
+        ]));
+        assert!(!requested_json_output(&["exm".into(), "status".into()]));
+    }
 
     // ---------------- 会话定位（session-resume：-c/-r/--session 优先序与匹配三态）
 
@@ -1166,7 +2192,11 @@ mod tests {
             .unwrap();
         // --session 最高（即使 -r/-c 同时给出）
         let got = resolve_resume_session(&core, Some(&b.id), Some("调试"), false).unwrap();
-        assert_eq!(got.as_deref(), Some(b.id.as_str()), "显式 --session 必须最优先");
+        assert_eq!(
+            got.as_deref(),
+            Some(b.id.as_str()),
+            "显式 --session 必须最优先"
+        );
         // -r 次之（-c 被忽略）
         let got = resolve_resume_session(&core, None, Some("调试"), true).unwrap();
         assert_eq!(got.as_deref(), Some(a.id.as_str()), "-r 优先于 -c");
@@ -1189,7 +2219,10 @@ mod tests {
         let err = resolve_resume_session(&core, None, Some("调试"), false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("2 个会话"), "多命中应报数量：{msg}");
-        assert!(msg.contains("调试前端问题") && msg.contains("调试后端问题"), "候选清单：{msg}");
+        assert!(
+            msg.contains("调试前端问题") && msg.contains("调试后端问题"),
+            "候选清单：{msg}"
+        );
         // 零命中
         let err = resolve_resume_session(&core, None, Some("不存在的名字"), false).unwrap_err();
         assert!(err.to_string().contains("无匹配"), "零命中报错");
@@ -1253,5 +2286,73 @@ mod tests {
     fn 工作区根目录_不动普通路径() {
         let ws = PathBuf::from("/home/dev/ExMachina");
         assert_eq!(normalize_root(&ws), ws);
+    }
+
+    #[test]
+    fn CLI顶层命令已登记到统一目录且基础命令仍可解析() {
+        validate_cli_command_catalog().expect("CLI 与统一目录不应漂移");
+        let registry = cli_command_registry().expect("构造 CLI 目录");
+        for name in ["model", "config", "memory", "skill", "cron", "approval"] {
+            assert!(registry.resolve(name).is_some(), "基础命令缺失：{name}");
+        }
+        for name in ["cli.tui", "cli.chat", "cli.gateway", "cli.openapi"] {
+            assert!(
+                registry.resolve(name).is_some(),
+                "Clap 顶层命令缺失：{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn spec_export_has_explicit_session_and_project_path_arguments() {
+        let parsed =
+            Cli::try_parse_from(["exm", "spec", "export", "session-123", "docs/spec.md"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::Spec {
+                action: SpecAction::Export { session_id, path }
+            }) if session_id == "session-123" && path == "docs/spec.md"
+        ));
+    }
+
+    #[test]
+    fn command_catalog_markdown_is_explicit_and_names_are_checked_against_the_directory() {
+        let parsed = Cli::try_parse_from(["exm", "command", "catalog", "--markdown"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::Command {
+                action: ExtensionCommandAction::Catalog { markdown: true }
+            })
+        ));
+
+        let matrix = include_str!("../../../docs/command-entry-matrix.md");
+        for descriptor in exm_core::command::builtin_command_descriptors() {
+            assert!(
+                matrix.contains(&format!(
+                    "| `{}` | `{}` |",
+                    descriptor.name, descriptor.usage
+                )),
+                "entry matrix omitted canonical command {}",
+                descriptor.name
+            );
+        }
+        let root =
+            std::env::temp_dir().join(format!("exm-command-matrix-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let core = Arc::new(Core::create(&root).unwrap());
+        let snapshot =
+            command_cmd::command_directory(&core, exm_core::command::CommandEntry::Cli, None)
+                .unwrap();
+        assert_eq!(command_cmd::render_directory_markdown(&snapshot), matrix);
+        drop(core);
+        let _ = std::fs::remove_dir_all(root);
+
+        for args in [
+            vec!["exm", "help", "spec.export"],
+            vec!["exm", "sessions", "list"],
+            vec!["exm", "stop", "session-123"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
     }
 }

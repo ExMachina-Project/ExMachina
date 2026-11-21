@@ -27,7 +27,8 @@ pub(crate) async fn tick(core: &Arc<Core>, ch: &Channel) -> anyhow::Result<Strin
         return Ok(format!("今日互动已达上限（{} 次）", s.daily_limit));
     }
 
-    let mut items = with_live_guard(core, ch, WatchTrigger::Automatic, fetch_candidates(ch, s)).await?;
+    let mut items =
+        with_live_guard(core, ch, WatchTrigger::Automatic, fetch_candidates(ch, s)).await?;
     live_channel(core, ch, WatchTrigger::Automatic)?;
     items.retain(|v| !state.seen(&video_key(v)));
     // 内容倾向（软偏好）：命中的视频排到队首优先观看，未命中的保留在后（不硬过滤）
@@ -43,13 +44,8 @@ pub(crate) async fn tick(core: &Arc<Core>, ch: &Channel) -> anyhow::Result<Strin
             .collect();
         // 热门流没有命中关键词时，尝试一次关键词搜索；失败则回退热门流（不中断轮询）
         if filtered.is_empty() && s.source != "search" && !s.keywords.is_empty() {
-            if let Ok(mut searched) = with_live_guard(
-                core,
-                ch,
-                WatchTrigger::Automatic,
-                search_candidates(ch, s),
-            )
-            .await
+            if let Ok(mut searched) =
+                with_live_guard(core, ch, WatchTrigger::Automatic, search_candidates(ch, s)).await
             {
                 searched.retain(|v| !state.seen(&video_key(v)) && matches_keywords(v, &s.keywords));
                 if !searched.is_empty() {
@@ -490,8 +486,7 @@ pub(crate) async fn fetch_candidates(ch: &Channel, s: &Settings) -> anyhow::Resu
 
 /// 倾向词轮换游标：按通道记忆轮次取模，跨轮次推进避免反复搜同一个词
 pub(crate) fn interest_cursor(ch: &Channel, terms: &[String]) -> usize {
-    static CURSORS: OnceLock<Mutex<std::collections::HashMap<String, usize>>> =
-        OnceLock::new();
+    static CURSORS: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
     let map = CURSORS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut guard = map.lock();
     let n = guard.entry(ch.id.clone()).or_insert(0);
@@ -583,7 +578,10 @@ pub(crate) fn interest_search_terms(interests: &str) -> Vec<String> {
     out
 }
 
-pub(crate) async fn search_candidates(ch: &Channel, s: &Settings) -> anyhow::Result<Vec<VideoItem>> {
+pub(crate) async fn search_candidates(
+    ch: &Channel,
+    s: &Settings,
+) -> anyhow::Result<Vec<VideoItem>> {
     match ch.kind.as_str() {
         "bilibili" => {
             let q = s.keywords.first().cloned().unwrap_or_default();

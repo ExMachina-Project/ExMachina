@@ -11,11 +11,11 @@
 //! 模型放行后才进完整轮次（与 @ 消息同链路）。决策失败保守忽略——
 //! 主动回复是增益不是义务，宁可漏不可吵。
 
-use exm_core::Core;
 use exm_core::provider::{ChatMessage, ChatRequest};
+use exm_core::Core;
 
-use super::channels::Channel;
 use super::channel::InboundCtx;
+use super::channels::Channel;
 
 /// 决策模型提示：只判断「值不值得回应」，输出严格 JSON。
 /// 上下文给最近群聊消息（含发送者署名）——是否值得回应高度依赖语境：
@@ -74,11 +74,22 @@ pub(crate) async fn decide(
             user.push('\n');
         }
     }
-    user.push_str(&format!("\n最新消息（未 @ 本集群）：{who} 说：{}\n\n判断是否回应。", ctx.text.trim()));
+    user.push_str(&format!(
+        "\n最新消息（未 @ 本集群）：{who} 说：{}\n\n判断是否回应。",
+        ctx.text.trim()
+    ));
 
     let orch = core.orchestrator();
-    let (provider,model)=match orch.target_model(ch.group.as_deref(),exm_core::model_routing::ModelPurpose::Planning,&user).await {
-        Ok(target)=>target,Err(e)=>{
+    let (provider, model) = match orch
+        .target_model(
+            ch.group.as_deref(),
+            exm_core::model_routing::ModelPurpose::Planning,
+            &user,
+        )
+        .await
+    {
+        Ok(target) => target,
+        Err(e) => {
             core.emit_sanitize_finding(serde_json::json!({"kind":"proactive.evalError","channel":ch.id,"error":e.to_string()}));
             return false;
         }
@@ -214,8 +225,9 @@ fn recent_group_lines(core: &Core, ch: &Channel, ctx: &InboundCtx<'_>) -> Vec<St
                         format!("[用户·{who}] {body}")
                     }
                 }
-                exm_core::types::MessageRole::Orchestrator
-                | exm_core::types::MessageRole::Unit => format!("[本集群] {body}"),
+                exm_core::types::MessageRole::Orchestrator | exm_core::types::MessageRole::Unit => {
+                    format!("[本集群] {body}")
+                }
                 exm_core::types::MessageRole::System => format!("[系统] {body}"),
             }
         })
@@ -230,7 +242,9 @@ mod tests {
     /// 保守侧：解析不出来一律不回应。
     #[test]
     fn 主动回复决策解析_合法与非法() {
-        assert!(parse_proactive_eval(r#"{"reply": true, "why": "有人求助"}"#));
+        assert!(parse_proactive_eval(
+            r#"{"reply": true, "why": "有人求助"}"#
+        ));
         assert!(!parse_proactive_eval(r#"{"reply": false, "why": "闲聊"}"#));
         // 围栏包裹
         assert!(parse_proactive_eval(
@@ -309,9 +323,15 @@ mod tests {
         assert!(!should_proactively_reply(&core, &ch, &ctx).await);
 
         // 问候同样到达模型；本环境未配置模型，因此拒绝主动回应。
-        let ch_full = Channel { proactive_rate: Some(100), ..ch };
+        let ch_full = Channel {
+            proactive_rate: Some(100),
+            ..ch
+        };
         let probe = String::from("在吗");
-        let probe_ctx = InboundCtx { text: &probe, ..ctx };
+        let probe_ctx = InboundCtx {
+            text: &probe,
+            ..ctx
+        };
         assert!(!should_proactively_reply(&core, &ch_full, &probe_ctx).await);
 
         // ③ 正常求助消息 + rate=100：漏斗走到底，决策模型调用失败（本测试环境
@@ -367,6 +387,9 @@ mod tests {
             env["payload"]["type"].as_str() == Some("sanitize.finding")
                 && env["payload"]["payload"]["kind"].as_str() == Some("proactive.evalError")
         });
-        assert!(reached_eval, "rate=0 的消息应仍到达决策模型（evalError 事件可证采样不再硬拦截）");
+        assert!(
+            reached_eval,
+            "rate=0 的消息应仍到达决策模型（evalError 事件可证采样不再硬拦截）"
+        );
     }
 }

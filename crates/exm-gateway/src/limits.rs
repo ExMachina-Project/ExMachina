@@ -1,7 +1,7 @@
 //! 用量治理（capability-completion 组 4）：滑动窗口限流 + 周期配额计数。
 //! 仅作用于外部入口（通道入站 / HTTP API）；组内派发不计费不限流（设计 D10）。
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 #[derive(Default)]

@@ -15,7 +15,11 @@ struct Doctor {
 
 impl Doctor {
     fn new() -> Self {
-        Doctor { pass: 0, warn: 0, fail: 0 }
+        Doctor {
+            pass: 0,
+            warn: 0,
+            fail: 0,
+        }
     }
     fn check(&mut self, name: &str, result: Result<String, String>) {
         match result {
@@ -45,7 +49,11 @@ impl Doctor {
 
 /// 开/关展示口径
 fn on_off(on: bool) -> &'static str {
-    if on { "开" } else { "关" }
+    if on {
+        "开"
+    } else {
+        "关"
+    }
 }
 
 pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
@@ -56,7 +64,11 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
     d.check(
         "运行配置",
         if cfg.config_path.exists() {
-            Ok(format!("{}（configVersion {}）", cfg.config_path.display(), cfg.config_version))
+            Ok(format!(
+                "{}（configVersion {}）",
+                cfg.config_path.display(),
+                cfg.config_version
+            ))
         } else {
             Err("未找到 config.json —— 请先运行 `exm install`".into())
         },
@@ -86,7 +98,9 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
                         std::fs::read_dir(e.path().join("agents"))
                             .map(|list| {
                                 list.filter_map(|x| x.ok())
-                                    .filter(|x| x.path().extension().map(|y| y == "json").unwrap_or(false))
+                                    .filter(|x| {
+                                        x.path().extension().map(|y| y == "json").unwrap_or(false)
+                                    })
                                     .count()
                             })
                             .unwrap_or(0)
@@ -98,7 +112,10 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
                     Err(format!("仅 {n} 份成员定义，期望 ≥42"))
                 }
             }
-            Err(_) => Err(format!("缺少目录 {}", cfg.agents_dir.join("groups").display())),
+            Err(_) => Err(format!(
+                "缺少目录 {}",
+                cfg.agents_dir.join("groups").display()
+            )),
         },
     );
 
@@ -119,7 +136,12 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
         Ok(core) => match core.memory_stats() {
             Ok(s) => d.check(
                 "深层记忆库",
-                Ok(format!("{} 条记忆 / {} 词项（{}）", s["total"], s["terms"], cfg.data_dir.display())),
+                Ok(format!(
+                    "{} 条记忆 / {} 词项（{}）",
+                    s["total"],
+                    s["terms"],
+                    cfg.data_dir.display()
+                )),
             ),
             Err(e) => d.check("深层记忆库", Err(format!("查询失败：{e}"))),
         },
@@ -150,7 +172,10 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
     );
     let configured = !cfg.llm.api_key.trim().is_empty()
         || !cfg.llm.api_keys.is_empty()
-        || cfg.llm_profiles.iter().any(|p| !p.api_key.trim().is_empty() || !p.api_keys.is_empty());
+        || cfg
+            .llm_profiles
+            .iter()
+            .any(|p| !p.api_key.trim().is_empty() || !p.api_keys.is_empty());
     d.soft(
         "LLM 通道",
         if cfg.use_mock {
@@ -191,7 +216,10 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
         "配置 Schema",
         Ok(format!(
             "{} 个分组（CLI 向导与 WebUI 设置页共用）",
-            config_schema()["groups"].as_array().map(|a| a.len()).unwrap_or(0)
+            config_schema()["groups"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0)
         )),
     );
 
@@ -203,7 +231,10 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
         if cfg.identity.group_gate_default {
             Ok("新通道群内仅 @提及 / 回复触发（新装默认）".to_string())
         } else {
-            Err("已关闭（升级迁移保持旧行为：群内任意消息触发；如需门控请到设置页开启）".to_string())
+            Err(
+                "已关闭（升级迁移保持旧行为：群内任意消息触发；如需门控请到设置页开启）"
+                    .to_string(),
+            )
         },
     );
 
@@ -211,8 +242,13 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
     d.check(
         "事件触发器",
         if cfg.triggers.file_watch.enabled && cfg.triggers.file_watch.debounce_ms < 50 {
-            Err(format!("去抖窗口过小（{}ms，下限 50）：易触发风暴", cfg.triggers.file_watch.debounce_ms))
-        } else if cfg.triggers.event_webhook.enabled && cfg.triggers.event_webhook.secret.trim().is_empty() {
+            Err(format!(
+                "去抖窗口过小（{}ms，下限 50）：易触发风暴",
+                cfg.triggers.file_watch.debounce_ms
+            ))
+        } else if cfg.triggers.event_webhook.enabled
+            && cfg.triggers.event_webhook.secret.trim().is_empty()
+        {
             Err("事件 webhook 已启用但密钥为空：入口不可用，请配置签名密钥或关闭".to_string())
         } else {
             let fw = cfg.triggers.file_watch.enabled as usize;
@@ -228,13 +264,20 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
 
     // 心跳：目标个体必须存在（per-agent 粒度）
     match &core_result {
-        Ok(core) => match cfg.automation.heartbeat_agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Ok(core) => match cfg
+            .automation
+            .heartbeat_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(agent) => {
-                let known = core
-                    .registry()
-                    .list_groups()
-                    .into_iter()
-                    .any(|g| core.registry().agents_in_group(&g.id).iter().any(|a| a.identifier == agent));
+                let known = core.registry().list_groups().into_iter().any(|g| {
+                    core.registry()
+                        .agents_in_group(&g.id)
+                        .iter()
+                        .any(|a| a.identifier == agent)
+                });
                 d.check(
                     "心跳目标个体",
                     if known {
@@ -254,16 +297,39 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
         "用量限制",
         if !cfg.limits.enabled {
             Ok("未启用（外部入口不限流）".into())
-        } else if cfg.limits.enabled && cfg.limits.max_requests == 0 && cfg.limits.quota_tokens == 0 && cfg.limits.quota_requests == 0 {
-            Err("已启用但窗口请求数与周期配额均为 0（不限）：等于未生效，请调整阈值或关闭".to_string())
-        } else if !matches!(cfg.limits.quota_period.as_str(), "daily" | "weekly" | "monthly") {
-            Err(format!("配额周期非法：{}（daily | weekly | monthly）", cfg.limits.quota_period))
-        } else if !matches!(cfg.limits.quota_running_policy.as_str(), "finish" | "interrupt") {
-            Err(format!("配额耗尽策略非法：{}（finish | interrupt）", cfg.limits.quota_running_policy))
+        } else if cfg.limits.enabled
+            && cfg.limits.max_requests == 0
+            && cfg.limits.quota_tokens == 0
+            && cfg.limits.quota_requests == 0
+        {
+            Err(
+                "已启用但窗口请求数与周期配额均为 0（不限）：等于未生效，请调整阈值或关闭"
+                    .to_string(),
+            )
+        } else if !matches!(
+            cfg.limits.quota_period.as_str(),
+            "daily" | "weekly" | "monthly"
+        ) {
+            Err(format!(
+                "配额周期非法：{}（daily | weekly | monthly）",
+                cfg.limits.quota_period
+            ))
+        } else if !matches!(
+            cfg.limits.quota_running_policy.as_str(),
+            "finish" | "interrupt"
+        ) {
+            Err(format!(
+                "配额耗尽策略非法：{}（finish | interrupt）",
+                cfg.limits.quota_running_policy
+            ))
         } else {
             Ok(format!(
                 "窗口 {}s / {} 次，周期 {}（token {}、请求 {}）",
-                cfg.limits.window_secs, cfg.limits.max_requests, cfg.limits.quota_period, cfg.limits.quota_tokens, cfg.limits.quota_requests
+                cfg.limits.window_secs,
+                cfg.limits.max_requests,
+                cfg.limits.quota_period,
+                cfg.limits.quota_tokens,
+                cfg.limits.quota_requests
             ))
         },
     );
@@ -292,9 +358,16 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
     d.check(
         "定时任务结果推送",
         if cfg.notify.max_chars < 50 {
-            Err(format!("推送摘要长度过小（{} < 50）：摘要将被过度截断", cfg.notify.max_chars))
+            Err(format!(
+                "推送摘要长度过小（{} < 50）：摘要将被过度截断",
+                cfg.notify.max_chars
+            ))
         } else {
-            Ok(format!("总开关 {}，摘要上限 {} 字符（逐任务在 notifyChannels 订阅）", on_off(cfg.notify.enabled), cfg.notify.max_chars))
+            Ok(format!(
+                "总开关 {}，摘要上限 {} 字符（逐任务在 notifyChannels 订阅）",
+                on_off(cfg.notify.enabled),
+                cfg.notify.max_chars
+            ))
         },
     );
 
@@ -309,7 +382,13 @@ pub fn run_doctor(workspace_root: &Path) -> anyhow::Result<()> {
         let forms: Vec<String> = {
             let mut v: Vec<String> = entries
                 .iter()
-                .map(|e| format!("{}×{}", e.form, entries.iter().filter(|x| x.form == e.form).count()))
+                .map(|e| {
+                    format!(
+                        "{}×{}",
+                        e.form,
+                        entries.iter().filter(|x| x.form == e.form).count()
+                    )
+                })
                 .collect();
             v.sort();
             v.dedup();

@@ -4,10 +4,14 @@ use super::*;
 
 /// 首启密钥设置引导的进程内状态：「下次再说」置位；网关重启自然清零 → 下次启动恢复提醒
 /// 「不再提醒」另持久化到 config.security.keySetupDismissed（跨重启）
-pub(crate) static KEY_SETUP_SNOOZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static KEY_SETUP_SNOOZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 通道入站端点识别：POST /api/channels/{id}/inbound → Some(通道 id)；其余 None
-pub(crate) fn inbound_channel_id<'a>(path: &'a str, method: &axum::http::Method) -> Option<&'a str> {
+pub(crate) fn inbound_channel_id<'a>(
+    path: &'a str,
+    method: &axum::http::Method,
+) -> Option<&'a str> {
     if method != axum::http::Method::POST {
         return None;
     }
@@ -16,7 +20,10 @@ pub(crate) fn inbound_channel_id<'a>(path: &'a str, method: &axum::http::Method)
         .filter(|id| !id.is_empty() && !id.contains('/'))
 }
 
-pub(crate) async fn verify_auth(State(st): State<AppState>, Json(b): Json<Value>) -> impl IntoResponse {
+pub(crate) async fn verify_auth(
+    State(st): State<AppState>,
+    Json(b): Json<Value>,
+) -> impl IntoResponse {
     let required = !st.core.config().security.auth_key.is_empty();
     if !required {
         return Json(json!({ "ok": true, "required": false })).into_response();

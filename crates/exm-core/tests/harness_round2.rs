@@ -266,6 +266,31 @@ async fn 后台任务_list_跨轮次寻址() {
         "会话隔离：B 不应看到 A 的任务：{}",
         rb.output
     );
+    // taskId 泄露给会话 B 也不能读取输出或终止任务。
+    let rb_poll = gw
+        .execute(
+            "coding-agent",
+            "ses-B",
+            &[ToolName::Terminal],
+            ToolName::Terminal,
+            &serde_json::json!({ "op": "poll", "taskId": task_id }),
+        )
+        .await;
+    assert!(!rb_poll.ok, "跨会话 poll 必须拒绝");
+    assert!(
+        rb_poll.error.unwrap_or_default().contains("不属于当前会话"),
+        "跨会话 poll 不应泄露任务存在性或输出"
+    );
+    let rb_kill = gw
+        .execute(
+            "coding-agent",
+            "ses-B",
+            &[ToolName::Terminal],
+            ToolName::Terminal,
+            &serde_json::json!({ "op": "kill", "taskId": task_id }),
+        )
+        .await;
+    assert!(!rb_kill.ok, "跨会话 kill 必须拒绝");
     // 会话 A 的 list：可寻址
     let ra = gw
         .execute(

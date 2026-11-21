@@ -63,10 +63,17 @@ fn redact_value(v: &Value) -> Value {
 
 /// 字符串脱敏：应用全部内联模式
 pub fn redact_str(s: &str) -> String {
+    static PATTERNS: std::sync::LazyLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::LazyLock::new(|| {
+            inline_patterns()
+                .into_iter()
+                .filter_map(|(pat, mask)| regex::Regex::new(pat).ok().map(|re| (re, mask)))
+                .collect()
+        });
     let mut out = s.to_string();
-    for (pat, mask) in inline_patterns() {
-        if let Ok(re) = regex::Regex::new(pat) {
-            out = re.replace_all(&out, mask.to_string()).to_string();
+    for (re, mask) in PATTERNS.iter() {
+        if let std::borrow::Cow::Owned(replaced) = re.replace_all(&out, *mask) {
+            out = replaced;
         }
     }
     out
@@ -124,7 +131,9 @@ mod tests {
 
     #[test]
     fn 内联密钥形态() {
-        let r = redact_str("export KEY=sk-proj-abcdefgh1234567890 && curl -H 'x: AKIAIOSFODNN7EXAMPLE' x");
+        let r = redact_str(
+            "export KEY=sk-proj-abcdefgh1234567890 && curl -H 'x: AKIAIOSFODNN7EXAMPLE' x",
+        );
         assert!(r.contains("sk-***"), "{r}");
         assert!(r.contains("AKIA***"), "{r}");
         assert!(!r.contains("abcdefgh1234567890"));

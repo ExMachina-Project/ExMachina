@@ -1,5 +1,6 @@
 //! tools/sandbox.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
 
+use super::managed_process::{capture_prefix, JobEnd, ManagedProcess, Stream};
 use super::*;
 
 /// 沙箱执行参数：程序 + 参数 + 环境（净化后）+ 身份（execUser 约束）
@@ -19,8 +20,80 @@ pub struct ShellOpts {
     /// None = 不约束（旧行为）。bwrap 路径不设此项（身份经 bwrap --uid/--gid 传入）
     #[cfg(unix)]
     pub uid_gid: Option<(u32, u32)>,
-    /// 圈禁根目录（execHome）：子进程 cwd + HOME 边界
+    /// 执行身份 HOME 与 cwd 边界：cwd 保留已绑定项目，但必须位于此目录内。
     pub confine_home: Option<String>,
+    /// 执行身份或沙箱配置无效时在 spawn 前失败，不通过 shell 命令回报错误。
+    pub configuration_error: Option<String>,
+}
+
+/// Resolve the actual cwd for a command while preserving the approved project.
+///
+/// `confine_home` is a boundary, not a replacement cwd: an Agent may work in
+/// `/home/exm/projects/demo` while its HOME remains `/home/exm`.  Both paths
+/// are canonicalized before the containment check so a symlink cannot move a
+/// project outside the configured execution home.
+pub(crate) fn resolve_execution_cwd(
+    workspace_root: &Path,
+    opts: &ShellOpts,
+) -> Result<std::path::PathBuf, String> {
+    let cwd = workspace_root
+        .canonicalize()
+        .map_err(|e| format!("项目工作目录不可用: {} ({e})", workspace_root.display()))?;
+    if !cwd.is_dir() {
+        return Err(format!("项目工作目录不是目录: {}", cwd.display()));
+    }
+    if let Some(home) = &opts.confine_home {
+        let home_path = std::path::Path::new(home)
+            .canonicalize()
+            .map_err(|e| format!("执行身份 HOME 不可用: {home} ({e})"))?;
+        if !cwd.starts_with(&home_path) {
+            return Err(format!(
+                "项目目录越过执行身份边界: cwd={}，execHome={}",
+                cwd.display(),
+                home_path.display()
+            ));
+        }
+    }
+    Ok(cwd)
+}
+
+/// Build the shell command shared by foreground execution, background jobs and
+/// approval replay.  Keeping argv, environment, uid/gid and cwd in one helper
+/// prevents the background path from silently bypassing the foreground policy.
+pub(crate) fn build_shell_command(
+    workspace_root: &Path,
+    cmd: &str,
+    opts: &ShellOpts,
+) -> Result<tokio::process::Command, String> {
+    if let Some(error) = &opts.configuration_error {
+        return Err(error.clone());
+    }
+    let mut process = tokio::process::Command::new(&opts.program);
+    let effective = opts.cmd_override.clone().unwrap_or_else(|| cmd.to_string());
+    if opts.args.is_empty() {
+        #[cfg(target_os = "windows")]
+        process.args(["/C", effective.as_str()]);
+        #[cfg(not(target_os = "windows"))]
+        process.args(["-c", effective.as_str()]);
+    } else {
+        process.args(&opts.args);
+    }
+    if opts.env_clear {
+        process.env_clear();
+    }
+    for (key, value) in &opts.envs {
+        process.env(key, value);
+    }
+    if opts.memory_mb > 0 {
+        process.env("EXM_MEM_LIMIT_MB", opts.memory_mb.to_string());
+    }
+    #[cfg(target_os = "linux")]
+    if let Some((uid, gid)) = opts.uid_gid {
+        process.uid(uid).gid(gid);
+    }
+    let cwd = resolve_execution_cwd(workspace_root, opts)?;
+    process.current_dir(cwd);
+    Ok(process)
 }
 
 impl ShellOpts {
@@ -37,6 +110,7 @@ impl ShellOpts {
                 max_processes: 0,
                 cmd_override: None,
                 confine_home: None,
+                configuration_error: None,
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -51,6 +125,7 @@ impl ShellOpts {
                 cmd_override: None,
                 uid_gid: None,
                 confine_home: None,
+                configuration_error: None,
             }
         }
     }
@@ -141,7 +216,7 @@ pub(crate) fn bwrap_available() -> bool {
 /// 句柄一关（含任务被 abort 时的 Drop），作业内整棵进程树随之终止。
 /// 这是 `taskkill` 之外的最后一道保险：agent 跑飞的长命令不会再拖着机器。
 ///
-/// 非 Windows 平台是空类型（Linux 侧由 ulimit + bwrap 负责）。
+/// 非 Windows 平台是空类型（Unix 生命周期由独立进程组管理）。
 pub struct WinJob {
     #[cfg(target_os = "windows")]
     handle: *mut core::ffi::c_void,
@@ -236,27 +311,11 @@ impl Drop for WinJob {
     }
 }
 
-/// 取子进程的原生句柄（Windows 传作业对象用；其他平台恒 None）
-fn child_raw_handle(child: &tokio::process::Child) -> *mut core::ffi::c_void {
-    #[cfg(target_os = "windows")]
-    {
-        // tokio::process::Child::raw_handle 是固有方法（无需引入 AsRawHandle）
-        child.raw_handle().unwrap_or(std::ptr::null_mut())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = child;
-        std::ptr::null_mut()
-    }
-}
-
-/// 把子进程收进带资源上限的作业（Windows）；其他平台 / 句柄不可得时静默跳过
+/// 把子进程收进带资源上限的作业（Windows）；句柄不可得时使用备用终止路径。
+#[cfg(target_os = "windows")]
 pub(crate) fn attach_job(child: &tokio::process::Child, opts: &ShellOpts) -> Option<WinJob> {
-    let handle = child_raw_handle(child);
-    if handle.is_null() {
-        return None;
-    }
-    // SAFETY: handle 来自 child_raw_handle 的存活子进程，attach 内部仅透传给 Win32 API
+    let handle = child.raw_handle()?;
+    // SAFETY: 原生句柄来自当前持有的 Windows 子进程。
     unsafe { WinJob::attach(handle, opts.memory_mb, opts.max_processes) }
 }
 
@@ -309,177 +368,105 @@ pub async fn execute_shell_with(
     timeout_secs: u64,
     opts: &ShellOpts,
 ) -> ToolResult {
-    let mut process = tokio::process::Command::new(&opts.program);
-    let effective: String = opts.cmd_override.clone().unwrap_or_else(|| cmd.to_string());
-    if opts.args.is_empty() {
-        // 默认：走 shell -c（bwrap 时 args 已含完整命令行）
-        #[cfg(target_os = "windows")]
-        process.args(["/C", effective.as_str()]);
-        #[cfg(not(target_os = "windows"))]
-        process.args(["-c", effective.as_str()]);
-    } else {
-        process.args(&opts.args);
-    }
-    if opts.env_clear {
-        process.env_clear();
-    }
-    for (k, v) in &opts.envs {
-        process.env(k, v);
-    }
-    if opts.memory_mb > 0 {
-        let _ = process.env("EXM_MEM_LIMIT_MB", opts.memory_mb.to_string());
-    }
-    // 执行身份约束（Linux execUser）：cwd 圈禁 execHome + spawn 侧 uid/gid 降权。
-    // 网关非 root 且目标 uid ≠ 自身时 spawn 会 EPERM——由上层在配置解析时拦截,
-    // 这里只在确有身份时设置(约束开启即必然可解析)。
-    #[cfg(target_os = "linux")]
-    if let Some((uid, gid)) = opts.uid_gid {
-        // Linux:tokio 的 unix CommandExt(sealed trait,经预导入路径直接可用)。
-        // 本环境 tokio 版本的 uid/gid 为安全 API(无 unsafe 签名);setuid 竞态由
-        // 父进程单线程 spawn 序列保证。
-        process.uid(uid).gid(gid);
-    }
-    // cwd:身份约束开启时圈禁到 execHome(覆盖 workspace_root——身份是更强的边界)
-    let cwd: std::path::PathBuf = match &opts.confine_home {
-        Some(home) => {
-            let p = std::path::PathBuf::from(home);
-            let _ = std::fs::create_dir_all(&p);
-            p
-        }
-        None => workspace_root.to_path_buf(),
-    };
-    let spawned = process
-        .current_dir(&cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    let mut child = match spawned {
-        Ok(c) => c,
-        Err(e) => return ToolResult::err(format!("命令执行失败: {e}")),
-    };
-    // `pid` 只在 Windows 路径下作为 taskkill 的 /PID 入参使用；
-    // POSIX 上 tokio 已通过 spawn 时的 kill_on_drop(true) 自动 SIGKILL 子进程。
-    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-    let pid = child.id();
-    // Windows：收进作业对象（内存/进程数上限 + 句柄关闭即整树终止）。
-    // 句柄活到函数末尾，Drop 即关 —— 命令结束后不留游离子进程。
-    let _job = attach_job(&child, opts);
-    // 管道读取放入独立任务：增量写入共享缓冲（而非 read_to_end 等闭流）。
-    // 为什么：超时强杀后可能残留孙进程占着管道写端（如 sh -c "x; sleep 30" 杀不掉 sleep），
-    // 等 EOF 会永远等不到——增量缓冲让超时路径能立刻快照「已产出」的部分输出。
-    // 1MB 软上限防病态输出撑爆内存（末尾文本截断策略不变）。
-    const OUTPUT_BUF_CAP: usize = 1024 * 1024;
-    let out_buf: Arc<parking_lot::Mutex<Vec<u8>>> = Arc::default();
-    let err_buf: Arc<parking_lot::Mutex<Vec<u8>>> = Arc::default();
-    let out_task = child.stdout.take().map(|mut s| {
-        let buf = out_buf.clone();
-        tokio::spawn(async move {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match tokio::io::AsyncReadExt::read(&mut s, &mut chunk).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut b = buf.lock();
-                        if b.len() < OUTPUT_BUF_CAP {
-                            b.extend_from_slice(&chunk[..n]);
-                        }
-                    }
-                }
-            }
-        })
-    });
-    let err_task = child.stderr.take().map(|mut s| {
-        let buf = err_buf.clone();
-        tokio::spawn(async move {
-            let mut chunk = [0u8; 4096];
-            loop {
-                match tokio::io::AsyncReadExt::read(&mut s, &mut chunk).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut b = buf.lock();
-                        if b.len() < OUTPUT_BUF_CAP {
-                            b.extend_from_slice(&chunk[..n]);
-                        }
-                    }
-                }
-            }
-        })
-    });
+    execute_shell_managed(workspace_root, cmd, timeout_secs, opts, None).await
+}
 
-    let budget = std::time::Duration::from_secs(timeout_secs.max(1));
-    match tokio::time::timeout(budget, child.wait()).await {
-        Err(_) => {
-            // 进程树强杀：Windows taskkill /T /F（cmd 的子进程一并终止）
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(pid) = pid {
-                    let _ = tokio::process::Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/T", "/F"])
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .await;
-                }
-            }
-            // 有界回收：先强杀（POSIX 立即 SIGKILL；Windows 上方 taskkill 已收进程树），
-            // 再等被杀进程退出最长 3s——超时路径绝不无限阻塞。
-            // 为什么必须显式杀：kill_on_drop 只在 Child 被 drop 时才生效。
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
-            // 快照已读输出：增量读者持续写入共享缓冲，即使残留孙进程占着管道写端
-            // （EOF 永不到来），超时前已产出的部分照样可诊断——长构建/测试卡在哪一步不再黑箱。
-            if let Some(t) = out_task {
-                t.abort();
-            }
-            if let Some(t) = err_task {
-                t.abort();
-            }
-            let out_lock = out_buf.lock();
-            let err_lock = err_buf.lock();
-            let partial = String::from_utf8_lossy(&out_lock);
-            let partial_err = String::from_utf8_lossy(&err_lock);
+/// 终端直通及审批代执行绑定调用时的轮次取消，不依赖轮询全局会话表。
+pub(crate) async fn execute_shell_for_session(
+    workspace_root: &Path,
+    cmd: &str,
+    timeout_secs: u64,
+    opts: &ShellOpts,
+    session_id: &str,
+) -> ToolResult {
+    let cancellation = crate::round_trace::subscribe_cancel(session_id);
+    execute_shell_managed(workspace_root, cmd, timeout_secs, opts, cancellation).await
+}
+
+async fn execute_shell_managed(
+    workspace_root: &Path,
+    cmd: &str,
+    timeout_secs: u64,
+    opts: &ShellOpts,
+    cancellation: Option<tokio::sync::watch::Receiver<bool>>,
+) -> ToolResult {
+    if cancellation
+        .as_ref()
+        .is_some_and(|receiver| *receiver.borrow())
+    {
+        return ToolResult::err("命令已取消，未启动");
+    }
+    let process = match ManagedProcess::spawn(workspace_root, cmd, opts) {
+        Ok(process) => process,
+        Err(error) => return ToolResult::err(format!("命令执行失败: {error}")),
+    };
+    const OUTPUT_BUF_CAP: usize = 1024 * 1024;
+    let out_buf = parking_lot::Mutex::new(Vec::new());
+    let err_buf = parking_lot::Mutex::new(Vec::new());
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+    let outcome = process
+        .run(
+            Some(deadline),
+            crate::round_trace::wait_for_cancel(cancellation),
+            |stream, bytes| {
+                let buf = match stream {
+                    Stream::Stdout => &out_buf,
+                    Stream::Stderr => &err_buf,
+                };
+                capture_prefix(&mut buf.lock(), bytes, OUTPUT_BUF_CAP);
+            },
+        )
+        .await;
+    let out_buf = out_buf.into_inner();
+    let err_buf = err_buf.into_inner();
+    let raw_out = String::from_utf8_lossy(&out_buf);
+    let raw_err = String::from_utf8_lossy(&err_buf);
+    let cleanup = outcome
+        .cleanup_error
+        .map(|note| format!("\n清理未确认：{note}"))
+        .unwrap_or_default();
+    let timed_out = matches!(&outcome.end, JobEnd::TimedOut);
+    match outcome.end {
+        JobEnd::TimedOut | JobEnd::Cancelled => {
             // 截断必须显式声明：半截输出若无标记，模型会把不完整结果当完整结论
             const PARTIAL_CAP: usize = 2000;
             const PARTIAL_ERR_CAP: usize = 1000;
-            let partial_total = partial.chars().count();
+            let reason = if timed_out {
+                format!("命令超时（{timeout_secs}s）")
+            } else {
+                "命令已取消".into()
+            };
+            let partial_total = raw_out.chars().count();
             let mut msg = format!(
-                "命令超时（{timeout_secs}s）已终止；终止前输出：\n{}",
-                partial.chars().take(PARTIAL_CAP).collect::<String>()
+                "{reason}{}；终止前输出：\n{}",
+                if cleanup.is_empty() {
+                    "，已终止"
+                } else {
+                    ""
+                },
+                raw_out.chars().take(PARTIAL_CAP).collect::<String>()
             );
             if partial_total > PARTIAL_CAP {
                 msg.push_str(&format!(
                     "\n…（已截断：终止前输出共 {partial_total} 字符，仅保留前 {PARTIAL_CAP}）"
                 ));
             }
-            if !partial_err.trim().is_empty() {
-                let err_total = partial_err.chars().count();
+            if !raw_err.trim().is_empty() {
+                let err_total = raw_err.chars().count();
                 msg.push_str(&format!(
                     "\n[stderr] {}",
-                    partial_err
-                        .chars()
-                        .take(PARTIAL_ERR_CAP)
-                        .collect::<String>()
+                    raw_err.chars().take(PARTIAL_ERR_CAP).collect::<String>()
                 ));
                 if err_total > PARTIAL_ERR_CAP {
                     msg.push_str(&format!("\n…（stderr 已截断：共 {err_total} 字符）"));
                 }
             }
+            msg.push_str(&cleanup);
             ToolResult::err(msg)
         }
-        Ok(Err(e)) => ToolResult::err(format!("命令执行失败: {e}")),
-        Ok(Ok(status)) => {
-            // 正常退出：管道已闭（EOF），读者任务自然收尾后取全量输出
-            if let Some(t) = out_task {
-                let _ = t.await;
-            }
-            if let Some(t) = err_task {
-                let _ = t.await;
-            }
-            let raw_out = String::from_utf8_lossy(&out_buf.lock()).to_string();
-            let raw_err = String::from_utf8_lossy(&err_buf.lock()).to_string();
+        JobEnd::Failed(error) => ToolResult::err(format!("命令执行失败: {error}{cleanup}")),
+        JobEnd::Exited(status) => {
             // 截断必须显式声明：半截输出若无标记，模型会把不完整结果当完整结论
             // （典型误判：测试/构建日志尾部被切，把半路输出读成「成功」）
             const OUT_CAP: usize = 8000;
@@ -497,7 +484,7 @@ pub async fn execute_shell_with(
                     text.push_str(&format!("\n…（stderr 已截断：共 {err_total} 字符）"));
                 }
             }
-            if status.success() {
+            if status.success() && cleanup.is_empty() {
                 ToolResult {
                     ok: true,
                     output: text,
@@ -515,7 +502,11 @@ pub async fn execute_shell_with(
                     let start = chars.len().saturating_sub(2000);
                     chars[start..].iter().collect()
                 };
-                let mut reason = format!("命令失败（退出码 {code}）");
+                let mut reason = if status.success() {
+                    "命令结束但子进程树清理未确认".into()
+                } else {
+                    format!("命令失败（退出码 {code}）")
+                };
                 if out_tail.trim().is_empty() && raw_err.trim().is_empty() {
                     reason.push_str("；无任何输出");
                 } else {
@@ -532,6 +523,7 @@ pub async fn execute_shell_with(
                         reason.push_str(&format!("\n[stderr 尾部] {err_tail}"));
                     }
                 }
+                reason.push_str(&cleanup);
                 ToolResult {
                     ok: false,
                     output: text,
@@ -540,5 +532,21 @@ pub async fn execute_shell_with(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod execution_config_tests {
+    use super::*;
+
+    #[test]
+    fn 执行身份配置错误在spawn前失败() {
+        let mut opts = ShellOpts::plain();
+        opts.configuration_error = Some("bad identity; do not interpret".into());
+        let result = build_shell_command(Path::new("/"), "echo should-not-run", &opts);
+        assert!(matches!(
+            result,
+            Err(error) if error == "bad identity; do not interpret"
+        ));
     }
 }

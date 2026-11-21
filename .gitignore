@@ -60,6 +60,8 @@ openspec/changes/
 !/docs/元智能体.md
 !/docs/客户端兼容身份.md
 !/docs/智能体模型分配.md
+!/docs/command-directory.md
+!/docs/command-entry-matrix.md
 
 # 本地验证产物
 /out/

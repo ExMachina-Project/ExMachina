@@ -95,8 +95,7 @@ pub(crate) fn bili_cookie(ch: &Channel) -> String {
 }
 
 /// 通道级 buvid 缓存（共享单例）：(buvid3, Option<buvid4>)
-type BuvidCache =
-    Mutex<std::collections::HashMap<String, (String, Option<String>, bool)>>;
+type BuvidCache = Mutex<std::collections::HashMap<String, (String, Option<String>, bool)>>;
 pub(crate) fn buvid_cache() -> &'static BuvidCache {
     static CACHE: OnceLock<BuvidCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -160,9 +159,7 @@ pub(crate) async fn bili_prime_buvid(ch: &Channel) {
     };
     // 指纹激活（失败不阻断：激活态随缓存记录，下次 prime 重试）
     let activated = activate_buvid(&b3).await;
-    cache
-        .lock()
-        .insert(ch.id.clone(), (b3, b4, activated));
+    cache.lock().insert(ch.id.clone(), (b3, b4, activated));
 }
 
 /// 桌面 Chrome 指纹常量（ExClimbWuzhi payload 内层；社区长期维护的默认值）
@@ -312,7 +309,11 @@ pub(crate) async fn bili_popular(ch: &Channel, limit: usize) -> anyhow::Result<V
         .collect())
 }
 
-pub(crate) async fn bili_search(ch: &Channel, keyword: &str, _s: &Settings) -> anyhow::Result<Vec<VideoItem>> {
+pub(crate) async fn bili_search(
+    ch: &Channel,
+    keyword: &str,
+    _s: &Settings,
+) -> anyhow::Result<Vec<VideoItem>> {
     // 搜索接口风控比普通接口严：无 buvid 指纹或 Referer 不符会返回 HTML 拦截页（实测）。
     // Referer 用搜索页；buvid 由 tick 开头的 bili_prime_buvid 预热进 cookie。
     let resp = bili_request_with_referer(
@@ -435,7 +436,11 @@ pub(crate) async fn bili_post_comment(
 }
 
 /// 检查指定 uid 的评论是否出现在该视频评论区（按时间倒序第一页，新评论必在前排）
-pub(crate) async fn bili_comment_visible(ch: &Channel, aid: u64, uid: &str) -> anyhow::Result<bool> {
+pub(crate) async fn bili_comment_visible(
+    ch: &Channel,
+    aid: u64,
+    uid: &str,
+) -> anyhow::Result<bool> {
     let body = bili_get(
         ch,
         &format!("https://api.bilibili.com/x/v2/reply?pn=1&ps=20&oid={aid}&type=1&sort=2"),
@@ -665,7 +670,11 @@ pub(crate) async fn yt_popular(ch: &Channel, s: &Settings) -> anyhow::Result<Vec
         .unwrap_or_default())
 }
 
-pub(crate) async fn yt_search(ch: &Channel, q: &str, _s: &Settings) -> anyhow::Result<Vec<VideoItem>> {
+pub(crate) async fn yt_search(
+    ch: &Channel,
+    q: &str,
+    _s: &Settings,
+) -> anyhow::Result<Vec<VideoItem>> {
     let key = yt_key(ch)?;
     let body = yt_get(
         "search",
@@ -870,4 +879,3 @@ pub(crate) fn strip_html(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------- 测试（无网络）
-
