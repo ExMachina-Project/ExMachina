@@ -4,14 +4,7 @@
 > [!WARNING]
 > 项目处于开发阶段（pre-alpha），接口与数据格式可能破坏性变更，请勿用于生产环境。
 
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./assets/branding/logo-animated-tagline-dark.svg">
-  <img src="./assets/branding/logo-animated-tagline.svg" alt="EXMACHINA —— 让我们摒弃拟人表达，让AI回归绝对理性" width="660">
-</picture>
-
-</div>
+![EXMACHINA —— 让我们摒弃拟人表达，让 AI 回归绝对理性](assets/branding/logo-animated-tagline.svg)
 
 <div align="center">
 

@@ -5,12 +5,9 @@
 > This project is in pre-alpha. Interfaces and data formats may break without notice. Do not use in production.
 > Contracts are defined in [docs/](./docs) (Chinese, source of truth).
 
-<div align="center">
+![EXMACHINA](assets/branding/logo-animated.svg)
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./assets/branding/logo-animated-dark.svg">
-  <img src="./assets/branding/logo-animated.svg" alt="EXMACHINA" width="660">
-</picture>
+<div align="center">
 
 ![Stage](https://img.shields.io/badge/stage-pre--alpha-orange)
 ![Rust](https://img.shields.io/badge/Rust-stable-dea584?logo=rust&logoColor=white)
