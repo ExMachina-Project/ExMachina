@@ -36,6 +36,12 @@ use tauri_plugin_notification::NotificationExt;
 struct GatewayChild(Mutex<Option<Child>>);
 struct LocalGatewayInfo(Mutex<Option<GatewayInfo>>);
 struct ActiveGatewayInfo(Mutex<GatewayInfo>);
+struct TrayCountsState(Mutex<desktop::TrayCounts>);
+struct TrayEventStreamState(Mutex<bool>);
+struct TrayMenuItems {
+    workspace: tauri::menu::MenuItem<tauri::Wry>,
+    approvals: tauri::menu::MenuItem<tauri::Wry>,
+}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +76,8 @@ fn main() {
     tauri::Builder::default()
         .manage(GatewayChild(Mutex::new(None)))
         .manage(LocalGatewayInfo(Mutex::new(None)))
+        .manage(TrayCountsState(Mutex::new(desktop::TrayCounts::default())))
+        .manage(TrayEventStreamState(Mutex::new(false)))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -155,6 +163,12 @@ fn main() {
                     api.prevent_close();
                 }
             }
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Focused(true), .. } if label == "main" => {
+                handle_main_window_focus(app, true);
+            }
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Focused(false), .. } if label == "main" => {
+                handle_main_window_focus(app, false);
+            }
             // 退出即终止网关子进程（托盘退出 / 完全退出共用此收口）
             tauri::RunEvent::Exit => {
                 if let Some(child) = app.state::<GatewayChild>().0.lock().unwrap().as_mut() {
@@ -169,18 +183,33 @@ fn main() {
 // ---------------------------------------------------------------- 系统托盘（11.1）
 
 fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::menu::{Menu, MenuItem};
-    let open = MenuItem::with_id(app, "open", "打开控制面板", true, None::<&str>)?;
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let counts = desktop::TrayCounts::default();
+    let labels = desktop::tray_menu_labels(&counts);
+    let open = MenuItem::with_id(app, "open", &labels.workspace, true, None::<&str>)?;
+    let approvals = MenuItem::with_id(app, "approvals", &labels.approvals, true, None::<&str>)?;
+    let console = MenuItem::with_id(app, "console", "打开实例控制台", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏窗口", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &toggle, &quit])?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &approvals, &console, &separator, &toggle, &quit])?;
 
     let mut builder = tauri::tray::TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
-        .tooltip("EXMACHINA · 多智能体系统")
+        .tooltip(&labels.tooltip)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "open" => show_main_window(app),
+            "open" => navigate_main_window(app, false),
+            "approvals" => navigate_main_window(app, true),
+            "console" => {
+                let active = app.state::<ActiveGatewayInfo>();
+                let info = active.0.lock().map(|info| info.clone());
+                if let Ok(info) = info {
+                    if let Err(error) = open_console(info.url) {
+                        eprintln!("[desktop] 打开实例控制台失败: {error}");
+                    }
+                }
+            }
             "toggle" => toggle_main_window(app),
             "quit" => {
                 // 托盘退出：级联终止网关子进程（RunEvent::Exit 收口）
@@ -192,6 +221,7 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         builder = builder.icon(icon.clone());
     }
     builder.build(app)?;
+    app.manage(TrayMenuItems { workspace: open, approvals });
     Ok(())
 }
 
@@ -200,6 +230,16 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+    clear_tray_unread(app);
+}
+
+fn navigate_main_window(app: &tauri::AppHandle, approvals: bool) {
+    show_main_window(app);
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window.eval(desktop::tray_navigation_script(approvals)) {
+            eprintln!("[desktop] 托盘导航失败: {error}");
+        }
     }
 }
 
@@ -210,9 +250,63 @@ fn toggle_main_window(app: &tauri::AppHandle) {
         if visible && focused {
             let _ = w.hide();
         } else {
-            let _ = w.show();
-            let _ = w.unminimize();
-            let _ = w.set_focus();
+            show_main_window(app);
+        }
+    }
+}
+
+fn clear_tray_unread(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<TrayCountsState>() {
+        if let Ok(mut counts) = state.0.lock() {
+            counts.clear_unread();
+        }
+        update_tray_visuals(app);
+    }
+}
+
+fn handle_main_window_focus(app: &tauri::AppHandle, focused: bool) {
+    let stream_connected = app
+        .try_state::<TrayEventStreamState>()
+        .and_then(|state| state.0.lock().ok().map(|connected| *connected))
+        .unwrap_or(false);
+    if let Some(state) = app.try_state::<TrayCountsState>() {
+        if let Ok(mut counts) = state.0.lock() {
+            counts.on_window_focus(focused, stream_connected);
+        }
+    }
+    update_tray_visuals(app);
+}
+
+fn set_event_stream_connected(app: &tauri::AppHandle, connected: bool) {
+    if let Some(state) = app.try_state::<TrayEventStreamState>() {
+        if let Ok(mut status) = state.0.lock() {
+            *status = connected;
+        }
+    }
+}
+
+fn main_window_in_background(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .map(|window| {
+            !window.is_visible().unwrap_or(false) || !window.is_focused().unwrap_or(false)
+        })
+        .unwrap_or(true)
+}
+
+fn update_tray_visuals(app: &tauri::AppHandle) {
+    let Some(count_state) = app.try_state::<TrayCountsState>() else { return };
+    let Ok(counts) = count_state.0.lock().map(|counts| counts.clone()) else { return };
+    let labels = desktop::tray_menu_labels(&counts);
+    if let Some(menu) = app.try_state::<TrayMenuItems>() {
+        let _ = menu.workspace.set_text(labels.workspace);
+        let _ = menu.approvals.set_text(labels.approvals);
+    }
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(labels.tooltip));
+        #[cfg(target_os = "windows")]
+        if let Some(icon) = app.default_window_icon() {
+            let count = counts.badge_count().unwrap_or(0);
+            let _ = tray.set_icon(Some(desktop::render_tray_badge(icon, count)));
         }
     }
 }
@@ -355,6 +449,15 @@ fn spawn_event_bridge(app: tauri::AppHandle) {
                 match connect_and_pump(&app, &ws_url, &info).await {
                     Ok(()) => return,
                     Err(e) => {
+                        set_event_stream_connected(&app, false);
+                        if e != "active gateway changed" {
+                            if let Some(state) = app.try_state::<TrayCountsState>() {
+                                if let Ok(mut counts) = state.0.lock() {
+                                    counts.on_stream_disconnect_in_background(main_window_in_background(&app));
+                            }
+                            }
+                            update_tray_visuals(&app);
+                        }
                         let delay = if e == "active gateway changed" { Duration::from_millis(100) } else { Duration::from_secs(5) };
                         eprintln!("[desktop] 事件流断开，{delay:?} 后重连: {e}");
                         tokio::time::sleep(delay).await;
@@ -371,7 +474,21 @@ async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str, expected: &Gatew
     let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(state) = app.try_state::<TrayCountsState>() {
+        if let Ok(mut counts) = state.0.lock() {
+            counts.begin_pending_refresh();
+        }
+    }
+    set_event_stream_connected(app, true);
+    update_tray_visuals(app);
+    let refresh_app = app.clone();
+    let refresh_info = expected.clone();
+    tauri::async_runtime::spawn(async move {
+        refresh_pending_approvals(refresh_app, refresh_info).await;
+    });
     let mut check = tokio::time::interval(Duration::from_secs(2));
+    let mut approval_refresh = tokio::time::interval(Duration::from_secs(30));
+    approval_refresh.tick().await;
     loop {
         tokio::select! {
             _ = check.tick() => {
@@ -380,13 +497,39 @@ async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str, expected: &Gatew
                     return Err("active gateway changed".into());
                 }
             }
+            _ = approval_refresh.tick() => {
+                let refresh_app = app.clone();
+                let refresh_info = expected.clone();
+                tauri::async_runtime::spawn(async move {
+                    refresh_pending_approvals(refresh_app, refresh_info).await;
+                });
+            }
             msg = ws.next() => match msg {
             Some(msg) => match msg {
             Ok(Message::Text(text)) => {
                 let Ok(evt) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                let active = app.state::<ActiveGatewayInfo>().0.lock().map_err(|e| e.to_string())?.clone();
+                if active.url != expected.url || active.key != expected.key || active.workspace != expected.workspace {
+                    return Err("active gateway changed".into());
+                }
                 let kind = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let cfg = desktop::DesktopConfig::load();
                 let payload = evt.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let changed = if let Some(state) = app.try_state::<TrayCountsState>() {
+                    state.0.lock().ok().map(|mut counts| {
+                        counts.record_event(kind, &payload, main_window_in_background(app))
+                    }).unwrap_or(false)
+                } else { false };
+                if changed {
+                    update_tray_visuals(app);
+                }
+                if matches!(kind, "approval.required" | "approval.resolved") {
+                    let refresh_app = app.clone();
+                    let refresh_info = expected.clone();
+                    tauri::async_runtime::spawn(async move {
+                        refresh_pending_approvals(refresh_app, refresh_info).await;
+                    });
+                }
                 if let Some(n) = desktop::map_event(kind, &payload, &cfg) {
                     let _ = app
                         .notification()
@@ -396,7 +539,7 @@ async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str, expected: &Gatew
                         .show();
                     // 审批请求需要人工立即处理：聚焦主窗口（点击定位的平台兜底口径）
                     if n.category == "approval" {
-                        show_main_window(app);
+                        navigate_main_window(app, true);
                     }
                 }
             }
@@ -411,6 +554,78 @@ async fn connect_and_pump(app: &tauri::AppHandle, ws_url: &str, expected: &Gatew
             }
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+struct PendingApprovalSnapshotEntry {
+    id: String,
+}
+
+async fn refresh_pending_approvals(app: tauri::AppHandle, expected: GatewayInfo) {
+    let refresh = app.try_state::<TrayCountsState>().and_then(|state| {
+        state.0.lock().ok().map(|mut counts| counts.start_approval_refresh())
+    });
+    let Some((approval_revision, snapshot_revision)) = refresh else { return };
+    update_tray_visuals(&app);
+
+    let result = async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|_| "无法创建审批计数请求".to_owned())?;
+        let endpoint = format!("{}/api/approvals", expected.url.trim_end_matches('/'));
+        let mut request = client
+            .get(endpoint)
+            .query(&[("status", "pending"), ("limit", "1000")]);
+        if !expected.key.is_empty() {
+            request = request.header("X-Auth-Key", &expected.key);
+        }
+        if let Some(workspace) = expected.workspace.as_deref() {
+            let encoded_workspace = percent_encode_query_value(workspace);
+            request = request
+                .header("X-Exm-Workspace", encoded_workspace)
+                .query(&[("workspace", workspace)]);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "审批计数暂不可用".to_owned())?
+            .error_for_status()
+            .map_err(|_| "审批计数暂不可用".to_owned())?;
+        let items = response
+            .json::<Vec<PendingApprovalSnapshotEntry>>()
+            .await
+            .map_err(|_| "审批计数响应无效".to_owned())?;
+        Ok::<_, String>(items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+    }
+    .await;
+
+    let still_active = app
+        .state::<ActiveGatewayInfo>()
+        .0
+        .lock()
+        .map(|active| {
+            active.url == expected.url
+                && active.key == expected.key
+                && active.workspace == expected.workspace
+        })
+        .unwrap_or(false);
+    if !still_active {
+        return;
+    }
+    if let Some(state) = app.try_state::<TrayCountsState>() {
+        if let Ok(mut counts) = state.0.lock() {
+            match result {
+                Ok(ids) => {
+                    counts.finish_approval_refresh(ids, approval_revision, snapshot_revision);
+                }
+                Err(_) => {
+                    counts.fail_approval_refresh(approval_revision, snapshot_revision);
+                }
+            }
+        }
+    }
+    update_tray_visuals(&app);
 }
 
 /// Keep reverse-proxy path prefixes, and append authentication after the WS path.
@@ -560,9 +775,17 @@ fn set_event_gateway(app: tauri::AppHandle, url: String, key: String, remote: bo
     if !matches!(parsed.scheme(), "http" | "https") || !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("网关地址仅支持 HTTP(S)".into());
     }
-    *app.state::<ActiveGatewayInfo>().0.lock().map_err(|e| e.to_string())? = GatewayInfo {
+    let active = app.state::<ActiveGatewayInfo>();
+    *active.0.lock().map_err(|e| e.to_string())? = GatewayInfo {
         url: url.clone(), key, remote, console_url: url, lan_enabled: false, lan_url: None, workspace,
     };
+    if let Some(state) = app.try_state::<TrayCountsState>() {
+        if let Ok(mut counts) = state.0.lock() {
+            counts.reset_for_scope();
+        }
+    }
+    set_event_stream_connected(&app, false);
+    update_tray_visuals(&app);
     Ok(())
 }
 
