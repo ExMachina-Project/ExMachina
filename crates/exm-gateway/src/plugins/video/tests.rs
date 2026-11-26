@@ -437,7 +437,7 @@ mod tick_smoke_tests {
             memory_isolation: false,
             created_at: String::new(),
         };
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         let r = tick(&core, &ch).await;
         assert!(r.is_err(), "无 apiKey 应失败：{r:?}");
         let msg = r.unwrap_err().to_string();
@@ -474,7 +474,7 @@ mod tick_smoke_tests {
             memory_isolation: false,
             created_at: String::new(),
         };
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         let r = tick(&core, &ch).await.unwrap();
         assert!(r.contains("主动观看已关闭"), "{r}");
     }
@@ -575,7 +575,7 @@ mod watch_switch_tests {
     async fn 旧通道快照与已排队工具在关闭后拒绝执行() {
         let core = core();
         let old = channel("youtube", true, true, true);
-        platform::save_channels(&core, &[old.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&old)).unwrap();
         assert_eq!(watch_channels(&core).len(), 1);
         let sid = "watch-switch-queued";
         tools::register_act_gate(
@@ -685,7 +685,7 @@ mod watch_switch_tests {
         let act = exec(&core, &old, WatchTrigger::OnDemand, "video__act");
         let mut latest = old.clone();
         latest.config.insert("watch".into(), "false".into());
-        platform::save_channels(&core, &[latest.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&latest)).unwrap();
         let result = summary("machina", "watch-switch-manual", json!({})).await;
         assert!(
             !result.ok && result.text.contains("缺少 videoId"),
@@ -754,7 +754,7 @@ mod watch_switch_tests {
         let mut ch = channel("youtube", true, true, false);
         ch.config.insert("dryRun".into(), "false".into());
         ch.config.insert("approval".into(), "always".into());
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         let act = exec(&core, &ch, WatchTrigger::Automatic, "video__act");
         let result = act(
             "video",
@@ -796,7 +796,7 @@ mod watch_switch_tests {
         let core = core();
         let mut ch = channel("youtube", false, true, false);
         ch.config.insert("dryRun".into(), "false".into());
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         for (title, reason) in [
             (format!("channel:{}:video", ch.id), "主动观看已关闭"),
             ("手动点播会话".into(), "apiKey"),
@@ -829,7 +829,7 @@ mod watch_switch_tests {
     async fn 等待中的自动工具在恢复前校验新配置且不继续后续动作() {
         let core = core();
         let old = channel("youtube", true, true, false);
-        platform::save_channels(&core, &[old.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&old)).unwrap();
         let resume = tokio::sync::Notify::new();
         let continued = std::sync::atomic::AtomicBool::new(false);
         let mut work = Box::pin(with_live_guard(
@@ -882,7 +882,7 @@ mod watch_switch_tests {
     async fn 取消观看future同步清理执行任务闸门和注入工具() {
         let core = core();
         let ch = channel("youtube", true, false, false);
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         let mut future = Box::pin(ask_agent(&core, &ch, "本地 Mock 观看"));
         let sid = poll_until_running(&core, &mut future).await;
         let gateway = core.orchestrator().tools.clone();
@@ -902,7 +902,7 @@ mod watch_switch_tests {
     async fn 运行中关闭观看在下个安全边界停止并清理() {
         let core = core();
         let mut ch = channel("youtube", true, false, false);
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         let old = ch.clone();
         let mut future = Box::pin(ask_agent(&core, &old, "本地 Mock 观看"));
         let sid = poll_until_running(&core, &mut future).await;
@@ -925,7 +925,7 @@ mod watch_switch_tests {
     async fn 会话锁排队期间关闭观看不得落库或启动自动轮次() {
         let core = core();
         let ch = channel("youtube", true, false, false);
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         let (run, _) = ChannelRun::begin(&core, &ch, "video").await.unwrap();
         let sid = run.session_id.clone();
         let mut blocker = Box::pin(core.chat(&sid, "手动 Mock 轮次暂占会话锁"));

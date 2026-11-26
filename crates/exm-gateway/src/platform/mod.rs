@@ -46,10 +46,34 @@ mod routes;
 mod skills;
 mod workbench;
 
+/// 测试临时目录守卫：`Drop` 时整棵移除（断言 panic 也会执行）。
+///
+/// 夹具都往 `std::env::temp_dir()` 建随机目录；各测试自觉清理容易漏，一轮全量
+/// 测试就留下数百个目录，`/tmp` 是 tmpfs 时累积会填满并把存储当内存吃
+/// （实测一轮 450 个）。持有本守卫的测试把目录交给它，离开作用域即清理。
+#[cfg(test)]
+pub(crate) struct TestDirs(pub Vec<std::path::PathBuf>);
+
+#[cfg(test)]
+impl Drop for TestDirs {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests_channel_approval;
 #[cfg(test)]
 mod tests_channel_boundary;
+#[cfg(test)]
+mod tests_channel_plan;
+#[cfg(test)]
+mod tests_channel_steering;
+#[cfg(test)]
+mod tests_channel_workflow;
+mod tests_context_sources;
 #[cfg(test)]
 mod tests_cron_notify;
 #[cfg(test)]

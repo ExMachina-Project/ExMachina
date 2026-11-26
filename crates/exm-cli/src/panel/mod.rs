@@ -304,6 +304,58 @@ impl Panel {
             ),
         ));
 
+        // goal/spec/plan/todo 关联视图（capability-parity 4.5）：四者并存的
+        // 「目标/规格/方案/执行进度」关系一目了然——与 CLI `status`/REST
+        // /api/sessions/:id/workflow 同一事实源（workflow_relation 派生视图）
+        if let Ok(relation) = core.workflow_relation(&state.session_id) {
+            let goal_line = match &relation.goal {
+                Some(g) => format!(
+                    "{}（{}·rev {}）{}",
+                    g.objective,
+                    format!("{:?}", g.status).to_lowercase(),
+                    g.revision,
+                    if g.verification.is_empty() {
+                        "· 未验证"
+                    } else {
+                        "· 已验证"
+                    }
+                ),
+                None => "（无——/goal start <目标> 创建）".to_string(),
+            };
+            let spec_line = match &relation.spec {
+                Some(s) => format!(
+                    "rev {}{} · {}",
+                    s.revision,
+                    if let Some(gid) = &s.goal_id {
+                        format!("（关联 goal {}）", short_id(gid))
+                    } else {
+                        String::new()
+                    },
+                    s.objective
+                ),
+                None => "（无——/spec draft <目标> 草拟）".to_string(),
+            };
+            rows.push(("目标", goal_line));
+            rows.push(("规格", spec_line));
+            rows.push((
+                "方案",
+                format!(
+                    "{} · {} 条待决条目{}",
+                    if relation.plan_mode {
+                        "plan（只读）"
+                    } else {
+                        "execute"
+                    },
+                    relation.plan_items,
+                    if relation.todo_present {
+                        " · todo 执行中"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+
         let mem = if cfg.memory_enabled {
             format!("深层记忆（召回 {} 条）", cfg.memory_recall_limit)
         } else {
@@ -780,15 +832,55 @@ impl Panel {
                             warn("用法：/queue add <后续任务>；普通消息不会自动入队")
                         );
                     } else {
-                        match exm_core::task_queue::enqueue(&state.session_id, &task, "queued", "")
-                        {
-                            Ok(id) => println!("{} 已加入后续队列：{id}", ok("accepted")),
+                        // enqueue_scoped（source=tui 可追溯）+ 快照事件落库可回放
+                        //（capability-parity 3.6：与 gate /queue、REST /queue 同口径）
+                        match exm_core::task_queue::enqueue_scoped(
+                            &state.session_id,
+                            &task,
+                            "queued",
+                            "",
+                            "tui",
+                            None,
+                        ) {
+                            Ok(id) => {
+                                let items = exm_core::task_queue::list(&state.session_id);
+                                let queued = items.iter().filter(|t| t.status == "queued").count();
+                                core.emit_session_event(
+                                    &state.session_id,
+                                    "task_queue.updated",
+                                    serde_json::json!({
+                                        "action": "add",
+                                        "items": items,
+                                        "running": items.iter().filter(|t| t.status == "running").count(),
+                                        "queued": queued,
+                                    }),
+                                );
+                                let seq = items
+                                    .iter()
+                                    .find(|t| t.id == id)
+                                    .map(|t| t.seq)
+                                    .unwrap_or_default();
+                                println!(
+                                    "{} 已加入后续队列（第 {seq} 条，待处理 {queued} 条）：{id}",
+                                    ok("accepted")
+                                );
+                            }
                             Err(e) => println!("{}", err(e)),
                         }
                     }
                 }
                 Some("clear") => {
                     exm_core::task_queue::clear(&state.session_id);
+                    core.emit_session_event(
+                        &state.session_id,
+                        "task_queue.updated",
+                        serde_json::json!({
+                            "action": "clear",
+                            "items": [],
+                            "running": 0,
+                            "queued": 0,
+                        }),
+                    );
                     println!("{} 已清空当前会话后续队列", ok("完成"));
                 }
                 Some(other) => println!(
@@ -801,15 +893,28 @@ impl Panel {
                 if instruction.trim().is_empty() {
                     println!("{}", warn("用法：/steer <当前任务引导>"));
                 } else {
-                    core.emit_session_event(
-                        &state.session_id,
-                        "steering.accepted",
-                        serde_json::json!({"text": instruction, "source": "cli"}),
-                    );
-                    println!(
-                        "{} 已接收 steering，将在安全检查点生效；当前轮次不会因普通引导自动停止。",
-                        ok("accepted")
-                    );
+                    // 规范路径（capability-parity 3.6「真实回执」）：不再只发
+                    // receipt 形状的事件——那没有 admit，轮次根本收不到引导。
+                    match core.admit_steering(&state.session_id, &instruction, Some("cli")) {
+                        Ok(exm_core::SteeringAdmission::Running) => {
+                            // admit_steering 内部已发 steering.accepted 事件并落库，
+                            // 此处只做终端回执（与 REST /steer 202 同语义）
+                            println!(
+                                "{} 已接收 steering，将在安全检查点生效；当前轮次不会因普通引导自动停止。",
+                                ok("accepted")
+                            );
+                        }
+                        Ok(exm_core::SteeringAdmission::Idle) => {
+                            // 空闲会话没有可引导的轮次。不代发轮次（dispatch 内无
+                            // 轮次渲染路径，静默 chat 会丢回复可见性）——如实提示，
+                            // 用户直接输入即普通轮次；排队用 /queue add。
+                            println!(
+                                "{}",
+                                warn("当前会话空闲，无运行中轮次可引导；直接输入即普通消息，/queue add 可排队后续任务")
+                            );
+                        }
+                        Err(e) => println!("{}", err(e.to_string())),
+                    }
                 }
             }
             "plan" => {
@@ -1560,6 +1665,29 @@ impl Panel {
                         Some(id) => memory_cmd::run_memory_forget(core, id)?,
                         None => println!("{}", warn("用法：/memory forget <id>")),
                     },
+                    // 记忆版本链（capability-parity 6.5）：面板与 CLI/REST 同链路
+                    "versions" => match rest.get(1) {
+                        Some(id) => memory_cmd::run_memory_versions(core, id)?,
+                        None => println!("{}", warn("用法：/memory versions <id>")),
+                    },
+                    "rollback" => match rest.get(1) {
+                        Some(id) => match args.kv.get("to") {
+                            Some(to) => match to.parse::<u64>() {
+                                Ok(to) => memory_cmd::run_memory_rollback(core, id, to)?,
+                                Err(_) => {
+                                    println!("{}", warn(format!("版本号须为正整数：--to {to}")))
+                                }
+                            },
+                            None => {
+                                println!("{}", warn("用法：/memory rollback <id> --to <版本号>"))
+                            }
+                        },
+                        None => println!("{}", warn("用法：/memory rollback <id> --to <版本号>")),
+                    },
+                    "restore" => match rest.get(1) {
+                        Some(id) => memory_cmd::run_memory_restore(core, id)?,
+                        None => println!("{}", warn("用法：/memory restore <id>")),
+                    },
                     "decay" => memory_cmd::run_memory_decay(core, 0.05)?,
                     "reindex" => memory_cmd::run_memory_reindex(core)?,
                     "render" => memory_cmd::run_memory_render(core)?,
@@ -1569,7 +1697,31 @@ impl Panel {
             }
 
             // ---------------- 平台 ----------------
-            "skills" => platform_cmd::run_skill_list(core)?,
+            "skills" => {
+                // 技能版本链（capability-parity 6.5）：面板与 CLI/REST 同链路；无子命令 = 清单
+                let sub = rest.first().map(|s| s.as_str()).unwrap_or("list");
+                match sub {
+                    "versions" => match rest.get(1) {
+                        Some(id) => platform_cmd::run_skill_versions(core, id)?,
+                        None => println!("{}", warn("用法：/skills versions <id>")),
+                    },
+                    "rollback" => match rest.get(1) {
+                        Some(id) => match args.kv.get("to") {
+                            Some(to) => match to.parse::<u64>() {
+                                Ok(to) => platform_cmd::run_skill_rollback(core, id, to)?,
+                                Err(_) => {
+                                    println!("{}", warn(format!("版本号须为正整数：--to {to}")))
+                                }
+                            },
+                            None => {
+                                println!("{}", warn("用法：/skills rollback <id> --to <版本号>"))
+                            }
+                        },
+                        None => println!("{}", warn("用法：/skills rollback <id> --to <版本号>")),
+                    },
+                    _ => platform_cmd::run_skill_list(core)?,
+                }
+            }
             "cron" => {
                 let sub = rest.first().map(|s| s.as_str()).unwrap_or("list");
                 match sub {

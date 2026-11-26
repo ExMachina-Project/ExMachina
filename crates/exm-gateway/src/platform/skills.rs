@@ -53,8 +53,10 @@ pub async fn create_skill(
         source: "manual".into(),
         ..Default::default()
     };
-    match st.core.add_skill(skill.clone()) {
-        Ok(_) => Json(serde_json::to_value(skill).unwrap_or(Value::Null)).into_response(),
+    match st.core.add_skill(skill) {
+        // 返回**落盘结果**（含 version/updatedAt）——不是入参回显，否则客户端拿到的
+        // version 永远是 0，与 CLI/回滚读到的版本事实源不一致。
+        Ok(written) => Json(serde_json::to_value(written).unwrap_or(Value::Null)).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),

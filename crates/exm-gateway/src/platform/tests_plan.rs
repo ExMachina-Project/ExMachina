@@ -16,6 +16,10 @@ mod plan_endpoint_tests {
     }
 
     fn app(c: exm_core::Core) -> axum::Router {
+        build_router_for(c)
+    }
+
+    fn build_router_for(c: exm_core::Core) -> axum::Router {
         crate::build_router(std::sync::Arc::new(c))
     }
 
@@ -215,5 +219,74 @@ mod plan_endpoint_tests {
         assert_eq!(v["kept"], 1);
         assert_eq!(v["mode"], "plan");
         assert_eq!(exm_core::plan::list_items(&s.id).len(), 1);
+    }
+
+    /// capability-parity 4.5：workflow 关联视图端点——goal/spec/plan/todo
+    /// 四层关系一次可见；不存在的会话 404；与 core workflow_relation 同口径。
+    #[tokio::test]
+    async fn workflow视图_四层关联与404() {
+        let c1 = core();
+        let s = c1.create_session("workflow-view").unwrap();
+        let goal = c1
+            .goal_update(&s.id, "start", Some("交付解析器"), None, None, None)
+            .unwrap();
+        let _ = c1
+            .spec_update(
+                &s.id,
+                "实现目标",
+                vec!["src".into()],
+                vec![],
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+        c1.set_plan_mode(&s.id, true);
+        exm_core::plan::push_item(
+            &s.id,
+            exm_core::plan::to_plan_item(
+                exm_core::types::ToolName::Edit,
+                &serde_json::json!({ "path": "p.rs", "old_string": "a", "new_string": "b" }),
+            ),
+        );
+
+        let app = app(c1);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{}/workflow", s.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["sessionId"], s.id.as_str());
+        assert_eq!(v["goal"]["id"], goal.id.as_str(), "goal 层带 id/版本");
+        assert!(v["goal"]["revision"].is_u64());
+        assert_eq!(v["spec"]["goalId"], goal.id, "spec → goal 关联可见");
+        assert_eq!(v["plan"]["mode"], "plan");
+        assert_eq!(v["plan"]["count"], 1);
+        assert_eq!(v["todoPresent"], false);
+
+        // 不存在的会话：404 如实（不虚造空关系）
+        let dir = std::env::temp_dir().join(format!("exm-plan-e2e-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = exm_core::config::ExmConfig::load(&dir);
+        cfg.use_mock = true;
+        cfg.memory_enabled = false;
+        let c2 = exm_core::Core::with_config(cfg).expect("创建 Core 失败");
+        let app2 = build_router_for(c2);
+        let resp = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/no-such/workflow")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

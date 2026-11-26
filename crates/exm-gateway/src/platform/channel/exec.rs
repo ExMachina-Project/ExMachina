@@ -43,6 +43,11 @@ pub(crate) struct ChannelRun {
     /// 单次等待（notify 单发会因观察时机错过而永久悬挂，测试实测踩过）。
     /// Clone 共享同一实例（回帖任务与执行方各持一份）。
     pub(crate) round_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// steering-only 轮次标记（capability-parity 3.4）：本「轮」没有自己的
+    /// 执行——消息被运行中的前序轮次作为 steering 消费。置位后回帖任务
+    /// 的退出条件变为「被引导轮次的收束事件」（代发其答复后退出），
+    /// round_done 不再置位（自己没有可等待的执行完成）。
+    pub(crate) steering_only: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChannelRun {
@@ -199,6 +204,7 @@ impl ChannelRun {
                 proactive: false,
                 flow: Some((ch.id.clone(), chat_key.to_string())),
                 round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                steering_only: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             rx,
         ))
@@ -230,6 +236,20 @@ impl ChannelRun {
     /// 收束事件 → 回帖文本（非收束事件返回 None；已按平台上限截断）
     pub(crate) fn take_reply(&self, evt: &CoreEvent, max_chars: usize) -> Option<String> {
         match evt.kind.as_str() {
+            "run.progress"
+                if !self.proactive
+                    && !self
+                        .origin
+                        .as_deref()
+                        .is_some_and(|origin| origin.starts_with("auto:"))
+                    && evt.payload.get("stage").and_then(|v| v.as_str()) == Some("preparing")
+                    && evt.payload.get("announce").and_then(|v| v.as_bool()) == Some(true) =>
+            {
+                evt.payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(|message| message.chars().take(max_chars).collect())
+            }
             "run.finished" => {
                 let text = flatten_statements(&evt.payload, max_chars);
                 // 沉默约定（IM silence）：模型宣告无话可说 → None（不投递），
@@ -279,6 +299,13 @@ impl ChannelRun {
                     None
                 }
             }
+            // steering 回执（capability-parity 3.4）：独立事件形态（非收束），
+            // 回帖任务投递其 message 后继续等被引导轮次的收束——不触发排空。
+            "session.steering_receipt" => evt
+                .payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|m| m.chars().take(max_chars).collect()),
             // 计划待审批（spec plan-mode 跨端呈现）：文本摘要 + 快捷审批指引。
             // 各 IM 适配器把本回复推回通道，即完成「推送文本摘要 + 快捷审批回复方式」
             "plan.pending" => {
@@ -388,6 +415,61 @@ impl ChannelRun {
         {
             self.core.emit_run_error(&self.session_id, &reply);
             return;
+        }
+        // steering 分流（capability-parity 3.4 / session-steering spec）：会话已有
+        // 运行中轮次时，普通文本不取消、不排队开新轮——立即作为当前任务的
+        // steering 暂存，在安全检查点被消费（工具动作继续到检查点，绝不打断）。
+        // 入口立即回执（不等运行完成，通道入口不同步等待）；运行方在下一处
+        // 检查点合并/引导。空闲（Idle）或收尾窗口（Closed→Idle）回落普通轮次。
+        // 注意：必须在获取会话运行锁之前分流，否则会排队等锁退化为
+        // 「同步等待当前运行完成」——spec 明确禁止的旧语义。
+        // 仅人工消息 steering：系统自动来源（auto:*，如主动观看）保持锁排队——
+        // 机器任务的执行时机归其触发器管理，把自动任务并进人类正在跑的轮次
+        // 既污染用户上下文，也绕过触发器自身的开关/预算闸门。
+        let human_input = self
+            .origin
+            .as_deref()
+            .is_none_or(|o| !o.starts_with("auto:"));
+        if human_input {
+            match self
+                .core
+                .admit_steering(&self.session_id, text, self.origin.as_deref())
+            {
+                Ok(exm_core::SteeringAdmission::Running) => {
+                    // steering-only 轮次：自己没有执行，round_done 不置位；回帖任务
+                    // 的退出条件切换为「被引导轮次的收束事件」（见 reply.rs）。
+                    self.steering_only
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    // steering 回执（「回执不冒充完成」）：已接收、正在引导——不是答案。
+                    // 用独立事件形态 session.steering_receipt（广播 + 落事件库，
+                    // WS/刷新可回放——capability-parity 3.5/3.6 的事件恢复口径），
+                    // 不借 run.error：收束事件会驱动回帖任务排空退出，回执若伪装
+                    // 收束形态会让任务在被引导轮次收束前提前退出（答复丢失）。
+                    self.core.emit_session_event(
+                        &self.session_id,
+                        "session.steering_receipt",
+                        serde_json::json!({
+                            "status": "steering_accepted",
+                            "message": "【报告】已接收：当前任务运行中，本消息将在安全检查点作为 steering 引导当前任务（不取消、不等待）。如需排队为后续独立任务请用 /queue <指令>。",
+                        }),
+                    );
+                    return;
+                }
+                Ok(exm_core::SteeringAdmission::Idle) => {}
+                Err(e) => {
+                    // QueueFull / 落库失败等：如实回执，不静默吞也不打断运行。
+                    // 回执经 run.error（终端错误形态）后置位 round_done：
+                    // 本轮确实没有执行可等，回帖任务凭「收束 + round_done」
+                    // 正常排空退出（与预算闸门短路路径同构）。
+                    self.core.emit_run_error(
+                        &self.session_id,
+                        &format!("【警告】steering 受理失败：{e}"),
+                    );
+                    self.round_done
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return;
+                }
+            }
         }
         // 周期 token 配额（外部来源会话）：耗尽即拒绝新轮次并经 run.error 回帖提示；
         // 组内派发会话无来源登记，天然不受限（设计 D10）

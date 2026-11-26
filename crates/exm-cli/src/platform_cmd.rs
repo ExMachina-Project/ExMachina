@@ -44,6 +44,13 @@ pub fn run_skill_list(core: &Core) -> anyhow::Result<()> {
                 s.triggers.join("、")
             }
         );
+        if s.version > 0 {
+            let mut meta = format!("版本 v{}", s.version);
+            if !s.updated_at.is_empty() {
+                meta.push_str(&format!("（更新于 {}）", s.updated_at));
+            }
+            println!("    {}", dim(meta));
+        }
         println!(
             "    {}",
             s.instructions.chars().take(120).collect::<String>()
@@ -73,8 +80,13 @@ pub fn run_skill_add(
         source: "manual".into(),
         ..Default::default()
     };
-    core.add_skill(skill)?;
-    println!("{} 技能包已创建：{}（全体组共用）", ok("完成"), id.cyan());
+    let written = core.add_skill(skill)?;
+    println!(
+        "{} 技能包已写入：{}（v{}，全体组共用）",
+        ok("完成"),
+        id.cyan(),
+        written.version
+    );
     println!(
         "{}",
         dim("派发时任务目标命中触发词即自动携带该指令；热装载，无需重启。")
@@ -97,10 +109,11 @@ pub fn run_skill_import(core: &Core, file: &str) -> anyhow::Result<()> {
         std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("读取文件失败 {file}: {e}"))?;
     let skill = core.import_skill_md(&raw)?;
     println!(
-        "{} 技能包已导入：{}（{}，触发词 {} 个，适用 {}）",
+        "{} 技能包已导入：{}（{}，v{}，触发词 {} 个，适用 {}）",
         ok("完成"),
         skill.id.cyan(),
         skill.name,
+        skill.version,
         skill.triggers.len(),
         if skill.agents.is_empty() {
             "全体".to_string()
@@ -122,6 +135,334 @@ pub fn run_skill_export(core: &Core, id: &str, out: &str) -> anyhow::Result<()> 
         std::fs::write(out, md)?;
         println!("{} 已导出到 {}", ok("完成"), out.cyan());
     }
+    Ok(())
+}
+
+/// 技能版本历史（capability-parity 6.5）：CLI 与 REST/面板共用 registry 同一事实源。
+pub fn run_skill_versions(core: &Core, id: &str) -> anyhow::Result<()> {
+    let history = core.skill_history_detailed(id)?;
+    if history.is_empty() {
+        anyhow::bail!("技能包不存在或无版本记录: {id}");
+    }
+    println!("{}", format!("技能包 {id} 版本历史（旧 → 新）").bold());
+    // 已删除：没有「当前生效版本」——与 REST 同一口径，不能把最后一个归档版本报成生效中
+    let deleted = core.skill_is_deleted(id)?;
+    let current = if deleted {
+        None
+    } else {
+        history.last().map(|r| r.version)
+    };
+    if deleted {
+        println!("  {}", warn("技能包已删除：历史保留，可回滚恢复任一版本"));
+    }
+    for r in &history {
+        let marker = if Some(r.version) == current {
+            ok("● 当前")
+        } else {
+            dim("○")
+        };
+        println!("  {} v{} {}", marker, r.version, dim(&r.name));
+        // 每版写了什么：名字通常各版相同，只列名字等于没有信息
+        let head: String = r
+            .instructions
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        if !head.is_empty() {
+            println!("      {}", dim(head));
+        }
+    }
+    if history.len() > 1 {
+        println!(
+            "{}",
+            dim(format!(
+                "回滚：exm skill rollback {id} --to <版本号>（以旧内容写新版本行，审计链不断）"
+            ))
+        );
+    }
+    Ok(())
+}
+
+/// 技能回滚（capability-parity 6.5 用户撤销学习）：历史版本经同一校验
+/// 成为新版本行；CLI/REST/聊天同链路。
+pub fn run_skill_rollback(core: &Core, id: &str, to: u64) -> anyhow::Result<()> {
+    let rolled = core.skill_rollback(id, to, "cli")?;
+    println!(
+        "{} 技能包 {id} 已回滚到 v{to}（新版本行 v{}，后续派发即生效）",
+        ok("完成"),
+        rolled.version
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------- 上下文来源
+
+/// 一条来源的可读状态行（CLI 呈现）。事实字段与 REST/通道同形：
+/// `status` / `baseStatus` / `disabled` / `reason` / `chars` / `modifiedAt`。
+fn context_line(s: &serde_json::Value) -> String {
+    let key = s["key"].as_str().unwrap_or("?");
+    let status = s["status"].as_str().unwrap_or("?");
+    let layer = s["layer"]
+        .as_str()
+        .map(|l| format!("（{} 层）", context_layer_label(l)))
+        .unwrap_or_default();
+    let base = s["baseStatus"]
+        .as_str()
+        .filter(|b| *b != status)
+        .map(|b| format!("，原状态 {b}"))
+        .unwrap_or_default();
+    let chars = s["chars"]
+        .as_u64()
+        .map(|c| format!("，{c} 字"))
+        .unwrap_or_default();
+    let modified = s["modifiedAt"]
+        .as_u64()
+        .filter(|t| *t > 0)
+        .map(|t| format!("，修改于 {}（UTC）", context_utc(t)))
+        .unwrap_or_default();
+    let reason = s["reason"]
+        .as_str()
+        .map(|r| format!("：{r}"))
+        .unwrap_or_default();
+    format!(
+        "[{}] {key}{layer} — {status}{base}{chars}{modified}{reason}",
+        s["kind"].as_str().unwrap_or("?")
+    )
+}
+
+/// Unix 秒 → `YYYY-MM-DD HH:MM`（UTC）。exm-cli 不依赖 chrono，也不读本地时区——
+/// 用标准库换算公历日期，并**标明是 UTC**：显示一个时区错误的时间比显示 UTC 更糟。
+/// 算法：Howard Hinnant 的 civil-from-days（days 从 1970-01-01 起，可为负）。
+fn context_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, m) = (rem / 3_600, (rem % 3_600) / 60);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{d:02} {h:02}:{m:02}")
+}
+
+/// 层级的外显名（API 契约里是 snake_case：project / user）在中文输出里的可读名。
+fn context_layer_label(layer: &str) -> &'static str {
+    match layer {
+        "project" => "项目",
+        "user" => "用户",
+        "agent_prompt" => "智能体提示",
+        "system_safety" => "系统安全",
+        _ => "未知",
+    }
+}
+
+/// 整层缺席说明的一行（Core 给出的原因原样呈现，入口不改写、不推断）。
+pub(crate) fn context_gap_line(gap: &serde_json::Value) -> String {
+    let layer = gap["layer"].as_str().unwrap_or("未知");
+    let reason = gap["reason"].as_str().unwrap_or("（未给出原因）");
+    format!("[{layer} 层] {reason}", layer = context_layer_label(layer))
+}
+
+/// `exm context <session> list`：四类来源清单 + 缺失原因 + 禁用位。
+pub fn run_context_list(core: &Core, session_id: &str) -> anyhow::Result<()> {
+    let sources = core.context_sources(session_id)?;
+    // 整层缺席的文件来源及其原因：由 Core 给出事实（未绑定项目 / 项目目录不可用 /
+    // 没有 ~/.exmachina）。清单里一个 file: 都没有时，这里是唯一的解释——
+    // 不在入口自己猜「为什么没有」。
+    let gaps = core.context_source_gaps(session_id)?;
+    if sources.is_empty() {
+        println!("{}", dim("当前会话没有可列出的上下文来源。"));
+        for g in &gaps {
+            println!("  {}", dim(context_gap_line(g)));
+        }
+        return Ok(());
+    }
+    println!(
+        "{}",
+        format!("会话 {session_id} 的上下文来源（{} 项）", sources.len()).bold()
+    );
+    for s in &sources {
+        println!("  {}", context_line(s));
+    }
+    if !gaps.is_empty() {
+        println!(
+            "{}",
+            dim("  未加载的文件来源层（说明，不是可操作的来源）：")
+        );
+        for g in &gaps {
+            println!("    {}", dim(context_gap_line(g)));
+        }
+    }
+    let disabled: Vec<&str> = sources
+        .iter()
+        .filter(|s| s["disabled"].as_bool() == Some(true))
+        .filter_map(|s| s["key"].as_str())
+        .collect();
+    if !disabled.is_empty() {
+        println!(
+            "{}",
+            warn(format!(
+                "已停用自动注入：{}（停用只管自动注入；模型主动的记忆召回与用户显式 /skill <id> 不受影响）",
+                disabled.join("、")
+            ))
+        );
+    }
+    println!(
+        "{}",
+        dim(format!(
+            "操作：exm context {session_id} detail <key> | disable <key> | enable <key> | refresh [key]"
+        ))
+    );
+    Ok(())
+}
+
+/// `exm context <session> detail <key>`。
+pub fn run_context_detail(core: &Core, session_id: &str, key: &str) -> anyhow::Result<()> {
+    let sources = core.context_sources(session_id)?;
+    let Some(s) = sources
+        .iter()
+        .find(|s| s["key"].as_str() == Some(key.trim()))
+    else {
+        let keys: Vec<&str> = sources.iter().filter_map(|s| s["key"].as_str()).collect();
+        anyhow::bail!("没有上下文来源 {key}。可用：{}", keys.join(" / "));
+    };
+    println!("{}", format!("来源 {key}：").bold());
+    println!("  {}", context_line(s));
+    if s["disabled"].as_bool() == Some(true) {
+        println!(
+            "  {}",
+            warn("自动注入已停用（下一轮对话起不再注入）；exm context … enable 可恢复。模型主动的记忆召回与用户显式 /skill <id> 不受影响。")
+        );
+    } else {
+        println!(
+            "  {}",
+            dim("自动注入开启中（下一轮对话按预算注入）；exm context … disable 可停用自动注入。")
+        );
+    }
+    Ok(())
+}
+
+/// 单来源刷新并打印结果。返回是否成功（供整表刷新汇总；单来源时据此定退出码）。
+fn context_refresh_one(core: &Core, session_id: &str, key: &str) -> anyhow::Result<bool> {
+    let report = core.context_source_refresh(session_id, key)?;
+    let others = report["others"].as_array().map(Vec::len).unwrap_or(0);
+    let source = &report["source"];
+    let is_file = source["kind"].as_str() == Some("file");
+    let line = context_line(source);
+    match (report["ok"].as_bool(), is_file) {
+        (Some(false), _) => {
+            println!(
+                "  {} 重读来源 {key} 失败：{}\n    {line}\n    {}",
+                err("失败"),
+                report["error"].as_str().unwrap_or("未知原因"),
+                dim(format!(
+                    "其他 {others} 个来源未受影响（未重读、状态不变）；本来源的禁用设置也未改动"
+                ))
+            );
+            Ok(false)
+        }
+        (Some(true), true) => {
+            println!(
+                "  {} 已重读来源 {key}\n    {line}\n    {}",
+                ok("完成"),
+                dim(format!("其他 {others} 个来源未重读、状态不变"))
+            );
+            Ok(true)
+        }
+        _ => {
+            let ready = source["status"].as_str() == Some("ready");
+            let verdict = if ready {
+                "已就绪，按预算参与自动注入".to_string()
+            } else {
+                format!(
+                    "未就绪：{}",
+                    source["reason"].as_str().unwrap_or("原因未上报")
+                )
+            };
+            println!(
+                "  🔄 来源 {key} 没有可重读的文件（运行时来源），已重新观测：{verdict}\n    {line}\n    {}",
+                dim(format!("其他 {others} 个来源未重读、状态不变"))
+            );
+            Ok(true)
+        }
+    }
+}
+
+/// `exm context <session> refresh [key]`。
+///
+/// 带一个 key：只刷新该来源；失败 → 非零退出（失败原因与「其余未受影响」都打印出来）。
+/// 不带 key：逐个刷新全部来源；**一个失败不中断其余**，全部跑完后汇总，
+/// 有失败则非零退出——「单来源刷新失败不会改变其他来源」在 CLI 上就是：
+/// 其余来源照样被刷新、照样如实回报。
+pub fn run_context_refresh(core: &Core, session_id: &str, key: Option<&str>) -> anyhow::Result<()> {
+    let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) else {
+        let sources = core.context_sources(session_id)?;
+        if sources.is_empty() {
+            println!("{}", dim("当前会话没有可刷新的上下文来源。"));
+            return Ok(());
+        }
+        println!(
+            "{}",
+            format!("刷新会话 {session_id} 的 {} 个上下文来源：", sources.len()).bold()
+        );
+        let mut failed = Vec::new();
+        for s in &sources {
+            let k = s["key"].as_str().unwrap_or_default();
+            if !context_refresh_one(core, session_id, k)? {
+                failed.push(k.to_string());
+            }
+        }
+        if !failed.is_empty() {
+            anyhow::bail!(
+                "{} 个来源刷新失败（{}）；其余 {} 个来源已刷新、未受影响",
+                failed.len(),
+                failed.join("、"),
+                sources.len() - failed.len()
+            );
+        }
+        return Ok(());
+    };
+    // 未知键是用法错误（不是刷新失败）：给出可用键
+    let sources = core.context_sources(session_id)?;
+    if !sources.iter().any(|s| s["key"].as_str() == Some(key)) {
+        let keys: Vec<&str> = sources.iter().filter_map(|s| s["key"].as_str()).collect();
+        anyhow::bail!("没有上下文来源 {key}，无从刷新。可用：{}", keys.join(" / "));
+    }
+    if context_refresh_one(core, session_id, key)? {
+        Ok(())
+    } else {
+        anyhow::bail!("来源 {key} 刷新失败（其余来源未受影响）")
+    }
+}
+
+/// `exm context <session> disable|enable <key>`。
+pub fn run_context_set(
+    core: &Core,
+    session_id: &str,
+    key: &str,
+    disable: bool,
+) -> anyhow::Result<()> {
+    let disabled = core.context_source_set(session_id, key, disable)?;
+    let verb = if disable { "已停用" } else { "已恢复" };
+    let state = if disabled.is_empty() {
+        "（当前没有停用的来源）".to_string()
+    } else {
+        format!("（已停用自动注入：{}）", disabled.join("、"))
+    };
+    println!(
+        "{} {verb}来源 {} 的自动注入，下一轮对话起生效{state}。",
+        ok("完成"),
+        key.trim()
+    );
     Ok(())
 }
 
@@ -678,4 +1019,31 @@ pub async fn run_approval_decide(core: &Core, id: &str, approve: bool) -> anyhow
         other => println!("{} 审批单 {id} 状态：{other}", ok("完成")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod context_time_tests {
+    use super::context_utc;
+
+    /// 换算钉在已知时刻上（取值来自公历事实，不取自本函数自身）。
+    #[test]
+    fn unix秒_转_utc_已知时刻() {
+        assert_eq!(context_utc(0), "1970-01-01 00:00");
+        // 2024-02-29 00:00:00 UTC（闰日）
+        assert_eq!(context_utc(1_709_164_800), "2024-02-29 00:00");
+        // 2024-03-01 00:00:00 UTC（闰日之后）
+        assert_eq!(context_utc(1_709_251_200), "2024-03-01 00:00");
+        // 2000-02-29 12:34:56 UTC（能被 400 整除的闰年）
+        assert_eq!(context_utc(951_827_696), "2000-02-29 12:34");
+        // 1999-12-31 23:59:59 → 2000-01-01 00:00:00（跨年边界）
+        assert_eq!(context_utc(946_684_799), "1999-12-31 23:59");
+        assert_eq!(context_utc(946_684_800), "2000-01-01 00:00");
+        // 2100 能被 100 整除、不被 400 整除 → 平年：2 月只有 28 天
+        assert_eq!(context_utc(4_107_456_000), "2100-02-28 00:00");
+        assert_eq!(context_utc(4_107_542_400), "2100-03-01 00:00");
+        // 2400 能被 400 整除 → 闰年
+        assert_eq!(context_utc(13_574_563_200), "2400-02-29 00:00");
+        // 近期时刻
+        assert_eq!(context_utc(1_795_499_940), "2026-11-24 05:59");
+    }
 }

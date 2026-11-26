@@ -195,16 +195,111 @@ pub fn run_memory_edit(
     }
     match core.memory_update(id, title.as_deref(), body.as_deref(), tags, kind.as_deref())? {
         Some(e) => {
-            println!("{} {}（{}）", ok("已更新"), e.id, e.title);
+            // capability-parity 6.5：回执带版本号——CLI/REST/聊天同一版本事实源
+            println!(
+                "{} {} v{}（{}）",
+                ok("已更新"),
+                e.id,
+                e.version_label(),
+                e.title
+            );
             Ok(())
         }
         None => anyhow::bail!("记忆条目不存在：{id}"),
     }
 }
 
+/// 记忆版本历史（capability-parity 6.5）：CLI 与 REST/聊天共用 MemoryStore 同一事实源。
+pub fn run_memory_versions(core: &Core, id: &str) -> anyhow::Result<()> {
+    let history = core.memory_history(id)?;
+    let current = core.memory_get_entry(id)?;
+    if history.is_empty() && current.is_none() {
+        anyhow::bail!("记忆条目不存在或无版本记录：{id}");
+    }
+    let forgotten = current.is_none();
+    println!(
+        "{}",
+        format!(
+            "记忆 {id} 版本历史（旧 → 新）{}",
+            if forgotten { "（已遗忘）" } else { "" }
+        )
+        .bold()
+    );
+    for r in &history {
+        let marker = if Some(r.version) == current.as_ref().map(|e| e.version_label()) {
+            ok("● 当前")
+        } else if r.change == "forgotten" {
+            dim("◌ 遗忘")
+        } else {
+            dim("○")
+        };
+        let tags = if r.tags.is_empty() {
+            String::new()
+        } else {
+            dim(format!("  #{}", r.tags.join(" #")))
+        };
+        println!(
+            "  {} v{} {} {}{}",
+            marker,
+            r.version,
+            dim(&r.change),
+            r.title,
+            tags
+        );
+        // 每版写了什么：只改正文时各版标题相同，光看标题无从选回滚目标。
+        // 遗忘行存的是被遗忘时的内容——「当时忘掉的是什么」正是要给人看的。
+        let head: String = r.body.replace('\n', " ").chars().take(80).collect();
+        if !head.is_empty() {
+            println!("      {}", dim(head));
+        }
+    }
+    if forgotten {
+        println!("{}", dim(format!("撤销遗忘：exm memory restore {id}")));
+    } else if history.len() > 1 {
+        println!(
+            "{}",
+            dim(format!(
+                "回滚：exm memory rollback {id} --to <版本号>（以旧内容写新版本行，审计链不断）"
+            ))
+        );
+    }
+    Ok(())
+}
+
+/// 记忆回滚（capability-parity 6.5 用户撤销学习）：历史版本经同一校验
+/// 成为新版本行；CLI/REST/聊天同链路。
+pub fn run_memory_rollback(core: &Core, id: &str, to: u64) -> anyhow::Result<()> {
+    let rolled = core.memory_rollback(id, to, "cli")?;
+    println!(
+        "{} {} 回滚到 v{to}（新版本 v{}，{}）",
+        ok("已回滚"),
+        rolled.id,
+        rolled.version_label(),
+        rolled.title
+    );
+    Ok(())
+}
+
+/// 撤销遗忘（capability-parity 6.5）：以被遗忘时的内容重建条目，归属恢复原样。
+pub fn run_memory_restore(core: &Core, id: &str) -> anyhow::Result<()> {
+    let e = core.memory_restore(id, "cli")?;
+    println!(
+        "{} {} v{}（{}）",
+        ok("已撤销遗忘"),
+        e.id,
+        e.version_label(),
+        e.title
+    );
+    Ok(())
+}
+
 pub fn run_memory_forget(core: &Core, id: &str) -> anyhow::Result<()> {
+    // 不存在/已遗忘的条目如实报错——打印「已遗忘」会把 no-op 说成成功
+    if core.memory_get_entry(id)?.is_none() {
+        anyhow::bail!("记忆条目不存在或已遗忘：{id}");
+    }
     core.memory_forget(id)?;
-    println!("{} {}", ok("已遗忘"), id);
+    println!("{} {}（可撤销：exm memory restore {id}）", ok("已遗忘"), id);
     Ok(())
 }
 

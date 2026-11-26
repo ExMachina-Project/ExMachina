@@ -87,6 +87,32 @@ mod channel_boundary_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 长任务准备事件只向显式用户输入简短播报() {
+        let core = std::sync::Arc::new(core());
+        let channel = ch("webhook", "tools", false);
+        let (run, _) = ChannelRun::begin(&core, &channel, "progress-chat")
+            .await
+            .expect("创建会话");
+        let event = exm_core::types::CoreEvent {
+            kind: "run.progress".into(),
+            session_id: run.session_id.clone(),
+            payload: serde_json::json!({
+                "stage": "preparing",
+                "announce": true,
+                "message": "准备检查项目约束，再执行并验证。",
+            }),
+        };
+        assert_eq!(
+            run.take_reply(&event, 200).as_deref(),
+            Some("准备检查项目约束，再执行并验证。")
+        );
+        let automatic = run.clone().with_origin("auto:cron");
+        assert!(automatic.take_reply(&event, 200).is_none());
+        let proactive = run.with_proactive(true);
+        assert!(proactive.take_reply(&event, 200).is_none());
+    }
+
     // ---------------- 计划模式跨端审批（spec plan-mode 通道面） ----------------
 
     /// 快捷审批指令：plan:yes 回放 / plan:no 保留，均不进模型轮次
@@ -185,6 +211,7 @@ mod channel_boundary_tests {
             proactive: false,
             flow: None,
             round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            steering_only: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         // 已含【报告】：原样透传
         let evt = exm_core::types::CoreEvent {
@@ -235,6 +262,7 @@ mod channel_boundary_tests {
             proactive: false,
             flow: None,
             round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            steering_only: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let evt = |text: &str| exm_core::types::CoreEvent {
             kind: "run.finished".into(),
@@ -294,6 +322,7 @@ mod channel_boundary_tests {
             proactive: false,
             flow: None,
             round_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            steering_only: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let text = run.take_reply(&evt, 650).expect("应有文本回复");
         assert!(

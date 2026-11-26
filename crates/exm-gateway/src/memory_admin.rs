@@ -352,3 +352,114 @@ pub(crate) async fn update_memory(
             .into_response(),
     }
 }
+
+/// 已遗忘（可撤销）的记忆清单（capability-parity 6.6，GET /api/memory/forgotten）。
+/// 遗忘后条目从常规列表消失——没有这个入口，治理面就无处提供「撤销遗忘」。
+/// 返回遗忘当时的完整条目（墓碑保留归属与统计字段），最近遗忘的在前。
+pub(crate) async fn memory_forgotten(State(st): State<AppState>) -> impl IntoResponse {
+    match st.core.memory_list_forgotten() {
+        Ok(rows) => Json(json!({ "entries": rows })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// 记忆版本历史（capability-parity 6.5，GET /api/memory/:id/versions）。
+/// 条目已被遗忘时 `current` 为 null、`forgotten=true`——客户端不会把「已遗忘」
+/// 读成「最后一个版本仍生效」。
+pub(crate) async fn memory_versions(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let current = st.core.memory_get_entry(&id).ok().flatten();
+    let forgotten = current.is_none() && st.core.memory_is_forgotten(&id).unwrap_or(false);
+    match st.core.memory_history(&id) {
+        Ok(history) => {
+            if history.is_empty() && current.is_none() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": format!("记忆条目不存在：{id}") })),
+                )
+                    .into_response();
+            }
+            Json(json!({
+                "id": id,
+                "versions": history.iter().map(|r| json!({
+                    "version": r.version, "change": r.change, "title": r.title,
+                    "kind": r.kind.key(), "tags": r.tags, "changedAt": r.changed_at,
+                    // 正文摘要：治理面要能看出「这一版写了什么」才谈得上选择回滚目标
+                    "body": r.body,
+                })).collect::<Vec<_>>(),
+                "current": current.as_ref().map(|e| json!(e.version_label()))
+                    .unwrap_or(serde_json::Value::Null),
+                "forgotten": forgotten,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MemoryRollbackBody {
+    pub to_version: u64,
+    pub by: Option<String>,
+}
+
+/// 记忆回滚（capability-parity 6.5，POST /api/memory/:id/rollback）：
+/// 历史版本经同一校验成为新版本行（版本号单调递增，审计链不断）。
+pub(crate) async fn memory_rollback(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<MemoryRollbackBody>,
+) -> impl IntoResponse {
+    let by = b.by.clone().unwrap_or_else(|| "console".into());
+    match st.core.memory_rollback(&id, b.to_version, &by) {
+        Ok(e) => Json(json!({
+            "id": e.id, "version": e.version_label(), "rolledBackTo": b.to_version, "by": by,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MemoryRestoreBody {
+    pub by: Option<String>,
+}
+
+/// 撤销遗忘（capability-parity 6.5，POST /api/memory/:id/restore）：
+/// 以被遗忘时的内容重建条目，归属恢复原样，版本号接着走。
+pub(crate) async fn memory_restore(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<MemoryRestoreBody>>,
+) -> impl IntoResponse {
+    let by = body
+        .and_then(|Json(b)| b.by)
+        .unwrap_or_else(|| "console".into());
+    match st.core.memory_restore(&id, &by) {
+        Ok(e) => Json(json!({
+            "id": e.id, "version": e.version_label(), "title": e.title, "by": by,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}

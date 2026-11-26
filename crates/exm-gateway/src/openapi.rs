@@ -152,6 +152,12 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/sessions/:id/archive", "归档视图"),
         Endpoint::new("post", "/api/sessions/:id/chat", "发送一轮对话"),
         Endpoint::new("post", "/api/sessions/:id/steer", "运行中转向指令"),
+        Endpoint::new("post", "/api/sessions/:id/queue", "显式加入后续任务队列（区别于 steering；回执 queued+pending 不冒充执行）"),
+        Endpoint::new("get", "/api/sessions/:id/queue", "查询会话后续任务队列（时间正序，含终态）"),
+        Endpoint::new("delete", "/api/sessions/:id/queue", "清空会话后续任务队列"),
+        Endpoint::new("patch", "/api/sessions/:id/queue/:qid", "编辑排队任务文本（revision 乐观锁；旧文本废弃不重放）"),
+        Endpoint::new("delete", "/api/sessions/:id/queue/:qid", "移除排队任务（不执行其文本）"),
+        Endpoint::new("post", "/api/sessions/:id/queue/:qid/move", "移动排队任务到指定序位（1 起，越界钳制）"),
         Endpoint::new("post", "/api/sessions/:id/stop", "停止运行中轮次"),
         Endpoint::new("post", "/api/sessions/:id/undo", "撤销上一轮"),
         Endpoint::new("post", "/api/sessions/:id/edit", "编辑重发"),
@@ -163,6 +169,31 @@ pub fn endpoints() -> Vec<Endpoint> {
             "post",
             "/api/sessions/:id/plan",
             "规划模式：决策（批准/修改/拒绝）",
+        ),
+        Endpoint::new(
+            "get",
+            "/api/sessions/:id/workflow",
+            "goal/spec/plan/todo 关联视图（目标/规格/方案/执行进度）",
+        ),
+        Endpoint::new(
+            "get",
+            "/api/sessions/:id/context",
+            "上下文来源清单（文件/记忆/检索/技能：status、baseStatus、disabled 与缺失原因 reason；顶层 gaps 给出整层缺席说明）",
+        ),
+        Endpoint::new(
+            "post",
+            "/api/sessions/:id/context",
+            "上下文来源治理：{action:disable|enable|refresh,key}。refresh 可不带 key（整表）；单来源刷新失败返回 200 + ok=false + error，不改禁用清单、不影响其他来源（others）",
+        ),
+        Endpoint::new(
+            "get",
+            "/api/learning/candidates",
+            "学习候选清单（状态过滤；候选绑定真实证据）",
+        ),
+        Endpoint::new(
+            "post",
+            "/api/learning/candidates/:id",
+            "学习候选人工裁决（approve/reject，一次定局）",
         ),
         // ---------------- 智能体与组
         Endpoint::new("get", "/api/agents", "智能体列表"),
@@ -275,6 +306,10 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("delete", "/api/memory/:id", "删除记忆"),
         Endpoint::new("put", "/api/memory/:id", "编辑记忆条目"),
         Endpoint::new("post", "/api/memory/:id/pin", "记忆置顶切换"),
+        Endpoint::new("get", "/api/memory/:id/versions", "记忆版本历史（含遗忘标记）"),
+        Endpoint::new("post", "/api/memory/:id/rollback", "记忆回滚到历史版本（产生新版本）"),
+        Endpoint::new("post", "/api/memory/:id/restore", "撤销遗忘（以被遗忘时的内容重建）"),
+        Endpoint::new("get", "/api/memory/forgotten", "已遗忘记忆清单（可撤销；最近遗忘在前）"),
         Endpoint::new("get", "/api/memory/md", "浅层快照查看"),
         Endpoint::new("put", "/api/memory/md", "浅层快照编辑"),
         // ---------------- 知识库
@@ -312,8 +347,23 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/skills", "技能包列表"),
         Endpoint::new("post", "/api/skills", "创建技能包"),
         Endpoint::new("post", "/api/skills/import", "导入技能包"),
+        Endpoint::new(
+            "get",
+            "/api/skills/deleted",
+            "已删除技能清单（历史保留，可回滚恢复；最近删除在前）",
+        ),
         Endpoint::new("get", "/api/skills/:id/export", "导出技能包"),
         Endpoint::new("delete", "/api/skills/:id", "删除技能包"),
+        Endpoint::new(
+            "get",
+            "/api/skills/:id/versions",
+            "技能版本历史（旧→新；已删除时 current 为 null）",
+        ),
+        Endpoint::new(
+            "post",
+            "/api/skills/:id/rollback",
+            "技能回滚（历史版本经同一校验成为新版本行）",
+        ),
         // ---------------- 插件
         Endpoint::new("get", "/api/plugins", "插件列表"),
         Endpoint::new("post", "/api/plugins/install", "安装插件"),
@@ -360,6 +410,11 @@ pub fn endpoints() -> Vec<Endpoint> {
         Endpoint::new("get", "/api/singles/:id/prompt", "单轮智能体提示词查看"),
         Endpoint::new("put", "/api/singles/:id/prompt", "单轮智能体提示词修改"),
         // ---------------- Nexus 拓扑
+        Endpoint::new(
+            "get",
+            "/api/connections",
+            "实例管理只读来源目录（search/kind/sourceKind/limit/offset/cursor；翻页使用nextCursor；不探测、不构成执行授权）",
+        ),
         Endpoint::new("get", "/api/nexus/links", "拓扑连边列表"),
         Endpoint::new("post", "/api/nexus/links", "保存拓扑连边"),
         Endpoint::new("delete", "/api/nexus/links/:id", "删除拓扑连边"),
@@ -499,6 +554,27 @@ pub fn generate() -> Value {
             op["responses"]["400"] = error_response("协议版本或查询参数无效");
             op["responses"]["403"] = error_response("鉴权失败或会话需要项目连接");
             op["responses"]["404"] = error_response("会话不存在或不属于当前项目");
+        }
+        if ep.path == "/api/sessions" {
+            op["description"] = json!("session-target-v1 能力由 /api/health.features 声明；显式目标不修改服务器激活对象。启用密钥时须通过实例鉴权；项目仍受 X-Exm-Workspace 及目录访问规则约束。");
+            op["responses"]["400"] = error_response("对象不存在、项目目录或参数无效");
+            op["responses"]["403"] = error_response("新会话目录与连接项目不匹配");
+            if ep.method == "get" {
+                op["parameters"] = json!([
+                    {"name": "target", "in": "query", "schema": {"type": "string"}, "description": "组 ID 或 single:<id>；提供时仅返回此对象的会话，不依赖全局 active；无效对象返回400"},
+                    {"name": "workspace", "in": "query", "schema": {"type": "string"}, "description": "固定项目绝对目录；省略只返回无项目会话"},
+                    {"name": "all", "in": "query", "schema": {"type": "boolean"}},
+                    {"name": "archived", "in": "query", "schema": {"type": "boolean"}}
+                ]);
+            } else if ep.method == "post" {
+                op["requestBody"] = json!({"content": {"application/json": {"schema": {
+                    "type": "object", "properties": {
+                        "title": {"type": "string"},
+                        "target": {"type": "string", "description": "组 ID 或 single:<id>；无效对象拒绝，不回落全局；省略保留旧客户端语义"},
+                        "workspace": {"type": "string", "description": "固定项目绝对目录，须与项目请求头一致"}
+                    }
+                }}}});
+            }
         }
         if ep.path.starts_with("/api/collaborations") {
             let mut parameters = vec![

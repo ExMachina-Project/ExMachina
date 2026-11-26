@@ -1381,10 +1381,17 @@ async fn handle_message(
     .with_external_id(external_id)
     .with_proactive(proactive);
     let session_id = run.session_id.clone();
+    // steering-only 标志与 run() 共享（run 消费 self，先取 Arc 引用）
+    let steering_flag = run.steering_only.clone();
     run.run(&text).await;
+    let run_was_steering = steering_flag.load(std::sync::atomic::Ordering::Acquire);
     let _ = reply.await;
-    // 会话工具组随轮次收束清理（注入键 = 本轮数据库会话 id）
-    core.orchestrator().tools.clear_session_tools(&session_id);
+    // 会话工具组随轮次收束清理（注入键 = 本轮数据库会话 id）。
+    // steering-only 提前返回时不清理：注入工具正被运行中的被引导轮次使用
+    //（capability-parity 3.4），清理时机归真实轮次的收束路径。
+    if !run_was_steering {
+        core.orchestrator().tools.clear_session_tools(&session_id);
+    }
 }
 
 // ---------------------------------------------------------------- 测试（纯函数部分）

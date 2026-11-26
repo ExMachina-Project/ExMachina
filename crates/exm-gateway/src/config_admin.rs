@@ -63,6 +63,10 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "flowIdleDays": cfg.automation.flow_idle_days,
             "memoryDigestMinTurns": cfg.automation.memory_digest_min_turns,
             "timezone": cfg.automation.timezone,
+            "goalContinueIntervalMinutes": cfg.automation.goal_continue_interval_minutes,
+            "goalContinueMaxSteps": cfg.automation.goal_continue_max_steps,
+            "goalContinueMaxRounds": cfg.automation.goal_continue_max_rounds,
+            "goalContinueRoundTimeoutSecs": cfg.automation.goal_continue_round_timeout_secs,
         },
         "search": {
             "provider": cfg.search.provider,
@@ -105,6 +109,7 @@ pub(crate) async fn get_config(State(st): State<AppState>) -> impl IntoResponse 
             "maxBytes": cfg.trash.max_bytes,
         },
         "experiments": {
+            "connectionFabric": cfg.experiments.connection_fabric,
             "dynamicCompaction": cfg.experiments.dynamic_compaction,
             "groupSharedContext": cfg.experiments.group_shared_context,
             "llmDrivenMemory": cfg.experiments.llm_driven_memory,
@@ -343,6 +348,8 @@ pub(crate) struct PartialTools {
 #[derive(Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PartialExperiments {
+    #[serde(default, deserialize_with = "provided_connection_fabric_patch")]
+    connection_fabric: Option<serde_json::Value>,
     #[serde(default)]
     dynamic_compaction: Option<bool>,
     #[serde(default)]
@@ -359,6 +366,13 @@ pub(crate) struct PartialExperiments {
     meta_agent: Option<bool>,
     #[serde(default)]
     auto_memory_digest: Option<bool>,
+}
+
+// 区分省略与显式null；null不是“保持当前值”的有效连接配置。
+fn provided_connection_fabric_patch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// 回收站保留契约（部分更新：缺省沿用旧值；0 视为未提供回默认）
@@ -504,6 +518,14 @@ pub(crate) struct PartialAutomation {
     memory_digest_min_turns: Option<usize>,
     #[serde(default)]
     timezone: Option<String>,
+    #[serde(default)]
+    goal_continue_interval_minutes: Option<u32>,
+    #[serde(default)]
+    goal_continue_max_steps: Option<usize>,
+    #[serde(default)]
+    goal_continue_max_rounds: Option<usize>,
+    #[serde(default)]
+    goal_continue_round_timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +618,10 @@ pub(crate) async fn put_config(
         flow_idle_days: None,
         memory_digest_min_turns: None,
         timezone: None,
+        goal_continue_interval_minutes: None,
+        goal_continue_max_steps: None,
+        goal_continue_max_rounds: None,
+        goal_continue_round_timeout_secs: None,
     });
     let sec_search = body.search.clone();
     let sec_hooks = body.hooks.clone();
@@ -835,6 +861,18 @@ pub(crate) async fn put_config(
                 .timezone
                 .clone()
                 .unwrap_or_else(|| current.automation.timezone.clone()),
+            goal_continue_interval_minutes: auto
+                .goal_continue_interval_minutes
+                .unwrap_or(current.automation.goal_continue_interval_minutes),
+            goal_continue_max_steps: auto
+                .goal_continue_max_steps
+                .unwrap_or(current.automation.goal_continue_max_steps),
+            goal_continue_max_rounds: auto
+                .goal_continue_max_rounds
+                .unwrap_or(current.automation.goal_continue_max_rounds),
+            goal_continue_round_timeout_secs: auto
+                .goal_continue_round_timeout_secs
+                .unwrap_or(current.automation.goal_continue_round_timeout_secs),
         },
         search,
         hooks,
@@ -858,6 +896,19 @@ pub(crate) async fn put_config(
         experiments: {
             let e = body.experiments.clone().unwrap_or_default();
             exm_core::config::ExperimentsConfig {
+                connection_fabric: match e.connection_fabric {
+                    Some(patch) => match current.experiments.connection_fabric.patched(&patch) {
+                        Ok(config) => config,
+                        Err(_) => return (
+                            StatusCode::BAD_REQUEST,
+                            Json(
+                                json!({ "error": "connectionFabric 配置字段、类型或资源上限无效" }),
+                            ),
+                        )
+                            .into_response(),
+                    },
+                    None => current.experiments.connection_fabric.clone(),
+                },
                 dynamic_compaction: e
                     .dynamic_compaction
                     .unwrap_or(current.experiments.dynamic_compaction),
@@ -876,6 +927,9 @@ pub(crate) async fn put_config(
                 auto_memory_digest: e
                     .auto_memory_digest
                     .unwrap_or(current.experiments.auto_memory_digest),
+                // 设备连接（experimental-device-connectivity）：结构化配置而非布尔开关，
+                // 不在 PartialExperiments PATCH 面里——沿用当前值（专属端点管理）。
+                device_connectivity: current.experiments.device_connectivity.clone(),
             }
         },
         // 五组补链（此前 put 不接收：设置页保存被静默丢弃）

@@ -25,6 +25,7 @@ pub(crate) struct SearchParams {
 
 /// 会话内容检索（GET /api/sessions/search）：标题 + 最近 200 条消息正文，
 /// 大小写不敏感；标题命中优先、同组按活跃倒序；返回命中片段（含 messageId）。
+#[allow(clippy::result_large_err)]
 pub(crate) async fn search_sessions(
     State(st): State<AppState>,
     Query(p): Query<SearchParams>,
@@ -173,6 +174,35 @@ pub(crate) async fn chat(
         exm_core::orchestrator::set_session_mode(&id, mode);
     }
     let agent = body.agent.clone();
+    // steering 分流（capability-parity 3.4，与 /steer 端点同口径）：会话运行中时
+    // 普通发送立即作为 steering 受理（不排队开新轮、不同步等待、绝不取消）；
+    // 空闲回落普通轮次。WebChat（WebUI 内置聊天）走本端点，与 QQ 等通道
+    // 适配器的分流语义完全一致（session-steering spec「聊天通道消息立即引导」）。
+    // 子代理直聊不分流（chat_with_agent 有独立的执行面）。
+    if agent.is_none() {
+        match st.core.admit_steering(&id, &text, Some("webui")) {
+            Ok(exm_core::SteeringAdmission::Running) => {
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "accepted": true,
+                        "status": "steering_accepted",
+                        "running": true,
+                        "interrupted": false,
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(exm_core::SteeringAdmission::Idle) => {}
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        }
+    }
     tokio::spawn(async move {
         let result = match &agent {
             // 子代理直聊：绕过编排，与该子个体单独对话（用户可见派发任务与传回内容，可直接追问）
@@ -305,19 +335,15 @@ pub(crate) async fn session_batch(
             Err(response) => return response,
         };
         for id in &b.ids {
-            let session = st
+            let Some(session) = st
                 .core
                 .store
                 .get_session(id)
                 .ok()
                 .flatten()
-                .filter(|session| session.workspace.as_deref() == root.to_str());
-            let Some(session) = session else {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "会话不存在" })),
-                )
-                    .into_response();
+                .filter(|session| session.workspace.as_deref() == root.to_str())
+            else {
+                continue; // 不存在/不属本项目 → 执行环 failed 明细（尽力而为语义）
             };
             if session.collaboration_id.is_some() {
                 return (
@@ -328,20 +354,18 @@ pub(crate) async fn session_batch(
             }
         }
     } else {
+        // 无项目头（全局视角）：不存在的 id 与工作区会话不在此拦截——
+        // 前者进 failed 明细，后者 set_session_archived/delete 会按 scope
+        // 规则给出错误并进 failed（尽力而为 + 全量反馈）。只拦协作成员硬错误。
         for id in &b.ids {
-            if st
-                .core
-                .store
-                .get_session(id)
-                .ok()
-                .flatten()
-                .is_none_or(|session| session.workspace.is_some())
-            {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "会话不存在" })),
-                )
-                    .into_response();
+            if let Some(session) = st.core.store.get_session(id).ok().flatten() {
+                if session.collaboration_id.is_some() {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "error": "协作成员会话不能批量操作" })),
+                    )
+                        .into_response();
+                }
             }
         }
     }
@@ -817,10 +841,24 @@ pub(crate) async fn create_session(
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) async fn list_sessions(
     State(st): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> impl IntoResponse {
+    if let Some(target) = q.target.as_deref() {
+        let valid = match target.strip_prefix("single:") {
+            Some(id) => st.core.registry().single_exists(id),
+            None => st.core.registry().group_exists(target),
+        };
+        if !valid {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "对话对象不存在" })),
+            )
+                .into_response();
+        }
+    }
     // 组是交互对象：会话列表归属激活组（?all=1 管理视角看全部，附消息数）；
     // ?archived=true 显式查归档区（归档会话不进默认列表）
     let root = match q
@@ -836,13 +874,16 @@ pub(crate) async fn list_sessions(
         st.core.list_archived_sessions()
     } else if let Some(root) = root.as_deref().and_then(std::path::Path::to_str) {
         st.core.list_sessions_admin_in_workspace(root)
-    } else if q.all.unwrap_or(false) || root.is_some() {
+    } else if q.all.unwrap_or(false) || q.target.is_some() || root.is_some() {
         st.core.list_sessions_admin()
     } else {
         st.core.list_sessions_in_scope()
     };
     match result {
         Ok(mut list) => {
+            if let Some(target) = q.target.as_deref() {
+                list.retain(|session| session.group_id == target);
+            }
             if let Some(root) = root {
                 list.retain(|s| s.workspace.as_deref() == root.to_str());
             } else {
@@ -870,6 +911,8 @@ pub(crate) async fn list_sessions(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionListQuery {
+    #[serde(default)]
+    target: Option<String>,
     #[serde(default)]
     all: Option<bool>,
     #[serde(default)]
@@ -900,6 +943,12 @@ pub(crate) async fn get_session(
         Ok(Some(s)) => {
             let mut value = serde_json::to_value(s).unwrap_or(Value::Null);
             value["running"] = json!(exm_core::round_trace::is_running(&id));
+            value["activity"] = json!({ "events": exm_core::round_trace::activity_snapshot(&id) });
+            // Missing metadata is distinct from an empty list; a failed read must not
+            // erase already-visible jobs in a reconnecting client.
+            if let Ok(jobs) = st.core.orchestrator().tools.terminal_job_snapshots(&id) {
+                value["terminalJobs"] = json!(jobs);
+            }
             Json(value).into_response()
         }
         Ok(None) => (
@@ -1017,6 +1066,213 @@ pub(crate) async fn export_trajectory(
 #[derive(Deserialize)]
 pub(crate) struct SteerBody {
     pub text: String,
+}
+
+// ---------------------------------------------------------------- 后续任务队列（capability-parity 3.3）
+
+/// 队列事件统一出口（capability-parity 3.5）：广播 + 落事件库（刷新/WS 重连
+/// 可回放，session-steering spec「从事件恢复队列」）+ 全量快照 payload
+///（items/running/queued——前端只认快照形态，回放与实时同一渲染路径）。
+fn emit_queue_snapshot(core: &exm_core::Core, session_id: &str, action: &str) {
+    let items = exm_core::task_queue::list(session_id);
+    let queued = items.iter().filter(|t| t.status == "queued").count();
+    let running = items.iter().filter(|t| t.status == "running").count();
+    core.emit_session_event(
+        session_id,
+        "task_queue.updated",
+        json!({
+            "action": action,
+            "items": items,
+            "running": running,
+            "queued": queued,
+        }),
+    );
+}
+
+/// POST /api/sessions/:id/queue —— 显式加入后续任务队列（区别于 steering：
+/// 普通消息只引导当前任务，`/queue`/此端点才成为独立后续任务）。
+/// 空闲会话语义：入队保留 pending（不直接启动轮次）——启动决策在
+/// 轮次收束钩子（orchestrator）或用户显式 resume；回执不冒充完成。
+pub(crate) async fn queue_add(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<QueueAddBody>,
+) -> impl IntoResponse {
+    let task = b.task.trim().to_string();
+    if task.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "task 不能为空" })),
+        )
+            .into_response();
+    }
+    if st.core.store.get_session(&id).ok().flatten().is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
+    }
+    // 项目归属：工作区头存在时按其固定根记录（跨项目编辑/删除据此拒绝）
+    let workspace = match queue_workspace(&st, &headers) {
+        Ok(ws) => ws,
+        Err(response) => return response,
+    };
+    let source = b.source.unwrap_or_else(|| "http".into());
+    match exm_core::task_queue::enqueue_scoped(
+        &id,
+        &task,
+        "queued",
+        "",
+        &source,
+        workspace.as_deref(),
+    ) {
+        Ok(queue_id) => {
+            let snapshot = exm_core::task_queue::list(&id);
+            let seq = snapshot
+                .iter()
+                .find(|t| t.id == queue_id)
+                .map(|t| t.seq)
+                .unwrap_or_default();
+            emit_queue_snapshot(&st.core, &id, "add");
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "ok": true,
+                    "status": "queued",
+                    "queueId": queue_id,
+                    "seq": seq,
+                    "pending": true,
+                })),
+            )
+                .into_response()
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
+    }
+}
+
+/// GET /api/sessions/:id/queue —— 队列状态查询（时间正序，含终态条目）
+pub(crate) async fn queue_list(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    if st.core.store.get_session(&id).ok().flatten().is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "会话不存在" })),
+        )
+            .into_response();
+    }
+    Json(json!({ "sessionId": id, "items": exm_core::task_queue::list(&id) })).into_response()
+}
+
+/// PATCH /api/sessions/:id/queue/:qid —— 编辑排队文本（steering 生效前）。
+/// 带 revision 乐观锁；历史文本留审计摘要不重复执行。
+pub(crate) async fn queue_edit(
+    State(st): State<AppState>,
+    Path((id, qid)): Path<(String, String)>,
+    Json(b): Json<QueueEditBody>,
+) -> axum::response::Response {
+    let task = b.task.trim().to_string();
+    if task.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "task 不能为空" })),
+        )
+            .into_response();
+    }
+    // 会话作用域天然拒绝跨会话 qid（查不到 → 404，不泄漏正文）
+    match exm_core::task_queue::edit(&id, &qid, &task, b.revision) {
+        Ok(item) => {
+            emit_queue_snapshot(&st.core, &id, "edit");
+            Json(json!({ "ok": true, "item": item })).into_response()
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
+    }
+}
+
+/// DELETE /api/sessions/:id/queue/:qid —— 移除排队条目（不执行其文本）
+pub(crate) async fn queue_remove(
+    State(st): State<AppState>,
+    Path((id, qid)): Path<(String, String)>,
+) -> axum::response::Response {
+    match exm_core::task_queue::remove(&id, &qid) {
+        Ok(()) => {
+            emit_queue_snapshot(&st.core, &id, "remove");
+            Json(json!({ "ok": true, "status": "removed", "queueId": qid })).into_response()
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
+    }
+}
+
+/// POST /api/sessions/:id/queue/:qid/move —— 移动排队条目到指定序位（1 起，越界钳制）
+pub(crate) async fn queue_move(
+    State(st): State<AppState>,
+    Path((id, qid)): Path<(String, String)>,
+    Json(b): Json<QueueMoveBody>,
+) -> axum::response::Response {
+    match exm_core::task_queue::move_to(&id, &qid, b.position) {
+        Ok(items) => {
+            emit_queue_snapshot(&st.core, &id, "move");
+            Json(json!({ "ok": true, "items": items })).into_response()
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
+    }
+}
+
+/// DELETE /api/sessions/:id/queue —— 清空队列（会话删除/用户显式清空）
+pub(crate) async fn queue_clear(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    exm_core::task_queue::clear(&id);
+    emit_queue_snapshot(&st.core, &id, "clear");
+    Json(json!({ "ok": true, "status": "cleared", "sessionId": id }))
+}
+
+#[allow(clippy::result_large_err)]
+fn queue_workspace(
+    st: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<String>, axum::response::Response> {
+    match headers.get("x-exm-workspace") {
+        Some(header) => match header.to_str() {
+            Ok(raw) => {
+                let decoded = crate::ws::percent_decode(raw);
+                match crate::project_scope::pinned(st, &decoded) {
+                    Ok(root) => Ok(Some(root.to_string_lossy().into_owned())),
+                    Err(response) => Err(response),
+                }
+            }
+            Err(_) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "项目目录请求头无效" })),
+            )
+                .into_response()),
+        },
+        None => Ok(None),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct QueueAddBody {
+    pub task: String,
+    /// 入口标记（http / webui / cli / chat……审计与回执区分）
+    pub source: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct QueueEditBody {
+    pub task: String,
+    /// 乐观锁：与服务端当前 revision 不符则拒绝
+    pub revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct QueueMoveBody {
+    /// 目标序位（1 起；越界钳到队首/队尾）
+    pub position: usize,
 }
 
 /// POST /api/sessions/:id/steer —— 非中断 steering admission。

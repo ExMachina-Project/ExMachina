@@ -96,6 +96,16 @@ pub(crate) async fn tick_jobs(core: &exm_core::Core) -> anyhow::Result<()> {
         }
     }
 
+    // goal 自动继续（capability-parity 4.2）：Active goal + 用户明确 start/resume
+    // 授权（GoalState.auto_continue）才有资格推进；有界（轮数/步数/时间/token）。
+    // interval=0（默认）零行为——不进扫描。
+    if core.config().automation.goal_continue_interval_minutes > 0 {
+        let minute = now.timestamp() / 60;
+        if core.goal_continue_tick(minute).await > 0 {
+            changed = true;
+        }
+    }
+
     // 闲置流会话归档（session-management）：每日一次（UTC 4 点低谷窗口）。
     // flowIdleDays=0（默认）不进扫描——关闭态零行为变更。
     // 当日去重：复用 cron 表存标记行（enabled=false，不会被 job_due 触发）。

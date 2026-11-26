@@ -54,7 +54,8 @@ struct TestWorkspace(std::path::PathBuf);
 
 impl TestWorkspace {
     fn new(source: &std::path::Path) -> anyhow::Result<Self> {
-        let workspace = Self(std::env::temp_dir().join(format!("exm-gw-e2e-{}", uuid::Uuid::new_v4())));
+        let workspace =
+            Self(std::env::temp_dir().join(format!("exm-gw-e2e-{}", uuid::Uuid::new_v4())));
         copy_roster(&source.join("entities"), &workspace.0.join("entities"))?;
         Ok(workspace)
     }
@@ -71,7 +72,9 @@ fn copy_roster(source: &std::path::Path, target: &std::path::Path) -> anyhow::Re
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with("active_") { continue; }
+        if name.to_string_lossy().starts_with("active_") {
+            continue;
+        }
         let kind = entry.file_type()?;
         if kind.is_dir() {
             copy_roster(&entry.path(), &target.join(name))?;
@@ -287,10 +290,7 @@ async fn main() -> anyhow::Result<()> {
         .json(&serde_json::json!({"title": "   "}))
         .send()
         .await?;
-    c.check(
-        "空标题会话被拒 400",
-        blank_title.status().as_u16() == 400,
-    );
+    c.check("空标题会话被拒 400", blank_title.status().as_u16() == 400);
 
     // 技能包：写入后热装载，任务目标命中触发词即随派发携带
     // 技能目录口径 = entities/skills（见 LocalRegistry::skills_dir），SKILL.md 格式
@@ -339,9 +339,9 @@ async fn main() -> anyhow::Result<()> {
     let dispatch_audit = core.store.list_dispatch_audit(&sid, 20).unwrap_or_default();
     c.check(
         "子代理派发落审计记录",
-        dispatch_audit
-            .iter()
-            .any(|a| a["agentId"].is_string() && a["durationMs"].is_u64() && a["status"].is_string()),
+        dispatch_audit.iter().any(|a| {
+            a["agentId"].is_string() && a["durationMs"].is_u64() && a["status"].is_string()
+        }),
     );
     // 流式修复回归：token/thinking 增量只走实时广播、不落事件库（否则事件页被逐字刷屏）
     c.check(
@@ -536,7 +536,10 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     c.check(
         "检索：limit=0 钳制到 1",
-        limit0["hits"].as_array().map(|a| a.len() <= 1).unwrap_or(false),
+        limit0["hits"]
+            .as_array()
+            .map(|a| a.len() <= 1)
+            .unwrap_or(false),
     );
     let limit999: serde_json::Value = client
         .get(format!("{base}/sessions/search"))
@@ -681,7 +684,10 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     c.check(
         "撤销：截断内容归档可查",
-        undo_archive.as_array().map(|a| a.len() == 2).unwrap_or(false),
+        undo_archive
+            .as_array()
+            .map(|a| a.len() == 2)
+            .unwrap_or(false),
     );
 
     let roles: Vec<String> = messages
@@ -987,11 +993,10 @@ async fn main() -> anyhow::Result<()> {
         );
         let body = exp.text().await?;
         let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
-        let parse_ok = lines.iter().all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok());
-        c.check(
-            "导出 JSONL 每行可解析",
-            parse_ok && !lines.is_empty(),
-        );
+        let parse_ok = lines
+            .iter()
+            .all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok());
+        c.check("导出 JSONL 每行可解析", parse_ok && !lines.is_empty());
         // 回读字段一致性：导出行数 ≥ 列表非空（全量），且每行含条目本体字段
         let has_fields = lines.iter().all(|l| {
             let v: serde_json::Value = serde_json::from_str(l).unwrap_or_default();
@@ -1033,7 +1038,10 @@ async fn main() -> anyhow::Result<()> {
     c.check(
         "知识新增（新建）",
         kadd["deduped"] == false
-            && kadd["entry"]["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false)
+            && kadd["entry"]["id"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
             && kadd["entry"]["sourceAgent"].as_str() == Some("manual"),
     );
     let kid = kadd["entry"]["id"].as_str().unwrap_or("").to_string();
@@ -1064,8 +1072,9 @@ async fn main() -> anyhow::Result<()> {
         kquery["items"]
             .as_array()
             .map(|a| {
-                a.iter()
-                    .any(|x| x["id"].as_str() == Some(kid.as_str()) && x["hits"].as_u64().unwrap_or(0) >= 1)
+                a.iter().any(|x| {
+                    x["id"].as_str() == Some(kid.as_str()) && x["hits"].as_u64().unwrap_or(0) >= 1
+                })
             })
             .unwrap_or(false),
     );
@@ -1109,11 +1118,15 @@ async fn main() -> anyhow::Result<()> {
             specs.iter().all(|s| s.name != "image_gen"),
         );
         // 注入替身闭包（Mock 环境等价回接）：执行 → outbox 登记 image 产物
-        core.orchestrator().tools.set_image_gen(std::sync::Arc::new(|_p, _s| {
-            Box::pin(async {
-                Ok(vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4])
-            })
-        }));
+        core.orchestrator()
+            .tools
+            .set_image_gen(std::sync::Arc::new(|_p, _s| {
+                Box::pin(async {
+                    Ok(vec![
+                        0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4,
+                    ])
+                })
+            }));
         let r = core
             .orchestrator()
             .tools
@@ -1169,7 +1182,8 @@ async fn main() -> anyhow::Result<()> {
         let kroki_addr = kroki_listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(kroki_listener, kroki_app).await.unwrap() });
         let orch = core.orchestrator();
-        orch.tools.set_chart_endpoint(&format!("http://{kroki_addr}"));
+        orch.tools
+            .set_chart_endpoint(&format!("http://{kroki_addr}"));
         let r = orch
             .tools
             .execute(
@@ -1206,13 +1220,17 @@ async fn main() -> anyhow::Result<()> {
             }))
             .send()
             .await?;
-        c.check("研究前置：search 后端 PUT 200", put_rs.status().is_success());
+        c.check(
+            "研究前置：search 后端 PUT 200",
+            put_rs.status().is_success(),
+        );
         let orch = core.orchestrator();
-        orch.tools.set_spawn_executor(std::sync::Arc::new(|_a, _s, _task, _tools| {
-            Box::pin(async {
-                Ok("要点：市场年增 40% [来源: https://example.com/market]".to_string())
-            })
-        }));
+        orch.tools
+            .set_spawn_executor(std::sync::Arc::new(|_a, _s, _task, _tools| {
+                Box::pin(async {
+                    Ok("要点：市场年增 40% [来源: https://example.com/market]".to_string())
+                })
+            }));
         let r = orch
             .tools
             .execute(
@@ -1239,7 +1257,8 @@ async fn main() -> anyhow::Result<()> {
             let report = std::fs::read_to_string(root.join(p)).unwrap_or_default();
             c.check(
                 "研究伪造引用拦截",
-                report.contains("（综合推断）") && report.contains("[1] https://example.com/market"),
+                report.contains("（综合推断）")
+                    && report.contains("[1] https://example.com/market"),
             );
         }
         // 事件：四阶段可观测
@@ -1247,7 +1266,11 @@ async fn main() -> anyhow::Result<()> {
         let stages: Vec<String> = events
             .iter()
             .filter(|env| env["payload"]["type"] == "research.stage")
-            .filter_map(|env| env["payload"]["payload"]["stage"].as_str().map(String::from))
+            .filter_map(|env| {
+                env["payload"]["payload"]["stage"]
+                    .as_str()
+                    .map(String::from)
+            })
             .collect();
         c.check(
             "研究四阶段事件",
@@ -1265,7 +1288,9 @@ async fn main() -> anyhow::Result<()> {
         match parse::parse_sync_report(raw) {
             Ok(r) => c.check(
                 "SyncReport 缺 summary 修复回流",
-                r.repaired == Some(true) && r.summary.starts_with("调研完成") && r.confidence == 0.8,
+                r.repaired == Some(true)
+                    && r.summary.starts_with("调研完成")
+                    && r.confidence == 0.8,
             ),
             Err(e) => {
                 c.check("SyncReport 缺 summary 修复回流", false);
@@ -1382,7 +1407,6 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await;
 
-
     // 跨段共享态（段函数只读引用；段内新会话等局部状态自建；
     // fake 端点三件套由段11 建立写入、段12/13 读取）
     let env = Env {
@@ -1421,6 +1445,7 @@ async fn main() -> anyhow::Result<()> {
     stage_first_run_setup(&env, &mut c).await?;
     stage_body_limit(&env, &mut c).await?;
     stage_session_archive(&env, &mut c).await?;
+    stage_session_queue(&env, &mut c).await?;
     stage_archive_by_flow(&env, &mut c).await?;
     stage_tool_budget_events(&env, &mut c).await?;
     stage_event_redaction(&env, &mut c).await?;
@@ -1448,12 +1473,12 @@ mod platform;
 mod sessions;
 
 use agents::*;
+use approval::*;
 use audit::*;
 use groups::*;
 use llm::*;
 use misc::*;
 use platform::*;
-use approval::*;
 use sessions::*;
 
 /// 跨段共享态：主会话/编成快照/配置快照/段11 fake 端点（段间延续的少量状态）。
@@ -1478,4 +1503,3 @@ struct Env {
     key_stats: std::sync::Arc<Mutex<std::collections::HashMap<String, u32>>>,
     prompt_log: std::sync::Arc<Mutex<Vec<String>>>,
 }
-

@@ -114,7 +114,7 @@ mod inbound_media_tests {
         // 旁听占位消息（未 @ 的纯图 → 占位文本）；本条消息自带的媒体是 pic.png
         let ctx = InboundCtx {
             text: "（用户发来附件：图片 x1，附件细节见消息注入）",
-            external_id: "example-user-id",
+            external_id: "test-external-user",
             display_name: "群友",
             is_group: true,
             mentioned: false,
@@ -151,7 +151,7 @@ mod inbound_media_tests {
         // 纯文本旁听消息不带附件（复读回归锚点）
         let plain_ctx = InboundCtx {
             text: "群里闲聊的一句话",
-            external_id: "example-user-id",
+            external_id: "test-external-user",
             display_name: "群友",
             is_group: true,
             mentioned: false,

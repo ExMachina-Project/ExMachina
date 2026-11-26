@@ -2,12 +2,13 @@
 //!
 //! 边界：本层只做「协议翻译 + 事件转发」，不含任何调度/提示词逻辑。
 //! 所有渠道（WebUI、桌面端、第三方 IM bot）共用同一 REST/WS 契约。
+#![recursion_limit = "512"]
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use exm_core::config::{ExmConfig, LlmConfig};
 use exm_core::types::CoreEvent;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 pub mod ambient_media;
 pub mod channel_test;
 pub mod channel_util;
+pub mod connections_api;
 pub mod discord;
 pub mod identity;
 pub mod limits;
@@ -67,9 +69,10 @@ use playbooks::list_playbooks;
 use sessions::{
     chat, create_session, delete_session, export_session, export_trajectory, get_effort,
     get_evidence, get_graph, get_session, get_workspace, list_audit, list_messages, list_sessions,
-    pin_session, put_effort, put_workspace, rename_session, search_sessions, session_archive,
-    session_batch, session_edit, session_flow_archive, session_fork, session_snapshots,
-    session_tokens, session_undo, steer_session, stop_session,
+    pin_session, put_effort, put_workspace, queue_add, queue_clear, queue_edit, queue_list,
+    queue_move, queue_remove, rename_session, search_sessions, session_archive, session_batch,
+    session_edit, session_flow_archive, session_fork, session_snapshots, session_tokens,
+    session_undo, steer_session, stop_session,
 };
 use version::{version_apply, version_apply_status, version_check, version_info};
 use voice::{voice_speak, voice_transcribe};
@@ -285,6 +288,15 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/sessions/:id/export", get(export_session))
         .route("/api/sessions/:id/trajectory", get(export_trajectory))
         .route("/api/sessions/:id/steer", post(steer_session))
+        .route(
+            "/api/sessions/:id/queue",
+            post(queue_add).get(queue_list).delete(queue_clear),
+        )
+        .route(
+            "/api/sessions/:id/queue/:qid",
+            patch(queue_edit).delete(queue_remove),
+        )
+        .route("/api/sessions/:id/queue/:qid/move", post(queue_move))
         .route("/api/sessions/:id/chat", post(chat))
         .route("/api/sessions/:id/graph", get(get_graph))
         .route("/api/sessions/:id/evidence", get(get_evidence))
@@ -356,11 +368,26 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .route("/api/memory/reindex", post(memory_reindex))
         .route("/api/memory/decay", post(memory_decay))
         .route("/api/memory/render", post(memory_render))
+        // 已遗忘清单（capability-parity 6.6）：撤销遗忘的入口数据源
+        .route("/api/memory/forgotten", get(memory_admin::memory_forgotten))
         .route(
             "/api/memory/:id",
             axum::routing::delete(forget_memory).put(update_memory),
         )
         .route("/api/memory/:id/pin", post(pin_memory))
+        // 记忆版本链（capability-parity 6.5）：历史 / 回滚 / 撤销遗忘
+        .route(
+            "/api/memory/:id/versions",
+            get(memory_admin::memory_versions),
+        )
+        .route(
+            "/api/memory/:id/rollback",
+            post(memory_admin::memory_rollback),
+        )
+        .route(
+            "/api/memory/:id/restore",
+            post(memory_admin::memory_restore),
+        )
         // 知识库（knowledge-base）：全局共享知识层管理面
         .route(
             "/api/knowledge",
@@ -390,6 +417,7 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .merge(worker_hub::routes())
         .merge(triggers::routes())
         .merge(nexus_api::routes())
+        .merge(connections_api::routes())
         .route(
             "/api/groups/:gid/agents/:identifier",
             axum::routing::delete(remove_agent_from_group),
@@ -566,6 +594,40 @@ pub async fn serve(core: Arc<Core>, port: u16, host: Option<&str>) -> anyhow::Re
             let n = core.resume_interrupted().await;
             if n > 0 {
                 println!("[gateway] 断点续跑：已恢复 {n} 个中断会话（后台）");
+            }
+            // 队列重启再物化（capability-parity 3.6）：队列注册表是内存态，
+            // 重启清零；但落库快照事件会让刷新回放出永远不执行的虚假条目。
+            // 从事件尾把未终态项装回为 pending_recovery（不自动执行），
+            // 并发新快照事件让已连接的 WebUI 立即收敛到真实状态。
+            let mut recovered_sessions = 0usize;
+            let mut recovered_items = 0usize;
+            if let Ok(sessions) = core.list_sessions() {
+                for s in &sessions {
+                    let before = exm_core::task_queue::list(&s.id).len();
+                    if exm_core::task_queue::rematerialize_from_events(&s.id, &core.store) > 0 {
+                        let items = exm_core::task_queue::list(&s.id);
+                        recovered_sessions += 1;
+                        recovered_items += items.len() - before;
+                        let queued = items.iter().filter(|t| t.status == "queued").count();
+                        let running = items.iter().filter(|t| t.status == "running").count();
+                        core.emit_session_event(
+                            &s.id,
+                            "task_queue.updated",
+                            serde_json::json!({
+                                "action": "pending_recovery",
+                                "reason": "服务重启",
+                                "items": items,
+                                "running": running,
+                                "queued": queued,
+                            }),
+                        );
+                    }
+                }
+            }
+            if recovered_items > 0 {
+                println!(
+                    "[gateway] 队列重启恢复：{recovered_sessions} 个会话共 {recovered_items} 条转入待恢复（pending_recovery，不自动执行）"
+                );
             }
         });
     }

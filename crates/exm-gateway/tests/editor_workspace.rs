@@ -70,22 +70,46 @@ impl Fixture {
     }
 
     async fn get_in_project(&self, uri: &str, workspace: &Path) -> Value {
-        let response = self.app.clone().oneshot(Request::builder().method(Method::GET).uri(uri)
-            .header("x-auth-key", "fixture-key")
-            .header("x-exm-workspace", workspace.to_str().unwrap())
-            .body(Body::empty()).unwrap()).await.unwrap();
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header("x-auth-key", "fixture-key")
+                    .header("x-exm-workspace", workspace.to_str().unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
-        let bytes = axum::body::to_bytes(response.into_body(), 2_000_000).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 2_000_000)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
     async fn get_project_list(&self, uri: &str, workspace: &Path) -> Value {
-        let response = self.app.clone().oneshot(Request::builder().method(Method::GET).uri(uri)
-            .header("x-auth-key", "fixture-key")
-            .header("x-exm-workspace", workspace.to_str().unwrap())
-            .body(Body::empty()).unwrap()).await.unwrap();
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header("x-auth-key", "fixture-key")
+                    .header("x-exm-workspace", workspace.to_str().unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
-        let bytes = axum::body::to_bytes(response.into_body(), 2_000_000).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 2_000_000)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -259,53 +283,138 @@ async fn project_sessions_pin_editor_scope_without_changing_the_instance_workspa
     std::fs::create_dir_all(&second).unwrap();
     std::fs::write(second.join("only-second.txt"), "project two").unwrap();
     f.write("only-first.txt", "project one");
-    let global_workspace = f.core.registry().effective_workspace(&f.core.config().workspace_root);
+    let global_workspace = f
+        .core
+        .registry()
+        .effective_workspace(&f.core.config().workspace_root);
     let target = f.core.registry().active_scope();
     let (status, created) = f.request(Method::POST, "/api/sessions", json!({
         "title": "Second project", "target": target, "workspace": second.canonicalize().unwrap(),
     })).await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let session_id = created["id"].as_str().unwrap();
-    assert_eq!(created["workspace"], second.canonicalize().unwrap().to_str().unwrap());
-    assert_eq!(f.core.registry().effective_workspace(&f.core.config().workspace_root), global_workspace);
+    assert_eq!(
+        created["workspace"],
+        second.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        f.core
+            .registry()
+            .effective_workspace(&f.core.config().workspace_root),
+        global_workspace
+    );
 
     let project_session = f.core.store.get_session(session_id).unwrap().unwrap();
-    assert!(project_session.memory_partition.as_deref().is_some_and(|partition| partition.starts_with("project-")));
-    assert!(f.get("/api/sessions?all=true").await.as_array().unwrap().is_empty(), "instance session list must not leak project sessions");
-    let hidden = f.app.clone().oneshot(Request::builder().method(Method::GET).uri(&format!("/api/sessions/{session_id}"))
-        .header("x-auth-key", "fixture-key").body(Body::empty()).unwrap()).await.unwrap();
+    assert!(project_session
+        .memory_partition
+        .as_deref()
+        .is_some_and(|partition| partition.starts_with("project-")));
+    assert!(
+        f.get("/api/sessions?all=true")
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "instance session list must not leak project sessions"
+    );
+    let hidden = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}"))
+                .header("x-auth-key", "fixture-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
-    let wrong_project = f.app.clone().oneshot(Request::builder().method(Method::GET).uri(&format!("/api/sessions/{session_id}"))
-        .header("x-auth-key", "fixture-key").header("x-exm-workspace", f.project.to_str().unwrap())
-        .body(Body::empty()).unwrap()).await.unwrap();
+    let wrong_project = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}"))
+                .header("x-auth-key", "fixture-key")
+                .header("x-exm-workspace", f.project.to_str().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(wrong_project.status(), StatusCode::NOT_FOUND);
 
-    let listed = f.get_project_list(&format!("/api/sessions?all=true&workspace={}", second.canonicalize().unwrap().to_str().unwrap()), &second.canonicalize().unwrap()).await;
+    let listed = f
+        .get_project_list(
+            &format!(
+                "/api/sessions?all=true&workspace={}",
+                second.canonicalize().unwrap().to_str().unwrap()
+            ),
+            &second.canonicalize().unwrap(),
+        )
+        .await;
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert_eq!(listed[0]["id"], session_id);
 
-    let response = f.app.clone().oneshot(Request::builder().method(Method::GET).uri("/api/fs/list?path=.")
-        .header("x-auth-key", "fixture-key")
-        .header("x-exm-workspace", second.canonicalize().unwrap().to_str().unwrap())
-        .body(Body::empty()).unwrap()).await.unwrap();
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/fs/list?path=.")
+                .header("x-auth-key", "fixture-key")
+                .header(
+                    "x-exm-workspace",
+                    second.canonicalize().unwrap().to_str().unwrap(),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), 2_000_000).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 2_000_000)
+        .await
+        .unwrap();
     let listing: Value = serde_json::from_slice(&bytes).unwrap();
-    let names: Vec<&str> = listing["entries"].as_array().unwrap().iter().map(|row| row["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"only-second.txt"));
     assert!(!names.contains(&"only-first.txt"));
 
-    let session = f.get_in_project(&format!("/api/sessions/{session_id}"), &second.canonicalize().unwrap()).await;
+    let session = f
+        .get_in_project(
+            &format!("/api/sessions/{session_id}"),
+            &second.canonicalize().unwrap(),
+        )
+        .await;
     assert_eq!(session["workspace"], created["workspace"]);
 
-    let mut third = second.clone(); third.push("nested");
+    let mut third = second.clone();
+    third.push("nested");
     std::fs::create_dir_all(&third).unwrap();
     let (status, sibling) = f.request(Method::POST, "/api/sessions", json!({
         "title": "Sibling project", "target": target, "workspace": third.canonicalize().unwrap(),
     })).await;
     assert_eq!(status, StatusCode::OK, "{sibling}");
-    let sibling_session = f.core.store.get_session(sibling["id"].as_str().unwrap()).unwrap().unwrap();
-    assert_ne!(project_session.memory_partition, sibling_session.memory_partition, "project memory namespaces must differ");
+    let sibling_session = f
+        .core
+        .store
+        .get_session(sibling["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        project_session.memory_partition, sibling_session.memory_partition,
+        "project memory namespaces must differ"
+    );
 }
 
 #[cfg(unix)]

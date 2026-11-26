@@ -75,6 +75,507 @@ pub(crate) async fn admit(
         return GateDecision::Deny(receipt);
     }
 
+    // ⓪' /queue 显式入队（capability-parity 3.4）：`/queue <指令>` 把指令加入
+    // 流会话的后续任务队列——与普通消息的 steering 语义严格分离（普通文本
+    // 绝不隐式转成队列任务，session-steering spec）。回执如实：queued+pending，
+    // 不冒充已执行（「通道回执不冒充完成」）。
+    // 会话定位与 /stop 同口径（流绑定优先，旧 title 回落）；流尚未建会话时
+    // 不代建——queue 归属真实会话，避免空流产生孤儿队列项。
+    // 权限：入队是普通操作（身份闸门在后续 ③ 统一裁决），此处只解析命令；
+    // 空指令给用法提示。子命令 list 先于入队解析（否则 "list" 会被当任务文本）。
+    let queue_rest = ctx.text.trim().strip_prefix("/queue").map(str::trim);
+    if queue_rest == Some("list") {
+        let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
+        let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
+        let sid = core.flow_active_session(&ch.id, ctx.chat_key).or_else(|| {
+            core.list_sessions_in_group(&gid)
+                .ok()
+                .and_then(|list| list.into_iter().find(|s| s.title == title))
+                .map(|s| s.id)
+        });
+        let Some(sid) = sid else {
+            return GateDecision::Deny("【报告】当前聊天流还没有会话，队列自然为空。".into());
+        };
+        let items: Vec<String> = exm_core::task_queue::list(&sid)
+            .into_iter()
+            .filter(|t| t.status == "queued")
+            .map(|t| format!("{}. {}", t.seq, t.task))
+            .collect();
+        return GateDecision::Deny(if items.is_empty() {
+            "队列为空：没有排队中的后续任务。".into()
+        } else {
+            format!(
+                "📋 后续任务队列（待处理 {} 条）：\n{}",
+                items.len(),
+                items.join("\n")
+            )
+        });
+    }
+    if queue_rest == Some("") {
+        return GateDecision::Deny(
+            "用法：/queue <指令> —— 把指令排入本聊天流的后续任务队列（当前任务完成后按序执行）；/queue list 查看队列。".into(),
+        );
+    }
+    if let Some(task) = queue_rest.filter(|t| !t.is_empty()) {
+        let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
+        let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
+        let sid = core.flow_active_session(&ch.id, ctx.chat_key).or_else(|| {
+            core.list_sessions_in_group(&gid)
+                .ok()
+                .and_then(|list| list.into_iter().find(|s| s.title == title))
+                .map(|s| s.id)
+        });
+        let Some(sid) = sid else {
+            return GateDecision::Deny(
+                "【报告】当前聊天流还没有会话，先发送一条普通消息建立上下文后再用 /queue 排队后续任务。".into(),
+            );
+        };
+        // 入站消毒与主链一致：队列文本也会进未来轮次的模型上下文
+        let (clean_task, findings) =
+            crate::sanitize::sanitize_with(task, Some(&core.config().security.sanitize_rules));
+        if !findings.is_empty() {
+            crate::sanitize::note_findings(&findings);
+            core.emit_sanitize_finding(serde_json::json!({
+                "channel": ch.id,
+                "externalId": ctx.external_id,
+                "patterns": findings.iter().map(|f| f.rule).collect::<Vec<_>>(),
+                "actions": findings.iter().map(|f| f.action).collect::<Vec<_>>(),
+            }));
+        }
+        return match exm_core::task_queue::enqueue_scoped(
+            &sid,
+            &clean_task,
+            "queued",
+            "",
+            "chat",
+            None,
+        ) {
+            Ok(qid) => {
+                let items = exm_core::task_queue::list(&sid);
+                let seq = items
+                    .iter()
+                    .find(|t| t.id == qid)
+                    .map(|t| t.seq)
+                    .unwrap_or(0);
+                let queued = items.iter().filter(|t| t.status == "queued").count();
+                // 队列快照事件（与 REST 面同口径）：广播 + 落库可回放（3.5
+                // 「WS 重连/刷新可从事件恢复队列」对聊天入口同样成立）
+                let running = items.iter().filter(|t| t.status == "running").count();
+                core.emit_session_event(
+                    &sid,
+                    "task_queue.updated",
+                    serde_json::json!({
+                        "action": "add",
+                        "items": items,
+                        "running": running,
+                        "queued": queued,
+                    }),
+                );
+                GateDecision::Deny(format!(
+                    "📥 已加入后续队列（第 {seq} 条，待处理 {queued} 条）：当前任务完成后按序执行；可用 /queue list 查询。"
+                ))
+            }
+            Err(e) => GateDecision::Deny(format!("【报告】加入队列失败：{e}")),
+        };
+    }
+    // /queue 不带参数的用法提示已在新 ⓪' 分支统一处理（queue_rest 解析），
+    // 此处不再重复。
+
+    // ⓪'' /plan 只读规划（capability-parity 4.4）：聊天入口与 CLI/TUI/WebUI
+    // 等价——status 查模式与清单、start <任务> 进计划模式并跑只读轮、approve
+    // 逐项回放、reject 保留清单、execute 切回执行模式；裸 /plan 视同 status。
+    // 事件面（plan.enabled/disabled/item/approved/rejected/applied）由 core
+    // 统一发射（广播+落库），四入口一致。会话定位与 /queue 同口径。
+    if let Some(rest) = ctx.text.trim().strip_prefix("/plan").map(str::trim) {
+        let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
+        let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
+        let sid = core.flow_active_session(&ch.id, ctx.chat_key).or_else(|| {
+            core.list_sessions_in_group(&gid)
+                .ok()
+                .and_then(|list| list.into_iter().find(|s| s.title == title))
+                .map(|s| s.id)
+        });
+        let (sub, task) = match rest.split_once(char::is_whitespace) {
+            Some((s, t)) => (s, t.trim()),
+            None => (rest, ""),
+        };
+        // approve/reject 是裁决面：仅管理员（与 /stop 同口径——聊天流是共享上下文）
+        if matches!(sub, "approve" | "reject") && !is_channel_admin(core, ch, ctx.external_id) {
+            if ctx.mentioned {
+                return GateDecision::Deny(
+                    "【报告】/plan approve|reject 需要管理员权限：计划裁决影响共享会话的执行。"
+                        .into(),
+                );
+            }
+            return GateDecision::Ignore;
+        }
+        let reply = match (sid, sub, task) {
+            (None, ..) => {
+                "【报告】当前聊天流还没有会话，先发送一条普通消息建立上下文后再用 /plan。"
+                    .to_string()
+            }
+            (Some(sid), "status" | "", _) => {
+                let items = core.plan_list(&sid);
+                let mode = if exm_core::plan::is_plan_mode(&sid) {
+                    "plan（只读）"
+                } else {
+                    "execute"
+                };
+                if items.is_empty() {
+                    format!("📋 计划模式：{mode}；暂无计划条目。")
+                } else {
+                    format!(
+                        "📋 计划模式：{mode}；待决条目 {} 条：\n{}",
+                        items.len(),
+                        items
+                            .iter()
+                            .map(|i| format!("{} [{}] {} → {}", i.id, i.action, i.tool, i.target))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                }
+            }
+            (Some(sid), "start", t) if !t.is_empty() => {
+                core.set_plan_mode(&sid, true);
+                // 只读规划轮走标准 chat 链路（写工具被转换为 plan.item）
+                match core.chat(&sid, t).await {
+                    Ok(()) => "📋 已进入计划模式并完成一轮只读规划；用 /plan status 查看条目，/plan approve 回放执行或 /plan reject 保留待改。".to_string(),
+                    Err(e) => format!("【报告】规划轮失败：{e}"),
+                }
+            }
+            (Some(sid), "start", _) => {
+                core.set_plan_mode(&sid, true);
+                "📋 已进入计划模式；后续写操作会转换为计划条目，/plan approve 回放执行。"
+                    .to_string()
+            }
+            (Some(sid), "approve", _) => match core.plan_approve(&sid).await {
+                Ok(results) => format!("✅ 已批准并回放 {} 个计划条目。", results.len()),
+                Err(e) => format!("【报告】批准失败：{e}"),
+            },
+            (Some(sid), "reject", _) => {
+                let items = core.plan_reject(&sid);
+                format!("🚫 已拒绝计划；{} 个条目保留待修改。", items.len())
+            }
+            (Some(sid), "execute" | "off", _) => {
+                core.set_plan_mode(&sid, false);
+                "🔁 已切换回执行模式。".to_string()
+            }
+            (Some(_), other, _) => format!(
+                "用法：/plan [status|start <任务>|approve|reject|execute]（未知子命令 `{other}`）"
+            ),
+        };
+        return GateDecision::Deny(reply);
+    }
+
+    // ⓪''' /goal 与 /spec 会话工作流命令（capability-parity 4.6）：与 CLI/TUI
+    // 等价，命令在 gate 拦截直答——绝不把命令文本交给模型猜测（命令不是对话）。
+    // 读面（status/show）普通成员可用；写面（start/edit/pause/resume/complete/
+    // block/clear/draft/export）仅管理员（goal/spec 是共享会话的持久工作流状态）。
+    // 与 cron（定时任务）/todo 看板（轮内执行进度）/队列（后续任务排队）三者
+    // 互不相干：goal/spec 只动 workflow.* 事件，不触碰 cron 表、todo 快照与
+    // task_queue。会话定位与 /stop //queue //plan 同口径。
+    if let Some(raw) = ctx.text.trim().strip_prefix("/goal") {
+        // 未 trim 的剩余：空或以空白开头才属于 /goal（避免误吞 /goalx 之类命令）
+        if raw.is_empty() || raw.starts_with(char::is_whitespace) {
+            let rest = raw.trim();
+            let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
+            let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
+            let sid = core.flow_active_session(&ch.id, ctx.chat_key).or_else(|| {
+                core.list_sessions_in_group(&gid)
+                    .ok()
+                    .and_then(|list| list.into_iter().find(|s| s.title == title))
+                    .map(|s| s.id)
+            });
+            let (sub, arg) = match rest.split_once(char::is_whitespace) {
+                Some((s, a)) => (s, a.trim()),
+                None => (rest, ""),
+            };
+            let sub = if sub.is_empty() { "status" } else { sub };
+            // 写面仅管理员；未 @ 静默忽略（与 /stop //plan approve 同口径）。白名单判权：
+            // 只对确知的写子命令判权——打错的子命令不是写操作，走用法提示。
+            if matches!(
+                sub,
+                "start" | "edit" | "pause" | "resume" | "complete" | "block" | "clear"
+            ) && !is_channel_admin(core, ch, ctx.external_id)
+            {
+                if ctx.mentioned {
+                    return GateDecision::Deny(
+                        "【报告】/goal 写操作需要管理员权限：goal 是共享会话的持久目标状态。"
+                            .into(),
+                    );
+                }
+                return GateDecision::Ignore;
+            }
+            let reply = match sid {
+                None => "【报告】当前聊天流还没有会话，先发送一条普通消息建立上下文后再用 /goal。"
+                    .to_string(),
+                Some(sid) => {
+                    let current_revision = core.goal_get(&sid).ok().flatten().map(|g| g.revision);
+                    let outcome = match sub {
+                        "status" | "show" => {
+                            return GateDecision::Deny(match core.goal_get(&sid) {
+                                Ok(Some(g)) => format!(
+                                    "🎯 goal {}（rev {}）\n目标：{}\n验收：{}\n验证：{}",
+                                    format!("{:?}", g.status).to_lowercase(),
+                                    g.revision,
+                                    g.objective,
+                                    if g.acceptance.is_empty() {
+                                        "（未声明）".into()
+                                    } else {
+                                        g.acceptance.join("；")
+                                    },
+                                    if g.verification.is_empty() {
+                                        "（未验证）".into()
+                                    } else {
+                                        g.verification.join("；")
+                                    },
+                                ),
+                                Ok(None) => {
+                                    "🎯 当前会话没有 goal；用 /goal start <目标> 创建。".into()
+                                }
+                                Err(e) => format!("【报告】读取 goal 失败：{e}"),
+                            });
+                        }
+                        "start" if !arg.is_empty() => {
+                            core.goal_update(&sid, "start", Some(arg), None, None, None)
+                        }
+                        "edit" if !arg.is_empty() => {
+                            core.goal_update(&sid, "edit", Some(arg), None, None, current_revision)
+                        }
+                        "pause" => {
+                            core.goal_update(&sid, "pause", None, None, None, current_revision)
+                        }
+                        "resume" => {
+                            core.goal_update(&sid, "resume", None, None, None, current_revision)
+                        }
+                        "complete" if !arg.is_empty() => core.goal_update(
+                            &sid,
+                            "complete",
+                            None,
+                            None,
+                            Some(arg),
+                            current_revision,
+                        ),
+                        "block" if !arg.is_empty() => {
+                            core.goal_update(&sid, "block", None, Some(arg), None, current_revision)
+                        }
+                        "block" => core.goal_update(
+                            &sid,
+                            "block",
+                            None,
+                            Some("聊天通道手动受阻"),
+                            None,
+                            current_revision,
+                        ),
+                        "clear" => {
+                            core.goal_update(&sid, "clear", None, None, None, current_revision)
+                        }
+                        _ => {
+                            return GateDecision::Deny(
+                            "用法：/goal [status|start <目标>|edit <目标>|pause|resume|complete <验证证据>|block [原因]|clear]（complete 必须带真实验证证据）".into(),
+                        );
+                        }
+                    };
+                    match outcome {
+                        Ok(g) => format!(
+                            "🎯 goal {}（rev {}）：{}",
+                            format!("{:?}", g.status).to_lowercase(),
+                            g.revision,
+                            g.objective
+                        ),
+                        Err(e) => format!("【报告】goal 操作失败：{e}"),
+                    }
+                }
+            };
+            return GateDecision::Deny(reply);
+        }
+    }
+
+    if let Some(raw) = ctx.text.trim().strip_prefix("/context") {
+        // 未 trim 的剩余：空或以空白开头才属于 /context（避免误吞 /contextx）
+        if raw.is_empty() || raw.starts_with(char::is_whitespace) {
+            let rest = raw.trim();
+            let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
+            let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
+            let sid = core.flow_active_session(&ch.id, ctx.chat_key).or_else(|| {
+                core.list_sessions_in_group(&gid)
+                    .ok()
+                    .and_then(|list| list.into_iter().find(|s| s.title == title))
+                    .map(|s| s.id)
+            });
+            let (sub, arg) = match rest.split_once(char::is_whitespace) {
+                Some((s, a)) => (s, a.trim()),
+                None => (rest, ""),
+            };
+            let sub = if sub.is_empty() { "status" } else { sub };
+            // 写面仅管理员（与 /plan 同口径——**白名单**：只对确知的写子命令判权）。
+            // 不能用「非只读即写」的黑名单：那会把打错的子命令当成写操作，非管理员
+            // 得到「需要管理员权限」——像是权限问题，其实是用法错误，还暗示存在
+            // 这样一个子命令。未知子命令走下面的用法提示（对所有人一致）。
+            if matches!(sub, "disable" | "enable") && !is_channel_admin(core, ch, ctx.external_id) {
+                if ctx.mentioned {
+                    return GateDecision::Deny(
+                        "【报告】/context disable|enable 需要管理员权限：来源禁用影响共享会话的上下文注入。".into(),
+                    );
+                }
+                return GateDecision::Ignore;
+            }
+            let reply = match sid {
+                None => {
+                    "【报告】当前聊天流还没有会话，先发送一条普通消息建立上下文后再用 /context。"
+                        .to_string()
+                }
+                Some(sid) => {
+                    match sub {
+                        "status" | "show" | "list" => render_context_sources(core, &sid),
+                        // detail：单个来源的状态与缺失原因（验收「各来源及缺失原因」）
+                        "detail" if !arg.is_empty() => render_context_detail(core, &sid, arg),
+                        "disable" if !arg.is_empty() => apply_context_source(core, &sid, arg, true),
+                        "enable" if !arg.is_empty() => apply_context_source(core, &sid, arg, false),
+                        // refresh：带 key 只重读该来源（失败只影响它自己）；不带 key 重读整表
+                        "refresh" if !arg.is_empty() => refresh_context_source(core, &sid, arg),
+                        "refresh" => render_context_sources(core, &sid),
+                        _ => {
+                            return GateDecision::Deny(
+                                "用法：/context [status|detail <key>|disable <key>|enable <key>|refresh [key]]（key 形如 file:AGENTS.md / memory / retrieval / skills）".into(),
+                            );
+                        }
+                    }
+                }
+            };
+            return GateDecision::Deny(reply);
+        }
+    }
+
+    if let Some(raw) = ctx.text.trim().strip_prefix("/learn") {
+        // 未 trim 的剩余：空或以空白开头才属于 /learn
+        if raw.is_empty() || raw.starts_with(char::is_whitespace) {
+            let rest = raw.trim();
+            let (sub, arg) = match rest.split_once(char::is_whitespace) {
+                Some((s, a)) => (s, a.trim()),
+                None => (rest, ""),
+            };
+            let sub = if sub.is_empty() { "list" } else { sub };
+            // 裁决是治理写面：仅管理员（候选转正影响共享技能/记忆）。
+            // 与 /context 同口径——白名单判权：打错的子命令不是写操作，走用法提示。
+            if matches!(sub, "approve" | "reject") && !is_channel_admin(core, ch, ctx.external_id) {
+                if ctx.mentioned {
+                    return GateDecision::Deny(
+                        "【报告】/learn approve|reject 需要管理员权限：候选转正影响共享技能与记忆。".into(),
+                    );
+                }
+                return GateDecision::Ignore;
+            }
+            let reply = match sub {
+                "list" | "show" | "status" => render_learning_candidates(core, arg),
+                "approve" if !arg.is_empty() => {
+                    decide_learning(core, arg, true, ctx.external_id, None)
+                }
+                "reject" if arg.is_empty() => {
+                    return GateDecision::Deny(
+                        "用法：/learn reject <id> <原因>（拒绝建议带原因）".into(),
+                    );
+                }
+                "reject" => {
+                    let (id, reason) = match arg.split_once(char::is_whitespace) {
+                        Some((i, r)) => (i.trim(), r.trim()),
+                        None => (arg, ""),
+                    };
+                    let reason = if reason.is_empty() {
+                        None
+                    } else {
+                        Some(reason)
+                    };
+                    decide_learning(core, id, false, ctx.external_id, reason)
+                }
+                _ => {
+                    return GateDecision::Deny(
+                        "用法：/learn [list [pending|approved|rejected]|approve <id>|reject <id> <原因>]（候选提交由智能体在任务后经证据校验发起）".into(),
+                    );
+                }
+            };
+            return GateDecision::Deny(reply);
+        }
+    }
+
+    if let Some(raw) = ctx.text.trim().strip_prefix("/spec") {
+        // 未 trim 的剩余：空或以空白开头才属于 /spec（避免误吞 /specx 之类命令）
+        if raw.is_empty() || raw.starts_with(char::is_whitespace) {
+            let rest = raw.trim();
+            let gid = ch.group.clone().unwrap_or_else(|| core.active_group());
+            let title = format!("channel:{}:{}", ch.id, ctx.chat_key);
+            let sid = core.flow_active_session(&ch.id, ctx.chat_key).or_else(|| {
+                core.list_sessions_in_group(&gid)
+                    .ok()
+                    .and_then(|list| list.into_iter().find(|s| s.title == title))
+                    .map(|s| s.id)
+            });
+            let (sub, arg) = match rest.split_once(char::is_whitespace) {
+                Some((s, a)) => (s, a.trim()),
+                None => (rest, ""),
+            };
+            let sub = if sub.is_empty() { "show" } else { sub };
+            // 写面仅管理员；未 @ 静默忽略。白名单判权（与 /goal 同口径）：`export`
+            // 是只读的口径说明（见下），不在写面之内。
+            if matches!(sub, "draft" | "edit" | "clear")
+                && !is_channel_admin(core, ch, ctx.external_id)
+            {
+                if ctx.mentioned {
+                    return GateDecision::Deny(
+                        "【报告】/spec 写操作需要管理员权限：spec 是共享会话的编程规格状态。"
+                            .into(),
+                    );
+                }
+                return GateDecision::Ignore;
+            }
+            let sid =
+                match sid {
+                    Some(sid) => sid,
+                    None => return GateDecision::Deny(
+                        "【报告】当前聊天流还没有会话，先发送一条普通消息建立上下文后再用 /spec。"
+                            .into(),
+                    ),
+                };
+            let reply = match sub {
+            "status" | "show" => match core.spec_get(&sid) {
+                Ok(Some(s)) => format!(
+                    "📄 spec（rev {}，关联 goal {}）\n目标：{}\n范围：{}\n约束：{}\n验收：{}\n来源：{}",
+                    s.revision,
+                    s.goal_id.as_deref().unwrap_or("未关联"),
+                    s.objective,
+                    if s.scope.is_empty() { "（未声明）".into() } else { s.scope.join("、") },
+                    if s.constraints.is_empty() { "（未声明）".into() } else { s.constraints.join("；") },
+                    if s.acceptance.is_empty() { "（未声明）".into() } else { s.acceptance.join("；") },
+                    s.source,
+                ),
+                Ok(None) => "📄 当前会话没有 spec；用 /spec draft <目标> 草拟。".into(),
+                Err(e) => format!("【报告】读取 spec 失败：{e}"),
+            },
+            "draft" | "edit" if !arg.is_empty() => {
+                let expected = core.spec_get(&sid).ok().flatten().map(|s| s.revision);
+                match core.spec_update(&sid, arg, vec![], vec![], vec![], vec![], expected) {
+                    Ok(s) => format!("📄 spec 已{}（rev {}）：{}", if sub == "draft" { "草拟" } else { "修订" }, s.revision, s.objective),
+                    Err(e) => format!("【报告】spec 操作失败：{e}"),
+                }
+            }
+            "clear" => {
+                let expected = core.spec_get(&sid).ok().flatten().map(|s| s.revision);
+                match core.spec_clear(&sid, expected) {
+                    Ok(()) => "📄 spec 已清除（事实保留在事件轨迹）。".into(),
+                    Err(e) => format!("【报告】spec 清除失败：{e}"),
+                }
+            }
+            // 显式导出涉及工作区写——聊天通道不开放（用 CLI/WebUI 显式操作），
+            // 这里给出口径说明而不是静默不支持。
+            "export" => "【报告】/spec export 涉及工作区写入，请在 CLI（exm spec export）或 WebUI 操作；聊天通道只做会话内草拟/修订/清除。".into(),
+            _ => {
+                "用法：/spec [show|draft <目标>|edit <目标>|clear]（修改不自动批准 plan；导出走 CLI/WebUI）".into()
+            }
+        };
+            return GateDecision::Deny(reply);
+        }
+    }
+
     // ① 配对码兑换（控制台签发短码 → 通道内 /pair <码> 绑定；单次有效、限期）
     // 防爆破（inbound-sanitization）：单通道单账号连续失败 N 次（默认 5）进入锁定
     // 窗口（默认 15 分钟）——锁定期内正确码也拒绝并提示剩余时间；锁定有审计事件
@@ -390,6 +891,341 @@ async fn flow_command(core: &exm_core::Core, ch: &Channel, ctx: &InboundCtx<'_>)
         }
     }
     None
+}
+
+/// 学习候选清单渲染（capability-parity 6.4 /learn list）：
+/// 按状态过滤（缺省 pending——待裁决的最相关）。
+fn render_learning_candidates(core: &exm_core::Core, status_arg: &str) -> String {
+    let status = match status_arg {
+        "pending" | "approved" | "rejected" => Some(status_arg),
+        _ => None,
+    };
+    match core.learning_candidates(status) {
+        Ok(list) if list.is_empty() => {
+            "🎓 当前没有待处理的学习候选（智能体任务后凭真实证据自动提交）。".into()
+        }
+        Ok(list) => {
+            let lines: Vec<String> = list
+                .iter()
+                .take(10)
+                .map(|c| {
+                    let evidence: Vec<String> = c
+                        .evidence
+                        .iter()
+                        .map(|e| format!("{}·{}", e.kind.key(), e.verification))
+                        .collect();
+                    format!(
+                        "• [{}] {}（{}/{}，置信 {:.0}%，{} 条证据：{}）\n  {}",
+                        c.status,
+                        c.title,
+                        c.target,
+                        c.scope,
+                        c.confidence * 100.0,
+                        c.evidence.len(),
+                        evidence.join("、"),
+                        c.id
+                    )
+                })
+                .collect();
+            format!(
+                "🎓 学习候选（{} 项）：\n{}\n裁决：/learn approve <id> / /learn reject <id> <原因>",
+                list.len(),
+                lines.join("\n")
+            )
+        }
+        Err(e) => format!("【报告】读取学习候选失败：{e}"),
+    }
+}
+
+/// 学习候选裁决（capability-parity 6.4 / 6.6）：approve/reject 一次定局。
+/// 批准回执带转正落点与版本号——通道治理操作与 REST/CLI/WebUI 同一口径，
+/// 版本事实源只有一条（技能/记忆版本链），这里只是把它如实转述。
+fn decide_learning(
+    core: &exm_core::Core,
+    id: &str,
+    approve: bool,
+    decided_by: &str,
+    reason: Option<&str>,
+) -> String {
+    let verb = if approve { "批准" } else { "拒绝" };
+    match core.learning_decide(id, approve, decided_by, reason) {
+        Ok(c) => {
+            // 转正失败不吞：批准 ≠ 生效，用户必须看到真实落点
+            if let Some(p) = &c.promotion {
+                if !p.ok {
+                    return format!(
+                        "🎓 已{verb}候选「{}」（{}），但转正失败：{}",
+                        c.title,
+                        c.id,
+                        p.error.as_deref().unwrap_or("未知原因")
+                    );
+                }
+                let v = p
+                    .version
+                    .map(|n| format!(" v{n}"))
+                    .unwrap_or_else(String::new);
+                return format!(
+                    "🎓 已{verb}候选「{}」（{}）：已写入 {}{v}，后续治理走对应版本链",
+                    c.title, c.id, p.ref_id
+                );
+            }
+            format!(
+                "🎓 已{verb}候选「{}」（{}）：转正与版本化由技能/记忆写入链承接",
+                c.title, c.id
+            )
+        }
+        Err(e) => format!("【报告】{verb}候选失败：{e}"),
+    }
+}
+
+/// 层级的通道可读名称。API/事件里是 snake_case 外显名（project / user），照搬到
+/// 中文回执里会夹生；只在本渲染层映射，不动契约。
+fn layer_label(layer: &str) -> &'static str {
+    match layer {
+        "project" => "项目",
+        "user" => "用户",
+        "agent_prompt" => "智能体提示",
+        "system_safety" => "系统安全",
+        _ => "未知",
+    }
+}
+
+/// 一条来源的可读状态：禁用时带上「原本是什么状态」，未就绪时带上原因。
+fn context_source_line(s: &serde_json::Value) -> String {
+    let kind = s.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+    let key = s.get("key").and_then(|v| v.as_str()).unwrap_or("?");
+    let status = s.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+    let layer = s
+        .get("layer")
+        .and_then(|v| v.as_str())
+        .map(|l| format!("（{} 层）", layer_label(l)))
+        .unwrap_or_default();
+    // 禁用是叠加位：原状态留在 baseStatus，用户要能看出「启用后会是什么」
+    let base = s
+        .get("baseStatus")
+        .and_then(|v| v.as_str())
+        .filter(|b| *b != status)
+        .map(|b| format!("，原状态 {b}"))
+        .unwrap_or_default();
+    let chars = s
+        .get("chars")
+        .and_then(|v| v.as_u64())
+        .map(|c| format!("，{c} 字"))
+        .unwrap_or_default();
+    let reason = s
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(|r| format!("：{r}"))
+        .unwrap_or_default();
+    let modified = s
+        .get("modifiedAt")
+        .and_then(|v| v.as_u64())
+        .filter(|t| *t > 0)
+        .and_then(fmt_modified)
+        .map(|t| format!("，修改于 {t}"))
+        .unwrap_or_default();
+    format!("• [{kind}] {key}{layer} — {status}{base}{chars}{modified}{reason}")
+}
+
+/// Unix 秒 → 本地可读时间（`%Y-%m-%d %H:%M`）。0 / 解析不了返回 None：
+/// 不打印一个假的「1970-01-01」。
+fn fmt_modified(secs: u64) -> Option<String> {
+    chrono::DateTime::from_timestamp(secs as i64, 0).map(|dt| {
+        dt.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    })
+}
+
+/// 上下文来源清单渲染（capability-parity 6.3 /context status）：
+/// 文件/记忆/检索/技能四类，含状态、禁用位与缺失原因——「用户可查看各来源及缺失原因」。
+///
+/// 整层缺席的文件来源（未绑定项目 / 项目目录不可用 / 没有 ~/.exmachina）不在清单里，
+/// 由 Core 给出原因附在末尾——这里不猜「为什么没有文件来源」。
+fn render_context_sources(core: &exm_core::Core, sid: &str) -> String {
+    let sources = match core.context_sources(sid) {
+        Ok(s) => s,
+        Err(e) => return format!("【报告】读取上下文来源失败：{e}"),
+    };
+    // 清单已拿到：缺席说明取不到就不附（不为一句说明让整张清单失败），也不编造
+    let gaps = core.context_source_gaps(sid).unwrap_or_default();
+    let gap_note = context_gaps_note(&gaps);
+    if sources.is_empty() {
+        return format!("📦 当前会话没有可列出的上下文来源。{gap_note}");
+    }
+    let lines: Vec<String> = sources.iter().map(context_source_line).collect();
+    let disabled = sources
+        .iter()
+        .filter(|s| s.get("disabled").and_then(|v| v.as_bool()) == Some(true))
+        .count();
+    let note = if disabled == 0 {
+        String::new()
+    } else {
+        format!("\n（{disabled} 项已停用自动注入——停用只管自动注入，模型主动的记忆召回与用户显式 /skill <id> 不受影响）")
+    };
+    format!(
+        "📦 上下文来源（{} 项）：\n{}{note}{gap_note}\n操作：/context detail <key> 看单项、/context disable <key> 停用自动注入、/context enable <key> 恢复、/context refresh [key] 重读文件",
+        sources.len(),
+        lines.join("\n")
+    )
+}
+
+/// 缺席说明的呈现段（Core 给出的原因原样呈现；没有缺席就没有这一段）。
+fn context_gaps_note(gaps: &[serde_json::Value]) -> String {
+    if gaps.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = gaps
+        .iter()
+        .map(|g| {
+            let layer = layer_label(g.get("layer").and_then(|v| v.as_str()).unwrap_or("未知"));
+            format!(
+                "· {layer}层：{}",
+                g.get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("（未给出原因）")
+            )
+        })
+        .collect();
+    format!(
+        "\n未加载的文件来源（说明，不是可操作的来源）：\n{}",
+        lines.join("\n")
+    )
+}
+
+/// 清单里找一项；找不到时给出可用键（detail / refresh 共用同一口径：
+/// 未知键是**用法错误**，不是「读取失败」——不能包装成刷新失败）。
+fn find_context_source<'a>(
+    sources: &'a [serde_json::Value],
+    key: &str,
+) -> Result<&'a serde_json::Value, String> {
+    sources
+        .iter()
+        .find(|s| s.get("key").and_then(|v| v.as_str()) == Some(key))
+        .ok_or_else(|| {
+            let keys: Vec<String> = sources
+                .iter()
+                .filter_map(|s| s.get("key").and_then(|v| v.as_str()).map(str::to_string))
+                .collect();
+            if keys.is_empty() {
+                "当前会话没有任何上下文来源（无项目上下文文件）".to_string()
+            } else {
+                format!("可用：{}", keys.join(" / "))
+            }
+        })
+}
+
+/// 单个来源的详情（/context detail <key>）：状态、禁用位、原状态、缺失原因、
+/// 修改时间与字数（文件来源）。未知 key 给出可用键。
+fn render_context_detail(core: &exm_core::Core, sid: &str, key: &str) -> String {
+    let key = key.trim();
+    let sources = match core.context_sources(sid) {
+        Ok(s) => s,
+        Err(e) => return format!("【报告】读取上下文来源失败：{e}"),
+    };
+    match find_context_source(&sources, key) {
+        Ok(s) => {
+            let mut lines = vec![context_source_line(s)];
+            match s.get("disabled").and_then(|v| v.as_bool()) {
+                Some(true) => lines.push(
+                    "  自动注入已停用（下一轮对话起不再注入）；/context enable 可恢复。模型主动的记忆召回与用户显式 /skill <id> 不受影响。".into(),
+                ),
+                _ => lines.push(
+                    "  自动注入开启中（下一轮对话按预算注入）；/context disable 可停用自动注入。".into(),
+                ),
+            }
+            if s.get("status").and_then(|v| v.as_str()) == Some("disabled") {
+                // 已停用时也如实提示原状态：启用后它可能仍是 missing / 未就绪
+                let base = s.get("baseStatus").and_then(|v| v.as_str()).unwrap_or("?");
+                let why = s.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                lines.push(format!(
+                    "  恢复后回到原状态 {base}{}",
+                    if why.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（{why}）")
+                    }
+                ));
+            }
+            format!("📦 来源详情：\n{}", lines.join("\n"))
+        }
+        Err(hint) => format!("【报告】没有上下文来源 {key}。{hint}"),
+    }
+}
+
+/// 单来源刷新（/context refresh <key>）：如实回报该来源重读的结果。失败只体现在
+/// 这一个来源上，并明确说明其他来源未受影响。
+///
+/// 文案按来源种类说不同的话，因为发生的事不同：
+/// - 文件来源：真的重新读了文件 →「已重读」；读不出来 →「重读失败」+ 原因。
+/// - 运行时来源（记忆/检索/技能）：没有文件可重读，刷新 = 重新观测一次当前
+///   状态。观测本身不会失败，但观测结果可能是「未就绪」——这不能报成 ✅。
+fn refresh_context_source(core: &exm_core::Core, sid: &str, key: &str) -> String {
+    let key = key.trim();
+    // 未知键是用法错误，不是「刷新失败」：先对清单判定，不靠解析 Core 的错误文本。
+    let sources = match core.context_sources(sid) {
+        Ok(s) => s,
+        Err(e) => return format!("【报告】读取上下文来源失败：{e}"),
+    };
+    if let Err(hint) = find_context_source(&sources, key) {
+        return format!("【报告】没有上下文来源 {key}，无从刷新。{hint}");
+    }
+    let report = match core.context_source_refresh(sid, key) {
+        Ok(report) => report,
+        Err(e) => return format!("【报告】刷新来源 {key} 失败：{e}（其他来源不受影响）"),
+    };
+    let others = report["others"].as_array().map(Vec::len).unwrap_or(0);
+    let line = context_source_line(&report["source"]);
+    let is_file = report["source"]["kind"].as_str() == Some("file");
+    match (report["ok"].as_bool(), is_file) {
+        (Some(false), _) => {
+            let err = report["error"].as_str().unwrap_or("未知原因");
+            format!(
+                "⚠️ 重读来源 {key} 失败：{err}\n{line}\n其他 {others} 个来源未受影响（未重读、状态不变）；本来源的禁用设置也未改动。"
+            )
+        }
+        (Some(true), true) => {
+            format!("✅ 已重读来源 {key}。\n{line}\n其他 {others} 个来源未重读、状态不变。")
+        }
+        _ => {
+            let ready = report["source"]["status"].as_str() == Some("ready");
+            let verdict = if ready {
+                "已就绪，按预算参与自动注入".to_string()
+            } else {
+                format!(
+                    "未就绪：{}",
+                    report["source"]["reason"].as_str().unwrap_or("原因未上报")
+                )
+            };
+            format!(
+                "🔄 来源 {key} 没有可重读的文件（运行时来源），已重新观测：{verdict}\n{line}\n其他 {others} 个来源未重读、状态不变。"
+            )
+        }
+    }
+}
+
+/// 上下文来源禁用/启用（capability-parity 6.3）：单来源操作，
+/// 失败不影响其他来源（清单整体重读后回报）。
+///
+/// 文案只陈述已经验证过的事：开关管的是**自动注入**（规划/派发/智能体直连的各
+/// 注入点下一轮起生效）；模型主动发起的记忆召回、用户显式 `/skill <id>` 不受它管。
+fn apply_context_source(core: &exm_core::Core, sid: &str, key: &str, disable: bool) -> String {
+    let key = key.trim();
+    let verb = if disable { "停用" } else { "恢复" };
+    match core.context_source_set(sid, key, disable) {
+        Ok(disabled) => {
+            let state = if disabled.is_empty() {
+                "（当前没有停用的来源）".to_string()
+            } else {
+                format!("（已停用自动注入：{}）", disabled.join("、"))
+            };
+            format!("✅ 已{verb}来源 {key} 的自动注入，下一轮对话起生效{state}。")
+        }
+        // Core 层在任何失败路径上都先于写清单 bail（会话不存在 / 未知键 / 缺键），
+        // 所以失败 = 没有任何来源被改动。Core 的报错文本里已带原因与可用键，
+        // 原样转述即可——不解析错误文本来分类（那是脆弱做法），也不叠两层「失败：」
+        Err(e) => format!("【报告】无法{verb}来源 {key}，未做任何改动。{e}"),
+    }
 }
 
 /// 通道管理员判权（/reset、/stop 等管理指令共用）：通道 admins 清单命中，

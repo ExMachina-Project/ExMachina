@@ -78,6 +78,11 @@ where
         let is_speaker = || reply_ledger().lock().get(&sid).copied() == Some(my_seq);
         // round_done 兜底（见模块注释）：无收束事件的异常路径下防悬挂
         let round_done = || run.round_done.load(std::sync::atomic::Ordering::Acquire);
+        // steering-only 轮次（capability-parity 3.4）：本任务没有自己的执行，
+        // 退出条件 = 被引导轮次的收束事件（代发其答复后排空退出）。
+        // 心跳兜底改为观察「会话已无运行轮次」（round_trace）：被引导轮次
+        // 结束后若收束事件在广播中丢失（异常路径），仍可退出防悬挂。
+        let steering_only = || run.steering_only.load(std::sync::atomic::Ordering::Acquire);
         // 收流容错（竞态 P1-4）：Lagged = 广播环溢出丢了一批旧事件，新事件仍在
         // 环里——必须继续收，退出会让本轮回复静默丢失。Closed = 发送端全关。
         //
@@ -90,7 +95,11 @@ where
         // ① 消化到收束事件且 round_done 已置位（进入排空，消化完退出）；
         // ② round_done 置位但无收束事件（异常路径兜底，排空后退出防悬挂）；
         // ③ 已被更新任务取代时到达的收束事件（静默让位退出）。
+        // steering-only（3.4）另有一条：被引导轮次的收束事件到达即视为
+        // 「自己的收束」（代发其答复，排空退出）——它没有自己的执行，等待的
+        // 就是那场被引导的运行。
         let mut draining = false;
+        let mut preparation_sent = false;
         loop {
             let evt = if draining {
                 match rx.try_recv() {
@@ -105,7 +114,7 @@ where
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                     _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                        if round_done() {
+                        if round_done() || (steering_only() && !exm_core::round_trace::is_running(&sid)) {
                             draining = true;
                         }
                         continue;
@@ -120,6 +129,16 @@ where
             if !is_speaker() {
                 if matches!(evt.kind.as_str(), "run.finished" | "run.error") {
                     break;
+                }
+                continue;
+            }
+            if evt.kind == "run.progress" {
+                if preparation_sent {
+                    continue;
+                }
+                if let Some(text) = run.take_reply(&evt, max_chars) {
+                    preparation_sent = true;
+                    send(text).await;
                 }
                 continue;
             }
@@ -246,7 +265,9 @@ where
                 //（emit 与 store 微秒级乱序）：进入排空模式消化完再退出，
                 // 防止把同批收束答复漏发。更早到达（round_done 未置位）的
                 // 收束事件属于前序轮次：代发后继续等自己那轮。
-                if matches!(evt.kind.as_str(), "run.finished" | "run.error") && round_done() {
+                if matches!(evt.kind.as_str(), "run.finished" | "run.error")
+                    && (round_done() || steering_only())
+                {
                     draining = true;
                 }
             }

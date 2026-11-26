@@ -7,8 +7,12 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/skills", get(list_skills).post(create_skill))
         .route("/api/skills/import", post(import_skill))
+        // 已删除技能清单（capability-parity 6.6）：回滚恢复入口的数据源
+        .route("/api/skills/deleted", get(skill_deleted_list))
         .route("/api/skills/:id/export", get(export_skill))
         .route("/api/skills/:id", axum::routing::delete(delete_skill))
+        .route("/api/skills/:id/versions", get(skill_versions))
+        .route("/api/skills/:id/rollback", post(skill_rollback))
         .route("/api/groups/:id/agents", get(group_agents))
         .route("/api/groups/:id/primary", post(set_group_primary))
         .route("/api/groups/:id/model", axum::routing::put(set_group_model))
@@ -38,6 +42,16 @@ pub fn routes() -> Router<AppState> {
         .route("/api/approvals/:id/approve", post(approve_request))
         .route("/api/approvals/:id/deny", post(deny_request))
         .route("/api/sessions/:id/plan", get(plan_list).post(plan_decide))
+        .route("/api/sessions/:id/workflow", get(workflow_view))
+        .route(
+            "/api/sessions/:id/context",
+            get(context_sources).post(context_source_decide),
+        )
+        .route("/api/learning/candidates", get(learning_candidates_list))
+        .route(
+            "/api/learning/candidates/:id",
+            post(learning_candidates_decide),
+        )
         .route("/api/workbench/tree", get(workbench_tree))
         .route("/api/workbench/file", get(workbench_file))
         .route("/api/channels/status", get(channel_status))

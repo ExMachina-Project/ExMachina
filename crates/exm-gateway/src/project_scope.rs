@@ -8,6 +8,7 @@ fn query(uri: &axum::http::Uri, key: &str) -> Option<String> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn header(headers: &axum::http::HeaderMap) -> Result<Option<String>, axum::response::Response> {
     headers
         .get("x-exm-workspace")
@@ -23,6 +24,7 @@ fn header(headers: &axum::http::HeaderMap) -> Result<Option<String>, axum::respo
         .transpose()
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn required(
     st: &AppState,
     headers: &axum::http::HeaderMap,
@@ -61,7 +63,9 @@ pub(crate) async fn scope(
     let session_id = path
         .strip_prefix("/api/sessions/")
         .and_then(|s| s.split('/').next())
-        .filter(|id| !matches!(*id, "search" | "batch" | "flow-archive"));
+        // `global` 是事件溯源路径的保留字（空 session_id 全局事件流的查询面，
+        // handler 侧已特判），不是会话 id——不查库不 404
+        .filter(|id| !matches!(*id, "search" | "batch" | "flow-archive" | "global"));
     let approval_id = path
         .strip_prefix("/api/approvals/")
         .and_then(|s| s.split('/').next());
@@ -137,10 +141,9 @@ pub(crate) async fn scope(
             .into_response();
     }
     if let (Some(owner), Some(header)) = (owner.as_deref(), header.as_deref()) {
-        if pinned(&st, header)
+        if !pinned(&st, header)
             .map(|p| p.to_string_lossy() == owner)
             .unwrap_or(false)
-            == false
         {
             return (
                 StatusCode::NOT_FOUND,
@@ -200,12 +203,14 @@ pub(crate) async fn scope(
     exm_core::workspace::scope(Some(root), next.run(req)).await
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn pinned(
     st: &AppState,
     raw: &str,
 ) -> Result<std::path::PathBuf, axum::response::Response> {
     validate(st, exm_core::workspace::pinned, raw)
 }
+#[allow(clippy::result_large_err)]
 fn validate(
     st: &AppState,
     f: fn(&str) -> anyhow::Result<std::path::PathBuf>,

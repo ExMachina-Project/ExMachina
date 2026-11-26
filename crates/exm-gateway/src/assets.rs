@@ -1,4 +1,4 @@
-//! gateway/assets —— 自 lib.rs 按资源域拆出（纯搬移，零行为变更）
+//! HTTP endpoints for workspace asset previews.
 
 use super::*;
 
@@ -175,7 +175,7 @@ pub(crate) async fn health(State(st): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "ok": true,
         "mock": st.core.is_mock(),
-        "features": ["session-workspace-v1", "collaboration-v1"],
+        "features": ["session-workspace-v1", "session-target-v1", "collaboration-v1"],
         "agents": st.core.registry.count(),
         "runningSessions": running_sessions,
         "pendingApprovals": pending_approvals,

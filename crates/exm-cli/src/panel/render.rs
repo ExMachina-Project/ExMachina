@@ -684,7 +684,15 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
                 "/memory stats|pin|forget|decay|reindex|render ...",
                 "统计 / 固定 / 遗忘 / 衰减 / 重建 / 渲染",
             ),
+            (
+                "/memory versions|rollback|restore <id> [--to v]",
+                "版本历史 / 回滚 / 撤销遗忘",
+            ),
             ("/skills", "技能包清单"),
+            (
+                "/skills versions|rollback <id> [--to v]",
+                "技能版本历史 / 回滚",
+            ),
             (
                 "/cron list|add|enable|disable|remove|run|runs ...",
                 "定时任务",

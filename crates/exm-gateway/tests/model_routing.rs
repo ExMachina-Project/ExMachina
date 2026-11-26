@@ -344,7 +344,7 @@ async fn spawned_execution_inherits_the_owner_model_and_keeps_its_tool_identity(
     let f = Fixture::new().await;
     let session = f.core.create_session("spawn fixture").unwrap().id;
     let result = f.core.orchestrator().tools.execute("unit", &session,
-        &[exm_core::types::ToolName::Spawn], exm_core::types::ToolName::Spawn,
+        &[exm_core::types::ToolName::Spawn, exm_core::types::ToolName::Read], exm_core::types::ToolName::Spawn,
         &json!({"task":"Read fixture material and summarize", "tools":["read","spawn","agent_manage"]})).await;
     assert!(result.ok, "{:?}", result.error);
     let requests = f.state.requests.lock().unwrap();

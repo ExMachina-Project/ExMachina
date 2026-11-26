@@ -29,6 +29,7 @@ fn parse_scope(raw: Option<&str>) -> Result<Option<CommandScope>, String> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn context_for_request(
     st: &AppState,
     params: &DirectoryParams,
@@ -223,6 +224,13 @@ pub(crate) async fn get_capabilities(
         Err(response) => return response,
     };
     let mut capabilities = context.capabilities.clone();
+    // 模型工具面能力（capability-parity 5.1）：与 runtime schema 组装链同一
+    // 判定源——目录/快照声明与实际下发/执行一致（agent-tool-surface delta）。
+    capabilities.extend(st.core.tool_surface_capabilities(
+        &context,
+        exm_core::types::ToolScope::Computer,
+        context.session.as_deref(),
+    ));
     for entry in &directory.entries {
         let status = if entry.executable {
             CapabilityStatus::Available
@@ -298,6 +306,7 @@ mod tests {
     async fn http_command_directory_and_capabilities_are_versioned_and_role_filtered() {
         let core = test_core();
         let session = core.create_session("command-directory").unwrap();
+        let search_ready_before = core.orchestrator().tools.search_ready();
         let app = crate::build_router(core);
 
         let response = app
@@ -355,6 +364,30 @@ mod tests {
             capability.name == "command.spec.export"
                 && capability.status == CapabilityStatus::Unavailable
         }));
+        // capability-parity 5.1：模型工具面入快照——与 runtime schema 组装链
+        // 同源判定（目录存在 ≠ 可执行；未就绪如实 MissingDependency）
+        let find_tool = |name: &str| {
+            capabilities
+                .capabilities
+                .iter()
+                .find(|c| c.name == format!("tool.{name}"))
+        };
+        let read = find_tool("read").expect("内置工具 read 应入快照");
+        assert_eq!(read.status, CapabilityStatus::Available);
+        let web_search = find_tool("web_search").expect("web_search 应入快照");
+        if !search_ready_before {
+            assert_eq!(
+                web_search.status,
+                CapabilityStatus::MissingDependency,
+                "未配置搜索后端不得虚报 Available"
+            );
+        }
+        let meta = find_tool("meta_observe").expect("meta_observe 应入快照");
+        assert_eq!(
+            meta.status,
+            CapabilityStatus::MissingDependency,
+            "实验开关未开：目录存在不等于可执行"
+        );
     }
 
     #[tokio::test]

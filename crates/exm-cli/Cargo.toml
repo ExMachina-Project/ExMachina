@@ -9,7 +9,7 @@ description = "EXMACHINA CLI：`exm` 与 `exmachina` 双命令（同一实现、
 name = "exm_cli"
 path = "src/lib.rs"
 
-# 双命令：同一二进制实现，两个入口名（规范见 docs/07 §2）
+# 两个命令入口共用 exm_cli::run。
 [[bin]]
 name = "exm"
 path = "src/bin/exm.rs"
@@ -21,7 +21,6 @@ path = "src/bin/exmachina.rs"
 [dependencies]
 exm-core = { path = "../exm-core" }
 exm-gateway = { path = "../exm-gateway" }
-uuid.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
@@ -31,6 +30,9 @@ serde_json.workspace = true
 ratatui = "0.29"
 parking_lot = "0.12"
 crossterm = "0.28"
+
+[dev-dependencies]
+uuid.workspace = true
 
 # libc 仅 Unix fd 操作（pipe/dup/dup2）使用；Windows 走 CRT（extern 声明，无 crate）
 [target.'cfg(unix)'.dependencies]

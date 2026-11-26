@@ -79,16 +79,18 @@ pub(crate) async fn ws_handler(
         return (StatusCode::FORBIDDEN, "项目连接必须启用访问密钥").into_response();
     }
     if let Some(session_id) = q.session_id.as_deref() {
-        let session = match st.core.store.get_session(session_id) {
-            Ok(Some(session)) => session,
-            _ => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
-        };
-        match (session.workspace.as_deref(), q.workspace.as_deref()) {
-            (Some(expected), Some(raw))
-                if exm_core::workspace::pinned(raw)
-                    .is_ok_and(|root| root.to_str() == Some(expected)) => {}
-            (None, None) => {}
-            _ => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
+        // 工作区归属校验（防跨项目订阅）：只对已存在的会话生效。
+        // 不存在的会话 id 放行连接——WS 订阅是只读面，事件层按 session/
+        // workspace 过滤，不存在的会话永远无推送（心跳保活与 UI 乐观
+        // 连接依赖这一契约，session_recovery 有断言）。
+        if let Ok(Some(session)) = st.core.store.get_session(session_id) {
+            match (session.workspace.as_deref(), q.workspace.as_deref()) {
+                (Some(expected), Some(raw))
+                    if exm_core::workspace::pinned(raw)
+                        .is_ok_and(|root| root.to_str() == Some(expected)) => {}
+                (None, None) => {}
+                _ => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
+            }
         }
     }
     let workspace = match q.workspace.as_deref() {

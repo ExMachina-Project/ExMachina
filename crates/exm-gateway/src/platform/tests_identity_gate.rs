@@ -144,12 +144,12 @@ mod identity_gate_tests {
             id: "nap-main".into(),
             kind: "napcat".into(),
             enabled: true,
-            admins: vec!["10086".into(), " example-user-id ".into()],
+            admins: vec!["10086".into(), " test-admin-user ".into()],
             ..chan(None)
         };
         save_channels(&core, &[ch.clone(), holder]).unwrap();
         // 清单命中（含空白容差）：放行，不要求绑定
-        for uid in ["10086", "example-user-id"] {
+        for uid in ["10086", "test-admin-user"] {
             match admit(&core, &ch, &ctx("帮我做事", uid, false, false)).await {
                 GateDecision::Allow(_, _) => {}
                 GateDecision::Ignore => panic!("管理员 {uid} 应豁免放行，却被忽略"),

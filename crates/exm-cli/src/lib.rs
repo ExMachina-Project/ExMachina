@@ -2,6 +2,7 @@
 //!
 //! 命令规范见 docs/07 §2：两个名字互为别名，参数、行为、退出码完全一致。
 
+mod backend_cmd;
 pub mod chat;
 mod command_cmd;
 pub mod config_cmd;
@@ -10,6 +11,7 @@ pub mod group_cmd;
 pub mod headless;
 pub mod install;
 pub mod knowledge_cmd;
+pub mod learn_cmd;
 pub mod memory_cmd;
 pub mod panel;
 pub mod persona_cmd;
@@ -77,6 +79,11 @@ enum Commands {
     },
     /// 体检：配置 / 编成 / 记忆 / 通道 / WebUI
     Doctor,
+    /// 执行后端的能力清单与只读依赖自检（不启动容器、不回退宿主）
+    Backend {
+        #[command(subcommand)]
+        action: backend_cmd::BackendAction,
+    },
     /// 查询规范命令目录生成的帮助；标准 `--help` 仍提供参数级用法
     Help {
         /// 可选规范名、别名或命令前缀（例如 `spec.export`、`model`）
@@ -206,11 +213,23 @@ enum Commands {
         #[command(subcommand)]
         action: KnowledgeAction,
     },
+    /// 学习候选：任务后沉淀经验的清单查看与人工裁决（批准转正 / 拒绝）
+    Learn {
+        #[command(subcommand)]
+        action: LearnAction,
+    },
     /// 技能包：派发时按触发词自动携带的指令包（数据化技能）
     #[command(alias = "skills")]
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+    /// 会话上下文来源：文件/记忆/检索/技能的清单、详情、刷新与自动注入开关
+    Context {
+        /// 会话 id
+        session_id: String,
+        #[command(subcommand)]
+        action: ContextAction,
     },
     /// 定时任务：cron / 一次性任务，由网关调度器自动执行
     Cron {
@@ -283,6 +302,27 @@ enum QueueAction {
     Add {
         session_id: String,
         instruction: String,
+    },
+    /// 编辑排队中的任务文本（仅 queued 状态；带 revision 乐观锁）
+    Edit {
+        session_id: String,
+        /// 队列条目 id（tq- 开头）
+        queue_id: String,
+        new_instruction: String,
+        /// 期望 revision（缺省跳过乐观锁检查）
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    /// 移除排队中的任务（不执行其文本）
+    Remove {
+        session_id: String,
+        queue_id: String,
+    },
+    /// 移动排队中的任务到指定序位（1 起）
+    Move {
+        session_id: String,
+        queue_id: String,
+        position: usize,
     },
     /// 清空指定会话队列
     Clear { session_id: String },
@@ -471,6 +511,43 @@ enum SkillAction {
         #[arg(long, default_value = "")]
         out: String,
     },
+    /// 版本历史（capability-parity 6.5：受控写入的变更记录面）
+    Versions { id: String },
+    /// 回滚到历史版本（以旧内容写新版本行，审计链不断）
+    Rollback {
+        id: String,
+        /// 目标版本号
+        #[arg(long)]
+        to: u64,
+    },
+}
+
+/// `exm context <session>` 的子命令（capability-parity 6.3）。
+/// 会话 id 是位置参数——与 `exm plan status <session_id>` 同形。
+#[derive(Subcommand)]
+enum ContextAction {
+    /// 列出上下文来源（文件/记忆/检索/技能）及状态、禁用位与缺失原因
+    List,
+    /// 单个来源的详情
+    Detail {
+        /// 来源键：file:AGENTS.md / file:.exmachina/context.md / memory / retrieval / skills
+        key: String,
+    },
+    /// 重新读取单个来源（失败只影响该来源；其余来源不变）
+    Refresh {
+        /// 来源键；缺省重读整表
+        key: Option<String>,
+    },
+    /// 停用来源的自动注入（模型主动召回与用户显式 /skill 不受影响）
+    Disable {
+        /// 来源键
+        key: String,
+    },
+    /// 恢复来源的自动注入
+    Enable {
+        /// 来源键
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -532,6 +609,22 @@ enum ApprovalAction {
     Approve { id: String },
     /// 拒绝
     Deny { id: String },
+}
+
+#[derive(Subcommand)]
+enum LearnAction {
+    /// 列出学习候选（默认待裁决的；--status 筛选）
+    List {
+        /// 状态筛选：pending | approved | rejected
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// 批准候选并转正（写入技能/记忆版本链；回执带落点与版本号）
+    Approve { id: String },
+    /// 拒绝候选（建议带原因）
+    Reject { id: String, reason: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -685,8 +778,19 @@ enum MemoryAction {
         #[arg(long)]
         kind: Option<String>,
     },
-    /// 遗忘指定记忆
+    /// 遗忘指定记忆（可撤销：exm memory restore <id>；版本历史保留）
     Forget { id: String },
+    /// 版本历史（旧 → 新，含遗忘标记）
+    Versions { id: String },
+    /// 回滚到历史版本（历史内容经同一校验成为新版本行）
+    Rollback {
+        id: String,
+        /// 目标版本号
+        #[arg(long)]
+        to: u64,
+    },
+    /// 撤销遗忘（以被遗忘时的内容重建条目）
+    Restore { id: String },
     /// 重建倒排索引
     Reindex,
     /// 记忆衰减整理
@@ -774,6 +878,7 @@ fn validate_cli_command_catalog() -> anyhow::Result<()> {
         ("plan", "plan.status"),
         ("spec", "spec.show"),
         ("goal", "goal.status"),
+        ("context", "context.list"),
     ];
     for (entry_name, canonical) in mappings {
         if Cli::command().find_subcommand(entry_name).is_none()
@@ -1178,6 +1283,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let root = normalize_root(&workspace);
             doctor::run_doctor(&root)
         }
+        Commands::Backend { action } => {
+            let core = build_core(&workspace)?;
+            backend_cmd::run(&core, action, cli.output_format == "json").await
+        }
         Commands::Help { command } => {
             let core = build_core(&workspace)?;
             let session = initial_session.as_ref().map(|session| session.id.as_str());
@@ -1369,11 +1478,65 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     instruction,
                 } => {
                     core_session(&workspace, &session_id)?;
-                    let id = exm_core::task_queue::enqueue(&session_id, &instruction, "queued", "")
+                    let id = exm_core::task_queue::enqueue_scoped(
+                        &session_id,
+                        &instruction,
+                        "queued",
+                        "",
+                        "cli",
+                        None,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    let snapshot = exm_core::task_queue::list(&session_id);
+                    let seq = snapshot
+                        .iter()
+                        .find(|t| t.id == id)
+                        .map(|t| t.seq)
+                        .unwrap_or_default();
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok":true,"status":"queued","queueId":id,"seq":seq,"pending":true})
+                    );
+                }
+                QueueAction::Edit {
+                    session_id,
+                    queue_id,
+                    new_instruction,
+                    revision,
+                } => {
+                    core_session(&workspace, &session_id)?;
+                    let item = exm_core::task_queue::edit(
+                        &session_id,
+                        &queue_id,
+                        &new_instruction,
+                        revision,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    println!("{}", serde_json::to_string_pretty(&item)?);
+                }
+                QueueAction::Remove {
+                    session_id,
+                    queue_id,
+                } => {
+                    core_session(&workspace, &session_id)?;
+                    exm_core::task_queue::remove(&session_id, &queue_id)
                         .map_err(anyhow::Error::msg)?;
                     println!(
                         "{}",
-                        serde_json::json!({"ok":true,"status":"accepted","queueId":id})
+                        serde_json::json!({"ok":true,"status":"removed","queueId":queue_id})
+                    );
+                }
+                QueueAction::Move {
+                    session_id,
+                    queue_id,
+                    position,
+                } => {
+                    core_session(&workspace, &session_id)?;
+                    let items = exm_core::task_queue::move_to(&session_id, &queue_id, position)
+                        .map_err(anyhow::Error::msg)?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({ "items": items }))?
                     );
                 }
                 QueueAction::Clear { session_id } => {
@@ -1505,7 +1668,16 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                         .await;
                         message?;
                     }
-                    println!("计划模式已启用；写工具调用会被转换为计划条目。你可用 `exm plan status {session_id}` 查看。 ");
+                    // capability-parity 4.6：json 输出契约——plan 面输出必须
+                    // 是机器可解析的单值（human 提示只走 text 模式）
+                    if cli.output_format == "json" {
+                        println!(
+                            "{}",
+                            serde_json::json!({"ok":true,"status":"succeeded","mode":"plan"})
+                        );
+                    } else {
+                        println!("计划模式已启用；写工具调用会被转换为计划条目。你可用 `exm plan status {session_id}` 查看。 ");
+                    }
                 }
                 PlanAction::Approve { session_id } => {
                     let applied = core.plan_approve(&session_id).await?;
@@ -1932,6 +2104,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     kind,
                 } => memory_cmd::run_memory_edit(&core, &id, title, body, tags, kind),
                 MemoryAction::Forget { id } => memory_cmd::run_memory_forget(&core, &id),
+                MemoryAction::Versions { id } => memory_cmd::run_memory_versions(&core, &id),
+                MemoryAction::Rollback { id, to } => {
+                    memory_cmd::run_memory_rollback(&core, &id, to)
+                }
+                MemoryAction::Restore { id } => memory_cmd::run_memory_restore(&core, &id),
                 MemoryAction::Reindex => memory_cmd::run_memory_reindex(&core),
                 MemoryAction::Decay { floor } => memory_cmd::run_memory_decay(&core, floor),
                 MemoryAction::Render => memory_cmd::run_memory_render(&core),
@@ -1952,6 +2129,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                     knowledge_cmd::run_knowledge_add(&core, &title, &body, tags)
                 }
                 KnowledgeAction::Delete { id } => knowledge_cmd::run_knowledge_delete(&core, &id),
+            }
+        }
+        Commands::Learn { action } => {
+            let core = build_core(&workspace)?;
+            match action {
+                LearnAction::List { status, limit } => {
+                    learn_cmd::run_learn_list(&core, status.as_deref(), limit)
+                }
+                LearnAction::Approve { id } => learn_cmd::run_learn_decide(&core, &id, true, None),
+                LearnAction::Reject { id, reason } => {
+                    learn_cmd::run_learn_decide(&core, &id, false, reason.as_deref())
+                }
             }
         }
         Commands::Skill { action } => {
@@ -1977,6 +2166,27 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 SkillAction::Remove { id } => platform_cmd::run_skill_remove(&core, &id),
                 SkillAction::Import { file } => platform_cmd::run_skill_import(&core, &file),
                 SkillAction::Export { id, out } => platform_cmd::run_skill_export(&core, &id, &out),
+                SkillAction::Versions { id } => platform_cmd::run_skill_versions(&core, &id),
+                SkillAction::Rollback { id, to } => {
+                    platform_cmd::run_skill_rollback(&core, &id, to)
+                }
+            }
+        }
+        Commands::Context { session_id, action } => {
+            let core = build_core(&workspace)?;
+            let sid = session_id.as_str();
+            match action {
+                ContextAction::List => platform_cmd::run_context_list(&core, sid),
+                ContextAction::Detail { key } => platform_cmd::run_context_detail(&core, sid, &key),
+                ContextAction::Refresh { key } => {
+                    platform_cmd::run_context_refresh(&core, sid, key.as_deref())
+                }
+                ContextAction::Disable { key } => {
+                    platform_cmd::run_context_set(&core, sid, &key, true)
+                }
+                ContextAction::Enable { key } => {
+                    platform_cmd::run_context_set(&core, sid, &key, false)
+                }
             }
         }
         Commands::Cron { action } => {
@@ -2141,6 +2351,320 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// capability-parity 6.6：CLI 技能版本子命令在 clap 目录中可用
+    /// （跨入口验收的 CLI 面；与 REST/聊天共用 registry 事实源）。
+    #[test]
+    fn skill_versions_and_rollback_subcommands_declared() {
+        let cmd = Cli::command();
+        let skill = cmd
+            .find_subcommand("skill")
+            .expect("skill 子命令在场")
+            .clone();
+        assert!(skill.find_subcommand("versions").is_some(), "versions 在场");
+        let rollback = skill
+            .find_subcommand("rollback")
+            .expect("rollback 在场")
+            .clone();
+        // --to 必填（目标版本号）
+        let missing = Cli::try_parse_from(["exm", "skill", "rollback", "some-id"]);
+        assert!(missing.is_err(), "缺 --to 被拒");
+        let ok = Cli::try_parse_from(["exm", "skill", "rollback", "some-id", "--to", "2"]);
+        assert!(ok.is_ok());
+        let _ = rollback;
+    }
+
+    /// capability-parity 6.5：记忆侧 CLI 与技能侧同一形态（versions/rollback）+ 撤销遗忘。
+    #[test]
+    fn memory_versions_rollback_restore_subcommands_declared() {
+        let cmd = Cli::command();
+        let memory = cmd
+            .find_subcommand("memory")
+            .expect("memory 子命令在场")
+            .clone();
+        assert!(
+            memory.find_subcommand("versions").is_some(),
+            "versions 在场"
+        );
+        let rollback = memory
+            .find_subcommand("rollback")
+            .expect("rollback 在场")
+            .clone();
+        // --to 必填（目标版本号）
+        let missing = Cli::try_parse_from(["exm", "memory", "rollback", "some-id"]);
+        assert!(missing.is_err(), "缺 --to 被拒");
+        let ok = Cli::try_parse_from(["exm", "memory", "rollback", "some-id", "--to", "2"]);
+        assert!(ok.is_ok());
+        let _ = rollback;
+        let restore = memory
+            .find_subcommand("restore")
+            .expect("restore 在场")
+            .clone();
+        // restore 只要 id，没有额外必填参数
+        let ok = Cli::try_parse_from(["exm", "memory", "restore", "some-id"]);
+        assert!(ok.is_ok());
+        let _ = restore;
+    }
+
+    /// capability-parity 6.6：CLI 学习候选子命令在 clap 目录中可用
+    /// （与 REST /api/learning/candidates、通道 /learn 共用同一 Core 事实源）。
+    #[test]
+    fn learn_list_approve_reject_subcommands_declared() {
+        let cmd = Cli::command();
+        let learn = cmd
+            .find_subcommand("learn")
+            .expect("learn 子命令在场")
+            .clone();
+        let list = learn.find_subcommand("list").expect("list 在场").clone();
+        // --status 只接受三个状态值在运行时由 Core 校验；这里验参数可解析
+        let ok = Cli::try_parse_from(["exm", "learn", "list", "--status", "pending"]);
+        assert!(ok.is_ok());
+        let _ = list;
+        let approve = learn
+            .find_subcommand("approve")
+            .expect("approve 在场")
+            .clone();
+        let missing = Cli::try_parse_from(["exm", "learn", "approve"]);
+        assert!(missing.is_err(), "approve 缺 id 被拒");
+        let ok = Cli::try_parse_from(["exm", "learn", "approve", "some-id"]);
+        assert!(ok.is_ok());
+        let _ = approve;
+        let reject = learn
+            .find_subcommand("reject")
+            .expect("reject 在场")
+            .clone();
+        let ok = Cli::try_parse_from(["exm", "learn", "reject", "some-id", "原因说明"]);
+        assert!(ok.is_ok());
+        let _ = reject;
+    }
+
+    /// capability-parity 6.6 功能面：CLI 学习候选走同一 Core 事实源——
+    /// 真实证据候选提交 → CLI list 可见 → CLI approve 转正进技能版本链 →
+    /// 版本史可审计（与 REST / 通道同一账本与同一版本链，无第二存储）。
+    #[test]
+    fn learn_cli_走同一事实源_裁决转正进技能版本链() {
+        // 夹具自建工作区（resume_core 的目录不清理，累积会填满 tmpfs）；结束后整棵移除
+        let home = std::env::temp_dir().join(format!("exm-learn-cli-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = exm_core::config::ExmConfig::load(&home);
+        let core = Arc::new(Core::with_config(cfg).expect("创建 Core 失败"));
+        let out = learn_cli_same_fact_source(&core, &home);
+        let _ = std::fs::remove_dir_all(&home);
+        out.unwrap();
+    }
+
+    /// 函数体：所有断言都在这里，返回 Result 而不是直接 panic——
+    /// 这样断言失败时外层仍会清理临时目录。
+    fn learn_cli_same_fact_source(core: &Core, home: &std::path::Path) -> Result<(), String> {
+        use exm_core::learning_candidates::{CandidateDraft, CandidateEvidenceKind};
+        fn e(what: &str, err: impl std::fmt::Display) -> String {
+            format!("{what}：{err}")
+        }
+        // 落点技能预置版本链 v1 → v2：CLI 批准后的转正应续接为 v3，
+        // 回执（账本与打印文本）都必须如实报 v3——写死或错位成 v1 在这里才区分得出来。
+        let mut pre = exm_core::types::SkillDef {
+            id: "learn-cli-skill".into(),
+            name: "发布流程".into(),
+            instructions: "初版：发布前手工确认".into(),
+            ..Default::default()
+        };
+        core.skill_write_versioned(&pre)
+            .map_err(|x| e("预置技能 v1", x))?;
+        pre.instructions = "第二版：发布前跑一遍回归".into();
+        core.skill_write_versioned(&pre)
+            .map_err(|x| e("预置技能 v2", x))?;
+        // 真实证据夹具：会话工作区 + 本会话成功写调用（与网关测试同款口径）
+        let ws = home.join("ws");
+        std::fs::create_dir_all(&ws).map_err(|x| e("建工作区", x))?;
+        std::fs::write(ws.join("ARTIFACT.md"), "artifact").map_err(|x| e("写产物", x))?;
+        let session = core
+            .store
+            .create_session_in(
+                "learn-cli",
+                "exmachina",
+                Some(ws.to_string_lossy().into_owned()),
+            )
+            .map_err(|x| e("建会话", x))?;
+        exm_core::round_trace::begin(&session.id);
+        exm_core::round_trace::push_tool(
+            &session.id,
+            exm_core::round_trace::ToolCallRecord {
+                call_id: "cli-seed-write".into(),
+                agent_id: "exmachina".into(),
+                tool: "filesystem".into(),
+                args: serde_json::json!({
+                    "op": "write", "path": "ARTIFACT.md", "content": "artifact"
+                }),
+                ok: true,
+                duration_ms: 1,
+                summary: String::new(),
+            },
+        );
+        let triggers = vec!["发布".to_string()];
+        let draft = CandidateDraft {
+            target: "skill",
+            target_id: Some("learn-cli-skill"),
+            title: "CLI 转正链路验证",
+            content: "真实产物支撑的经验",
+            scope: "global",
+            triggers: &triggers,
+            source_session: &session.id,
+            source_goal: "g",
+            evidence: &[(CandidateEvidenceKind::ArtifactFile, "ARTIFACT.md".into())],
+        };
+        // 提交在 round_trace 之内；之后的每一步都先 end 再判断（不留悬挂的 trace）
+        let submitted = core.learning_submit(&draft);
+        exm_core::round_trace::end(&session.id);
+        let cand = submitted.map_err(|x| e("真实证据候选过审", x))?;
+
+        // CLI list 面可见（同一账本）
+        let listed = core
+            .learning_candidates(Some("pending"))
+            .map_err(|x| e("候选清单", x))?;
+        if !listed.iter().any(|c| c.id == cand.id) {
+            return Err("CLI 用的 learning_candidates 与提交账本不是同一份".into());
+        }
+        learn_cmd::run_learn_list(core, Some("pending"), 20).map_err(|x| e("CLI list 渲染", x))?;
+
+        // CLI approve → 转正进技能版本链（同一版本事实源，无第二存储）
+        learn_cmd::run_learn_decide(core, &cand.id, true, None).map_err(|x| e("CLI approve", x))?;
+        let hist = core
+            .skill_history_detailed("learn-cli-skill")
+            .map_err(|x| e("技能版本史", x))?;
+        let vers: Vec<u64> = hist.iter().map(|r| r.version).collect();
+        if vers != vec![1, 2, 3] {
+            return Err(format!("转正应续接既有技能链为 v1、v2、v3，实际 {vers:?}"));
+        }
+        if (hist[2].version, hist[2].name.as_str()) != (3, "CLI 转正链路验证") {
+            return Err(format!(
+                "当前版本（v3）的名称不符：v{} {}",
+                hist[2].version, hist[2].name
+            ));
+        }
+        if hist[1].instructions != "第二版：发布前跑一遍回归" {
+            return Err("被转正覆盖的 v2 应留在版本史里可回滚".into());
+        }
+        // 决策记录在候选账本（同一账本的 decided 状态）：list 里找已批准且带转正回执
+        let approved = core
+            .learning_candidates(Some("approved"))
+            .map_err(|x| e("已批准清单", x))?;
+        let decided = approved
+            .iter()
+            .find(|c| c.id == cand.id)
+            .ok_or_else(|| "裁决后的候选不在账本".to_string())?;
+        let promo = decided
+            .promotion
+            .as_ref()
+            .ok_or_else(|| "转正回执未记录".to_string())?;
+        let got = (
+            decided.status.as_str(),
+            promo.ok,
+            promo.ref_id.as_str(),
+            promo.version,
+        );
+        let want = ("approved", true, "learn-cli-skill", Some(3));
+        if got != want {
+            return Err(format!("裁决/转正回执不符：{got:?}，应为 {want:?}"));
+        }
+        // CLI 打印的回执文本与账本回执同源：落点 id + 实际生效版本号
+        let line = learn_cmd::promoted_line(promo);
+        if line != "已批准并转正 → learn-cli-skill v3" {
+            return Err(format!("CLI 回执文本不符：{line:?}"));
+        }
+
+        // 批准 ≠ 生效：内容在批准前被改坏（直接改账本模拟）→ 转正失败。
+        // CLI 必须以错误形式如实上报（裁决保留在账本），不得打印「已批准并转正」。
+        // 第二条候选要有自己的会话 + 本会话写回执：上面那条会话的回执已随 round_trace 结算，
+        // 再引用同一产物会被证据闸拒掉（闸在正常工作）。
+        let ws2 = home.join("ws2");
+        std::fs::create_dir_all(&ws2).map_err(|x| e("建第二个工作区", x))?;
+        std::fs::write(ws2.join("LEAK.md"), "artifact").map_err(|x| e("写产物", x))?;
+        let session2 = core
+            .store
+            .create_session_in(
+                "learn-cli-leaky",
+                "exmachina",
+                Some(ws2.to_string_lossy().into_owned()),
+            )
+            .map_err(|x| e("建第二个会话", x))?;
+        exm_core::round_trace::begin(&session2.id);
+        exm_core::round_trace::push_tool(
+            &session2.id,
+            exm_core::round_trace::ToolCallRecord {
+                call_id: "cli-seed-write-2".into(),
+                agent_id: "exmachina".into(),
+                tool: "filesystem".into(),
+                args: serde_json::json!({
+                    "op": "write", "path": "LEAK.md", "content": "artifact"
+                }),
+                ok: true,
+                duration_ms: 1,
+                summary: String::new(),
+            },
+        );
+        let triggers = vec!["泄露".to_string()];
+        let draft = CandidateDraft {
+            target: "skill",
+            target_id: Some("learn-cli-leaky"),
+            title: "CLI 转正失败回执验证",
+            content: "看起来正常的内容",
+            scope: "global",
+            triggers: &triggers,
+            source_session: &session2.id,
+            source_goal: "g",
+            evidence: &[(CandidateEvidenceKind::ArtifactFile, "LEAK.md".into())],
+        };
+        let submitted = core.learning_submit(&draft);
+        exm_core::round_trace::end(&session2.id);
+        let leaky = submitted.map_err(|x| e("第二条候选过审", x))?;
+        let mut all = core.store.list_learning_candidates();
+        let row = all
+            .iter_mut()
+            .find(|c| c.id == leaky.id)
+            .ok_or_else(|| "第二条候选不在账本".to_string())?;
+        row.content = "部署时用 API_KEY=sk-abcdefghijklmnopqr 直连".into();
+        core.store
+            .update_learning_candidate(row)
+            .map_err(|x| e("改写候选账本", x))?;
+        // 不用 expect_err：helper 内 panic 会绕过外层的临时目录清理
+        let msg = match learn_cmd::run_learn_decide(core, &leaky.id, true, None) {
+            Ok(()) => return Err("转正失败时 CLI 必须报错，不能报成功".into()),
+            Err(err) => err.to_string(),
+        };
+        if !msg.contains("已批准") || !msg.contains("转正失败") {
+            return Err(format!(
+                "CLI 失败回执应同时说明「已批准」与「转正失败」：{msg}"
+            ));
+        }
+        if !msg.contains("敏感") {
+            return Err(format!("CLI 失败回执应带失败原因：{msg}"));
+        }
+        if !msg.contains("裁决保留") {
+            return Err(format!("CLI 失败回执应说明裁决保留（不静默撤销）：{msg}"));
+        }
+        // 账本事实：裁决保留为 approved，promotion.ok=false；落点技能不存在
+        let decided = core
+            .learning_candidates(Some("approved"))
+            .map_err(|x| e("已批准清单", x))?
+            .into_iter()
+            .find(|c| c.id == leaky.id)
+            .ok_or_else(|| "失败的转正不得回滚用户裁决".to_string())?;
+        let promo = decided
+            .promotion
+            .as_ref()
+            .ok_or_else(|| "转正回执未记录".to_string())?;
+        if promo.ok {
+            return Err("敏感内容不得转正成功".into());
+        }
+        if core
+            .skill_history_detailed("learn-cli-leaky")
+            .map(|h| !h.is_empty())
+            .unwrap_or(false)
+        {
+            return Err("失败的转正不得留下半成品技能".into());
+        }
+        Ok(())
+    }
+
     #[test]
     fn json_error_output_has_stable_category_and_redacts_inline_credentials() {
         let output = cli_error_result(
@@ -2289,7 +2813,7 @@ mod tests {
     }
 
     #[test]
-    fn CLI顶层命令已登记到统一目录且基础命令仍可解析() {
+    fn cli顶层命令已登记到统一目录且基础命令仍可解析() {
         validate_cli_command_catalog().expect("CLI 与统一目录不应漂移");
         let registry = cli_command_registry().expect("构造 CLI 目录");
         for name in ["model", "config", "memory", "skill", "cron", "approval"] {
@@ -2301,6 +2825,332 @@ mod tests {
                 "Clap 顶层命令缺失：{name}"
             );
         }
+    }
+
+    /// 隔离根下的 Core + 一个绑定了临时项目的会话（有项目层文件来源）。
+    fn context_fixture(
+        agents_md: Option<&str>,
+    ) -> (Arc<Core>, exm_core::types::Session, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("exm-cli-ctx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let core = Arc::new(Core::create(&root).unwrap());
+        let ws = root.join("project");
+        std::fs::create_dir_all(&ws).unwrap();
+        if let Some(text) = agents_md {
+            std::fs::write(ws.join("AGENTS.md"), text).unwrap();
+        }
+        let ws_str = ws.canonicalize().unwrap().to_string_lossy().into_owned();
+        let session = core
+            .store
+            .create_session_in("ctx-cli", &core.active_group(), Some(ws_str))
+            .unwrap();
+        (core, session, root)
+    }
+
+    #[test]
+    fn context子命令_已声明且目录已登记() {
+        // clap 声明：位置参数 <session_id> + 五个子命令
+        for args in [
+            vec!["exm", "context", "sid-1", "list"],
+            vec!["exm", "context", "sid-1", "detail", "file:AGENTS.md"],
+            vec!["exm", "context", "sid-1", "refresh"],
+            vec!["exm", "context", "sid-1", "refresh", "memory"],
+            vec!["exm", "context", "sid-1", "disable", "skills"],
+            vec!["exm", "context", "sid-1", "enable", "skills"],
+        ] {
+            assert!(
+                Cli::try_parse_from(args.clone()).is_ok(),
+                "应可解析：{args:?}"
+            );
+        }
+        // 缺会话 id / 缺子命令是用法错误
+        assert!(Cli::try_parse_from(["exm", "context", "list"]).is_err());
+        assert!(Cli::try_parse_from(["exm", "context"]).is_err());
+        // 目录：顶层 `context` 映射到规范命令 context.list（漂移即失败）
+        validate_cli_command_catalog().expect("CLI 与统一目录不应漂移");
+        let registry = cli_command_registry().unwrap();
+        assert!(
+            registry.resolve("cli.context").is_some(),
+            "cli.context 入口缺失"
+        );
+        // 规范目录里五个 context.* 与通道 /context 子命令同名同义
+        let builtin = exm_core::command::CommandRegistry::with_builtins().unwrap();
+        for name in [
+            "context.list",
+            "context.detail",
+            "context.refresh",
+            "context.disable",
+            "context.enable",
+        ] {
+            assert!(builtin.resolve(name).is_some(), "规范命令缺失：{name}");
+        }
+        assert_eq!(builtin.resolve("context").unwrap().name, "context.list");
+        // 刷新是只读（无副作用）；开关是会话状态写入
+        use exm_core::command::{CommandPermission, CommandSideEffect};
+        assert_eq!(
+            builtin.resolve("context.refresh").unwrap().side_effect,
+            CommandSideEffect::None
+        );
+        assert_eq!(
+            builtin.resolve("context.refresh").unwrap().permissions,
+            vec![CommandPermission::Read]
+        );
+        assert_eq!(
+            builtin.resolve("context.disable").unwrap().side_effect,
+            CommandSideEffect::SessionState
+        );
+    }
+
+    #[test]
+    fn context_cli_清单详情与缺失原因() {
+        let (core, session, root) = context_fixture(Some("# 规则\nCLI 清单测试"));
+        let sid = &session.id;
+        // list 成功
+        platform_cmd::run_context_list(&core, sid).unwrap();
+        let sources = core.context_sources(sid).unwrap();
+        let agents = sources
+            .iter()
+            .find(|s| s["key"] == "file:AGENTS.md")
+            .unwrap();
+        assert_eq!(agents["status"], "loaded");
+        // 运行时来源带真实缺失原因（Core::create 默认配置下如实汇报，不硬编码是哪一种）
+        for key in ["memory", "retrieval", "skills"] {
+            let s = sources.iter().find(|s| s["key"] == key).unwrap();
+            if s["status"] != "ready" {
+                assert!(
+                    s["reason"].as_str().is_some_and(|r| !r.is_empty()),
+                    "{key} 未就绪必须带原因：{s}"
+                );
+            }
+        }
+        // detail：已知键成功；未知键报错并列出可用键
+        platform_cmd::run_context_detail(&core, sid, "file:AGENTS.md").unwrap();
+        let err = platform_cmd::run_context_detail(&core, sid, "file:nope.md")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("没有上下文来源 file:nope.md"), "{err}");
+        assert!(
+            err.contains("file:AGENTS.md"),
+            "可用键里应含已知来源：{err}"
+        );
+        // 会话不存在：如实报错（不 panic、不伪造清单）
+        let err = platform_cmd::run_context_list(&core, "no-such-session")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("会话不存在"), "{err}");
+        drop(core);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 整层缺席的文件来源要有原因（未绑定项目）：CLI 的说明行由 Core 给出的
+    /// 原因决定——呈现逻辑 `context_gap_line` 是纯函数，直接对 Core 的真实返回断言。
+    #[test]
+    fn context_cli_整层缺席要说明原因() {
+        let root = std::env::temp_dir().join(format!("exm-cli-ctx-gap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let core = Arc::new(Core::create(&root).unwrap());
+        // 未绑定项目的会话（CLI/WebUI 里 `exm` 直接建的就是这种）
+        let session = core
+            .store
+            .create_session("未绑定", &core.active_group())
+            .unwrap();
+        let sid = &session.id;
+
+        let gaps = core.context_source_gaps(sid).unwrap();
+        let project = gaps
+            .iter()
+            .find(|g| g["layer"] == "project")
+            .expect("未绑定会话缺项目层");
+        let line = platform_cmd::context_gap_line(project);
+        assert!(line.starts_with("[项目 层]"), "标明是哪一层：{line}");
+        assert!(line.contains("未绑定项目"), "原因要说出来：{line}");
+        assert!(
+            line.contains("AGENTS.md") && line.contains(".exmachina/context.md"),
+            "列出没加载的文件：{line}"
+        );
+        // 原因原样来自 Core，格式化不改写它
+        assert!(line.contains(project["reason"].as_str().unwrap()), "{line}");
+
+        // 清单里确实没有项目层来源（说明与清单一致），list 仍成功返回
+        assert!(core
+            .context_sources(sid)
+            .unwrap()
+            .iter()
+            .all(|s| s["layer"] != "project"));
+        platform_cmd::run_context_list(&core, sid).unwrap();
+
+        // 绑定了项目：没有项目层的缺席说明
+        let ws = root.join("project");
+        std::fs::create_dir_all(&ws).unwrap();
+        let bound = core
+            .store
+            .create_session_in(
+                "已绑定",
+                &core.active_group(),
+                Some(ws.canonicalize().unwrap().to_string_lossy().into_owned()),
+            )
+            .unwrap();
+        let gaps2 = core.context_source_gaps(&bound.id).unwrap();
+        assert!(gaps2.iter().all(|g| g["layer"] != "project"), "{gaps2:?}");
+        drop(core);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn context_cli_刷新_单来源失败不影响其余且非零退出() {
+        let (core, session, root) = context_fixture(Some("# v1"));
+        let sid = &session.id;
+        std::fs::create_dir_all(root.join("project").join(".exmachina")).unwrap();
+        std::fs::write(
+            root.join("project").join(".exmachina").join("context.md"),
+            "# 补充",
+        )
+        .unwrap();
+        let before_sources = core.context_sources(sid).unwrap();
+        assert!(!before_sources.is_empty());
+        // 先停用一个别的来源：刷新不得改动禁用清单
+        platform_cmd::run_context_set(&core, sid, "skills", true).unwrap();
+        // 快照在「停用之后、刷新之前」拍：后面比对的是「刷新有没有改变任何东西」，
+        // 不能把测试自己的停用操作算到刷新头上
+        let before = core.context_sources(sid).unwrap();
+        assert_eq!(
+            before.iter().find(|s| s["key"] == "skills").unwrap()["status"],
+            "disabled",
+            "夹具前提：skills 已停用"
+        );
+        // 单来源刷新成功
+        platform_cmd::run_context_refresh(&core, sid, Some("file:AGENTS.md")).unwrap();
+        // 让 AGENTS.md 读不出来（路径上是目录）
+        std::fs::remove_file(root.join("project").join("AGENTS.md")).unwrap();
+        std::fs::create_dir_all(root.join("project").join("AGENTS.md")).unwrap();
+        // 单来源刷新失败：返回 Err（CLI 非零退出），其余来源与禁用清单不变
+        let err = platform_cmd::run_context_refresh(&core, sid, Some("file:AGENTS.md"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("刷新失败"), "{err}");
+        let after = core.context_sources(sid).unwrap();
+        for b in &before {
+            if b["key"] == "file:AGENTS.md" {
+                continue;
+            }
+            let a = after.iter().find(|x| x["key"] == b["key"]).unwrap();
+            assert_eq!(
+                (a["status"].clone(), a["disabled"].clone()),
+                (b["status"].clone(), b["disabled"].clone()),
+                "{} 不受刷新失败影响",
+                b["key"]
+            );
+        }
+        assert_eq!(
+            core.store.disabled_context_sources(sid),
+            vec!["skills".to_string()]
+        );
+        // 整表刷新：一个失败不中断其余——其余来源照样被刷新（事件逐个留痕），
+        // 整体返回 Err（非零退出），汇总里点名失败的那一个
+        let refreshed = |core: &Arc<Core>| -> Vec<(String, bool)> {
+            core.store
+                .list_events(sid)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|e| {
+                    let p = &e["payload"];
+                    (p.get("type").and_then(|t| t.as_str()) == Some("context.source.refreshed"))
+                        .then(|| {
+                            let inner = &p["payload"];
+                            (
+                                inner
+                                    .get("key")
+                                    .and_then(|k| k.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                inner.get("ok").and_then(|k| k.as_bool()).unwrap_or(false),
+                            )
+                        })
+                })
+                .collect()
+        };
+        let refreshed_before = refreshed(&core).len();
+        let err = platform_cmd::run_context_refresh(&core, sid, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("1 个来源刷新失败") && err.contains("file:AGENTS.md"),
+            "汇总点名失败来源：{err}"
+        );
+        let batch: Vec<(String, bool)> = refreshed(&core)
+            .into_iter()
+            .skip(refreshed_before)
+            .collect();
+        // 每个来源都刷新过（逐个留痕，含失败的那个），不因一个失败而中断
+        assert_eq!(
+            batch.len(),
+            before.len(),
+            "整表刷新应逐个来源留痕：{batch:?}"
+        );
+        assert_eq!(
+            batch.iter().filter(|(_, ok)| !ok).count(),
+            1,
+            "恰好失败一个：{batch:?}"
+        );
+        assert!(
+            batch.iter().any(|(k, ok)| k == "file:AGENTS.md" && !ok),
+            "失败的正是读不出来的那个：{batch:?}"
+        );
+        assert!(
+            batch
+                .iter()
+                .any(|(k, ok)| k == "file:.exmachina/context.md" && *ok),
+            "另一个文件来源照常刷新成功：{batch:?}"
+        );
+        // 未知键是用法错误，不是刷新失败
+        let err = platform_cmd::run_context_refresh(&core, sid, Some("file:nope.md"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("没有上下文来源 file:nope.md"), "{err}");
+        assert!(!err.contains("刷新失败"), "未知键不该被说成刷新失败：{err}");
+        drop(core);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn context_cli_开关_独立且可恢复_未知键拒绝() {
+        let (core, session, root) = context_fixture(Some("# 规则"));
+        let sid = &session.id;
+        platform_cmd::run_context_set(&core, sid, "file:AGENTS.md", true).unwrap();
+        let sources = core.context_sources(sid).unwrap();
+        let agents = sources
+            .iter()
+            .find(|s| s["key"] == "file:AGENTS.md")
+            .unwrap();
+        assert_eq!(
+            (agents["disabled"].clone(), agents["baseStatus"].clone()),
+            (true.into(), "loaded".into())
+        );
+        // 其他来源未被连带禁用
+        assert!(sources.iter().filter(|s| s["disabled"] == true).count() == 1);
+        // 未知键：拒绝、不留痕、说明原因
+        let err = platform_cmd::run_context_set(&core, sid, "file:nope.md", true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未知上下文来源"), "{err}");
+        assert!(err.contains("可用："), "{err}");
+        assert_eq!(
+            core.store.disabled_context_sources(sid),
+            vec!["file:AGENTS.md".to_string()]
+        );
+        // enable 恢复
+        platform_cmd::run_context_set(&core, sid, "file:AGENTS.md", false).unwrap();
+        assert!(core.store.disabled_context_sources(sid).is_empty());
+        let sources = core.context_sources(sid).unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .find(|s| s["key"] == "file:AGENTS.md")
+                .unwrap()["status"],
+            "loaded"
+        );
+        drop(core);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -323,4 +323,178 @@ mod tests {
             "回落应为单智能体 scope 或组 id（实际 {scope}）"
         );
     }
+
+    /// capability-parity 6.5/6.6：面板的版本命令不是「只写在帮助表里」——走真实
+    /// `Panel::dispatch`，对同一个 Core 断言版本链事实。与 CLI/REST 共用同一函数与同一
+    /// 版本事实源（技能版本链 / memory/history），没有第二套存储。
+    ///
+    /// 期望值独立推导：回滚与撤销遗忘都以旧内容**追加新版本行**，版本号单调递增。
+    #[tokio::test]
+    async fn 面板版本命令_走分发改同一版本链() {
+        let home = std::env::temp_dir().join(format!("exm-panel-ver-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        // 断言都在内层函数里返回 Result：失败时外层仍清理临时目录
+        let out = panel_version_chain(&home).await;
+        let _ = std::fs::remove_dir_all(&home);
+        out.unwrap();
+    }
+
+    async fn panel_version_chain(home: &std::path::Path) -> Result<(), String> {
+        use exm_core::memory::MemoryKind;
+        fn e(what: &str, err: impl std::fmt::Display) -> String {
+            format!("{what}：{err}")
+        }
+        fn need(what: &str, ok: bool, detail: impl std::fmt::Display) -> Result<(), String> {
+            if ok {
+                Ok(())
+            } else {
+                Err(format!("{what}：{detail}"))
+            }
+        }
+        let core = std::sync::Arc::new(exm_core::Core::create(home).map_err(|x| e("建 Core", x))?);
+        let session = core
+            .create_session("panel versions")
+            .map_err(|x| e("建会话", x))?;
+        let mut panel = Panel::new(home.to_path_buf(), home.join(".exmachina"), true);
+        let mut state = PanelState {
+            session_id: session.id.clone(),
+            session_title: session.title,
+            turns: 0,
+        };
+        // 走真实分发：行内容由调用处给出，错误原样上抛（带命令行便于定位）
+        macro_rules! run {
+            ($line:expr) => {{
+                let line: &str = &$line;
+                panel
+                    .dispatch(&core, &mut state, line)
+                    .await
+                    .map_err(|x| e(line, x))?
+            }};
+        }
+        let hist_of = |id: &str| -> Result<Vec<(u64, String, String)>, String> {
+            core.memory_history(id)
+                .map(|h| {
+                    h.iter()
+                        .map(|r| (r.version, r.change.clone(), r.body.clone()))
+                        .collect()
+                })
+                .map_err(|x| e("记忆版本史", x))
+        };
+
+        // ---------- 记忆 ----------
+        // 版本链期望（独立推导）：v1 created → 面板回滚到 v1 = v2 rolled_back
+        // → 面板遗忘 = v3 forgotten（遗忘本身是版本链上一行，可审计）
+        // → 面板撤销遗忘 = v4 restored。每一步都追加新版本行，版本号单调递增。
+        let entry = core
+            .memory_remember(exm_core::memory::MemoryDraft::new(
+                MemoryKind::Fact,
+                "面板版本验证",
+                "初版正文",
+            ))
+            .map_err(|x| e("写入记忆", x))?;
+        let id = entry.id.clone();
+        need("新写入应为 v1", entry.version == 1, entry.version)?;
+
+        run!(format!("/memory versions {id}"));
+        run!(format!("/memory rollback {id} --to 1"));
+        let hist = hist_of(&id)?;
+        need(
+            "面板回滚应在同一版本链追加 rolled_back 行",
+            hist.iter().map(|r| (r.0, r.1.as_str())).collect::<Vec<_>>()
+                == vec![(1, "created"), (2, "rolled_back")],
+            format!("{hist:?}"),
+        )?;
+        need(
+            "回滚行内容应是被回滚到的版本",
+            hist[1].2 == "初版正文",
+            &hist[1].2,
+        )?;
+
+        // 越界回滚：dispatch 把错误交给调用者，且旧版本不变
+        let oob = panel
+            .dispatch(&core, &mut state, &format!("/memory rollback {id} --to 99"))
+            .await;
+        need("越界回滚应返回错误（实际 Ok）", oob.is_err(), "")?;
+        need(
+            "越界回滚不得改变版本链",
+            hist_of(&id)?.len() == hist.len(),
+            "",
+        )?;
+
+        run!(format!("/memory forget {id}"));
+        need(
+            "遗忘后不应在常规列表",
+            core.memory_list(None, 50)
+                .map_err(|x| e("记忆列表", x))?
+                .iter()
+                .all(|x| x.id != id),
+            "",
+        )?;
+        run!(format!("/memory restore {id}"));
+        let hist = hist_of(&id)?;
+        need(
+            "遗忘占一个版本号，撤销遗忘再追加一行",
+            hist.iter().map(|r| (r.0, r.1.as_str())).collect::<Vec<_>>()
+                == vec![
+                    (1, "created"),
+                    (2, "rolled_back"),
+                    (3, "forgotten"),
+                    (4, "restored"),
+                ],
+            format!("{hist:?}"),
+        )?;
+        need(
+            "撤销遗忘后应回到常规列表",
+            core.memory_list(None, 50)
+                .map_err(|x| e("记忆列表", x))?
+                .iter()
+                .any(|x| x.id == id),
+            "",
+        )?;
+
+        // ---------- 技能 ----------
+        // v1 → 更新 v2 → 面板回滚到 v1 = v3（内容回到 v1）
+        let mut skill = exm_core::types::SkillDef {
+            id: "panel-ver".into(),
+            name: "面板版本验证".into(),
+            description: String::new(),
+            triggers: vec!["面板专属触发词QZ".into()],
+            instructions: "初版指令".into(),
+            agents: vec![],
+            created_at: String::new(),
+            use_count: 0,
+            success_count: 0,
+            last_used_at: String::new(),
+            source: String::new(),
+            version: 0,
+            updated_at: String::new(),
+        };
+        let v1 = core
+            .skill_write_versioned(&skill)
+            .map_err(|x| e("写技能 v1", x))?;
+        need("技能首写应为 v1", v1.version == 1, v1.version)?;
+        skill.instructions = "第二版指令".into();
+        let v2 = core
+            .skill_write_versioned(&skill)
+            .map_err(|x| e("写技能 v2", x))?;
+        need("技能二次写应为 v2", v2.version == 2, v2.version)?;
+
+        run!("/skills versions panel-ver");
+        run!("/skills rollback panel-ver --to 1");
+        let hist = core
+            .skill_history_detailed("panel-ver")
+            .map_err(|x| e("技能版本史", x))?;
+        let vers: Vec<u64> = hist.iter().map(|r| r.version).collect();
+        need(
+            "面板回滚应在技能版本链追加 v3",
+            vers == vec![1, 2, 3],
+            format!("{vers:?}"),
+        )?;
+        need(
+            "v3 内容应为被回滚到的 v1",
+            hist[2].instructions == "初版指令",
+            &hist[2].instructions,
+        )?;
+        Ok(())
+    }
 }

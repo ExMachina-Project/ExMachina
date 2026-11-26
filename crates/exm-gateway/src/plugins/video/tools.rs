@@ -932,7 +932,7 @@ mod manual_watch_tests {
     fn manual_tools_配置重建恢复注册且停用回收shots() {
         let core = core();
         let ch = channel();
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         reconcile_ondemand(&core);
         let old = core.orchestrator().tools.clone();
         assert!(old.dynamic_tool("video__shots").is_some());
@@ -2671,7 +2671,7 @@ mod tests {
         };
         let settings = Settings::from_channel(&ch);
         assert!(settings.comment && settings.dry_run);
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         // 配额测试需要 limit=1：显式注入（默认 6 不够严格）
         let mut gate = ActGate::from_settings(&settings, 0);
         gate.daily_limit = 1;
@@ -2759,7 +2759,7 @@ mod tests {
         register_act_gate("s2", ActGate::from_settings(&settings, 0));
         let st = session_state("s2");
         let core = test_core("off");
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         let r = dispatch_tool(
             &core,
             "video__act",
@@ -2831,7 +2831,7 @@ mod act_approval_tests {
         let s = Settings::from_channel(&ch);
         assert_eq!(s.approval, "always");
         assert!(!s.dry_run);
-        platform::save_channels(&core, &[ch.clone()]).unwrap();
+        platform::save_channels(&core, std::slice::from_ref(&ch)).unwrap();
         register_act_gate("s-apr", ActGate::from_settings(&s, 0));
         let st = session_state("s-apr");
         let r = dispatch_tool(

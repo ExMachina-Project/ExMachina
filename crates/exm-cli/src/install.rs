@@ -1,4 +1,4 @@
-//! `exm install` —— 首启安装向导（docs/07 §3）
+//! First-run setup wizard for `exm install`.
 //! 安装向导：一条命令完成 环境检查 → 交互式配置 → 连接自检 → 落盘 → 下一步指引
 
 use crate::render::*;
@@ -183,7 +183,7 @@ pub fn run_install(workspace_root: &std::path::Path, quick: bool) -> anyhow::Res
     );
     println!(
         "{}",
-        dim("提示：`exm` 与 `exmachina` 是同一命令的两个入口名，行为完全一致（docs/07 §2）")
+        dim("提示：`exm` 与 `exmachina` 是同一命令的两个入口名，行为完全一致")
     );
     Ok(())
 }
