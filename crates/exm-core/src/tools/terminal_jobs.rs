@@ -14,6 +14,51 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
+/// Public, bounded metadata for a console; never exposes process control handles.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalJobSnapshot {
+    pub task_id: String,
+    pub command: String,
+    pub status: String,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub output_preview: String,
+    pub output_bytes: usize,
+    pub output_truncated: bool,
+    pub error: Option<String>,
+}
+
+impl From<&TerminalJobRecord> for TerminalJobSnapshot {
+    fn from(record: &TerminalJobRecord) -> Self {
+        Self {
+            task_id: record.id.clone(),
+            command: super::redact_str(&record.command)
+                .chars()
+                .take(2000)
+                .collect(),
+            status: record.status.clone(),
+            started_at_ms: record.started_at_ms,
+            finished_at_ms: record.finished_at_ms,
+            exit_code: record.exit_code,
+            output_preview: super::redact_str(&record.output_preview)
+                .chars()
+                .take(2000)
+                .collect(),
+            output_bytes: record
+                .output_end_byte
+                .unwrap_or(record.output_bytes as u64)
+                .min(usize::MAX as u64) as usize,
+            output_truncated: record.output_truncated,
+            error: record
+                .error
+                .as_deref()
+                .map(|error| super::redact_str(error).chars().take(500).collect()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BackgroundLimits {
     pub max_running: usize,
@@ -368,9 +413,32 @@ struct Capture {
     stop: watch::Sender<bool>,
     limit: usize,
     persist: Arc<Mutex<bool>>,
+    events: tokio::sync::broadcast::Sender<crate::types::CoreEvent>,
+    published_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl Capture {
+    fn publish(&self, kind: &str, record: &TerminalJobRecord) {
+        let event = crate::types::CoreEvent {
+            kind: kind.to_string(),
+            session_id: record.session_id.clone(),
+            payload: serde_json::to_value(TerminalJobSnapshot::from(record)).unwrap_or_default(),
+        };
+        crate::round_trace::push_activity_event(event.clone());
+        let _ = self.events.send(event.clone());
+        if kind != "terminal.updated" {
+            let envelope = crate::types::Envelope::new(
+                format!("session.{}.events", record.session_id),
+                "terminal",
+                "broadcast",
+                "event",
+                &record.session_id,
+                serde_json::to_value(event).unwrap_or_default(),
+            );
+            let _ = self.store.append_event(&envelope);
+        }
+    }
+
     fn push(&self, stream: Stream, bytes: &[u8], eof: bool) {
         let mut output = self.output.lock();
         let text = output.decode(stream, bytes, eof);
@@ -391,6 +459,12 @@ impl Capture {
         }
         // 活动作业从内存读状态；崩溃后从带偏移的完整日志行重建，不重复写元数据。
         self.progress.send_replace(());
+        let now = std::time::Instant::now();
+        let mut published = self.published_at.lock();
+        if published.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(250)) {
+            *published = Some(now);
+            self.publish("terminal.updated", &record);
+        }
     }
 }
 
@@ -515,7 +589,14 @@ impl ToolGateway {
                 stop: stop.clone(),
                 limit: limits.max_output_bytes,
                 persist: persist.clone(),
+                events: self.events.clone(),
+                published_at: Mutex::new(None),
             };
+            // Publish only after the live registry owns this job. Otherwise a fast
+            // reconnect can observe the persisted `running` row without its live
+            // handle and conservatively mark it interrupted.
+            active.insert((root, id.clone()), live);
+            capture.publish("terminal.started", &capture.record.lock());
             let handle = tokio::spawn(async move {
                 let _registration = registration;
                 let outcome = process
@@ -562,11 +643,11 @@ impl ToolGateway {
                         record.status = "failed".into();
                         record.error = Some(format!("终态持久化失败: {error}"));
                     }
+                    capture.publish("terminal.finished", &record);
                 }
                 capture.progress.send_replace(());
             });
             *worker.try_lock().expect("new worker slot") = Some(handle);
-            active.insert((root, id.clone()), live);
             Ok(format!("后台任务已启动：taskId={id}\n命令：{cmd}\n截止：{seconds}s；用 terminal(op=\"poll\", taskId=\"{id}\") 查看输出；op=\"kill\" 终止。"))
         };
         match started() {
@@ -581,7 +662,8 @@ impl ToolGateway {
         let active = live_jobs().lock();
         let mut records = self.store.list_terminal_jobs()?;
         records.retain(|record| {
-            record.session_id == session && PathBuf::from(&record.workspace) == workspace
+            record.session_id == session
+                && std::path::Path::new(&record.workspace) == workspace.as_path()
         });
         for record in &mut records {
             if let Some(live) = active.get(&(root.clone(), record.id.clone())) {
@@ -592,6 +674,18 @@ impl ToolGateway {
         }
         records.sort_by_key(|record| std::cmp::Reverse(record.started_at_ms));
         Ok(records)
+    }
+
+    pub fn terminal_job_snapshots(
+        &self,
+        session: &str,
+    ) -> anyhow::Result<Vec<TerminalJobSnapshot>> {
+        Ok(self
+            .visible_background_records(session)?
+            .iter()
+            .take(32)
+            .map(TerminalJobSnapshot::from)
+            .collect())
     }
 
     pub(super) fn poll_background(&self, session: &str, id: &str) -> ToolResult {
@@ -935,5 +1029,83 @@ fn status(record: &TerminalJobRecord) -> String {
             "执行失败：{}",
             record.error.as_deref().unwrap_or("未知终态")
         ),
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn background_terminal_publishes_session_scoped_lifecycle_and_output() {
+        let root =
+            std::env::temp_dir().join(format!("exm-terminal-events-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(Store::open(root.join("data")).unwrap());
+        let registry =
+            Arc::new(crate::registry::LocalRegistry::new(root.join("entities")).unwrap());
+        let (events, mut receiver) = tokio::sync::broadcast::channel(64);
+        let gateway = ToolGateway::new(
+            &root,
+            store,
+            registry,
+            events,
+            crate::config::SecurityConfig::default(),
+        );
+        let session = "terminal-activity-session";
+        let result = gateway.start_background_at(
+            "printf activity-output",
+            session,
+            Some(3),
+            root.clone(),
+            false,
+        );
+        assert!(result.ok, "{}", result.error.unwrap_or_default());
+        let id = result
+            .output
+            .split("taskId=")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .expect("启动结果应包含 task id")
+            .to_string();
+
+        let mut saw_started = false;
+        let mut saw_finished = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(event) = receiver.recv().await {
+                assert_eq!(event.session_id, session);
+                if event.payload["taskId"] != id {
+                    continue;
+                }
+                match event.kind.as_str() {
+                    "terminal.started" => saw_started = true,
+                    "terminal.finished" => {
+                        assert!(saw_started, "终态事件不可先于启动事件");
+                        assert_eq!(event.payload["status"], "exited");
+                        assert_eq!(event.payload["exitCode"], 0);
+                        assert!(event.payload["outputPreview"]
+                            .as_str()
+                            .unwrap()
+                            .contains("activity-output"));
+                        saw_finished = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("后台终态事件应在有界时间内到达");
+        assert!(saw_started && saw_finished);
+        let jobs = gateway.terminal_job_snapshots(session).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].task_id, id);
+        assert!(jobs[0].output_preview.contains("activity-output"));
+        assert!(gateway
+            .terminal_job_snapshots("another-session")
+            .unwrap()
+            .is_empty());
+        drop(gateway);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

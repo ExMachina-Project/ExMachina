@@ -179,8 +179,12 @@ impl MemoryStore {
         }
         let mut s = String::from("## 历史记忆（群体记忆库召回，供参考，不得当事实直接引用）\n");
         for h in hits {
+            // capability-parity 6.5：注入标注来源与版本（spec：注入结果 MUST 标注来源和版本）。
+            // 「来源」有两层：哪条记忆（id + 版本）与它当初从哪来（source_ref）——都保留。
+            let version = h.entry.version_label();
             s.push_str(&format!(
-                "- [{}|{:.2}] {}：{}（来源：{}）\n",
+                "- [来源：记忆 {} v{version}] [{}|{:.2}] {}：{}（{}）\n",
+                h.entry.id,
                 h.entry.kind.key(),
                 h.score,
                 h.entry.title,
@@ -217,7 +221,12 @@ pub(crate) fn decay_factor(age_days: f64, half_life_days: f64) -> f64 {
 /// 衰减后重要性：乘因子后收进 [floor, 1.0]。
 /// 下限保底：濒死记忆缓慢趋近 floor 而非骤归零（floor 语义 = 衰减底线）；
 /// 上限钳 1.0：floor 传入越界值（>1）时也不得把重要性抬出 [0,1] 合法域。
-pub(crate) fn decayed_importance(current: f64, age_days: f64, half_life_days: f64, floor: f64) -> f64 {
+pub(crate) fn decayed_importance(
+    current: f64,
+    age_days: f64,
+    half_life_days: f64,
+    floor: f64,
+) -> f64 {
     let floor = floor.clamp(0.0, 1.0);
     (current * decay_factor(age_days, half_life_days)).clamp(floor, 1.0)
 }

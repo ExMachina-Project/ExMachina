@@ -11,7 +11,11 @@
 use super::*;
 
 impl ToolGateway {
-    pub(crate) async fn tool_speech(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
+    pub(crate) async fn tool_speech(
+        &self,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let text = args
             .get("text")
             .and_then(|v| v.as_str())

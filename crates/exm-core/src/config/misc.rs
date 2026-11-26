@@ -227,11 +227,96 @@ impl Default for CompactionConfig {
     }
 }
 
+/// 物理设备连接实验配置。默认关闭；关闭时不扫描、不连接、不向 Agent 暴露动作。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceConnectivityConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_device_discovery_secs")]
+    pub max_discovery_secs: u64,
+    #[serde(default = "default_device_discovery_results")]
+    pub max_discovery_results: usize,
+    #[serde(default = "default_device_audio_bytes")]
+    pub max_audio_bytes: u64,
+    #[serde(default = "default_device_audio_duration_secs")]
+    pub max_audio_duration_secs: u64,
+    #[serde(default = "default_device_image_bytes")]
+    pub max_image_bytes: u64,
+    #[serde(default = "default_device_image_edge")]
+    pub max_image_edge: u32,
+    #[serde(default = "default_device_capture_interval_secs")]
+    pub capture_interval_secs: u64,
+}
+
+impl DeviceConnectivityConfig {
+    /// 对直接编辑配置文件的输入施加硬资源上限（schema 范围不是安全边界）。
+    pub fn bounded(mut self) -> Self {
+        self.max_discovery_secs = self.max_discovery_secs.clamp(1, 300);
+        self.max_discovery_results = self.max_discovery_results.clamp(1, 256);
+        self.max_audio_bytes = self.max_audio_bytes.clamp(1, 100 * 1024 * 1024);
+        self.max_audio_duration_secs = self.max_audio_duration_secs.clamp(1, 3600);
+        self.max_image_bytes = self.max_image_bytes.clamp(1, 50 * 1024 * 1024);
+        self.max_image_edge = self.max_image_edge.clamp(64, 8192);
+        self.capture_interval_secs = self.capture_interval_secs.clamp(1, 3600);
+        self
+    }
+}
+
+fn default_device_discovery_secs() -> u64 {
+    30
+}
+
+fn default_device_discovery_results() -> usize {
+    32
+}
+
+fn default_device_audio_bytes() -> u64 {
+    20 * 1024 * 1024
+}
+
+fn default_device_audio_duration_secs() -> u64 {
+    300
+}
+
+fn default_device_image_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+fn default_device_image_edge() -> u32 {
+    4096
+}
+
+fn default_device_capture_interval_secs() -> u64 {
+    1
+}
+
+impl Default for DeviceConnectivityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_discovery_secs: default_device_discovery_secs(),
+            max_discovery_results: default_device_discovery_results(),
+            max_audio_bytes: default_device_audio_bytes(),
+            max_audio_duration_secs: default_device_audio_duration_secs(),
+            max_image_bytes: default_device_image_bytes(),
+            max_image_edge: default_device_image_edge(),
+            capture_interval_secs: default_device_capture_interval_secs(),
+        }
+    }
+}
+
 /// 实验性功能开关（未稳定的行为面；默认全关，开启即自担体验波动）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Default)]
 pub struct ExperimentsConfig {
+    /// 统一连接层的新操作；与设备及其他实验完全独立。
+    #[serde(default)]
+    pub connection_fabric: super::ConnectionFabricConfig,
+    /// 物理设备接入实验；资源限制位于嵌套配置中，避免污染既有实验开关语义。
+    #[serde(default)]
+    pub device_connectivity: DeviceConnectivityConfig,
     /// 动态上下文压缩：模型获得 context_compact 工具，自行判断压缩时机
     /// （判断依据：上下文变得冗长 / 早期细节已不再关键 / 即将进入长任务阶段），
     /// 主动把指定范围历史压成滚动摘要。关闭时仍用条数阈值的自动压缩。
@@ -270,6 +355,13 @@ pub struct ExperimentsConfig {
     /// automation.memoryDigestMinTurns。默认关——关闭态零任务零 token 消耗。
     #[serde(default)]
     pub auto_memory_digest: bool,
+}
+
+impl ExperimentsConfig {
+    pub(super) fn bounded_device_connectivity(mut self) -> Self {
+        self.device_connectivity = self.device_connectivity.bounded();
+        self
+    }
 }
 
 // ---------------------------------------------------------------- 插件系统（plugins/ 目录）
@@ -347,6 +439,9 @@ impl Default for LinkTarget {
 pub struct NexusConfig {
     #[serde(default)]
     pub links: Vec<LinkTarget>,
+    /// 与远程 Agent 连结体分开保存；空列表不写入以保持旧配置兼容。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<crate::device::DeviceRecord>,
 }
 
 /// 推送（定时任务结果通道订阅的全局口径）

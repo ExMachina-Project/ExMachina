@@ -161,10 +161,7 @@ pub fn build_trajectory(
 
 /// 轨迹 → JSONL（每轮一行；保留会话元信息，便于批处理按行读取）
 pub fn trajectory_jsonl(trajectory: &Value) -> String {
-    let session = trajectory
-        .get("session")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let session = trajectory.get("session").cloned().unwrap_or(Value::Null);
     let schema = trajectory
         .get("schema")
         .cloned()
@@ -218,12 +215,7 @@ mod tests {
         }
     }
 
-    fn msg(
-        id: &str,
-        role: MessageRole,
-        turn: Option<usize>,
-        text: &str,
-    ) -> ChatMessage {
+    fn msg(id: &str, role: MessageRole, turn: Option<usize>, text: &str) -> ChatMessage {
         ChatMessage {
             id: id.into(),
             session_id: "s1".into(),

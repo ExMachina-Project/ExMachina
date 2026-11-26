@@ -177,7 +177,9 @@ impl ToolGateway {
                     return ToolResult::err("op=send 需要 sessionId 与 text");
                 }
                 if target_id == current.id {
-                    return ToolResult::err("不能向当前会话投递（会与进行中的本轮串行排队）；直接继续对话即可");
+                    return ToolResult::err(
+                        "不能向当前会话投递（会与进行中的本轮串行排队）；直接继续对话即可",
+                    );
                 }
                 let Some(target) = self.store.get_session(target_id).ok().flatten() else {
                     return Self::scope_denied();
@@ -224,8 +226,12 @@ mod tests {
         let mut cfg = crate::config::ExmConfig::load(&dir);
         cfg.use_mock = true;
         let core = crate::Core::with_config(cfg).expect("创建 Core 失败");
-        core.registry().create_group(Some("g1".into()), "组一", "").unwrap();
-        core.registry().create_group(Some("g2".into()), "组二", "").unwrap();
+        core.registry()
+            .create_group(Some("g1".into()), "组一", "")
+            .unwrap();
+        core.registry()
+            .create_group(Some("g2".into()), "组二", "")
+            .unwrap();
         let s1 = core.store.create_session("组一会话", "g1").unwrap();
         let s2 = core.store.create_session("组二会话", "g2").unwrap();
         core.store

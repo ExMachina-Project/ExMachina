@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 /// 回收站根目录（`<工作区>/.exmachina/trash`）
 pub fn trash_root(core: &Core) -> PathBuf {
-    core.config().workspace_root.join(".exmachina").join("trash")
+    core.config()
+        .workspace_root
+        .join(".exmachina")
+        .join("trash")
 }
 
 /// 一次巡检的结果（审计与状态面数据源）
@@ -90,7 +93,9 @@ fn age_days(day: &str) -> u64 {
     match (parse(day), parse(&t)) {
         (Some((y1, m1, d1)), Some((y2, m2, d2))) => {
             // 简化儒略日（Fliegel & Van Flandern 公式，不依赖 chrono）：天数差即年龄
-            let jd = |y: i64, m: i64, d: i64| 367 * y - (7 * (y + (m + 9)) / 12) / 4 + (275 * m) / 9 + d + 1721013;
+            let jd = |y: i64, m: i64, d: i64| {
+                367 * y - (7 * (y + (m + 9)) / 12) / 4 + (275 * m) / 9 + d + 1721013
+            };
             (jd(y2, m2, d2) - jd(y1, m1, d1)).max(0) as u64
         }
         _ => 0,
@@ -244,7 +249,7 @@ mod tests {
         mk_day(&root, "2021-01-01", 4096);
         mk_day(&root, "2022-01-01", 4096);
         let cfg = TrashConfig {
-            retention_days: 0, // 关保留期，单测容量
+            retention_days: 0,   // 关保留期，单测容量
             max_bytes: 5 * 1024, // 5KB：删一个（余 8192）仍超，须删两个（余 4096）
         };
         let r = run_cleanup(&core, &cfg);
@@ -261,7 +266,9 @@ mod tests {
         // 造一个 3 天前、一个 6 天前的目录
         let t = today();
         let shift = |days: i64| -> String {
-            let jd = |y: i64, m: i64, d: i64| 367 * y - (7 * (y + (m + 9) / 12)) / 4 + (275 * m) / 9 + d + 1721013;
+            let jd = |y: i64, m: i64, d: i64| {
+                367 * y - (7 * (y + (m + 9) / 12)) / 4 + (275 * m) / 9 + d + 1721013
+            };
             let (y, m, d) = parse_iso(&t).unwrap();
             let target = jd(y, m, d) - days;
             jd_to_iso(target)

@@ -10,9 +10,9 @@
 use crate::fsdb::FsDb;
 use crate::types::*;
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -148,7 +148,12 @@ impl SqliteStore {
         add_column_if_missing(&conn, "sessions", "collaboration_id", "TEXT");
         add_column_if_missing(&conn, "sessions", "memory_partition", "TEXT");
         // im-inbound-attach：入站附件随 user 消息落库（JSON 数组文本，缺省 '[]'）
-        add_column_if_missing(&conn, "messages", "attachments", "TEXT NOT NULL DEFAULT '[]'");
+        add_column_if_missing(
+            &conn,
+            "messages",
+            "attachments",
+            "TEXT NOT NULL DEFAULT '[]'",
+        );
 
         let store = SqliteStore {
             conn: Mutex::new(conn),
@@ -358,8 +363,9 @@ impl SqliteStore {
     /// 归档区视图：只含归档态，按归档时间倒序
     pub fn list_archived_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock();
-        let mut st = conn
-            .prepare("SELECT * FROM sessions WHERE archived_at IS NOT NULL ORDER BY archived_at DESC")?;
+        let mut st = conn.prepare(
+            "SELECT * FROM sessions WHERE archived_at IS NOT NULL ORDER BY archived_at DESC",
+        )?;
         let rows = st.query_map([], Self::row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -864,6 +870,8 @@ impl SqliteStore {
         result_summary: &str,
         duration_ms: u64,
     ) -> Result<()> {
+        let args = crate::tools::redact_json(args);
+        let result_summary = crate::tools::redact_str(result_summary);
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO tool_audit(id,agent_id,tool,args,result_summary,duration_ms,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -896,7 +904,10 @@ impl SqliteStore {
                 "id": r.get::<_, String>("id")?,
             }))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .map(|entry| crate::tools::redact_json(&entry))
+            .collect())
     }
 
     /// 跨个体聚合的工具审计查询(agent/tool 过滤,时间倒序,limit 封顶)
@@ -924,6 +935,7 @@ impl SqliteStore {
                 }))
             })?
             .filter_map(|r| r.ok())
+            .map(|entry| crate::tools::redact_json(&entry))
             .collect();
         if let Some(a) = agent {
             all.retain(|v| v.get("agentId").and_then(|x| x.as_str()) == Some(a));
@@ -1002,11 +1014,20 @@ impl SqliteStore {
     // ------------------------------------------------- 事件溯源(FsDb,B1 保留)
 
     pub fn append_event(&self, env: &Envelope) -> Result<()> {
-        self.fsdb.append_line("events", &env.session_id, env)
+        let mut safe = env.clone();
+        safe.payload = crate::tools::redact_observation(&safe.payload);
+        self.fsdb.append_line("events", &safe.session_id, &safe)
     }
 
     pub fn list_events(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
-        self.fsdb.read_lines("events", session_id, 0)
+        self.fsdb
+            .read_lines::<serde_json::Value>("events", session_id, 0)
+            .map(|events| {
+                events
+                    .iter()
+                    .map(crate::tools::redact_observation)
+                    .collect()
+            })
     }
 
     // ------------------------------------------------- 执行审批(FsDb,B1 保留)
@@ -1300,7 +1321,6 @@ mod store_tests {
         let dir = std::env::temp_dir().join(format!("exm-store-{}", uuid::Uuid::new_v4()));
         Store::open(&dir).expect("打开测试存储失败")
     }
-
 
     fn sqlite_test_store() -> SqliteStore {
         let dir = std::env::temp_dir().join(format!("exm-sqlite-{}", uuid::Uuid::new_v4()));

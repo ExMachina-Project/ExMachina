@@ -374,6 +374,7 @@ impl Orchestrator {
                 };
                 let suitable = model.purposes.contains(&purpose)
                     || (purpose == ModelPurpose::Vision && model.vision)
+                    || (purpose == ModelPurpose::Transcribe && model.audio)
                     || (purpose.is_text()
                         && (model.purposes.is_empty()
                             || model.purposes.contains(&ModelPurpose::Chat)));

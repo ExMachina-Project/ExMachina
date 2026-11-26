@@ -192,9 +192,7 @@ impl ToolGateway {
                 out.push_str("\n（op=get 按 id 取全文；hits 高的热门条目可优先参考）");
                 ToolResult::ok(out)
             }
-            other => ToolResult::err(format!(
-                "未知 op「{other}」（支持 search / get / list）"
-            )),
+            other => ToolResult::err(format!("未知 op「{other}」（支持 search / get / list）")),
         }
     }
 }

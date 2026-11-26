@@ -667,7 +667,10 @@ mod quota_summary_tests {
         let s = OpenAiCompatibleProvider::quota_error_summary(429, body);
         assert!(!s.contains("minimax"), "不得夹带上游内容：{s}");
         assert!(!s.contains("{\"error\""), "不得外发原始 JSON：{s}");
-        assert!(s.contains("429") && s.contains("额度"), "按状态码给话术：{s}");
+        assert!(
+            s.contains("429") && s.contains("额度"),
+            "按状态码给话术：{s}"
+        );
         // 402 余额 / 403 权限各自分叉
         assert!(OpenAiCompatibleProvider::quota_error_summary(402, "x").contains("余额"));
         assert!(OpenAiCompatibleProvider::quota_error_summary(403, "x").contains("权限"));
@@ -715,7 +718,10 @@ mod image_generation_tests {
         )])
         .await;
         let p = OpenAiCompatibleProvider::new(base, vec!["k".into()]);
-        let bytes = p.image_generate("gpt-image-1", "一只猫", "1024x1024").await.unwrap();
+        let bytes = p
+            .image_generate("gpt-image-1", "一只猫", "1024x1024")
+            .await
+            .unwrap();
         assert_eq!(bytes, png.to_vec(), "b64 解码应得原始字节");
     }
 
@@ -767,7 +773,10 @@ mod image_generation_tests {
     /// Mock 替身：确定性 PNG 字节（魔数合法）
     #[tokio::test]
     async fn 生图_mock替身_合法png() {
-        let bytes = MockLlmProvider.image_generate("m", "p", "512x512").await.unwrap();
+        let bytes = MockLlmProvider
+            .image_generate("m", "p", "512x512")
+            .await
+            .unwrap();
         assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47], "PNG 魔数");
     }
 }

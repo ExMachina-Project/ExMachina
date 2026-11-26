@@ -23,7 +23,11 @@ impl SessionOrigin {
     pub fn key(&self) -> String {
         match self {
             SessionOrigin::Console => "console".into(),
-            SessionOrigin::Channel { channel_id, chat_key, .. } => {
+            SessionOrigin::Channel {
+                channel_id,
+                chat_key,
+                ..
+            } => {
                 format!("channel:{channel_id}:{chat_key}")
             }
         }
@@ -60,7 +64,10 @@ pub fn parse_session_origin(title: &str) -> SessionOrigin {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArchiveScope {
     /// 单流：channelId + chatKey
-    Flow { channel_id: String, chat_key: String },
+    Flow {
+        channel_id: String,
+        chat_key: String,
+    },
     /// 整通道：channelId
     Channel { channel_id: String },
 }
@@ -70,8 +77,15 @@ impl ArchiveScope {
     pub fn matches(&self, origin: &SessionOrigin) -> bool {
         match (self, origin) {
             (
-                ArchiveScope::Flow { channel_id, chat_key },
-                SessionOrigin::Channel { channel_id: c, chat_key: k, .. },
+                ArchiveScope::Flow {
+                    channel_id,
+                    chat_key,
+                },
+                SessionOrigin::Channel {
+                    channel_id: c,
+                    chat_key: k,
+                    ..
+                },
             ) => channel_id == c && chat_key == k,
             (
                 ArchiveScope::Channel { channel_id },
@@ -128,23 +142,46 @@ mod tests {
         assert_eq!(parse_session_origin(""), SessionOrigin::Console);
         // 前缀命中但段缺失 / 空段 = 控制台（防御：脏数据不进通道组）
         assert_eq!(parse_session_origin("channel:"), SessionOrigin::Console);
-        assert_eq!(parse_session_origin("channel:c-tg:"), SessionOrigin::Console);
+        assert_eq!(
+            parse_session_origin("channel:c-tg:"),
+            SessionOrigin::Console
+        );
         assert_eq!(parse_session_origin("channel::k"), SessionOrigin::Console);
     }
 
     #[test]
     fn origin键_口径() {
-        assert_eq!(parse_session_origin("channel:c-tg:1").key(), "channel:c-tg:1");
+        assert_eq!(
+            parse_session_origin("channel:c-tg:1").key(),
+            "channel:c-tg:1"
+        );
         assert_eq!(SessionOrigin::Console.key(), "console");
     }
 
     #[test]
     fn 归档范围_匹配() {
         let o = parse_session_origin("channel:c-tg:grp:lab");
-        assert!(ArchiveScope::Flow { channel_id: "c-tg".into(), chat_key: "grp".into() }.matches(&o));
-        assert!(!ArchiveScope::Flow { channel_id: "c-tg".into(), chat_key: "other".into() }.matches(&o));
-        assert!(ArchiveScope::Channel { channel_id: "c-tg".into() }.matches(&o));
-        assert!(!ArchiveScope::Channel { channel_id: "c-qq".into() }.matches(&o));
-        assert!(!ArchiveScope::Channel { channel_id: "c-tg".into() }.matches(&SessionOrigin::Console));
+        assert!(ArchiveScope::Flow {
+            channel_id: "c-tg".into(),
+            chat_key: "grp".into()
+        }
+        .matches(&o));
+        assert!(!ArchiveScope::Flow {
+            channel_id: "c-tg".into(),
+            chat_key: "other".into()
+        }
+        .matches(&o));
+        assert!(ArchiveScope::Channel {
+            channel_id: "c-tg".into()
+        }
+        .matches(&o));
+        assert!(!ArchiveScope::Channel {
+            channel_id: "c-qq".into()
+        }
+        .matches(&o));
+        assert!(!ArchiveScope::Channel {
+            channel_id: "c-tg".into()
+        }
+        .matches(&SessionOrigin::Console));
     }
 }

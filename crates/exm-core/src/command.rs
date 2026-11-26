@@ -432,6 +432,7 @@ impl CommandRegistry {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn with_builtins() -> Result<Self, CommandRegistryDiagnostic> {
         let mut registry = Self::new(COMMAND_PROTOCOL_VERSION);
         for descriptor in builtin_command_descriptors() {
@@ -441,6 +442,7 @@ impl CommandRegistry {
     }
 
     /// 注册规范命令。任何失败都在写入 map 前返回，避免留下半个命令或半个别名。
+    #[allow(clippy::result_large_err)]
     pub fn register(
         &mut self,
         descriptor: CommandDescriptor,
@@ -578,6 +580,7 @@ impl CommandRegistry {
 
     /// 注册插件/技能命令。插件永远使用显式命名空间，不能通过传入 `model.use`、
     /// `help` 等名称覆盖 core owner；插件 alias 也必须带同一命名空间。
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     pub fn register_plugin_command(
         &mut self,
         plugin_id: &str,
@@ -731,6 +734,7 @@ impl CommandRegistry {
 
     /// 技能命令只引用既有技能事实源，不复制正文或授予技能额外工具权限。
     /// 首版命令版本固定为 1；技能包版本不等同于命令协议版本。
+    #[allow(clippy::result_large_err)]
     pub fn register_skill_command(
         &mut self,
         skill: &crate::types::SkillDef,
@@ -779,6 +783,7 @@ impl CommandRegistry {
     }
 
     /// Core 装配期只可收窄插件命令，不允许替换 owner、版本、名称或别名。
+    #[allow(clippy::result_large_err)]
     pub(crate) fn require_plugin_execution_capability(
         &mut self,
         name: &str,
@@ -820,6 +825,7 @@ impl CommandRegistry {
         self.register_plugin_manager(manager)
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn with_plugins(
         manager: &crate::plugin::PluginManager,
     ) -> Result<(Self, Vec<CapabilityItem>), CommandRegistryDiagnostic> {
@@ -1036,6 +1042,7 @@ fn object_schema(properties: &[(&str, &str)], required: &[&str]) -> Value {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn builtin_descriptor(
     name: &str,
     aliases: &[&str],
@@ -1315,7 +1322,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             Session,
             &[Read],
             None,
-            "查看当前计划状态",
+            "查看当前计划状态（与 goal/spec 关联：方案从规格推导，批准前只读）",
             "plan status",
             object_schema(&[], &[]),
         ),
@@ -1355,7 +1362,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             Session,
             &[Read],
             None,
-            "查看会话内编程规格",
+            "查看会话内编程规格（自动关联当前 goal；修改不自动批准 plan）",
             "spec show",
             object_schema(&[], &[]),
         ),
@@ -1365,7 +1372,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             Session,
             &[Write],
             SessionState,
-            "草拟会话内编程规格",
+            "草拟会话内编程规格（关联当前 goal；写入 plan 前需显式批准）",
             "spec draft <objective>",
             object_schema(&[("objective", "string")], &["objective"]),
         ),
@@ -1408,7 +1415,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             Session,
             &[Read],
             None,
-            "查看会话持久目标",
+            "查看会话持久目标（与 spec 关联显示；complete 需真实验证证据）",
             "goal status",
             object_schema(&[], &[]),
         ),
@@ -1418,7 +1425,7 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             Session,
             &[Write],
             SessionState,
-            "启动会话持久目标",
+            "启动会话持久目标（可被 /spec 引用关联；用 workflow 视览看四者关系）",
             "goal start <objective>",
             object_schema(&[("objective", "string")], &["objective"]),
         ),
@@ -1484,6 +1491,60 @@ pub fn builtin_command_descriptors() -> Vec<CommandDescriptor> {
             "清除会话持久目标",
             "goal clear",
             object_schema(&[], &[]),
+        ),
+        // 上下文来源治理（capability-parity 6.3）：文件 / 记忆 / 检索 / 技能四类来源的
+        // 清单、单项详情、单来源刷新与自动注入开关。通道 `/context`、CLI `exm context`、
+        // WebUI 共用同一组规范名——各入口只是呈现不同，事实源在 Core。
+        builtin_descriptor(
+            "context.list",
+            &["context"],
+            Session,
+            &[Read],
+            None,
+            "列出会话上下文来源（文件/记忆/检索/技能）及状态、禁用位与缺失原因",
+            "context list",
+            object_schema(&[], &[]),
+        ),
+        builtin_descriptor(
+            "context.detail",
+            &[],
+            Session,
+            &[Read],
+            None,
+            "查看单个上下文来源的状态、原状态与缺失原因",
+            "context detail <key>",
+            object_schema(&[("key", "string")], &["key"]),
+        ),
+        // 刷新只重新观测/重读，不改任何状态（禁用清单不动）——无副作用
+        builtin_descriptor(
+            "context.refresh",
+            &[],
+            Session,
+            &[Read],
+            None,
+            "重新读取单个来源（文件重读；记忆/检索/技能重新观测）。失败只影响该来源",
+            "context refresh <key>",
+            object_schema(&[("key", "string")], &["key"]),
+        ),
+        builtin_descriptor(
+            "context.disable",
+            &[],
+            Session,
+            &[Write],
+            SessionState,
+            "停用来源的自动注入（模型主动召回与用户显式 /skill 不受影响）",
+            "context disable <key>",
+            object_schema(&[("key", "string")], &["key"]),
+        ),
+        builtin_descriptor(
+            "context.enable",
+            &[],
+            Session,
+            &[Write],
+            SessionState,
+            "恢复来源的自动注入",
+            "context enable <key>",
+            object_schema(&[("key", "string")], &["key"]),
         ),
         builtin_descriptor(
             "admin.diagnostics",
@@ -2036,12 +2097,18 @@ mod tests {
             "goal.status",
             "goal.start",
             "goal.clear",
+            "context.list",
+            "context.detail",
+            "context.refresh",
+            "context.disable",
+            "context.enable",
         ] {
             assert!(registry.resolve(command).is_some(), "missing {command}");
         }
         assert_eq!(registry.resolve("model").unwrap().name, "model.list");
         assert_eq!(registry.resolve("queue").unwrap().name, "queue.add");
         assert_eq!(registry.resolve("spec").unwrap().name, "spec.show");
+        assert_eq!(registry.resolve("context").unwrap().name, "context.list");
     }
 
     #[test]
@@ -2272,6 +2339,102 @@ mod tests {
             assert!(!wire.to_string().contains("session-fixture"));
             assert!(!wire.to_string().contains("project-fixture"));
             assert!(!wire.to_string().contains("user-fixture"));
+        }
+    }
+
+    /// capability-parity 3.6：loopback 事件夹具覆盖五类场景——
+    /// 立即接收、不等待、不打断、明确入队、真实回执。
+    /// 通道帧形态（{type, payload} 包装）往返后语义必须与规范回执一致：
+    /// 回执只表达「已接收/steering/queued」，绝不出现 Succeeded 冒充完成。
+    #[test]
+    fn loopback夹具覆盖steering与队列五类场景回执() {
+        let fixture = TransportFixture::LoopbackChannel;
+        let entry = CommandEntry::Chat;
+
+        // ① 立即接收 + ② 不等待：steer 运行中回执 = Accepted（非 Succeeded），
+        //    interrupted=false（未打断），不携带最终答案字段
+        let steer_req = request("steer", entry, json!({"instruction":"优先处理登录缺陷"}));
+        let decoded = fixture.request_round_trip(&steer_req);
+        assert_eq!(decoded.command, "steer");
+        assert_eq!(decoded.args["instruction"], "优先处理登录缺陷");
+        let mut steer_receipt = CommandResult::success(
+            &decoded,
+            CommandStatus::Accepted,
+            json!({
+                "status": "steering_accepted",
+                "running": true,
+                "interrupted": false,
+            }),
+        );
+        steer_receipt.events.push(CommandEvent {
+            kind: "steering.accepted".into(),
+            data: json!({"source": "chat", "text": "优先处理登录缺陷"}),
+        });
+        let wire = serde_json::to_value(fixture.result_round_trip(&steer_receipt)).unwrap();
+        assert_eq!(wire["status"], "accepted", "立即接收=Accepted: {wire}");
+        assert_eq!(wire["data"]["status"], "steering_accepted");
+        assert_eq!(wire["data"]["interrupted"], false, "不打断");
+        assert!(
+            wire.get("data").unwrap()["answer"].is_null(),
+            "无最终答案字段"
+        );
+        assert_eq!(
+            wire["events"][0]["kind"], "steering.accepted",
+            "真实事件回执"
+        );
+
+        // ③ 不打断：stop 是独立命令——普通 steer 请求绝不携带取消语义
+        assert!(
+            !serde_json::to_string(&decoded).unwrap().contains("stop"),
+            "steer 请求不得混入停止语义"
+        );
+
+        // ④ 明确入队：queue.add 回执 = Accepted + pending 状态 + 序号，
+        //    不写成任务已执行完成
+        let queue_req = request("queue.add", entry, json!({"instruction":"之后导出报告"}));
+        let decoded_q = fixture.request_round_trip(&queue_req);
+        assert_eq!(decoded_q.command, "queue.add");
+        let mut queue_receipt = CommandResult::success(
+            &decoded_q,
+            CommandStatus::Accepted,
+            json!({
+                "status": "queued",
+                "seq": 3,
+                "pending": true,
+            }),
+        );
+        queue_receipt.events.push(CommandEvent {
+            kind: "task_queue.updated".into(),
+            data: json!({"action": "add", "queued": 3}),
+        });
+        let wire_q = serde_json::to_value(fixture.result_round_trip(&queue_receipt)).unwrap();
+        assert_eq!(wire_q["status"], "accepted", "入队=Accepted: {wire_q}");
+        assert_eq!(wire_q["data"]["status"], "queued");
+        assert_eq!(wire_q["data"]["pending"], true, "pending 不冒充完成");
+        assert_eq!(wire_q["data"]["seq"], 3, "队列序号在回执里");
+        assert_eq!(wire_q["events"][0]["kind"], "task_queue.updated");
+
+        // ⑤ 真实回执：stop 命令的收束回执如实反映停止结果——
+        //    Accepted + stoppedTools 计数，不伪造成功完成
+        let stop_req = request("stop", entry, json!({}));
+        let decoded_s = fixture.request_round_trip(&stop_req);
+        assert_eq!(decoded_s.command, "stop");
+        let stop_receipt = CommandResult::success(
+            &decoded_s,
+            CommandStatus::Accepted,
+            json!({"status": "accepted", "stoppedTools": 2}),
+        );
+        let wire_s = serde_json::to_value(fixture.result_round_trip(&stop_receipt)).unwrap();
+        assert_eq!(wire_s["status"], "accepted");
+        assert_eq!(wire_s["data"]["stoppedTools"], 2, "停止回执带真实计数");
+
+        // 五类场景共用契约：回执 requestId 与请求一一对应（可审计链）
+        for (w, r) in [
+            (&wire, &steer_req),
+            (&wire_q, &queue_req),
+            (&wire_s, &stop_req),
+        ] {
+            assert_eq!(w["requestId"], r.request_id);
         }
     }
 }

@@ -52,10 +52,17 @@ impl AgentRuntime {
                     let tool = ToolName::parse(&c.name).unwrap_or(ToolName::Read);
                     let r = self
                         .tools
-                        .execute(agent_id, trace, allowlist, tool, &c.arguments)
+                        .execute_with_call_id(
+                            agent_id,
+                            trace,
+                            allowlist,
+                            tool,
+                            &c.arguments,
+                            Some(&c.id),
+                        )
                         .await;
                     let images = self.image_feedback(&c.name, &r.images, attach_images);
-                    (tool_feedback(&c.name, &r), images)
+                    (tool_feedback(&c.name, &r, &c.id), images)
                 }
             });
             let results = futures_util::future::join_all(futs).await;
@@ -90,13 +97,20 @@ impl AgentRuntime {
                 // 统一入口：内置按白名单放行，声明式自定义按 agents 可见性放行
                 (
                     self.tools
-                        .execute_named(agent_id, trace, allowlist, &c.name, &c.arguments)
+                        .execute_named_with_call_id(
+                            agent_id,
+                            trace,
+                            allowlist,
+                            &c.name,
+                            &c.arguments,
+                            Some(&c.id),
+                        )
                         .await,
                     c.name.clone(),
                 )
             };
             let images = self.image_feedback(&name, &r.images, attach_images);
-            out[i] = Some((tool_feedback(&name, &r), images));
+            out[i] = Some((tool_feedback(&name, &r, &c.id), images));
         }
         out.into_iter().map(|x| x.unwrap_or_default()).collect()
     }

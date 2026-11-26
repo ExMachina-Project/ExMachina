@@ -80,7 +80,10 @@ impl Orchestrator {
             let text = match self.call_orch_stream(session_id, &messages, true).await {
                 Ok(text) => text,
                 Err(e) => {
-                    if !reports.values().any(|report|matches!(report.status,SyncStatus::Done)) {
+                    if !reports
+                        .values()
+                        .any(|report| matches!(report.status, SyncStatus::Done))
+                    {
                         return Err(e.context("收束失败，且没有已完成的节点结果"));
                     }
                     // 降级路径：候选链耗尽 / 网络断等导致收束 LLM 不可用时，不把本轮直接判死——

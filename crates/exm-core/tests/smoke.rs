@@ -19,6 +19,10 @@ fn serial_guard() -> MutexGuard<'static, ()> {
     SERIAL.lock()
 }
 
+/// 既有测试用的配置构造（不持有目录守卫——保持原行为）。
+///
+/// 注意：不要写成 `test_config_guarded().0`——那会让守卫在表达式结束时立即
+/// drop，刚建好的编成副本当场被删，所有调用方装载到 0 个个体。
 fn test_config() -> ExmConfig {
     let root = std::env::current_dir().unwrap().join("..").join("..");
     let mut cfg = ExmConfig::load(&root);
@@ -32,6 +36,25 @@ fn test_config() -> ExmConfig {
     }
     cfg.agents_dir = agents_copy;
     cfg.data_dir = std::env::temp_dir().join(format!("exm-test-{}", uuid::Uuid::new_v4()));
+    finish_test_config(cfg)
+}
+
+/// 测试临时目录守卫：`Drop` 时整棵移除（断言 panic 也会执行）。
+///
+/// 夹具往 `std::env::temp_dir()` 建随机目录；各测试自觉清理容易漏，一轮全量
+/// 测试就留下数百个目录，`/tmp` 是 tmpfs 时累积会填满并把存储当内存吃。
+struct TestDirs(Vec<std::path::PathBuf>);
+
+impl Drop for TestDirs {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// [`test_config`] / [`test_config_guarded`] 的公共尾部：Mock 通道、密封性、并发上限。
+fn finish_test_config(mut cfg: ExmConfig) -> ExmConfig {
     cfg.use_mock = true;
     // 密封性：屏蔽开发机的真实端点/密钥，强制 Mock 通道（README：测试不依赖真实模型与网络）
     cfg.llm.api_key.clear();
@@ -43,6 +66,23 @@ fn test_config() -> ExmConfig {
     cfg.security.approval_wait_secs = 0;
     cfg.max_concurrency = 4;
     cfg
+}
+
+/// 同 [`test_config`]，但把它建的两个临时目录（编成副本 + 数据目录）交给守卫：
+/// 持有返回的 `TestDirs` 到测试结束，离开作用域即清理。新增测试一律用它。
+fn test_config_guarded() -> (ExmConfig, TestDirs) {
+    let root = std::env::current_dir().unwrap().join("..").join("..");
+    let mut cfg = ExmConfig::load(&root);
+    let base = std::env::temp_dir().join(format!("exm-fleet-{}", uuid::Uuid::new_v4()));
+    let agents_copy = base.join("entities");
+    copy_agents_tree(&root.join("entities"), &agents_copy);
+    if root.join("skills").is_dir() {
+        copy_agents_tree(&root.join("skills"), &base.join("skills"));
+    }
+    cfg.agents_dir = agents_copy;
+    let data_dir = std::env::temp_dir().join(format!("exm-test-{}", uuid::Uuid::new_v4()));
+    cfg.data_dir = data_dir.clone();
+    (finish_test_config(cfg), TestDirs(vec![base, data_dir]))
 }
 
 /// 复制编成树到临时目录（跳过运行时状态文件；groups/ 现含默认组，一并复制）
@@ -2937,4 +2977,190 @@ async fn 自主记忆摘要_达标归纳与去重() {
         a_digests.len()
     );
     assert!(a_digests[0].body.contains("E2E 会话主题归纳"));
+}
+
+// ---------------- 记忆注入带版本（capability-parity 6.5） ----------------
+// spec「注入前相关性和预算」：注入结果 MUST 标注来源和版本；
+// spec「用户撤销学习」：删除状态在后续会话生效。
+// 这两点此前只有实现、没有证据——这里经真实派发链路截获 DispatchOrder 来证明。
+
+/// 截获派发单的假执行器：不跑模型，只把 order 的 inputs 存下来并回一份空报告。
+struct CapturingExecutor {
+    orders: std::sync::Mutex<Vec<DispatchOrder>>,
+}
+
+#[async_trait::async_trait]
+impl exm_core::remote::RemoteExecutor for CapturingExecutor {
+    fn accepts(&self, _def: &AgentDefinition) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        _session_id: &str,
+        def: &AgentDefinition,
+        order: &DispatchOrder,
+        _attach_images: bool,
+        _on_delta: &(dyn Fn(exm_core::provider::StreamDelta) + Send + Sync),
+    ) -> anyhow::Result<SyncReport> {
+        self.orders.lock().unwrap().push(order.clone());
+        // 只填契约必填字段；其余走 serde default——缺字段会让这里直接失败，而非静默
+        let report = serde_json::from_value(serde_json::json!({
+            "sourceAgent": def.identifier,
+            "taskNodeId": order.task_node_id,
+            "status": "done",
+            "statements": [],
+            "summary": "captured",
+            "nextSuggestion": {},
+        }))?;
+        Ok(report)
+    }
+}
+
+/// 跑一次对话并返回所有派发单里 kind == "memory" 的 inputs。
+async fn memory_inputs_of_run(core: &Core) -> Vec<DispatchInput> {
+    let exec = std::sync::Arc::new(CapturingExecutor {
+        orders: std::sync::Mutex::new(Vec::new()),
+    });
+    core.set_remote(exec.clone()).expect("注入截获执行器失败");
+    let s = core.create_session("记忆注入带版本").unwrap();
+    core.chat(&s.id, "评估当前项目的架构风险并给出建议")
+        .await
+        .expect("任务执行失败");
+    let orders = exec.orders.lock().unwrap().clone();
+    assert!(!orders.is_empty(), "应有派发发生");
+    orders
+        .into_iter()
+        .flat_map(|o| o.inputs.into_iter())
+        .filter(|i| i.kind == "memory")
+        .collect()
+}
+
+#[tokio::test]
+async fn 记忆注入_标注来源与版本_且撤销后不再注入() {
+    let _serial = serial_guard();
+    let (mut cfg, _dirs) = test_config_guarded();
+    cfg.memory_enabled = true;
+    let core = Core::with_config(cfg).expect("创建 Core 失败");
+    let session = core.create_session("播种").unwrap();
+
+    // 首个被派发的节点是 S1「背景补齐」(context-agent)；检索词取自智能体名/标识 + 节点标题，
+    // 所以记忆正文要含节点标题里的词才能稳定命中（词法倒排，不依赖 embedding）。
+    let lesson = core
+        .memory_remember(
+            MemoryDraft::new(
+                MemoryKind::Lesson,
+                "背景补齐先列依赖",
+                "背景补齐时先列出依赖与约束，再补外部资料。",
+            )
+            .importance(0.9),
+        )
+        .unwrap();
+    let v1 = lesson.version_label();
+    assert_eq!(v1, 1);
+
+    // ---- 命中：注入标注来源与版本 ----
+    // ref_id 是多次命中以「;」拼接的审计串（memory:<id>#v<N>），按段比对——
+    // 库里可能有别的测试/运行沉淀的记忆同时命中，不能假设只有一条。
+    fn refs_of(inputs: &[DispatchInput]) -> Vec<String> {
+        inputs
+            .iter()
+            .flat_map(|i| i.ref_id.split(';').map(str::to_string))
+            .collect()
+    }
+    let inputs = memory_inputs_of_run(&core).await;
+    let want = format!("memory:{}#v{v1}", lesson.id);
+    assert!(
+        refs_of(&inputs).contains(&want),
+        "记忆应被注入派发单且 ref_id 形如 memory:<id>#v<版本>，期望 {want}；实际：{:?}",
+        refs_of(&inputs)
+    );
+    let hit = inputs
+        .iter()
+        .find(|i| i.ref_id.contains(&want))
+        .unwrap_or_else(|| panic!("ref_id 含 {want} 的 input 应存在"));
+    assert!(
+        hit.summary
+            .contains(&format!("[来源：记忆 {} v{v1}]", lesson.id)),
+        "注入文本标注来源与版本：{}",
+        hit.summary
+    );
+    assert!(
+        hit.summary.contains("背景补齐时先列出依赖与约束"),
+        "注入文本带记忆正文：{}",
+        hit.summary
+    );
+
+    // ---- 改一版：注入跟着指向新版本 ----
+    let updated = core
+        .memory_update(
+            &lesson.id,
+            None,
+            Some("背景补齐时先列依赖，再核对约束边界。"),
+            None,
+            None,
+        )
+        .unwrap()
+        .expect("条目应存在");
+    let v2 = updated.version_label();
+    assert_eq!(v2, 2, "更新产生新版本");
+    let inputs = memory_inputs_of_run(&core).await;
+    let refs = refs_of(&inputs);
+    let mine = format!("memory:{}#", lesson.id);
+    let injected: Vec<&str> = refs
+        .iter()
+        .filter(|r| r.starts_with(&mine))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        injected,
+        vec![format!("memory:{}#v{v2}", lesson.id).as_str()],
+        "更新后该条目只以 v{v2} 出现一次：{refs:?}"
+    );
+
+    // ---- 撤销学习：回滚到 v1 → 注入内容是旧版 ----
+    let rolled = core.memory_rollback(&lesson.id, v1, "user-1").unwrap();
+    let v3 = rolled.version_label();
+    assert_eq!(v3, 3, "回滚产生新版本行");
+    let inputs = memory_inputs_of_run(&core).await;
+    let refs = refs_of(&inputs);
+    assert!(
+        refs.contains(&format!("memory:{}#v{v3}", lesson.id)),
+        "回滚后注入指向新版本行 v{v3}：{refs:?}"
+    );
+    let hit = inputs
+        .iter()
+        .find(|i| i.ref_id.contains(&format!("memory:{}#v{v3}", lesson.id)))
+        .unwrap_or_else(|| panic!("回滚后记忆仍应注入：{refs:?}"));
+    assert!(
+        hit.summary.contains("先列出依赖与约束，再补外部资料"),
+        "回滚后注入的是旧版内容：{}",
+        hit.summary
+    );
+
+    // ---- 删除状态在后续会话生效：遗忘后不再注入 ----
+    core.memory_forget(&lesson.id).unwrap();
+    // 对照组：同时写入一条不会被遗忘的记忆——遗忘后它仍应注入，证明召回路径是活的，
+    // 「目标条目消失」是遗忘生效，而不是这一轮恰好没有召回。
+    let control = core
+        .memory_remember(MemoryDraft::new(
+            MemoryKind::Fact,
+            "背景补齐对照组",
+            "背景补齐的对照记忆：不应受别的条目遗忘影响。",
+        ))
+        .unwrap();
+    let inputs = memory_inputs_of_run(&core).await;
+    let refs = refs_of(&inputs);
+    assert!(
+        refs.contains(&format!(
+            "memory:{}#v{}",
+            control.id,
+            control.version_label()
+        )),
+        "对照组记忆应正常注入：{refs:?}"
+    );
+    assert!(
+        !refs.iter().any(|r| r.starts_with(&mine)),
+        "已遗忘的记忆不得再注入：{refs:?}"
+    );
+    drop(session);
 }

@@ -52,6 +52,7 @@ struct RoundState {
     thinking: String,
     tools: Vec<ToolCallRecord>,
     steps: Vec<TraceStep>,
+    activity: Vec<crate::types::CoreEvent>,
     cancelled: watch::Sender<bool>,
     steering: Vec<SteeringInput>,
     steering_open: bool,
@@ -163,6 +164,73 @@ pub fn push_thinking(session_id: &str, delta: &str) {
             text: delta.to_string(),
         }),
     }
+}
+
+/// Keep a bounded replay tail of meaningful live events for a console reconnect.
+/// Token/thinking chunks are coalesced; completed runs discard the entire state.
+pub fn push_activity_event(event: crate::types::CoreEvent) {
+    if !matches!(
+        event.kind.as_str(),
+        "run.progress"
+            | "orchestrator.token"
+            | "orchestrator.thinking"
+            | "unit.token"
+            | "unit.thinking"
+            | "tool.call"
+            | "tool.result"
+            | "terminal.started"
+            | "terminal.updated"
+            | "terminal.finished"
+            | "spawn.started"
+            | "spawn.finished"
+    ) {
+        return;
+    }
+    let mut map = states().lock();
+    let Some(state) = map.get_mut(&event.session_id) else {
+        return;
+    };
+    let delta_kind = matches!(
+        event.kind.as_str(),
+        "orchestrator.token" | "orchestrator.thinking" | "unit.token" | "unit.thinking"
+    );
+    if delta_kind {
+        let agent = event.payload.get("agentId").and_then(|v| v.as_str());
+        if let Some(last) = state.activity.last_mut().filter(|last| {
+            last.kind == event.kind
+                && last.payload.get("agentId").and_then(|v| v.as_str()) == agent
+                && last
+                    .payload
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s.len() < 16_384)
+        }) {
+            if let (Some(old), Some(next)) = (
+                last.payload.get("delta").and_then(|v| v.as_str()),
+                event.payload.get("delta").and_then(|v| v.as_str()),
+            ) {
+                let mut joined = String::with_capacity(old.len() + next.len());
+                joined.push_str(old);
+                joined.push_str(next);
+                last.payload["delta"] = serde_json::Value::String(joined);
+                return;
+            }
+        }
+    }
+    const MAX_ACTIVITY_EVENTS: usize = 128;
+    if state.activity.len() == MAX_ACTIVITY_EVENTS {
+        state.activity.remove(0);
+    }
+    state.activity.push(event);
+}
+
+/// A snapshot is read only while a round is active; it never creates round state.
+pub fn activity_snapshot(session_id: &str) -> Vec<crate::types::CoreEvent> {
+    states()
+        .lock()
+        .get(session_id)
+        .map(|state| state.activity.clone())
+        .unwrap_or_default()
 }
 
 /// 记录一次完成的工具调用（同步并入有序步骤）
@@ -338,6 +406,33 @@ mod serde_contract_tests {
         ));
         assert!(!called.get(), "已关闭的轮次不能持久化为 steering");
         end(&session);
+    }
+
+    #[test]
+    fn activity_snapshot_coalesces_deltas_and_is_scoped_to_live_round() {
+        let session = format!("activity-round-{}", crate::types::new_id());
+        begin(&session);
+        push_activity_event(crate::types::CoreEvent {
+            kind: "run.progress".into(),
+            session_id: session.clone(),
+            payload: serde_json::json!({"stage":"preparing", "message":"准备检查项目"}),
+        });
+        for delta in ["先看", "一下配置", "再开始"] {
+            push_activity_event(crate::types::CoreEvent {
+                kind: "orchestrator.token".into(),
+                session_id: session.clone(),
+                payload: serde_json::json!({"delta": delta}),
+            });
+        }
+        let events = activity_snapshot(&session);
+        assert_eq!(events.len(), 2, "文本增量应合并，保留准备状态");
+        assert_eq!(events[1].payload["delta"], "先看一下配置再开始");
+        assert!(activity_snapshot("another-session").is_empty());
+        end(&session);
+        assert!(
+            activity_snapshot(&session).is_empty(),
+            "轮次收束后不应恢复旧活动"
+        );
     }
 
     /// 序列化契约回归（P0 修复）：工具步骤键名 MUST 为 camelCase（callId），

@@ -85,17 +85,19 @@ impl Core {
         };
         // 回写绑定也直接操作（bind_flow_session_named 内部重复拿锁）：
         // 读流→合并名→写回，单临界区内完成
-        let mut flow = self.channel_flow(channel_id, chat_key).unwrap_or_else(|| ChannelFlow {
-            id: Self::flow_id(channel_id, chat_key),
-            channel_id: channel_id.to_string(),
-            chat_key: chat_key.to_string(),
-            display_name: flow_name.unwrap_or("").trim().to_string(),
-            is_group,
-            active_session: None,
-            last_message: String::new(),
-            last_active_at: String::new(),
-            created_at: now_iso(),
-        });
+        let mut flow = self
+            .channel_flow(channel_id, chat_key)
+            .unwrap_or_else(|| ChannelFlow {
+                id: Self::flow_id(channel_id, chat_key),
+                channel_id: channel_id.to_string(),
+                chat_key: chat_key.to_string(),
+                display_name: flow_name.unwrap_or("").trim().to_string(),
+                is_group,
+                active_session: None,
+                last_message: String::new(),
+                last_active_at: String::new(),
+                created_at: now_iso(),
+            });
         if flow.display_name.trim().is_empty() {
             if let Some(n) = flow_name {
                 flow.display_name = n.trim().to_string();
@@ -115,7 +117,9 @@ impl Core {
             .flatten()
     }
     pub fn channel_flows(&self, channel_id: Option<&str>) -> Vec<ChannelFlow> {
-        self.store.list_channel_flows(channel_id).unwrap_or_default()
+        self.store
+            .list_channel_flows(channel_id)
+            .unwrap_or_default()
     }
     /// 保存流（upsert）
     pub fn save_channel_flow(&self, flow: &ChannelFlow) -> anyhow::Result<()> {
@@ -339,5 +343,4 @@ impl Core {
         self.store.put_identity(&identity)?;
         Ok(identity)
     }
-
 }

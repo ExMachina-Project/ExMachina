@@ -67,7 +67,12 @@ impl Orchestrator {
         };
 
         // 技能包清单（数据驱动）：命中触发词的技能会随派发自动携带
-        let skill_brief = match self.registry.load_skills() {
+        // 技能来源被用户在本会话禁用：规划提示里不再出现技能目录——否则指挥体仍会
+        // 看到并规划出依赖技能的派发（capability-parity 6.3；与派发路径 matched_skills 同闸）
+        let skills_disabled = self
+            .tools
+            .context_source_disabled(session_id, crate::context_files::SourceKind::Skills);
+        let skill_brief = match if skills_disabled { Ok(Vec::new()) } else { self.registry.load_skills() } {
             Ok(sk) if !sk.is_empty() => {
                 let lines = sk
                     .iter()
@@ -98,11 +103,11 @@ impl Orchestrator {
                     "## 可用技能包
 {lines}
 
-技能维护：完成任务后若形成可复用流程，用 skill_manage 沉淀或修正（触发词要具体、指令可执行）。
+技能维护：完成任务后若形成可复用流程**且本会话有真实成功证据**，用 skill_manage 提议为技能候选并附上证据（工具结果末尾〔回执 …〕的标识或工作区内文件路径）；候选经用户确认后才生效，没有证据的自述会被拒绝（触发词要具体、指令可执行）。
 "
                 )
             }
-            _ => "## 技能沉淀\n完成任务后若形成可复用流程，用 skill_manage 创建技能（id 稳定、触发词具体、指令可执行）。\n".to_string(),
+            _ => "## 技能沉淀\n完成任务后若形成可复用流程且本会话有真实成功证据，用 skill_manage 提议为技能候选并附上 evidence（工具结果末尾〔回执 …〕的标识或工作区内文件路径）；候选经用户确认后才生效，没有证据的自述会被拒绝（id 稳定、触发词具体、指令可执行）。\n".to_string(),
         };
 
         // 链路模板清单（数据驱动）：与注册表一样注入规划提示，编成变化无需改代码
@@ -137,17 +142,25 @@ impl Orchestrator {
         };
 
         // ---- 记忆召回（docs/08 §5）：注入历史记忆与个体可靠性统计 ----
+        // 记忆来源被用户在本会话禁用则不召回（含深层记忆关闭时的 memory.md 文件记忆
+        // 回落——两者都是「记忆」来源；capability-parity 6.3）。模型主动调用 memory_recall
+        // 工具是显式工具行为，不在此列。
         let mut memory_block = String::new();
         // 记忆命名空间：默认同组共享；通道开启隔离时会话带独立分区键
         let memory_group = self.memory_group_for_session(session_id);
-        if self.memory_enabled {
-            let embedding=self.embed_query(text).await;
+        let memory_disabled = self
+            .tools
+            .context_source_disabled(session_id, crate::context_files::SourceKind::Memory);
+        if memory_disabled {
+            memory_block = String::new();
+        } else if self.memory_enabled {
+            let embedding = self.embed_query(text).await;
             if let Ok(hits) = self.memory.recall_with_model(
                 None,
                 text,
                 self.memory_recall_limit,
                 Some(&memory_group),
-                embedding.as_ref().map(|(m,v)|(m.as_str(),v.as_slice())),
+                embedding.as_ref().map(|(m, v)| (m.as_str(), v.as_slice())),
             ) {
                 memory_block = MemoryStore::render_prompt_block(&hits);
                 self.emit(
@@ -157,6 +170,7 @@ impl Orchestrator {
                         "query": text,
                         "hits": hits.iter().map(|h| serde_json::json!({
                             "id": h.entry.id,
+                            "version": h.entry.version_label(),
                             "kind": h.entry.kind.key(),
                             "title": h.entry.title,
                             "score": h.score,
@@ -192,8 +206,14 @@ impl Orchestrator {
             _ => String::new(),
         };
 
-        // 会话上下文（多轮记忆）：滚动摘要（压缩后的更早历史）+ 最近窗口原文
+        // 会话上下文（多轮记忆）：滚动摘要（压缩后的更早历史）+ 最近窗口原文。
+        // 滚动摘要属于「会话检索」来源，禁用后不注入；最近窗口是会话历史本身
+        // （不是独立来源，context_sources 同口径），始终在场。
         let (summary, recent) = self.ensure_compacted(session_id).await?;
+        let retrieval_disabled = self
+            .tools
+            .context_source_disabled(session_id, crate::context_files::SourceKind::Retrieval);
+        let summary = if retrieval_disabled { None } else { summary };
         let context_block = match (&summary, recent.is_empty()) {
             (Some(s), false) if !s.trim().is_empty() => {
                 format!("## 会话上下文（更早对话摘要）\n{s}\n\n## 最近对话\n{recent}\n\n")
@@ -224,9 +244,17 @@ impl Orchestrator {
         }
         // 多模态输入：本轮附带的图片（data URL）。生效模型未标记视觉能力时，
         // 走「视觉转述」模型把图片转成文字描述注入；未配置转述且明确无视觉 → 丢弃并说明。
-        let chain=self.resolve_agent_chain(&primary,crate::model_routing::ModelPurpose::Planning,text,session_id,None).await?;
+        let chain = self
+            .resolve_agent_chain(
+                &primary,
+                crate::model_routing::ModelPurpose::Planning,
+                text,
+                session_id,
+                None,
+            )
+            .await?;
         let images = crate::image_stash::take(session_id);
-        match self.relay_images(&images,&chain).await? {
+        match self.relay_images(&images, &chain).await? {
             Some(desc) => {
                 let note = format!(
                     "\n\n以下是用户图片的视觉转述（背景资料，仅供你了解图片内容）：\n{desc}\n要求：像亲眼看过图片一样自然回应；不得把上面的转述文字抄进回复，不得提及「转述/转写/识图/图片描述」，不得逐条罗列图片细节。"
@@ -234,7 +262,8 @@ impl Orchestrator {
                 user_msg.content.push_str(&note);
             }
             None => {
-                let vision = chain.candidates
+                let vision = chain
+                    .candidates
                     .first()
                     .and_then(|(pid, _, model)| self.model_pool.capability(pid, model, true));
                 if vision == Some(false) && !images.is_empty() {
@@ -268,7 +297,9 @@ impl Orchestrator {
         let mut last_err = String::new();
         for _attempt in 0..3 {
             // 规划阶段：输出为内部协议 JSON，不进可见输出区（改道思维轨收起栏）
-            let output = self.call_orch_stream_with_chain(session_id, &messages, false,&chain).await?;
+            let output = self
+                .call_orch_stream_with_chain(session_id, &messages, false, &chain)
+                .await?;
             match parse::parse_plan(&output) {
                 Ok(plan) => {
                     let unknown: Vec<String> = plan
@@ -294,9 +325,15 @@ impl Orchestrator {
                         let invalid = plan.nodes.iter().find_map(|node| {
                             let selection = node.model_selection.as_ref()?;
                             let def = self.registry.get(&node.agent_identifier)?;
-                            self.validate_model_selection(&def, selection).err().map(|e| e.to_string())
+                            self.validate_model_selection(&def, selection)
+                                .err()
+                                .map(|e| e.to_string())
                         });
-                        if let Some(error) = invalid { last_err = error; } else { return Ok(plan); }
+                        if let Some(error) = invalid {
+                            last_err = error;
+                        } else {
+                            return Ok(plan);
+                        }
                     } else {
                         last_err =
                             format!("以下 agentIdentifier 不在注册表：{}", unknown.join("、"));
@@ -318,16 +355,35 @@ impl Orchestrator {
         visible_tokens: bool,
     ) -> anyhow::Result<String> {
         // 回退链逐档尝试：失败且未发出任何 token 时切换下一档案并冷却失败者
-        let primary=self.registry.primary().ok_or_else(||anyhow::anyhow!("当前交互目标没有主智能体"))?;
-        let purpose=if visible_tokens {crate::model_routing::ModelPurpose::Summary} else {crate::model_routing::ModelPurpose::Planning};
-        let task=messages.last().map(|m|m.content.as_str()).unwrap_or("");
-        let chain = self.resolve_agent_chain(&primary,purpose,task,session_id,None).await?;
-        self.call_orch_stream_with_chain(session_id,messages,visible_tokens,&chain).await
+        let primary = self
+            .registry
+            .primary()
+            .ok_or_else(|| anyhow::anyhow!("当前交互目标没有主智能体"))?;
+        let purpose = if visible_tokens {
+            crate::model_routing::ModelPurpose::Summary
+        } else {
+            crate::model_routing::ModelPurpose::Planning
+        };
+        let task = messages.last().map(|m| m.content.as_str()).unwrap_or("");
+        let chain = self
+            .resolve_agent_chain(&primary, purpose, task, session_id, None)
+            .await?;
+        self.call_orch_stream_with_chain(session_id, messages, visible_tokens, &chain)
+            .await
     }
 
-    async fn call_orch_stream_with_chain(&self,session_id:&str,messages:&[ChatMessage],visible_tokens:bool,chain:&ModelChain)->anyhow::Result<String> {
-        let primary=self.registry.primary().ok_or_else(||anyhow::anyhow!("当前目标没有主智能体"))?;
-        let candidates=chain.candidates.clone();
+    async fn call_orch_stream_with_chain(
+        &self,
+        session_id: &str,
+        messages: &[ChatMessage],
+        visible_tokens: bool,
+        chain: &ModelChain,
+    ) -> anyhow::Result<String> {
+        let primary = self
+            .registry
+            .primary()
+            .ok_or_else(|| anyhow::anyhow!("当前目标没有主智能体"))?;
+        let candidates = chain.candidates.clone();
         let mut last_err: Option<anyhow::Error> = None;
         'candidate: for (pid, provider, model) in candidates {
             let mut req = ChatRequest::new(model.clone(), messages.to_vec());
@@ -337,7 +393,11 @@ impl Orchestrator {
             let stream_provider = provider.clone();
             let handle = tokio::spawn(async move { stream_provider.stream(req_clone, tx).await });
             struct AbortStream(tokio::task::AbortHandle);
-            impl Drop for AbortStream { fn drop(&mut self) { self.0.abort(); } }
+            impl Drop for AbortStream {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
             let _abort = AbortStream(handle.abort_handle());
 
             let mut acc = String::new();
@@ -349,27 +409,27 @@ impl Orchestrator {
             loop {
                 match tokio::time::timeout(idle, rx.recv()).await {
                     Ok(Some(delta)) => match delta {
-                    // 思维链单独成轨：渠道折叠呈现「思考」，不与回答混流
-                    StreamDelta::Thinking(t) => {
-                        // 思维增量随轮次留存（过程收起栏/落盘数据源）
-                        crate::round_trace::push_thinking(session_id, &t);
-                        self.emit(
-                            session_id,
-                            "orchestrator.thinking",
-                            serde_json::json!({ "delta": t }),
-                        );
-                    }
-                    StreamDelta::Text(t) => {
-                        acc.push_str(&t);
-                        // 规划阶段输出的是内部协议（OrchestratorPlan JSON），不是用户面文本：
-                        // 改道思维轨（收起栏），可见输出区只保留收束阶段的用户面文本
-                        let kind = if visible_tokens {
-                            "orchestrator.token"
-                        } else {
-                            "orchestrator.thinking"
-                        };
-                        self.emit(session_id, kind, serde_json::json!({ "delta": t }));
-                    }
+                        // 思维链单独成轨：渠道折叠呈现「思考」，不与回答混流
+                        StreamDelta::Thinking(t) => {
+                            // 思维增量随轮次留存（过程收起栏/落盘数据源）
+                            crate::round_trace::push_thinking(session_id, &t);
+                            self.emit(
+                                session_id,
+                                "orchestrator.thinking",
+                                serde_json::json!({ "delta": t }),
+                            );
+                        }
+                        StreamDelta::Text(t) => {
+                            acc.push_str(&t);
+                            // 规划阶段输出的是内部协议（OrchestratorPlan JSON），不是用户面文本：
+                            // 改道思维轨（收起栏），可见输出区只保留收束阶段的用户面文本
+                            let kind = if visible_tokens {
+                                "orchestrator.token"
+                            } else {
+                                "orchestrator.thinking"
+                            };
+                            self.emit(session_id, kind, serde_json::json!({ "delta": t }));
+                        }
                     },
                     // 流正常收尾（发送端 drop）：退出收流，等待任务终态
                     Ok(None) => break,
@@ -390,7 +450,9 @@ impl Orchestrator {
                                 "流式响应 {pid} 帧间超时（180s 无增量），判定端点僵死"
                             ));
                         }
-                        if !acc.is_empty() { return Err(last_err.take().unwrap()); }
+                        if !acc.is_empty() {
+                            return Err(last_err.take().unwrap());
+                        }
                         continue 'candidate;
                     }
                 }
@@ -406,7 +468,10 @@ impl Orchestrator {
                     );
                     if acc.is_empty() && resp.content.is_empty() {
                         let fallback = provider.chat(req).await?;
-                        anyhow::ensure!(!fallback.content.trim().is_empty(),"模型返回空响应：{pid}/{model}");
+                        anyhow::ensure!(
+                            !fallback.content.trim().is_empty(),
+                            "模型返回空响应：{pid}/{model}"
+                        );
                         self.emit(session_id,"model.used",serde_json::json!({"profile":pid,"model":model,"agentId":primary.identifier}));
                         self.tools.record_usage(
                             session_id,
@@ -466,6 +531,6 @@ impl Orchestrator {
                 Err(e) => return Err(anyhow::anyhow!("流式任务失败: {e}")),
             }
         }
-        Err(last_err.unwrap_or_else(||anyhow::anyhow!("没有可用的模型候选")))
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("没有可用的模型候选")))
     }
 }

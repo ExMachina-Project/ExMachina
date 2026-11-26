@@ -460,11 +460,7 @@ mod pending_inputs_tests {
             goal.contains("[群聊·李四] 对，我也想知道"),
             "李四署名丢失：{goal}"
         );
-        assert_ne!(
-            goal.lines().count(),
-            1,
-            "多人都应保留独立行，不是拼成一段"
-        );
+        assert_ne!(goal.lines().count(), 1, "多人都应保留独立行，不是拼成一段");
     }
 }
 
@@ -546,5 +542,458 @@ mod five_stage_smoke {
         assert!(!crate::round_trace::is_cancelled(&sid));
         let ws = core_arc.config().workspace_root.clone();
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// capability-parity 6.3 验收：`/context disable <来源>` 必须**真的改变发往模型的
+    /// 提示词**，而不只是翻一个标志位、回一句「下轮生效」。走真实轮次（`Core::chat`），
+    /// 用内容探测器观察模型实际收到的请求。三条注入代码路径各有各的闸，都要验证：
+    ///
+    /// | 路径 | 何时走 | 注入点 |
+    /// |---|---|---|
+    /// | 规划（`Orchestrator::plan`） | 组模式 | 技能简表、滚动摘要、记忆召回 |
+    /// | 派发（dispatch inputs） | 组模式，有执行个体 | 技能指令、记忆、共享上下文里的摘要 |
+    /// | 智能体直连（`single_direct_round`） | 智能体模式 | 系统提示里的滚动摘要 |
+    ///
+    /// 断言只依赖闸直接控制的**注入结构**（块标题、输入前缀），不依赖召回排序之类
+    /// 闸管不了的结果——见各测试的说明。
+    mod context_source_gates {
+        use super::*;
+        use crate::provider::mock_probe_scope;
+
+        /// 唯一标记：并行测试各用各的，探测器互不干扰。用带连字符的 uuid——
+        /// 不用 32 位连续十六进制：其中的长数字子串会被敏感内容检测当成卡号
+        /// （技能写入经同一校验），随机命中时夹具自己就把测试弄挂了。
+        fn marker(tag: &str) -> String {
+            format!("{tag}-{}", uuid::Uuid::new_v4())
+        }
+
+        /// 探测作用域：本测试独有、且会出现在它**每个**模型请求里的片段（进智能体
+        /// 名称/提示词 → 系统提示）。Mock 是全进程共用的，没有它，邻居测试的请求会
+        /// 给本测试的探针计数（见 `provider::mock` 的说明）。
+        fn scope() -> String {
+            format!("csg-{}", uuid::Uuid::new_v4())
+        }
+
+        fn core_with_memory(scope: &str) -> crate::Core {
+            let dir = std::env::temp_dir().join(format!("exm-csg-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut cfg = crate::config::ExmConfig::load(&dir);
+            cfg.use_mock = true;
+            cfg.memory_enabled = true;
+            core_from_config(cfg, scope)
+        }
+
+        /// 组模式 Core（带主智能体与执行个体，名称都含 `scope`——探测作用域）。
+        /// 规划路径以组主智能体的职责提示词为基底；默认空目录落的是智能体模式
+        /// （无主智能体），所以这里建一个带主智能体的组并激活。
+        fn core_from_config(cfg: crate::config::ExmConfig, scope: &str) -> crate::Core {
+            let orch = format!("orch-{scope}");
+            let worker = format!("worker-{scope}");
+            let core = crate::Core::with_config(cfg).expect("创建 Core 失败");
+            let reg = core.registry();
+            reg.create_group(Some("csg".into()), "来源闸测试组", "")
+                .unwrap();
+            reg.upsert_agent(
+                "csg",
+                AgentDefinition {
+                    name: orch.clone(),
+                    identifier: orch,
+                    domain: "测试".into(),
+                    tier: Tier::Orchestrator,
+                    description: "测试主智能体".into(),
+                    capabilities: vec![],
+                    tools: vec![],
+                    when_to_call: String::new(),
+                    link: None,
+                    max_steps: None,
+                    dependencies: vec![],
+                    composable_with: vec![],
+                    input_schema: Default::default(),
+                    output_schema: Default::default(),
+                    prompt_file: String::new(),
+                    model_hint: None,
+                    model_routing: None,
+                },
+                None,
+            )
+            .unwrap();
+            reg.set_primary("csg", &format!("orch-{scope}")).unwrap();
+            // 一个执行个体：Mock 规划据此产出 L1 派发（只有主智能体时走 L0 直答，
+            // 派发路径——技能/记忆/共享上下文的注入点——不会执行）
+            reg.upsert_agent(
+                "csg",
+                AgentDefinition {
+                    name: worker.clone(),
+                    identifier: worker,
+                    domain: "测试".into(),
+                    tier: Tier::Unit,
+                    description: "测试执行个体".into(),
+                    capabilities: vec![],
+                    tools: vec![],
+                    when_to_call: String::new(),
+                    link: None,
+                    max_steps: None,
+                    dependencies: vec![],
+                    composable_with: vec![],
+                    input_schema: Default::default(),
+                    output_schema: Default::default(),
+                    prompt_file: String::new(),
+                    model_hint: None,
+                    model_routing: None,
+                },
+                None,
+            )
+            .unwrap();
+            reg.set_active_group("csg").unwrap();
+            core
+        }
+
+        fn skill(id: &str, name: &str, body_mark: &str) -> crate::types::SkillDef {
+            crate::types::SkillDef {
+                id: id.into(),
+                name: name.into(),
+                description: String::new(),
+                triggers: vec!["触发".into()],
+                // 指令正文带独立标记：派发路径注入的是 instructions（不是 name）
+                instructions: format!("指令正文 {body_mark}"),
+                agents: vec![],
+                created_at: String::new(),
+                use_count: 0,
+                success_count: 0,
+                last_used_at: String::new(),
+                source: String::new(),
+                version: 0,
+                updated_at: String::new(),
+            }
+        }
+
+        /// 跑**完整一轮**（规划 + 派发，或智能体直连），返回各标记是否出现在发往
+        /// 模型的任一请求里。第二个返回值是各标记命中的消息数——断言失败时连同
+        /// 打出，便于区分「没注入」与「注入了多次」。
+        ///
+        /// `scope` 是探测作用域：只有含它的请求才计数（见 [`scope`]）。
+        ///
+        /// 轮次 future 在**构造点就地装箱**：`core.chat` 的 future 约 40KB，若按值传给
+        /// `mock_probe_scope`，它就整份嵌进本函数的状态机，再嵌进测试体（同一测试体
+        /// 顺序跑三轮）——三层叠起来超过 2MB 线程栈（实测溢出，且余量本来就只有几十
+        /// 字节：被测代码任何一点增长都会把它推过去）。装箱后栈上只剩一个指针。
+        async fn round_and_probe(
+            core: &std::sync::Arc<crate::Core>,
+            scope: &str,
+            sid: &str,
+            text: &str,
+            marks: &[&str],
+        ) -> (Vec<bool>, Vec<u32>) {
+            let round: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>> = {
+                let core = core.clone();
+                let sid = sid.to_string();
+                let text = text.to_string();
+                Box::pin(async move { core.chat(&sid, &text).await })
+            };
+            let (table, out) = mock_probe_scope(scope, marks, round).await;
+            out.expect("完整一轮应成功（禁用来源不是故障）");
+            let hits: Vec<u32> = marks
+                .iter()
+                .map(|m| table.get(*m).copied().unwrap_or(0))
+                .collect();
+            let present: Vec<bool> = hits.iter().map(|n| *n > 0).collect();
+            (present, hits)
+        }
+
+        /// (Core, 会话 id, 探测作用域)
+        fn setup() -> (std::sync::Arc<crate::Core>, String, String) {
+            let scope = scope();
+            let core = std::sync::Arc::new(core_with_memory(&scope));
+            let sid = core.create_session("csg").unwrap().id;
+            (core, sid, scope)
+        }
+
+        /// 技能闸与记忆闸，覆盖规划与派发两条路径的注入点：
+        ///
+        /// | 来源 | 规划路径 | 派发路径 |
+        /// |---|---|---|
+        /// | skills | 技能简表里的技能 name | `[来源：技能 <id> vN]` 指令注入 |
+        /// | memory | `## 历史记忆（群体记忆库召回…` 块 | `[群体记忆|…]` / `[个体记忆|…]` 输入 |
+        ///
+        /// 探针一律用**注入结构自带的标记**，不用「我写的那条内容」：每轮结束
+        /// write_memories 会把执行回流写成记忆（个体 evidence 归属 worker、标题与派发
+        /// 查询完全重合），下一轮派发召回窗口里占位的就是它而非任意一条群体教训——
+        /// 那是召回排序的结果，不是闸能负责的不变量。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn 禁用技能与记忆_规划与派发提示词里都消失() {
+            let (core, sid, scope) = setup();
+            // 短历史：用户输入即 goal，派发路径按 goal 命中技能触发词
+            let text = "触发一下 做一个东西";
+            let skill_name = marker("技能目录");
+            core.add_skill(skill("csg-skill", &skill_name, "指令正文"))
+                .unwrap();
+            core.memory_remember(
+                crate::memory::MemoryDraft::new(
+                    crate::memory::MemoryKind::Lesson,
+                    format!("{text}：一条教训"),
+                    "教训正文",
+                )
+                .importance(1.0),
+            )
+            .expect("写入记忆");
+
+            // [技能简表, 技能指令注入, 规划记忆块, 派发记忆输入]
+            const PLAN_MEM: &str = "## 历史记忆（群体记忆库召回";
+            const DISPATCH_MEM_A: &str = "[群体记忆|";
+            const DISPATCH_MEM_B: &str = "[个体记忆|";
+            const SKILL_INJECT: &str = "[来源：技能 csg-skill v";
+            let marks = [
+                skill_name.as_str(),
+                SKILL_INJECT,
+                PLAN_MEM,
+                DISPATCH_MEM_A,
+                DISPATCH_MEM_B,
+            ];
+            fn show(v: &[bool], hits: &[u32]) -> String {
+                ["技能简表", "技能指令注入", "规划记忆块", "派发记忆输入"]
+                    .iter()
+                    .zip([v[0], v[1], v[2], v[3] || v[4]])
+                    .zip([hits[0], hits[1], hits[2], hits[3] + hits[4]])
+                    .map(|((n, b), h)| format!("{n}={b}×{h}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+
+            let (base, base_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(
+                [base[0], base[1], base[2], base[3] || base[4]],
+                [true; 4],
+                "基线：四处注入都应在场 —— {}",
+                show(&base, &base_hits)
+            );
+
+            // ① 只禁用 skills → 技能简表（规划）与技能指令注入（派发）消失；记忆两处照常
+            core.context_source_set(&sid, "skills", true).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert!(!v[0], "禁用 skills：规划提示词不得再出现技能简表");
+            assert!(!v[1], "禁用 skills：派发不得再注入技能指令");
+            assert!(
+                v[2],
+                "禁用 skills 不得波及规划路径的记忆召回 —— {}",
+                show(&v, &v_hits)
+            );
+            assert!(
+                v[3] || v[4],
+                "禁用 skills 不得波及派发路径的记忆输入 —— {}",
+                show(&v, &v_hits)
+            );
+
+            // ② 再禁用 memory → 记忆两处消失（技能仍关闭）
+            core.context_source_set(&sid, "memory", true).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert!(!v[2], "禁用 memory：规划提示词不得再出现记忆块");
+            assert!(
+                !v[3] && !v[4],
+                "禁用 memory：派发不得再带记忆输入 —— {}",
+                show(&v, &v_hits)
+            );
+            assert!(
+                !v[0] && !v[1],
+                "memory 的开关不得波及 skills —— {}",
+                show(&v, &v_hits)
+            );
+
+            // ③ 只重新启用 skills → 技能两处回来；记忆仍关闭（启用只影响自己）
+            core.context_source_set(&sid, "skills", false).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(
+                (v[0], v[1]),
+                (true, true),
+                "启用 skills 只恢复 skills —— {}",
+                show(&v, &v_hits)
+            );
+            assert!(
+                !v[2],
+                "启用 skills 不得顺带恢复 memory —— {}",
+                show(&v, &v_hits)
+            );
+            assert!(!v[3] && !v[4]);
+
+            // ④ 再启用 memory → 全部回来
+            core.context_source_set(&sid, "memory", false).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(
+                [v[0], v[1], v[2], v[3] || v[4]],
+                [true; 4],
+                "全部恢复 —— {}",
+                show(&v, &v_hits)
+            );
+
+            let ws = core.config().workspace_root.clone();
+            let _ = std::fs::remove_dir_all(&ws);
+        }
+
+        /// 检索闸：滚动摘要属于「会话检索」来源。规划路径（plan.rs 会话上下文块）与
+        /// 派发路径（groupSharedContext 的共享上下文输入）都要被闸住；最近对话窗口
+        /// 是会话历史本身，不是独立来源，始终在场。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn 禁用检索_滚动摘要不再注入_最近窗口仍在() {
+            let dir = std::env::temp_dir().join(format!("exm-csg-r-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut cfg = crate::config::ExmConfig::load(&dir);
+            cfg.use_mock = true;
+            cfg.memory_enabled = false;
+            cfg.experiments.group_shared_context = true; // 派发侧共享上下文（实验开关）
+            let scope = scope();
+            let core = std::sync::Arc::new(core_from_config(cfg, &scope));
+            let sid = core.create_session("csg-retrieval").unwrap().id;
+
+            // 长历史：超过条数阈值（COMPACT_TRIGGER=20）→ 本轮触发压缩，Mock 压缩器
+            // 产出固定摘要（「目标与进展：…」）——以此作为滚动摘要的探针，两条路径同源。
+            const SUMMARY_MARK: &str = "目标与进展：用户持续在推进当前任务";
+            // 最近窗口 = 尾部 keep=12 条原文：其中一条带标记。它是会话历史本身，
+            // 不是独立来源——禁用 retrieval 也必须在场。
+            let recent_mark = marker("最近窗口");
+            for i in 0..30 {
+                let text = if i == 25 {
+                    recent_mark.clone()
+                } else {
+                    format!("早期消息 {i}")
+                };
+                core.store
+                    .add_message(
+                        &sid,
+                        crate::types::MessageRole::User,
+                        None,
+                        vec![Statement::new(SpeechTag::要求, text)],
+                    )
+                    .unwrap();
+            }
+            let marks = [SUMMARY_MARK, recent_mark.as_str()];
+            let show = |v: &[bool], hits: &[u32]| {
+                format!(
+                    "滚动摘要={}×{} 最近窗口={}×{}",
+                    v[0], hits[0], v[1], hits[1]
+                )
+            };
+            let text = "做一个东西";
+
+            let (base, base_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(
+                base,
+                [true, true],
+                "基线：滚动摘要与最近窗口都应注入 —— {}",
+                show(&base, &base_hits)
+            );
+
+            // 禁用 retrieval → 摘要消失；最近窗口仍在（不是独立来源）
+            core.context_source_set(&sid, "retrieval", true).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(v, [false, true], "禁用 retrieval —— {}", show(&v, &v_hits));
+
+            // 重新启用 → 摘要回来
+            core.context_source_set(&sid, "retrieval", false).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(
+                v,
+                [true, true],
+                "启用 retrieval 恢复摘要 —— {}",
+                show(&v, &v_hits)
+            );
+
+            let ws = core.config().workspace_root.clone();
+            let _ = std::fs::remove_dir_all(&ws);
+        }
+
+        /// 智能体模式的轮次走 `single_direct_round`，与组模式的规划/派发是不同的注入
+        /// 代码路径——滚动摘要的闸在这里也要成立。这条路径没有技能/记忆的自动注入，
+        /// 所以只需验证 retrieval。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn 智能体模式_禁用检索_滚动摘要不再注入() {
+            let dir = std::env::temp_dir().join(format!("exm-csg-s-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut cfg = crate::config::ExmConfig::load(&dir);
+            cfg.use_mock = true;
+            cfg.memory_enabled = false;
+            let core = std::sync::Arc::new(crate::Core::with_config(cfg).expect("创建 Core 失败"));
+            // 智能体模式：一个单智能体并激活（`exm agent create` 后的形态）。
+            // 提示词里放探测作用域：这条路径的请求只有一条系统提示，作用域必须在其中
+            let scope = scope();
+            let reg = core.registry();
+            let single = reg
+                .upsert_single(
+                    AgentDefinition {
+                        name: "csg-single".into(),
+                        identifier: "csg-single".into(),
+                        domain: "测试".into(),
+                        tier: Tier::Orchestrator,
+                        description: "测试单智能体".into(),
+                        capabilities: vec![],
+                        tools: vec![],
+                        when_to_call: String::new(),
+                        link: None,
+                        max_steps: None,
+                        dependencies: vec![],
+                        composable_with: vec![],
+                        input_schema: Default::default(),
+                        output_schema: Default::default(),
+                        prompt_file: String::new(),
+                        model_hint: None,
+                        model_routing: None,
+                    },
+                    Some(format!("你是测试单智能体。探测域 {scope}")),
+                )
+                .unwrap();
+            reg.set_active_single(Some(&single.identifier)).unwrap();
+            assert!(reg.single_mode(), "前置：处于智能体模式");
+            let sid = core.create_session("csg-single").unwrap().id;
+
+            const SUMMARY_MARK: &str = "目标与进展：用户持续在推进当前任务";
+            let recent_mark = marker("最近窗口");
+            // 智能体模式的压缩阈值比组模式宽（trigger=40 / keep=20，见 single_direct_round）：
+            // 历史必须超过 40 条才会真正发生压缩、产生滚动摘要。标记消息放在尾部窗口内。
+            for i in 0..50 {
+                let text = if i == 48 {
+                    recent_mark.clone()
+                } else {
+                    format!("早期消息 {i}")
+                };
+                core.store
+                    .add_message(
+                        &sid,
+                        crate::types::MessageRole::User,
+                        None,
+                        vec![Statement::new(SpeechTag::要求, text)],
+                    )
+                    .unwrap();
+            }
+            let marks = [SUMMARY_MARK, recent_mark.as_str()];
+            let show = |v: &[bool], hits: &[u32]| {
+                format!(
+                    "滚动摘要={}×{} 最近窗口={}×{}",
+                    v[0], hits[0], v[1], hits[1]
+                )
+            };
+            let text = "做一个东西";
+
+            let (base, base_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(base, [true, true], "基线 —— {}", show(&base, &base_hits));
+
+            core.context_source_set(&sid, "retrieval", true).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(
+                v,
+                [false, true],
+                "禁用 retrieval（智能体模式）—— {}",
+                show(&v, &v_hits)
+            );
+
+            core.context_source_set(&sid, "retrieval", false).unwrap();
+            let (v, v_hits) = round_and_probe(&core, &scope, &sid, text, &marks).await;
+            assert_eq!(
+                v,
+                [true, true],
+                "启用 retrieval 恢复 —— {}",
+                show(&v, &v_hits)
+            );
+
+            let ws = core.config().workspace_root.clone();
+            let _ = std::fs::remove_dir_all(&ws);
+        }
     }
 }

@@ -375,7 +375,10 @@ pub async fn fetch_targz(url: &str, tmp: &Path) -> Result<(), String> {
         if total > MAX_TOTAL_BYTES {
             drop(out);
             let _ = std::fs::remove_file(tmp);
-            return Err(format!("包超过总上限（{}MB），已中止下载", MAX_TOTAL_BYTES / 1024 / 1024));
+            return Err(format!(
+                "包超过总上限（{}MB），已中止下载",
+                MAX_TOTAL_BYTES / 1024 / 1024
+            ));
         }
         out.write_all(&chunk)
             .map_err(|e| format!("写临时文件失败：{e}"))?;

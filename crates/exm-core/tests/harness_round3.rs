@@ -144,7 +144,13 @@ async fn spawn_后台派生_立即返回并回收() {
         .execute(
             "orchestrator",
             "ses-sp",
-            &[ToolName::Spawn],
+            &[
+                ToolName::Spawn,
+                ToolName::Read,
+                ToolName::Grep,
+                ToolName::Glob,
+                ToolName::WebFetch,
+            ],
             ToolName::Spawn,
             &serde_json::json!({ "task": "调研 A 方案", "background": true }),
         )
@@ -163,7 +169,13 @@ async fn spawn_后台派生_立即返回并回收() {
         .execute(
             "orchestrator",
             "ses-sp",
-            &[ToolName::Spawn],
+            &[
+                ToolName::Spawn,
+                ToolName::Read,
+                ToolName::Grep,
+                ToolName::Glob,
+                ToolName::WebFetch,
+            ],
             ToolName::Spawn,
             &serde_json::json!({ "op": "status", "spawnId": spawn_id }),
         )
@@ -185,7 +197,13 @@ async fn spawn_后台派生_立即返回并回收() {
         .execute(
             "orchestrator",
             "ses-sp",
-            &[ToolName::Spawn],
+            &[
+                ToolName::Spawn,
+                ToolName::Read,
+                ToolName::Grep,
+                ToolName::Glob,
+                ToolName::WebFetch,
+            ],
             ToolName::Spawn,
             &serde_json::json!({ "op": "list" }),
         )
@@ -200,7 +218,13 @@ async fn spawn_后台派生_立即返回并回收() {
         .execute(
             "orchestrator",
             "ses-other",
-            &[ToolName::Spawn],
+            &[
+                ToolName::Spawn,
+                ToolName::Read,
+                ToolName::Grep,
+                ToolName::Glob,
+                ToolName::WebFetch,
+            ],
             ToolName::Spawn,
             &serde_json::json!({ "op": "list" }),
         )
@@ -228,7 +252,13 @@ async fn spawn_后台超时终态与未读提醒() {
         .execute(
             "orchestrator",
             "ses-to",
-            &[ToolName::Spawn],
+            &[
+                ToolName::Spawn,
+                ToolName::Read,
+                ToolName::Grep,
+                ToolName::Glob,
+                ToolName::WebFetch,
+            ],
             ToolName::Spawn,
             &serde_json::json!({ "task": "慢任务", "background": true, "timeoutSecs": 5 }),
         )
@@ -245,7 +275,13 @@ async fn spawn_后台超时终态与未读提醒() {
         .execute(
             "orchestrator",
             "ses-to",
-            &[ToolName::Spawn],
+            &[
+                ToolName::Spawn,
+                ToolName::Read,
+                ToolName::Grep,
+                ToolName::Glob,
+                ToolName::WebFetch,
+            ],
             ToolName::Spawn,
             &serde_json::json!({ "op": "status", "spawnId": spawn_id }),
         )
@@ -262,7 +298,13 @@ async fn spawn_未读终态进入提醒注入() {
         .execute(
             "orchestrator",
             "ses-note",
-            &[ToolName::Spawn],
+            &[
+                ToolName::Spawn,
+                ToolName::Read,
+                ToolName::Grep,
+                ToolName::Glob,
+                ToolName::WebFetch,
+            ],
             ToolName::Spawn,
             &serde_json::json!({ "task": "提醒验证", "background": true }),
         )

@@ -83,6 +83,37 @@ impl AgentRuntime {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(crate::autonomy::SEARCH_DISCIPLINE);
         }
+        // 分层上下文文件（capability-parity 6.1/6.2，spec: context-files）：
+        // 与 chat_execute 同口径——项目/用户层按固定优先级注入 + 来源事件。
+        {
+            let workspace = crate::workspace::current()
+                .or_else(|| self.tools.workspace_for_session_opt(session_id));
+            let user_root = crate::context_files::user_context_root();
+            let disabled = self.tools.disabled_context_sources(session_id);
+            let (section, statuses, conflicts) =
+                crate::context_files::load_context_section_filtered(
+                    workspace.as_deref(),
+                    user_root.as_deref(),
+                    crate::context_files::DEFAULT_PER_FILE_CHARS,
+                    crate::context_files::DEFAULT_TOTAL_CHARS,
+                    &disabled,
+                );
+            if !section.trim().is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&section);
+            }
+            if !conflicts.is_empty() || statuses.iter().any(|s| s.status.starts_with("loaded")) {
+                let payload = serde_json::json!({
+                    "sources": statuses,
+                    "conflicts": conflicts,
+                });
+                self.tools.emit_and_persist(crate::types::CoreEvent {
+                    kind: "context.sources".into(),
+                    session_id: session_id.to_string(),
+                    payload,
+                });
+            }
+        }
 
         let max_steps = order.constraints.max_steps.max(1);
         // 派发时限（指挥体按步数分档声明，timeout_ms = 步数 × 30s）：0 = 不限（旧调用方兼容）。
@@ -101,6 +132,10 @@ impl AgentRuntime {
         // （web_search / computer 仅在后端就绪时下发——不承诺不存在的能力；
         //   文件记忆模式下 memory_write/link 必然失败，同样不下发）
         let scoped_allowlist = scope.filter_allowlist(&order.tool_allowlist);
+        if scope.allows_tools() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(TASK_PROGRESS_NOTE);
+        }
         let mut specs = crate::tools::ToolGateway::tool_specs_gated(
             &scoped_allowlist,
             self.tools.search_ready(),
@@ -497,7 +532,8 @@ impl AgentRuntime {
     /// 无派发概念、无 SyncReport 契约——模型产出不含工具调用的文本即为终点。
     /// 供智能体模式使用;工具面 = 个体 allowlist + 可见自定义工具 + MCP。
     /// `trace` = 过程数据归集键（单聊与用量同键）。
-    // 会话执行的全部上下文逐项透传，收拢参数会造一个只用一次的中间结构
+    ///
+    /// 分层上下文段由这里注入（见 [`Self::chat_execute_with_context`]）。
     #[allow(clippy::too_many_arguments)]
     pub async fn chat_execute<F>(
         &self,
@@ -509,6 +545,45 @@ impl AgentRuntime {
         chain: crate::provider::ModelChain,
         attach_images: bool,
         scope: ToolScope,
+        on_delta: F,
+    ) -> anyhow::Result<String>
+    where
+        F: FnMut(StreamDelta),
+    {
+        self.chat_execute_with_context(
+            def,
+            system_prompt,
+            history,
+            session_id,
+            trace,
+            chain,
+            attach_images,
+            scope,
+            false,
+            on_delta,
+        )
+        .await
+    }
+
+    /// 同 [`Self::chat_execute`]，但由调用者声明系统提示里**是否已经**带了分层上下文段
+    /// （`already_has_context = true` 时这里不再注入）。
+    ///
+    /// 上下文段在一个请求里只能出现一次：它是按字符预算装填的，重复一遍等于这份预算被
+    /// 占用两倍，同一条指令出现两遍也会让模型困惑。调用者自己拼装系统提示并已注入
+    /// （orchestrator 的单体直连 / 定向对话：注入的同时落 `context.sources` 事件）时传
+    /// `true`；只给任务书的派生执行器走 [`Self::chat_execute`]，由这里注入。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_execute_with_context<F>(
+        &self,
+        def: &AgentDefinition,
+        system_prompt: String,
+        history: Vec<ChatMessage>,
+        session_id: &str,
+        trace: &str,
+        chain: crate::provider::ModelChain,
+        attach_images: bool,
+        scope: ToolScope,
+        already_has_context: bool,
         mut on_delta: F,
     ) -> anyhow::Result<String>
     where
@@ -528,6 +603,40 @@ impl AgentRuntime {
         if scope.allows_tools() && self.tools.search_discipline_ready() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(crate::autonomy::SEARCH_DISCIPLINE);
+        }
+        // 分层上下文文件（capability-parity 6.1/6.2，spec: context-files）：
+        // 项目（工作区）与用户（~/.exmachina）层按固定优先级注入，带来源标签
+        // 与不可信声明；缺失容错（无文件 = 不追加任何段）。敏感文件默认排除。
+        // 调用者已注入过（orchestrator 直连/定向对话）则跳过：一个请求里只出现一次。
+        if !already_has_context {
+            let workspace = crate::workspace::current()
+                .or_else(|| self.tools.workspace_for_session_opt(session_id));
+            let user_root = crate::context_files::user_context_root();
+            let disabled = self.tools.disabled_context_sources(session_id);
+            let (section, statuses, conflicts) =
+                crate::context_files::load_context_section_filtered(
+                    workspace.as_deref(),
+                    user_root.as_deref(),
+                    crate::context_files::DEFAULT_PER_FILE_CHARS,
+                    crate::context_files::DEFAULT_TOTAL_CHARS,
+                    &disabled,
+                );
+            if !section.trim().is_empty() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&section);
+            }
+            // 冲突说明（要求绕过审批/读密钥/自动发布）落事件流：策略不变、可诊断
+            if !conflicts.is_empty() || statuses.iter().any(|s| s.status.starts_with("loaded")) {
+                let payload = serde_json::json!({
+                    "sources": statuses,
+                    "conflicts": conflicts,
+                });
+                self.tools.emit_and_persist(crate::types::CoreEvent {
+                    kind: "context.sources".into(),
+                    session_id: session_id.to_string(),
+                    payload,
+                });
+            }
         }
         // 任务清单注入（spec: agent-todo）：清单非空时每轮带上进度全景（✅/🔄/⬜）
         if let Some(todo_block) = crate::todo::render(session_id) {
@@ -555,13 +664,19 @@ impl AgentRuntime {
         let mut done_tools: Vec<String> = Vec::new();
         let mut usage_prompt: u64 = 0;
         let mut usage_completion: u64 = 0;
-        // 元认知反思态（每轮一次上限）
+        // 元认知反思态（每轮一次上限）：连续失败计数 + 全轮产出统计（条件②用）
         let mut consecutive_failures: u32 = 0;
         let mut reflected = false;
+        let mut total_calls: usize = 0;
+        let mut productive_calls: usize = 0;
 
         // 原生 function calling：按白名单生成工具 schema + 该个体可见的 MCP 工具
         // （后端未就绪 / 模式不支持的工具不下发——不承诺不存在的能力）
         let scoped_allowlist = scope.filter_allowlist(&def.tools);
+        if scope.allows_tools() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(TASK_PROGRESS_NOTE);
+        }
         let mut specs = crate::tools::ToolGateway::tool_specs_gated(
             &scoped_allowlist,
             self.tools.search_ready(),
@@ -633,6 +748,14 @@ impl AgentRuntime {
 
             // 原生 function calling:只读并发 / 写串行,结果回灌后继续
             if !calls.is_empty() {
+                self.tools.emit_and_persist(crate::types::CoreEvent {
+                    kind: "run.progress".into(),
+                    session_id: trace.to_string(),
+                    payload: serde_json::json!({
+                        "stage": "working", "agentId": def.identifier,
+                        "message": format!("准备调用 {}，完成后检查实际结果。", calls.iter().take(4).map(|call| call.name.as_str()).collect::<Vec<_>>().join("、")),
+                    }),
+                });
                 let mut assistant = ChatMessage::assistant(text.clone());
                 assistant.tool_calls = calls.clone();
                 messages.push(assistant);
@@ -650,12 +773,48 @@ impl AgentRuntime {
                     )
                     .await;
                 let mut image_feedback = Vec::new();
+                let mut batch_failed = false;
+                let mut batch_productive = 0usize;
                 for (c, (feedback, images)) in calls.iter().zip(feedbacks) {
+                    // 元认知反思统计（metaAgent）：失败按前缀识别（tool_feedback 统一口径），
+                    // 产出按「非警告回灌」计——与文本协议路径同判据。
+                    if feedback.starts_with("【警告】") {
+                        batch_failed = true;
+                    } else {
+                        batch_productive += 1;
+                    }
                     let mut msg = ChatMessage::tool_result(&c.id, feedback);
                     msg.name = Some(c.name.clone());
                     messages.push(msg);
                     if let Some((note, data_urls)) = images {
                         image_feedback.push((note, data_urls));
+                    }
+                }
+                if batch_failed {
+                    consecutive_failures += 1;
+                } else {
+                    consecutive_failures = 0;
+                    productive_calls += batch_productive;
+                }
+                total_calls += calls.len();
+                // 元认知反思钩子（实验性 metaAgent，与文本协议路径同口径）：
+                // 条件① 连续失败 ≥2；条件② 步数 ≥8 且产出占比 <30%。每轮一次上限。
+                if self.experiments.meta_agent
+                    && !reflected
+                    && (consecutive_failures >= 2
+                        || (total_calls >= 8 && productive_calls * 10 < total_calls * 3))
+                {
+                    reflected = true;
+                    let hint = if consecutive_failures >= 2 {
+                        self.meta_reflect(session_id, &consecutive_failures, &done_tools)
+                            .await
+                    } else {
+                        let ratio = productive_calls as f64 / total_calls.max(1) as f64;
+                        self.meta_reflect_low_yield(session_id, &done_tools, ratio)
+                            .await
+                    };
+                    if let Some(h) = hint {
+                        messages.push(ChatMessage::user(h));
                     }
                 }
                 for (note, data_urls) in image_feedback {
@@ -693,21 +852,28 @@ impl AgentRuntime {
                             um.images = data_urls;
                             messages.push(um);
                         }
-                        // 元认知反思钩子（实验性 metaAgent）：连续失败 ≥2 时触发一次
-                        // 反思调用（策略 JSON 注入后续循环;失败静默降级 continue）
-                        if self.experiments.meta_agent && !reflected && !result.ok {
+                        // 元认知反思钩子（实验性 metaAgent，两条件与主路径同口径）：
+                        // 条件① 连续失败 ≥2；条件② 步数 ≥8 且产出占比 <30%。
+                        // 每轮一次上限；反思调用失败静默降级 continue。
+                        total_calls += 1;
+                        if !result.ok {
                             consecutive_failures += 1;
-                            if consecutive_failures >= 2 {
-                                reflected = true;
-                                if let Some(hint) = self
-                                    .meta_reflect(session_id, &consecutive_failures, &done_tools)
-                                    .await
-                                {
-                                    messages.push(ChatMessage::user(hint));
-                                }
-                            }
-                        } else if result.ok {
+                        } else {
                             consecutive_failures = 0;
+                            productive_calls += 1;
+                        }
+                        if self.experiments.meta_agent
+                            && !reflected
+                            && (consecutive_failures >= 2
+                                || (total_calls >= 8 && productive_calls * 10 < total_calls * 3))
+                        {
+                            reflected = true;
+                            if let Some(hint) = self
+                                .meta_reflect(session_id, &consecutive_failures, &done_tools)
+                                .await
+                            {
+                                messages.push(ChatMessage::user(hint));
+                            }
                         }
                         continue;
                     }
@@ -787,6 +953,35 @@ impl AgentRuntime {
         failures: &u32,
         done_tools: &[String],
     ) -> Option<String> {
+        let hint = self
+            .meta_reflect_call(session_id, failures, done_tools, "consecutive_failures")
+            .await?;
+        Some(hint)
+    }
+
+    /// 条件②（低产出）触发入口：步数 ≥8 且产出型工具结果占比 <30%。
+    /// 与连续失败共用反思调用与注入逻辑，trigger 字段区分来源（事件可审计）。
+    pub(crate) async fn meta_reflect_low_yield(
+        &self,
+        session_id: &str,
+        done_tools: &[String],
+        productive_ratio: f64,
+    ) -> Option<String> {
+        let failures = &0u32;
+        let hint = self
+            .meta_reflect_call(session_id, failures, done_tools, "low_yield")
+            .await?;
+        let pct = (productive_ratio * 100.0).round() as u64;
+        Some(format!("{hint}（产出占比 {pct}%）"))
+    }
+
+    async fn meta_reflect_call(
+        &self,
+        session_id: &str,
+        failures: &u32,
+        done_tools: &[String],
+        trigger: &str,
+    ) -> Option<String> {
         let trace = crate::round_trace::snapshot_tool_trace(session_id);
         let (provider, model) = self
             .tools
@@ -827,16 +1022,44 @@ impl AgentRuntime {
             "compact" => {
                 "【元认知】上下文可能已混入大量失败噪声:请先理清已知有效信息,基于确定的事实继续。"
             }
-            _ => return None, // continue = 不注入
+            _ => {
+                // continue = 不注入提示,但仍发事件（审计可见反思发生过并选择保持策略）
+                self.emit_meta_reflect(session_id, &strategy, &note, failures, trigger);
+                return None;
+            }
         };
-        let _ = self.tools.events.send(crate::types::CoreEvent {
+        self.emit_meta_reflect(session_id, &strategy, &note, failures, trigger);
+        Some(format!("{hint}（{note}）"))
+    }
+
+    /// meta.reflect 事件：广播 + 落库（事件页可查——与 auto.eval 同口径；
+    /// 此前只广播导致 REST 按会话查事件看不到反思记录）。
+    fn emit_meta_reflect(
+        &self,
+        session_id: &str,
+        strategy: &str,
+        note: &str,
+        failures: &u32,
+        trigger: &str,
+    ) {
+        let evt = crate::types::CoreEvent {
             kind: "meta.reflect".into(),
             session_id: session_id.to_string(),
             payload: serde_json::json!({
                 "strategy": strategy, "note": note, "consecutiveFailures": failures,
+                "trigger": trigger,
             }),
-        });
-        Some(format!("{hint}（{note}）"))
+        };
+        let _ = self.tools.events.send(evt.clone());
+        let env = crate::types::Envelope::new(
+            format!("session.{session_id}.events"),
+            "runtime",
+            "broadcast",
+            "event",
+            session_id,
+            serde_json::to_value(&evt).unwrap_or(serde_json::Value::Null),
+        );
+        let _ = self.tools.store.append_event(&env);
     }
 }
 

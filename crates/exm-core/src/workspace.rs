@@ -35,12 +35,17 @@ pub fn pinned(raw: &str) -> anyhow::Result<PathBuf> {
 
 /// Resolve an internal checkpoint path without following symlinks or accepting traversal.
 pub(crate) fn checkpoint(root: &Path, id: &str, relative: &Path) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(!id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "无效的检查点标识");
+    anyhow::ensure!(
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "无效的检查点标识"
+    );
     let tail = Path::new(".exmachina/checkpoints").join(id).join(relative);
     anyhow::ensure!(!relative.is_absolute(), "检查点路径越界");
     let mut path = root.to_path_buf();
     for part in tail.components() {
-        let Component::Normal(part) = part else { anyhow::bail!("检查点路径越界") };
+        let Component::Normal(part) = part else {
+            anyhow::bail!("检查点路径越界")
+        };
         path.push(part);
         if let Ok(meta) = std::fs::symlink_metadata(&path) {
             anyhow::ensure!(!meta.file_type().is_symlink(), "检查点路径不能包含符号链接");

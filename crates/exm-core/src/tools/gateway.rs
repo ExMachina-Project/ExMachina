@@ -27,15 +27,25 @@ pub(crate) struct PluginCommandTarget<'a> {
 impl PluginCommandTarget<'_> {
     fn redact_result(&self, text: &str) -> String {
         // 插件响应可能回显请求中的真实凭据；替换配置值后才做通用脱敏和持久化。
-        let mut secrets: Vec<_> = self.credentials.into_iter().flat_map(|values| values.values())
-            .map(String::as_str).filter(|secret| !secret.is_empty()).collect();
+        let mut secrets: Vec<_> = self
+            .credentials
+            .into_iter()
+            .flat_map(|values| values.values())
+            .map(String::as_str)
+            .filter(|secret| !secret.is_empty())
+            .collect();
         secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
-        crate::tools::redact_str(&secrets.into_iter().fold(text.to_owned(), |text, secret| {
-            text.replace(secret, "***")
-        }))
+        crate::tools::redact_str(
+            &secrets
+                .into_iter()
+                .fold(text.to_owned(), |text, secret| text.replace(secret, "***")),
+        )
     }
 }
 
+// 大小差告警：Declarative(CustomTool) 显著大于其余两支（均 Arc 单字）。
+// 按项目对 remote.rs 同款告警的既有处理保留原布局（热路径未装箱，避免逐次分配）。
+#[allow(clippy::large_enum_variant)]
 enum PluginCommandBinding {
     Declarative(crate::config::CustomTool),
     Process(Arc<dyn crate::plugin::ToolProvider>),
@@ -254,6 +264,39 @@ impl ToolGateway {
             return root;
         }
         self.effective_root()
+    }
+
+    /// 同 `workspace_for_session`，但 effective_root 回落也返回 None——
+    /// 分层上下文发现需要「无项目作用域」与「默认根」可区分（默认根不是
+    /// 用户批准的项目，不该按项目层读它的 AGENTS.md）。
+    /// 会话级上下文来源禁用清单（capability-parity 6.3）：透传 store。
+    pub(crate) fn disabled_context_sources(&self, session_id: &str) -> Vec<String> {
+        self.store.disabled_context_sources(session_id)
+    }
+
+    /// 某类非文件来源（memory / retrieval / skills）在本会话是否被用户禁用。
+    /// 每个注入点都必须过这道闸——否则 disable 只是翻了个标志位、回复「下轮生效」
+    /// 却什么都没变。key 与 `Core::context_source_set` 同口径。
+    pub(crate) fn context_source_disabled(
+        &self,
+        session_id: &str,
+        kind: crate::context_files::SourceKind,
+    ) -> bool {
+        self.disabled_context_sources(session_id)
+            .iter()
+            .any(|k| k == kind.key())
+    }
+
+    pub(crate) fn workspace_for_session_opt(&self, session_id: &str) -> Option<PathBuf> {
+        if let Some(root) = crate::workspace::current() {
+            return Some(root);
+        }
+        self.store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|session| session.workspace)
+            .and_then(|raw| crate::workspace::pinned(&raw).ok())
     }
     pub fn new(
         workspace_root: impl AsRef<Path>,
@@ -502,21 +545,35 @@ impl ToolGateway {
     ) -> Result<PluginCommandBinding, crate::command::CapabilityStatus> {
         use crate::command::CapabilityStatus as Status;
 
-        let local = name.strip_prefix(&format!("{}__", target.plugin)).ok_or(Status::Forbidden)?;
-        let entry = target.manager.get(target.plugin).ok_or(Status::Unavailable)?;
+        let local = name
+            .strip_prefix(&format!("{}__", target.plugin))
+            .ok_or(Status::Forbidden)?;
+        let entry = target
+            .manager
+            .get(target.plugin)
+            .ok_or(Status::Unavailable)?;
         if !entry.enabled {
             return Err(Status::Disabled);
         }
         if entry.error.is_some() {
             return Err(Status::Unavailable);
         }
-        let version = entry.manifest.commands.get(local).ok_or(Status::Unavailable)?.version;
+        let version = entry
+            .manifest
+            .commands
+            .get(local)
+            .ok_or(Status::Unavailable)?
+            .version;
         if version != target.version {
             return Err(Status::Unavailable);
         }
         match entry.form.as_str() {
             "declarative" => {
-                let manifest_tool = entry.manifest.tools.iter().find(|tool| tool.name == local)
+                let manifest_tool = entry
+                    .manifest
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == local)
                     .ok_or(Status::MissingDependency)?;
                 if !manifest_tool.visible_to(agent_id) {
                     return Err(Status::Forbidden);
@@ -526,29 +583,49 @@ impl ToolGateway {
                 if !self.plugin_tools.read().contains(&tool) {
                     return Err(Status::MissingDependency);
                 }
-                if tool.kind_norm() == "http" && std::iter::once(tool.target.as_str())
-                    .chain(tool.headers.values().map(String::as_str))
-                    .any(|value| !self.resolve_credential_vars(target.plugin, value).1.is_empty())
+                if tool.kind_norm() == "http"
+                    && std::iter::once(tool.target.as_str())
+                        .chain(tool.headers.values().map(String::as_str))
+                        .any(|value| {
+                            !self
+                                .resolve_credential_vars(target.plugin, value)
+                                .1
+                                .is_empty()
+                        })
                 {
                     return Err(Status::MissingDependency);
                 }
                 Ok(PluginCommandBinding::Declarative(tool))
             }
             "process" => {
-                let active_provider = target.manager.provider_of(target.plugin)
-                    .and_then(|provider| provider.tool_provider()).ok_or(Status::MissingDependency)?;
+                let active_provider = target
+                    .manager
+                    .provider_of(target.plugin)
+                    .and_then(|provider| provider.tool_provider())
+                    .ok_or(Status::MissingDependency)?;
                 if !active_provider.ready() {
                     return Err(Status::MissingDependency);
                 }
-                let declared = active_provider.tool_specs().into_iter().find(|tool| tool.name == name)
+                let declared = active_provider
+                    .tool_specs()
+                    .into_iter()
+                    .find(|tool| tool.name == name)
                     .ok_or(Status::MissingDependency)?;
-                if !declared.visible_to(agent_id) || entry.manifest.tools.iter()
-                    .any(|tool| tool.name == local && !tool.visible_to(agent_id))
+                if !declared.visible_to(agent_id)
+                    || entry
+                        .manifest
+                        .tools
+                        .iter()
+                        .any(|tool| tool.name == local && !tool.visible_to(agent_id))
                 {
                     return Err(Status::Forbidden);
                 }
                 // 执行使用管理器当前 provider，不会因 ToolGateway 同名表项而绕到旧进程或别的插件。
-                let attached = self.plugin_runtime_tools.read().get(target.plugin).cloned()
+                let attached = self
+                    .plugin_runtime_tools
+                    .read()
+                    .get(target.plugin)
+                    .cloned()
                     .is_some_and(|provider| provider.tool_specs().contains(&declared));
                 if !attached {
                     return Err(Status::MissingDependency);
@@ -909,6 +986,13 @@ impl ToolGateway {
         self.search.proactive && (self.search.ready() || self.browser_ready())
     }
 
+    /// 上下文来源就绪汇报（capability-parity 6.3）：skills 探测归口 gateway
+    /// （技能目录在位）；memory/retrieval 由 Core 聚合层补充（记忆服务与
+    /// 会话摘要在 Core 手里，gateway 不重复探测）。
+    pub fn context_skills_ready(&self) -> bool {
+        self.workspace_root.join("entities/skills").is_dir()
+    }
+
     /// 测试可见：审批单断言用
     #[cfg(test)]
     pub(crate) fn store_for_test(&self) -> &Store {
@@ -1000,14 +1084,18 @@ impl ToolGateway {
             return ToolResult::err("本轮已被用户停止，拒绝迟到工具调用");
         }
         let started = Instant::now();
+        let result_redactor = super::redact::ToolRedactor::from_args(args);
         let call_id = format!("t{}", &crate::types::new_id()[..12]);
-        let _ = self.events.send(CoreEvent {
-            kind: "tool.call".into(),
-            session_id: session_id.to_string(),
-            payload: serde_json::json!({
-                "callId": call_id, "agentId": agent_id, "tool": full_name, "args": args,
-            }),
-        });
+        crate::types::broadcast_core_event(
+            &self.events,
+            CoreEvent {
+                kind: "tool.call".into(),
+                session_id: session_id.to_string(),
+                payload: serde_json::json!({
+                    "callId": call_id, "agentId": agent_id, "tool": full_name, "args": args,
+                }),
+            },
+        );
         let result = match self.mcp.call(full_name, agent_id, args).await {
             Some(r) => ToolResult {
                 ok: r.ok,
@@ -1021,6 +1109,7 @@ impl ToolGateway {
             },
             None => ToolResult::err(format!("MCP 工具不存在或未开放: {full_name}")),
         };
+        let result = result_redactor.result(result);
         let summary: String = if result.ok {
             result.output.chars().take(200).collect()
         } else {
@@ -1049,7 +1138,7 @@ impl ToolGateway {
                 call_id: call_id.clone(),
                 agent_id: agent_id.to_string(),
                 tool: full_name.to_string(),
-                args: args.clone(),
+                args: super::redact::redact_json(args),
                 ok: result.ok,
                 duration_ms: started.elapsed().as_millis() as u64,
                 summary,
@@ -1087,7 +1176,12 @@ impl ToolGateway {
     /// 「过程透明」只对在线连接生效。落库量与工具次数同阶（每次调用 2 条），
     /// 与 token 流水账（一次运行数千条）不同量级，不会刷屏。
     pub(crate) fn emit_and_persist(&self, evt: CoreEvent) {
-        let _ = self.events.send(evt.clone());
+        let evt = super::redact::redact_core_event(evt);
+        crate::round_trace::push_activity_event(evt.clone());
+        crate::types::broadcast_core_event(&self.events, evt.clone());
+        if evt.kind == "run.progress" {
+            return;
+        }
         let env = crate::types::Envelope::new(
             format!("session.{}.events", evt.session_id),
             "tools",
@@ -1112,6 +1206,22 @@ impl ToolGateway {
             .await
     }
 
+    /// 同 `execute`，但回执标识采用模型 tool call 的 id（语义见
+    /// `execute_named_with_call_id`）。只读工具走并发分支时也必须带 id，否则落盘
+    /// callId 与回填给模型的不一致，模型无法引用真实回执。
+    pub async fn execute_with_call_id(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        allowlist: &[ToolName],
+        tool: ToolName,
+        args: &serde_json::Value,
+        call_id: Option<&str>,
+    ) -> ToolResult {
+        self.execute_named_with_call_id(agent_id, session_id, allowlist, tool.key(), args, call_id)
+            .await
+    }
+
     /// 执行任意工具名：内置（按 `allowlist` 放行）或**声明式自定义工具**（按 `agents` 可见性放行）。
     /// 模型给出的工具名统一走这里，钩子 / 结果落盘 / 审计对两类工具一视同仁。
     /// `session_id` 用于：工具执行事件（tool.call / tool.result）与审批单归属——渠道可按会话过滤呈现。
@@ -1123,7 +1233,25 @@ impl ToolGateway {
         name: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
-        self.execute_named_bound(agent_id, session_id, allowlist, name, args, None).await
+        self.execute_named_with_call_id(agent_id, session_id, allowlist, name, args, None)
+            .await
+    }
+
+    /// 同 `execute_named`，但回执标识采用调用方给出的 `call_id`（模型原生 tool call 的
+    /// id）。落盘的工具记录（`ChatMessage.tool_calls[].callId`）、`tool.call`/`tool.result`
+    /// 事件与模型上下文里的 tool result 消息 id 三者对齐——模型据此**引用**本会话的
+    /// 真实回执（学习候选证据核验，capability-parity 6.4）。`None` 时沿用内部生成。
+    pub async fn execute_named_with_call_id(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        allowlist: &[ToolName],
+        name: &str,
+        args: &serde_json::Value,
+        call_id: Option<&str>,
+    ) -> ToolResult {
+        self.execute_named_bound(agent_id, session_id, allowlist, name, args, None, call_id)
+            .await
     }
 
     pub(crate) async fn execute_plugin_command(
@@ -1134,9 +1262,13 @@ impl ToolGateway {
         args: &serde_json::Value,
         target: PluginCommandTarget<'_>,
     ) -> ToolResult {
-        self.execute_named_bound(agent_id, session_id, &[], name, args, Some(target)).await
+        self.execute_named_bound(agent_id, session_id, &[], name, args, Some(target), None)
+            .await
     }
 
+    // 参数个数随 call_id 透传到 8 个：这几个是同一执行链的私有转发层，每个参数都被
+    // 内层原样使用；打包成 struct 会让三个调用点的可读性更差。
+    #[allow(clippy::too_many_arguments)]
     async fn execute_named_bound(
         &self,
         agent_id: &str,
@@ -1145,6 +1277,7 @@ impl ToolGateway {
         name: &str,
         args: &serde_json::Value,
         plugin_command: Option<PluginCommandTarget<'_>>,
+        call_id: Option<&str>,
     ) -> ToolResult {
         let workspace = match self.store.get_session(session_id).and_then(|session| {
             session
@@ -1163,12 +1296,21 @@ impl ToolGateway {
                     agent_id: agent_id.to_string(),
                     session_id: session_id.to_string(),
                 },
-                self.execute_named_inner(agent_id, session_id, allowlist, name, args, plugin_command),
+                self.execute_named_inner(
+                    agent_id,
+                    session_id,
+                    allowlist,
+                    name,
+                    args,
+                    plugin_command,
+                    call_id,
+                ),
             ),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_named_inner(
         &self,
         agent_id: &str,
@@ -1177,12 +1319,19 @@ impl ToolGateway {
         name: &str,
         args: &serde_json::Value,
         plugin_command: Option<PluginCommandTarget<'_>>,
+        call_id: Option<&str>,
     ) -> ToolResult {
         if crate::round_trace::is_cancelled(session_id) {
             return ToolResult::err("本轮已被用户停止，拒绝迟到工具调用");
         }
         let started = Instant::now();
-        let call_id = format!("t{}", &crate::types::new_id()[..12]);
+        // 回执标识：调用方给出（模型 tool call id）则原样落盘，否则内部生成。
+        // 空串视为未给出。
+        let call_id = match call_id.map(str::trim) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => format!("t{}", &crate::types::new_id()[..12]),
+        };
+        let result_redactor = super::redact::ToolRedactor::from_args(args);
         // 工具执行事件（call）：文件操作 / 终端命令 / 截屏对用户全程可见——编程软件式的过程透明
         // 插件工具归因：`<plugin>__<tool>` 名字解析出 plugin id 写入事件（审计可检索）
         let plugin_attr = crate::plugin::parse_namespaced(name)
@@ -1322,6 +1471,15 @@ impl ToolGateway {
                     ToolResult::err("agent_manage 仅限激活组主智能体使用")
                 } else if tool == ToolName::Computer {
                     self.tool_computer(agent_id, session_id, args).await
+                } else if tool == ToolName::Programmatic {
+                    // 有界程序化组合（5.2）：需要 allowlist 做子调用授权面
+                    // （dispatch 无该参数——在此前置路由）
+                    self.tool_programmatic(agent_id, session_id, allowlist, args)
+                        .await
+                } else if tool == ToolName::Spawn {
+                    // 子任务只能收窄不能扩权（capability-parity 5.5）：请求白名单
+                    // 与父 allowlist 求交后传给执行器
+                    self.tool_spawn(allowlist, agent_id, session_id, args).await
                 } else if tool == ToolName::ContextCompact {
                     // 实验性动态压缩：豁免 allowlist（能力面由 schema 下发门控控制——
                     // 未开实验开关时模型根本看不到该工具 schema，不会有调用进来）
@@ -1339,14 +1497,22 @@ impl ToolGateway {
                         ToolResult::err("本轮已被用户停止，拒绝迟到插件命令")
                     } else {
                         match self.plugin_command_binding(agent_id, name, target) {
-                            Ok(PluginCommandBinding::Declarative(tool)) => self.run_custom(agent_id, session_id, &tool, args).await,
-                            Ok(PluginCommandBinding::Process(provider)) => match provider.call_tool(name, args) {
-                                Ok(text) => ToolResult::ok(text),
-                                Err(_) => ToolResult::err("插件进程工具未成功执行"),
-                            },
+                            Ok(PluginCommandBinding::Declarative(tool)) => {
+                                self.run_custom(agent_id, session_id, &tool, args).await
+                            }
+                            Ok(PluginCommandBinding::Process(provider)) => {
+                                match provider.call_tool(name, args) {
+                                    Ok(text) => ToolResult::ok(text),
+                                    Err(_) => ToolResult::err("插件进程工具未成功执行"),
+                                }
+                            }
                             Ok(PluginCommandBinding::Builtin(exec)) => {
                                 let out = exec(agent_id, session_id, args.clone()).await;
-                                if out.ok { ToolResult::ok_with_images(out.text, out.images) } else { ToolResult::err(out.text) }
+                                if out.ok {
+                                    ToolResult::ok_with_images(out.text, out.images)
+                                } else {
+                                    ToolResult::err(out.text)
+                                }
                             }
                             Err(_) => ToolResult::err("插件命令的工具授权或运行依赖已改变"),
                         }
@@ -1423,8 +1589,12 @@ impl ToolGateway {
         };
         if let Some(target) = &plugin_command {
             result.output = target.redact_result(&result.output);
-            result.error = result.error.as_deref().map(|error| target.redact_result(error));
+            result.error = result
+                .error
+                .as_deref()
+                .map(|error| target.redact_result(error));
         }
+        result = result_redactor.result(result);
         let terminal_op = (name == ToolName::Terminal.key())
             .then(|| args.get("op").and_then(|v| v.as_str()))
             .flatten();
@@ -1497,6 +1667,7 @@ impl ToolGateway {
                 }
             }
         }
+        result = result_redactor.result(result);
         let summary = if result.ok {
             result.output.chars().take(200).collect::<String>()
         } else {
@@ -1525,7 +1696,7 @@ impl ToolGateway {
                 call_id: call_id.clone(),
                 agent_id: agent_id.to_string(),
                 tool: name.to_string(),
-                args: args.clone(),
+                args: super::redact::redact_json(args),
                 ok: result.ok,
                 duration_ms: started.elapsed().as_millis() as u64,
                 summary,
@@ -1640,12 +1811,21 @@ impl ToolGateway {
             ToolName::MemoryWrite => self.tool_memory_write(agent_id, session_id, args),
             ToolName::MemoryLink => self.tool_memory_link(agent_id, session_id, args),
             ToolName::Git => self.tool_git(agent_id, session_id, args).await,
-            ToolName::Spawn => self.tool_spawn(agent_id, session_id, args).await,
             ToolName::Sessions => self.tool_sessions(agent_id, session_id, args).await,
-            ToolName::SkillManage => self.tool_skill_manage(args),
+            ToolName::SkillManage => self.tool_skill_manage(session_id, args),
             ToolName::Todo => self.tool_todo(session_id, args),
             ToolName::Speech => self.tool_speech(session_id, args).await,
             ToolName::ImageGen => self.tool_image_gen(session_id, args).await,
+            ToolName::Programmatic => {
+                // allowlist 在 execute_named_inner 层传入（dispatch 无该参数）；
+                // 此分支不会到达——见 execute_named_inner 的前置路由
+                self.tool_programmatic(agent_id, session_id, &[], args)
+                    .await
+            }
+            ToolName::Spawn => {
+                // dispatch 无 allowlist 参数：此兜底分支传空父面 = 默认只读子任务
+                self.tool_spawn(&[], agent_id, session_id, args).await
+            }
             ToolName::RenderChart => self.tool_render_chart(session_id, args).await,
             ToolName::ResearchReport => self.tool_research_report(agent_id, session_id, args).await,
             ToolName::KnowledgeWrite => self.tool_knowledge_write(agent_id, session_id, args).await,

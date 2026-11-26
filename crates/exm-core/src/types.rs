@@ -191,9 +191,53 @@ pub enum ToolName {
     /// 结构化 Markdown 报告（四节 + 内联引用 + 来源清单）。
     #[serde(rename = "research_report")]
     ResearchReport,
+    /// 有界程序化工具组合（capability-parity 5.2）：JSON 步骤清单串行组合
+    /// 当前已授权工具，中间结果不回灌模型，只返回逐步状态与最终摘要。
+    /// 子调用走 execute_named 全链（授权/审批/沙箱/脱敏/审计原样生效）。
+    #[serde(rename = "programmatic")]
+    Programmatic,
 }
 
 impl ToolName {
+    /// 全枚举（能力快照逐项判定用；与 key()/下发链一一对应）
+    pub fn all() -> &'static [ToolName] {
+        use ToolName::*;
+        &[
+            Read,
+            Filesystem,
+            Terminal,
+            Edit,
+            Patch,
+            Grep,
+            Glob,
+            WebSearch,
+            WebFetch,
+            AgentManage,
+            Schedule,
+            Browser,
+            Computer,
+            MemoryRead,
+            MemoryWrite,
+            MemoryLink,
+            Git,
+            Spawn,
+            Sessions,
+            SkillManage,
+            ContextCompact,
+            Todo,
+            MetaObserve,
+            MetaPropose,
+            MetaBuild,
+            Speech,
+            KnowledgeWrite,
+            KnowledgeRead,
+            ImageGen,
+            RenderChart,
+            ResearchReport,
+            Programmatic,
+        ]
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             ToolName::Read => "read",
@@ -227,6 +271,7 @@ impl ToolName {
             ToolName::ImageGen => "image_gen",
             ToolName::RenderChart => "render_chart",
             ToolName::ResearchReport => "research_report",
+            ToolName::Programmatic => "programmatic",
         }
     }
 
@@ -279,6 +324,7 @@ impl ToolName {
             "image_gen" => Some(ToolName::ImageGen),
             "render_chart" => Some(ToolName::RenderChart),
             "research_report" => Some(ToolName::ResearchReport),
+            "programmatic" => Some(ToolName::Programmatic),
             _ => None,
         }
     }
@@ -320,6 +366,7 @@ impl ToolName {
             ToolName::ImageGen,
             ToolName::RenderChart,
             ToolName::ResearchReport,
+            ToolName::Programmatic,
         ]
     }
 }
@@ -1174,6 +1221,15 @@ pub struct CoreEvent {
     pub payload: serde_json::Value,
 }
 
+/// Broadcast only a sanitized event payload. Persistence applies the same sanitizer
+/// independently so alternate stores and live subscribers share one safety boundary.
+pub(crate) fn broadcast_core_event(
+    sender: &tokio::sync::broadcast::Sender<CoreEvent>,
+    event: CoreEvent,
+) {
+    let _ = sender.send(crate::tools::redact_core_event(event));
+}
+
 /// 领域标签规范化：默认组旧枚举值 → 中文标签（自定义组可用任意文本）
 pub fn normalize_domain(raw: &str) -> String {
     match raw {
@@ -1239,6 +1295,13 @@ pub struct SkillDef {
     /// 来源：manual（手工）/ agent（智能体沉淀）/ import（外部导入）
     #[serde(default)]
     pub source: String,
+    /// 单调递增版本号（capability-parity 6.5 受控写入）：每次成功更新 +1，
+    /// 新版本未生效前旧版本保持可注入；回滚 = 恢复历史版本行。
+    #[serde(default)]
+    pub version: u64,
+    /// 最近一次版本变更时间（ISO）
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 impl SkillDef {
@@ -1415,7 +1478,9 @@ impl ApprovalScope {
     pub fn is_approve(&self) -> bool {
         matches!(
             self,
-            ApprovalScope::Once { approve: true } | ApprovalScope::Session | ApprovalScope::Allowlist
+            ApprovalScope::Once { approve: true }
+                | ApprovalScope::Session
+                | ApprovalScope::Allowlist
         )
     }
 }

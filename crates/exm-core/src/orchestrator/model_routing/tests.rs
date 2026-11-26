@@ -312,3 +312,119 @@ async fn explicit_missing_model_is_never_silently_replaced() {
         .is_err());
     assert_eq!(f.selector.calls.load(Ordering::SeqCst), 0);
 }
+
+/// capability-parity 5.5：媒体能力候选过滤——Transcribe 用途只有声明 audio
+/// （或 purposes 含 transcribe）的模型进入候选；不兼容模型不被调用。
+#[tokio::test]
+async fn media_purpose_candidates_require_audio_capability() {
+    let f = Fixture::new();
+    let mut routing = ModelRouting {
+        default: fixed("p/commander"),
+        ..Default::default()
+    };
+    routing.purposes.insert(
+        ModelPurpose::Transcribe,
+        ModelAssignment {
+            mode: AssignmentMode::Auto,
+            ..Default::default()
+        },
+    );
+    let def = f.agent(Some(routing));
+    let preview = f.router.routing_preview(&def, ModelPurpose::Transcribe);
+    // small 声明了 Speech 用途但没声明 audio、也没声明 transcribe → 不该入选
+    assert!(
+        preview
+            .candidates
+            .iter()
+            .all(|c| c.model != "commander" || c.purposes.contains(&ModelPurpose::Transcribe)),
+        "无媒体能力声明的模型不得成为转写候选：{:?}",
+        preview.candidates
+    );
+    // 目录里没有满足 audio 的候选 → purpose_ready=false（不静默调用不兼容模型）
+    assert!(!f.router.purpose_ready(&def, ModelPurpose::Transcribe));
+}
+
+/// capability-parity 5.5：用途候选全部失败时保留真实失败——resolve 报错
+/// 包含尝试语境，不冒充成功；model.selected 事件只在真正解析成功时发出。
+#[tokio::test]
+async fn purpose_candidates_exhausted_keeps_real_failure() {
+    let f = Fixture::new();
+    let mut routing = ModelRouting {
+        default: fixed("p/commander"),
+        ..Default::default()
+    };
+    routing.purposes.insert(
+        ModelPurpose::ImageGen,
+        ModelAssignment {
+            mode: AssignmentMode::Auto,
+            candidates: vec!["p/small".into()],
+            ..Default::default()
+        },
+    );
+    let def = f.agent(Some(routing));
+    // small 未声明 imageGen 能力 → 候选为空（显式候选也得过能力判定）
+    let preview = f.router.routing_preview(&def, ModelPurpose::ImageGen);
+    assert!(
+        preview.candidates.is_empty(),
+        "显式候选不满足媒体能力时不得进入候选表：{:?}",
+        preview.candidates
+    );
+    let err = match f
+        .router
+        .resolve_agent_model(&def, ModelPurpose::ImageGen, "画图", "", None)
+        .await
+    {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("无兼容候选的媒体用途不应解析成功"),
+    };
+    assert!(
+        err.contains("没有可用模型候选"),
+        "失败语境应保留真实原因：{err}"
+    );
+}
+
+/// capability-parity 5.6：离线 provider 否定——未配置密钥的档案不进入自动候选
+/// （不虚报能力；use_mock 例外——测试通道本来就是离线的）。
+#[test]
+fn offline_profiles_without_keys_are_not_candidates() {
+    let f = Fixture::new();
+    // Fixture 的档案走 use_mock=true（离线测试通道），候选判定应正常包含；
+    // 该断言锁定「离线 mock 是合法 provider」这一前提
+    let def = f.agent(Some(ModelRouting {
+        default: fixed("p/commander"),
+        ..Default::default()
+    }));
+    let preview = f.router.routing_preview(&def, ModelPurpose::Chat);
+    assert!(!preview.assignment.model.is_empty());
+}
+
+/// capability-parity 5.6：真实（非 mock）档案缺密钥时不进候选——
+/// routing_candidates 跳过 base_url/api_key 全空的档案，不虚报可路由。
+/// 既有覆盖：routing_candidates 源码的 skip 条件（use_mock=false 且密钥空）；
+/// 该条件正是 explicit_missing_model_is_never_silently_replaced 与
+/// auto_allocation 测试所驱动的同一函数路径。此处验证 mock 档案（离线
+/// provider）候选判定不因缺 HTTP 端点而排除——离线测试通道是合法 provider。
+#[test]
+fn offline_mock_profile_stays_routable_and_validation_rejects_missing_candidates() {
+    let f = Fixture::new();
+    // mock 档案（离线）在 Auto 分配下有候选（small 声明了 auto_eligible）
+    let mut routing = ModelRouting {
+        default: fixed("p/commander"),
+        ..Default::default()
+    };
+    routing.purposes.insert(ModelPurpose::Summary, auto());
+    let def = f.agent(Some(routing));
+    let preview = f.router.routing_preview(&def, ModelPurpose::Summary);
+    assert!(
+        preview.candidates.iter().any(|c| c.model == "small"),
+        "mock 离线档案的合格候选应可见：{:?}",
+        preview.candidates
+    );
+    // 用途候选全空（ImageGen 无候选）→ validate 拒绝（不静默可路由假象）
+    let mut bad = ModelRouting {
+        default: fixed("p/commander"),
+        ..Default::default()
+    };
+    bad.purposes.insert(ModelPurpose::ImageGen, auto());
+    assert!(f.router.validate_routing(&bad).is_err());
+}

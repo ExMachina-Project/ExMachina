@@ -85,7 +85,11 @@ pub fn parse_auto_eval(output: &str) -> Option<(String, String)> {
     if task.is_empty() {
         return None;
     }
-    let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let why = v
+        .get("why")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     Some((task, why))
 }
 
@@ -187,8 +191,9 @@ mod autonomy_tests {
     #[test]
     fn eval解析_合法与容错() {
         // 标准输出
-        let (task, why) = parse_auto_eval(r#"{"act": true, "task": "修复失败测试", "why": "主干红了"}"#)
-            .expect("应解析出任务");
+        let (task, why) =
+            parse_auto_eval(r#"{"act": true, "task": "修复失败测试", "why": "主干红了"}"#)
+                .expect("应解析出任务");
         assert_eq!(task, "修复失败测试");
         assert_eq!(why, "主干红了");
         // 围栏包裹
@@ -243,9 +248,15 @@ mod autonomy_tests {
 
     #[test]
     fn 纪律文本_含关键约定() {
-        assert!(SUPER_AGENT_DISCIPLINE.contains("一个具体问题"), "停机问答约束");
+        assert!(
+            SUPER_AGENT_DISCIPLINE.contains("一个具体问题"),
+            "停机问答约束"
+        );
         assert!(SUPER_AGENT_DISCIPLINE.contains("静默推进"), "静默约束");
-        assert!(SUPER_AGENT_DISCIPLINE.contains("组模式"), "组模式并行拆解指引");
+        assert!(
+            SUPER_AGENT_DISCIPLINE.contains("组模式"),
+            "组模式并行拆解指引"
+        );
         assert!(AUTO_ACT_DISCIPLINE.contains("风险闸门"), "自主行动风险闸门");
         assert!(AUTO_EVAL_PROMPT.contains("不确定 = 不做"), "Eval 保守纪律");
     }
@@ -254,7 +265,10 @@ mod autonomy_tests {
     #[test]
     fn 停机三态_解析() {
         // 交付：结论 + 证据，无问句决策
-        assert_eq!(parse_halt_kind("任务完成：报告已生成并验证通过。"), HaltKind::Delivered);
+        assert_eq!(
+            parse_halt_kind("任务完成：报告已生成并验证通过。"),
+            HaltKind::Delivered
+        );
         // 需决策：问句 + 建议/候选特征
         assert_eq!(
             parse_halt_kind("下一步用方案 A 还是方案 B？建议 A（成本低）。"),
@@ -281,6 +295,4 @@ mod autonomy_tests {
         assert_eq!(HaltKind::NeedsDecision.key(), "needs_decision");
         assert_eq!(HaltKind::Blocked.key(), "blocked");
     }
-
 }
-

@@ -66,7 +66,10 @@ impl LocalRegistry {
         }))
     }
 
-    fn load_skills_from(&self, dir: Option<PathBuf>) -> anyhow::Result<Vec<crate::types::SkillDef>> {
+    fn load_skills_from(
+        &self,
+        dir: Option<PathBuf>,
+    ) -> anyhow::Result<Vec<crate::types::SkillDef>> {
         let Some(dir) = dir else {
             return Ok(vec![]);
         };
@@ -76,7 +79,10 @@ impl LocalRegistry {
         // 两类来源：skills/<id>/SKILL.md（新标准）与 skills/<id>.json（旧格式兼容）
         let mut md: Vec<PathBuf> = Vec::new();
         let mut json: Vec<PathBuf> = Vec::new();
-        for p in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).map(|e| e.path()) {
+        for p in std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+        {
             if p.extension().map(|x| x == "json").unwrap_or(false) {
                 json.push(p);
             } else if p.is_dir() && p.join("SKILL.md").exists() {
@@ -94,8 +100,7 @@ impl LocalRegistry {
                 Err(e) => anyhow::bail!("技能包校验失败: {}（{e}）", f.display()),
             }
         }
-        let md_ids: std::collections::HashSet<String> =
-            out.iter().map(|s| s.id.clone()).collect();
+        let md_ids: std::collections::HashSet<String> = out.iter().map(|s| s.id.clone()).collect();
         for f in json {
             let raw = std::fs::read_to_string(&f)?;
             let s: crate::types::SkillDef = serde_json::from_str(&raw)
@@ -243,6 +248,20 @@ impl LocalRegistry {
             .map(|s| render_skill_md(&s)))
     }
 
+    /// 只解析不落盘（模型侧 import 入候选前的结构校验）。
+    pub fn import_skill_md_dry_run(&self, raw: &str) -> anyhow::Result<crate::types::SkillDef> {
+        let mut skill = parse_skill_md(raw)
+            .map_err(|e| anyhow::anyhow!("SKILL.md 解析失败：{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("缺少 YAML frontmatter（需以 --- 开头）"))?;
+        if skill.source.trim().is_empty() {
+            skill.source = "import".into();
+        }
+        if skill.created_at.trim().is_empty() {
+            skill.created_at = crate::types::now_iso();
+        }
+        Ok(skill)
+    }
+
     /// 从 SKILL.md 原文导入技能（标准 frontmatter + Markdown 正文）。
     /// 来源标记 import；同 id 覆盖（与 write_skill 一致）。
     pub fn import_skill_md(&self, raw: &str) -> anyhow::Result<crate::types::SkillDef> {
@@ -290,6 +309,279 @@ impl LocalRegistry {
         Ok(())
     }
 
+    // ---------------- 版本化写入（capability-parity 6.5，spec: agent-learning-loop） ----------------
+
+    /// 校验新版本内容（格式/大小/敏感信息/范围）：拒绝时旧版本保持不变，
+    /// 不留半成品。全部通过才可进入版本化写入。
+    pub fn validate_skill_update(skill: &crate::types::SkillDef) -> Result<(), String> {
+        let id = skill.id.trim();
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!("非法技能 id: {id}（仅允许字母/数字/-/_）"));
+        }
+        if skill.name.trim().is_empty() {
+            return Err("name 不能为空".into());
+        }
+        if skill.instructions.trim().is_empty() {
+            return Err("instructions 不能为空".into());
+        }
+        if skill.instructions.chars().count() > 30_000 {
+            return Err("instructions 超过 30000 字符上限".into());
+        }
+        if crate::learning_candidates::is_sensitive_content(&skill.instructions)
+            || crate::learning_candidates::is_sensitive_content(&skill.name)
+        {
+            return Err("内容含敏感信息形态（密钥/令牌/密码）——默认拒绝".into());
+        }
+        Ok(())
+    }
+
+    /// 版本化写入：校验通过后先归档当前版本到 `<id>/.history/v<N>.md`，再写
+    /// 新版本（version+1、updatedAt=now）。旧版本在历史目录保持可回滚。
+    /// 校验失败返回 Err——原技能不变（受控写入红线）。
+    pub fn write_skill_versioned(
+        &self,
+        skill: &crate::types::SkillDef,
+    ) -> anyhow::Result<crate::types::SkillDef> {
+        Self::validate_skill_update(skill).map_err(|e| anyhow::anyhow!("技能更新被拒：{e}"))?;
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组");
+        };
+        let id = skill.id.trim().to_string();
+        let current = self.load_skills()?.into_iter().find(|s| s.id == id);
+        let mut next = skill.clone();
+        next.id = id;
+        if next.source.trim().is_empty() {
+            next.source = current
+                .as_ref()
+                .map(|s| s.source.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "manual".into());
+        }
+        next.created_at = current
+            .as_ref()
+            .map(|s| s.created_at.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(crate::types::now_iso);
+        next.version = current.as_ref().map(|s| s.version).unwrap_or(0) + 1;
+        next.updated_at = crate::types::now_iso();
+        // 恢复被删除的技能：清除删除标记（目录里只剩 .history/ 与标记，current 为 None → v1；
+        // 若历史上已有版本，版本号接着最大历史版本走，避免 v1.md 被覆盖）。
+        std::fs::create_dir_all(dir.join(&next.id).join(".history"))?;
+        let _ = std::fs::remove_file(dir.join(&next.id).join(".deleted"));
+        if next.version == 1 {
+            if let Some(max_hist) = max_history_version(&dir.join(&next.id).join(".history")) {
+                next.version = max_hist + 1;
+            }
+        }
+        if let Some(old) = current.as_ref() {
+            let hist = dir.join(&next.id).join(".history");
+            std::fs::create_dir_all(&hist)?;
+            std::fs::write(
+                hist.join(format!("v{}.md", old.version)),
+                render_skill_md(old),
+            )?;
+        }
+        std::fs::create_dir_all(dir.join(&next.id))?;
+        std::fs::write(dir.join(&next.id).join("SKILL.md"), render_skill_md(&next))?;
+        let legacy = dir.join(format!("{}.json", next.id));
+        if legacy.exists() {
+            let _ = std::fs::remove_file(&legacy);
+        }
+        Ok(next)
+    }
+
+    /// 技能是否处于「已删除但历史保留」状态（有删除标记、无 SKILL.md）。
+    pub fn skill_is_deleted(&self, id: &str) -> anyhow::Result<bool> {
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组");
+        };
+        Ok(dir.join(id).join(".deleted").exists() && !dir.join(id).join("SKILL.md").exists())
+    }
+
+    /// 已删除（历史保留、可回滚恢复）的技能清单，最近删除的在前。
+    /// 删除标记内容 = 删除时间（ISO）；标记缺失/读不出时按空串处理并排在后面。
+    /// 与 [`Self::skill_is_deleted`] 同一判据——治理面据此提供「回滚恢复」入口
+    /// （否则技能从列表消失后用户无处可点）。
+    pub fn list_deleted_skills(&self) -> anyhow::Result<Vec<DeletedSkill>> {
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组");
+        };
+        let mut out: Vec<DeletedSkill> = Vec::new();
+        // 技能目录在写入第一个技能之前并不存在：此时「已删除清单」语义上就是空，
+        // 不是错误（全新工作区一打开治理面就 400 是不可接受的）。
+        if !dir.is_dir() {
+            return Ok(out);
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let skill_dir = entry.path();
+            if !skill_dir.join(".deleted").exists() || skill_dir.join("SKILL.md").exists() {
+                continue;
+            }
+            let deleted_at = std::fs::read_to_string(skill_dir.join(".deleted"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            out.push(DeletedSkill {
+                id: entry.file_name().to_string_lossy().into_owned(),
+                deleted_at,
+            });
+        }
+        // id 作平局裁决：顺序确定，不随目录迭代序漂移
+        out.sort_by(|a, b| {
+            b.deleted_at
+                .cmp(&a.deleted_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(out)
+    }
+
+    /// 版本历史（旧→新）：`<id>/.history/vN.md` 清单 + 当前版本。
+    /// 技能被删除后历史仍可列出（末尾无「当前版本」行）——删除是可审计、可恢复的状态，
+    /// 不是抹除。
+    pub fn skill_history(&self, id: &str) -> anyhow::Result<Vec<(u64, String)>> {
+        Ok(self
+            .skill_history_detailed(id)?
+            .into_iter()
+            .map(|r| (r.version, r.name))
+            .collect())
+    }
+
+    /// 技能版本历史（旧 → 新），每行带该版本的完整定义。
+    /// 归档文件 `v{v}.md` 本就是完整的 SKILL.md——`skill_history` 此前每个版本都
+    /// 读取并解析了它，只留下 name。治理面要让用户看得出「这一版写了什么」才谈得上
+    /// 选回滚目标，所以这里把解析结果原样交出去（不增加 I/O）。
+    /// 末行是当前生效版本（技能已删除时没有末行）。
+    pub fn skill_history_detailed(&self, id: &str) -> anyhow::Result<Vec<SkillHistoryRow>> {
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组");
+        };
+        let mut out: Vec<SkillHistoryRow> = Vec::new();
+        let hist = dir.join(id).join(".history");
+        if hist.is_dir() {
+            let mut vers: Vec<u64> = std::fs::read_dir(&hist)?
+                .filter_map(|e| e.ok())
+                .filter_map(|e| history_version_of(&e.file_name().to_string_lossy()))
+                .collect();
+            vers.sort_unstable();
+            for v in vers {
+                let raw =
+                    std::fs::read_to_string(hist.join(format!("v{v}.md"))).unwrap_or_default();
+                let def = parse_skill_md(&raw).ok().flatten();
+                let name = def
+                    .as_ref()
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| format!("v{v}"));
+                out.push(SkillHistoryRow {
+                    version: v,
+                    name,
+                    description: def
+                        .as_ref()
+                        .map(|s| s.description.clone())
+                        .unwrap_or_default(),
+                    instructions: def.map(|s| s.instructions).unwrap_or_default(),
+                });
+            }
+        }
+        if let Some(cur) = self.load_skills()?.into_iter().find(|s| s.id == id) {
+            out.push(SkillHistoryRow {
+                version: cur.version,
+                name: cur.name,
+                description: cur.description,
+                instructions: cur.instructions,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 回滚到历史版本：历史版本经同一校验后成为新版本行（version 继续
+    /// 单调递增——回滚不是倒退版本号，是「以旧内容写新版本」，审计链不断）。
+    pub fn rollback_skill(
+        &self,
+        id: &str,
+        to_version: u64,
+    ) -> anyhow::Result<crate::types::SkillDef> {
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组");
+        };
+        let hist_path = dir
+            .join(id)
+            .join(".history")
+            .join(format!("v{to_version}.md"));
+        let raw = std::fs::read_to_string(&hist_path)
+            .map_err(|_| anyhow::anyhow!("历史版本不存在：{id} v{to_version}"))?;
+        let old = parse_skill_md(&raw)
+            .map_err(|e| anyhow::anyhow!("历史版本解析失败：{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("历史版本缺少 frontmatter"))?;
+        self.write_skill_versioned(&old)
+    }
+
+    /// 删除技能——留痕可恢复（spec「删除状态在后续会话生效并可审计」）：
+    /// 当前版本先归档到 `<id>/.history/v<N>.md`，再移除 `SKILL.md` 与旧 json，
+    /// 留 `.deleted` 标记（内容 = 删除时间）。`load_skills` 只认带 `SKILL.md` 的目录，
+    /// 所以删除后技能立即停止注入；`.history/` 保留，`rollback_skill` 可恢复任一版本。
+    /// 不存在返回 Ok(false)；标记已存在（已删除）也返回 Ok(false)。
+    pub fn remove_skill_versioned(&self, id: &str) -> anyhow::Result<bool> {
+        let id = id.trim();
+        Self::validate_skill_id(id)?;
+        let Some(dir) = self.skills_dir() else {
+            anyhow::bail!("无激活组");
+        };
+        let skill_dir = dir.join(id);
+        let live = skill_dir.join("SKILL.md").exists();
+        let legacy = dir.join(format!("{id}.json"));
+        if !live && !legacy.exists() {
+            return Ok(false);
+        }
+        if live {
+            let current = self
+                .load_skills()?
+                .into_iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| anyhow::anyhow!("技能校验失败，拒绝删除：{id}"))?;
+            let hist = skill_dir.join(".history");
+            std::fs::create_dir_all(&hist)?;
+            // 已有同名归档（旧实现把 legacy v0 存成 v1.md 的遗留）不覆盖
+            let path = hist.join(format!("v{}.md", current.version));
+            if !path.exists() {
+                std::fs::write(&path, render_skill_md(&current))?;
+            }
+            std::fs::remove_file(skill_dir.join("SKILL.md"))?;
+        } else {
+            // 旧格式单文件：原样搬进历史（按 v0 记——legacy 技能本就没有版本号）
+            let raw = std::fs::read_to_string(&legacy)?;
+            let hist = skill_dir.join(".history");
+            std::fs::create_dir_all(&hist)?;
+            let path = hist.join("v0.md");
+            if !path.exists() {
+                std::fs::write(&path, &raw)?;
+            }
+            std::fs::remove_file(&legacy)?;
+        }
+        std::fs::create_dir_all(&skill_dir)?;
+        std::fs::write(skill_dir.join(".deleted"), crate::types::now_iso())?;
+        self.remove_skill_usage(id);
+        Ok(true)
+    }
+
+    fn validate_skill_id(id: &str) -> anyhow::Result<()> {
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            anyhow::bail!("非法技能 id: {id}（仅允许字母/数字/-/_）");
+        }
+        Ok(())
+    }
+
     // ---------------- 协议层（`<组目录>/protocol/*.md`，frontmatter 驱动按需注入） ----------------
 
     /// 装载激活组的协议文档（热装载；无 frontmatter 的 .md 跳过，坏 frontmatter 跳过并告警）
@@ -325,7 +617,21 @@ impl LocalRegistry {
         }
         Ok(out)
     }
+}
 
+/// 归档文件名 `v<N>.md` → N（其它文件名返回 None）。历史清单与版本号续算共用，
+/// 两处口径不会漂移。
+fn history_version_of(name: &str) -> Option<u64> {
+    name.strip_prefix('v')?.strip_suffix(".md")?.parse().ok()
+}
+
+/// `.history/` 里最大的版本号（无历史返回 None）。
+fn max_history_version(hist: &Path) -> Option<u64> {
+    std::fs::read_dir(hist)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| history_version_of(&e.file_name().to_string_lossy()))
+        .max()
 }
 
 /// SKILL.md 渲染：frontmatter（内联列表）+ 空行 + Markdown 正文
@@ -347,6 +653,12 @@ fn render_skill_md(s: &crate::types::SkillDef) -> String {
     }
     if !s.source.trim().is_empty() {
         fm.push_str(&format!("source: {}\n", s.source));
+    }
+    if s.version > 0 {
+        fm.push_str(&format!("version: {}\n", s.version));
+    }
+    if !s.updated_at.trim().is_empty() {
+        fm.push_str(&format!("updatedAt: {}\n", s.updated_at));
     }
     fm.push_str("---\n\n");
     fm.push_str(s.instructions.trim());
@@ -440,6 +752,8 @@ fn parse_skill_md(raw: &str) -> Result<Option<crate::types::SkillDef>, String> {
     let mut agents: Vec<String> = Vec::new();
     let mut created_at = String::new();
     let mut source = String::new();
+    let mut version: u64 = 0;
+    let mut updated_at = String::new();
     let mut closed = false;
     // 逐行列表项的归属：跟随最近声明的列表字段（triggers → agents）
     let mut list_field: u8 = 0; // 0=无 1=triggers 2=agents
@@ -478,6 +792,8 @@ fn parse_skill_md(raw: &str) -> Result<Option<crate::types::SkillDef>, String> {
             }
             "createdAt" | "created_at" => created_at = v.to_string(),
             "source" => source = v.to_string(),
+            "version" => version = v.parse::<u64>().unwrap_or(0),
+            "updatedAt" | "updated_at" => updated_at = v.to_string(),
             _ => {}
         }
     }
@@ -503,6 +819,8 @@ fn parse_skill_md(raw: &str) -> Result<Option<crate::types::SkillDef>, String> {
         success_count: 0,
         last_used_at: String::new(),
         source,
+        version,
+        updated_at,
     }))
 }
 
@@ -547,7 +865,8 @@ mod skills_dir_tests {
 
     /// 生产同构布局：<workspace>/entities 作为 agents_dir（config.rs 口径）
     fn mk_registry(tag: &str) -> (LocalRegistry, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("exm-skills-{tag}-{}", crate::types::new_id()));
+        let root =
+            std::env::temp_dir().join(format!("exm-skills-{tag}-{}", crate::types::new_id()));
         let reg = LocalRegistry::new(root.join("entities")).unwrap();
         (reg, root)
     }
@@ -584,7 +903,10 @@ mod skills_dir_tests {
         let dir = reg.skills_dir().unwrap();
         assert!(dir.join("legacy.json").exists(), "旧技能应已迁移到新目录");
         let list = reg.load_skills().unwrap();
-        assert!(list.iter().any(|s| s.id == "legacy"), "迁移后可装载：{list:?}");
+        assert!(
+            list.iter().any(|s| s.id == "legacy"),
+            "迁移后可装载：{list:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -616,11 +938,17 @@ mod skills_dir_tests {
         };
         reg.write_skill(&s).unwrap();
         let dir = reg.skills_dir().unwrap();
-        assert!(dir.join("rt-skill/SKILL.md").exists(), "写入应为 SKILL.md 格式");
+        assert!(
+            dir.join("rt-skill/SKILL.md").exists(),
+            "写入应为 SKILL.md 格式"
+        );
         let list = reg.load_skills().unwrap();
         let got = list.iter().find(|x| x.id == "rt-skill").expect("应可读回");
         assert_eq!(got.name, "往返技能");
-        assert_eq!(got.triggers, vec!["往返".to_string(), "roundtrip".to_string()]);
+        assert_eq!(
+            got.triggers,
+            vec!["往返".to_string(), "roundtrip".to_string()]
+        );
         assert!(got.instructions.contains("约束一"));
         assert!(got.agents.is_empty());
         let _ = std::fs::remove_dir_all(&root);
@@ -655,7 +983,10 @@ mod skills_dir_tests {
             ..Default::default()
         })
         .unwrap();
-        assert!(!skills.join("dual.json").exists(), "write 应清除同 id 旧 json");
+        assert!(
+            !skills.join("dual.json").exists(),
+            "write 应清除同 id 旧 json"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -729,25 +1060,28 @@ mod skills_dir_tests {
         reg.create_group(Some("g1".into()), "组一", "").unwrap();
         reg.create_group(Some("g2".into()), "组二", "").unwrap();
         reg.set_active_group("g1").unwrap();
-        reg.upsert_single(crate::types::AgentDefinition {
-            name: "单体".into(),
-            identifier: "solo-x".into(),
-            domain: "测试".into(),
-            tier: crate::types::Tier::Orchestrator,
-            description: "测试单智能体".into(),
-            capabilities: vec![],
-            tools: vec![],
-            when_to_call: String::new(),
-            link: None,
-            max_steps: None,
-            dependencies: vec![],
-            composable_with: vec![],
-            input_schema: Default::default(),
-            output_schema: Default::default(),
-            prompt_file: String::new(),
-            model_hint: None,
-            model_routing: None,
-        }, None)
+        reg.upsert_single(
+            crate::types::AgentDefinition {
+                name: "单体".into(),
+                identifier: "solo-x".into(),
+                domain: "测试".into(),
+                tier: crate::types::Tier::Orchestrator,
+                description: "测试单智能体".into(),
+                capabilities: vec![],
+                tools: vec![],
+                when_to_call: String::new(),
+                link: None,
+                max_steps: None,
+                dependencies: vec![],
+                composable_with: vec![],
+                input_schema: Default::default(),
+                output_schema: Default::default(),
+                prompt_file: String::new(),
+                model_hint: None,
+                model_routing: None,
+            },
+            None,
+        )
         .unwrap();
 
         // 全局态：g1 组模式
@@ -782,5 +1116,285 @@ mod skills_dir_tests {
         // （已在上面断言）
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// capability-parity 6.5 版本化写入：格式错误/敏感内容拒绝时旧版本不变；
+/// 成功更新归档旧版本；回滚以旧内容写新版本（版本号单调递增）。
+#[cfg(test)]
+mod versioned_write_tests {
+    use super::super::*;
+    use crate::types::SkillDef;
+
+    fn mk_registry(tag: &str) -> (LocalRegistry, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("exm-skv-{tag}-{}", crate::types::new_id()));
+        let reg = LocalRegistry::new(root.join("entities")).unwrap();
+        (reg, root)
+    }
+
+    fn skill(id: &str, instructions: &str) -> SkillDef {
+        SkillDef {
+            id: id.into(),
+            name: format!("技能-{id}"),
+            description: String::new(),
+            triggers: vec!["触发".into()],
+            instructions: instructions.into(),
+            agents: vec![],
+            created_at: String::new(),
+            use_count: 0,
+            success_count: 0,
+            last_used_at: String::new(),
+            source: String::new(),
+            version: 0,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn 版本链_创建更新回滚_单调递增() {
+        let (reg, _root) = mk_registry("chain");
+        // 创建 = v1
+        let v1 = reg
+            .write_skill_versioned(&skill("deploy", "第一版指令"))
+            .unwrap();
+        assert_eq!(v1.version, 1);
+        // 更新 = v2（v1 归档）
+        let v2 = reg
+            .write_skill_versioned(&skill("deploy", "第二版指令（金丝雀）"))
+            .unwrap();
+        assert_eq!(v2.version, 2);
+        let hist = reg.skill_history("deploy").unwrap();
+        assert_eq!(hist.len(), 2, "历史+当前：{hist:?}");
+        // 回滚到 v1：内容恢复、版本号继续递增（v3）
+        let v3 = reg.rollback_skill("deploy", 1).unwrap();
+        assert_eq!(v3.version, 3);
+        let current = reg
+            .load_skills()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "deploy")
+            .unwrap();
+        assert!(
+            current.instructions.contains("第一版指令"),
+            "回滚后内容恢复旧版"
+        );
+        assert_eq!(current.version, 3);
+    }
+
+    #[test]
+    fn 格式错误与敏感内容_旧版本不变() {
+        let (reg, _root) = mk_registry("reject");
+        let v1 = reg
+            .write_skill_versioned(&skill("safe", "正常指令"))
+            .unwrap();
+        assert_eq!(v1.version, 1);
+        // 空 instructions：拒
+        let err = reg.write_skill_versioned(&skill("safe", "  ")).unwrap_err();
+        assert!(err.to_string().contains("被拒"), "{err}");
+        // 敏感内容：拒
+        let err = reg
+            .write_skill_versioned(&skill("safe", "用 password=hunter2 直连"))
+            .unwrap_err();
+        assert!(err.to_string().contains("敏感"), "{err}");
+        // 非法 id：拒
+        let err = reg
+            .write_skill_versioned(&skill("bad id!", "内容"))
+            .unwrap_err();
+        assert!(err.to_string().contains("id"), "{err}");
+        // 旧版本原样：v1 内容未动、无 v2
+        let current = reg
+            .load_skills()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "safe")
+            .unwrap();
+        assert_eq!(current.version, 1);
+        assert!(current.instructions.contains("正常指令"));
+        assert!(
+            reg.skill_history("safe").unwrap().len() == 1,
+            "无半成品历史"
+        );
+    }
+
+    #[test]
+    fn 回滚不存在版本_具体拒绝原因() {
+        let (reg, _root) = mk_registry("norollback");
+        reg.write_skill_versioned(&skill("x", "内容")).unwrap();
+        let err = reg.rollback_skill("x", 9).unwrap_err();
+        assert!(err.to_string().contains("不存在"), "{err}");
+    }
+
+    /// legacy 技能（无 `version` frontmatter → 读作 0）连续更新两次：legacy **原件**必须
+    /// 仍可回滚到。旧实现把它归档成 `v1.md`，第二次更新时归档「当前 v1」又写 `v1.md`，
+    /// 原件被覆盖丢失。
+    #[test]
+    fn legacy技能_v0原件_连续更新不丢失() {
+        let (reg, root) = mk_registry("legacy");
+        let dir = reg.skills_dir().unwrap();
+        // 直接摆一个 legacy 技能（无 version / updatedAt frontmatter）——不经过版本化写入
+        std::fs::create_dir_all(dir.join("old")).unwrap();
+        std::fs::write(
+            dir.join("old/SKILL.md"),
+            "---\nid: old\nname: 旧技能\ntriggers: [触发]\n---\nlegacy 原件指令\n",
+        )
+        .unwrap();
+        assert!(root.join("entities").exists());
+        let before = reg.load_skills().unwrap().remove(0);
+        assert_eq!(before.version, 0, "前置：legacy 技能读作 v0");
+
+        let v1 = reg
+            .write_skill_versioned(&skill("old", "第一次更新"))
+            .unwrap();
+        assert_eq!(v1.version, 1);
+        let v2 = reg
+            .write_skill_versioned(&skill("old", "第二次更新"))
+            .unwrap();
+        assert_eq!(v2.version, 2);
+
+        let hist = dir.join("old/.history");
+        assert!(
+            std::fs::read_to_string(hist.join("v0.md"))
+                .unwrap()
+                .contains("legacy 原件指令"),
+            "legacy 原件应归档为 v0.md 且内容不变"
+        );
+        assert!(
+            std::fs::read_to_string(hist.join("v1.md"))
+                .unwrap()
+                .contains("第一次更新"),
+            "v1 应完整保留"
+        );
+        // 历史清单把 v0 如实列出，且 v0 可回滚
+        let vers: Vec<u64> = reg
+            .skill_history("old")
+            .unwrap()
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect();
+        assert_eq!(vers, vec![0, 1, 2]);
+        // 详细版：每行带该版本写时的完整指令——治理面据此看出「这一版写了什么」。
+        // 归档文件本就是完整 SKILL.md，这里只是不再把解析结果丢掉。
+        let detail = reg.skill_history_detailed("old").unwrap();
+        assert_eq!(
+            detail.iter().map(|r| r.version).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "与精简版同一版本序列"
+        );
+        let bodies: Vec<&str> = detail.iter().map(|r| r.instructions.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec!["legacy 原件指令", "第一次更新", "第二次更新"],
+            "各版内容与写入时一致"
+        );
+        // legacy 原件没有 version/updatedAt frontmatter，但 name 照常解析出来
+        assert_eq!(detail[0].name, "旧技能", "legacy 归档行的名称可解析");
+        let back = reg.rollback_skill("old", 0).unwrap();
+        assert_eq!(back.version, 3, "回滚以新版本行呈现");
+        assert_eq!(back.instructions, "legacy 原件指令");
+        assert_eq!(back.name, "旧技能", "回滚恢复的是 legacy 原件的完整内容");
+    }
+
+    /// 删除是可审计、可恢复的状态，不是抹除：删除后停止加载（不再注入）、历史完整
+    /// 可读、`.deleted` 标记在；恢复后续版本号接续而不是从 v1 重来。
+    #[test]
+    fn 删除留痕_停止加载_历史可读_可恢复且版本续接() {
+        let (reg, _root) = mk_registry("delete");
+        reg.write_skill_versioned(&skill("d", "第一版")).unwrap();
+        reg.write_skill_versioned(&skill("d", "第二版")).unwrap();
+        assert!(!reg.skill_is_deleted("d").unwrap());
+
+        assert!(reg.remove_skill_versioned("d").unwrap());
+        assert!(
+            !reg.remove_skill_versioned("d").unwrap(),
+            "重复删除返回 false（幂等）"
+        );
+        assert!(
+            !reg.remove_skill_versioned("never-existed").unwrap(),
+            "不存在 → false"
+        );
+        // 停止加载
+        assert!(
+            reg.load_skills().unwrap().iter().all(|s| s.id != "d"),
+            "删除后不得再被加载/注入"
+        );
+        assert!(reg.skill_is_deleted("d").unwrap());
+        // 历史完整可读：v1、v2 都在，没有「当前版本」行
+        let hist = reg.skill_history("d").unwrap();
+        let vers: Vec<u64> = hist.iter().map(|(v, _)| *v).collect();
+        assert_eq!(vers, vec![1, 2], "删除后历史仍应可审计：{hist:?}");
+        // 回滚 = 恢复：以 v1 内容写成新版本，版本号续接（3），不再处于删除态
+        let restored = reg.rollback_skill("d", 1).unwrap();
+        assert_eq!(
+            restored.version, 3,
+            "恢复后版本号续接，不得回到 v1 覆盖历史"
+        );
+        assert_eq!(restored.instructions, "第一版");
+        assert!(!reg.skill_is_deleted("d").unwrap());
+        let live = reg.load_skills().unwrap().remove(0);
+        assert_eq!(live.id, "d");
+        assert_eq!(live.version, 3);
+        // 历史里 v1/v2 原样保留（恢复没有覆盖它们）
+        let vers: Vec<u64> = reg
+            .skill_history("d")
+            .unwrap()
+            .iter()
+            .map(|(v, _)| *v)
+            .collect();
+        assert_eq!(vers, vec![1, 2, 3]);
+    }
+
+    /// 删除 legacy 单文件技能（`<id>.json`）：原样搬进历史，同样可恢复。
+    #[test]
+    fn 删除legacy单文件技能_原件进历史() {
+        let (reg, _root) = mk_registry("del-legacy");
+        let dir = reg.skills_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("lj.json");
+        std::fs::write(
+            &legacy,
+            serde_json::json!({
+                "id": "lj", "name": "旧档", "description": "", "triggers": ["触发"],
+                "instructions": "旧档指令", "agents": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            reg.load_skills().unwrap().iter().any(|s| s.id == "lj"),
+            "前置：旧档可加载"
+        );
+        assert!(reg.remove_skill_versioned("lj").unwrap());
+        assert!(!legacy.exists());
+        assert!(reg.load_skills().unwrap().iter().all(|s| s.id != "lj"));
+        let raw = std::fs::read_to_string(dir.join("lj/.history/v0.md")).unwrap();
+        assert!(raw.contains("旧档指令"), "旧档原件应原样进历史：{raw}");
+        assert!(reg.skill_is_deleted("lj").unwrap());
+    }
+
+    /// 校验不过（格式/敏感/越界 id）→ Err 且**原技能一个字节不变**，无半成品归档。
+    #[test]
+    fn 校验失败_原技能不变_无半成品() {
+        let (reg, _root) = mk_registry("atomic");
+        reg.write_skill_versioned(&skill("a", "好内容")).unwrap();
+        let dir = reg.skills_dir().unwrap();
+        let before = std::fs::read_to_string(dir.join("a/SKILL.md")).unwrap();
+        // 前置：首次写入没有旧版本，不应产生任何归档
+        assert!(
+            !dir.join("a/.history/v0.md").exists(),
+            "首次写入无旧版本可归档"
+        );
+        let err = reg
+            .write_skill_versioned(&skill("a", "令牌 sk-abcdefghijklmnopqrstuvwx"))
+            .unwrap_err();
+        assert!(err.to_string().contains("敏感"), "{err}");
+        let err = reg.write_skill_versioned(&skill("a", "")).unwrap_err();
+        assert!(err.to_string().contains("instructions"), "{err}");
+        let after = std::fs::read_to_string(dir.join("a/SKILL.md")).unwrap();
+        assert_eq!(before, after, "被拒的更新不得改动原技能");
+        assert_eq!(
+            reg.skill_history("a").unwrap().len(),
+            1,
+            "不得留下半成品历史"
+        );
     }
 }

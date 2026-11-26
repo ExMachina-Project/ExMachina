@@ -75,7 +75,9 @@ impl AgentPatch {
         }
         if let Some(v) = self.model_hint.as_deref() {
             let t = v.trim();
-            if let Some(routing)=&mut def.model_routing {routing.set_default_model(t);}
+            if let Some(routing) = &mut def.model_routing {
+                routing.set_default_model(t);
+            }
             def.model_hint = if t.is_empty() {
                 None
             } else {
@@ -86,6 +88,25 @@ impl AgentPatch {
             def.link = v.clone();
         }
     }
+}
+
+/// 技能版本历史里的一行（`LocalRegistry::skill_history_detailed`）。
+/// 归档 `v{v}.md` 是完整的 SKILL.md，所以这里能给出该版本的完整定义；
+/// 归档损坏/解析失败时行仍在（审计链不断），内容字段为空串。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillHistoryRow {
+    pub version: u64,
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+}
+
+/// 已删除（历史保留、可回滚恢复）的技能（`LocalRegistry::list_deleted_skills`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedSkill {
+    pub id: String,
+    /// 删除时间（ISO）；标记内容读不出时为空串
+    pub deleted_at: String,
 }
 
 pub struct LocalRegistry {

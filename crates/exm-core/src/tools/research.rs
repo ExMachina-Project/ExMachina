@@ -74,7 +74,11 @@ fn slugify(topic: &str) -> String {
         s = s.replace("--", "-");
     }
     let s = s.trim_matches('-').to_string();
-    let s = if s.is_empty() { "research".to_string() } else { s };
+    let s = if s.is_empty() {
+        "research".to_string()
+    } else {
+        s
+    };
     s.chars().take(40).collect()
 }
 
@@ -114,9 +118,17 @@ impl ToolGateway {
                 "检索后端不可用：research_report 需要至少一个可用的联网搜索后端（在「模型与搜索」设置里配置）",
             );
         }
-        let fallback=self.research_llm.read().clone();
-        let (provider,model)=match self.agent_aux_model(crate::model_routing::ModelPurpose::Research,&topic,fallback).await {
-            Ok(value)=>value,Err(e)=>return ToolResult::err(format!("研究模型不可用：{e}")),
+        let fallback = self.research_llm.read().clone();
+        let (provider, model) = match self
+            .agent_aux_model(
+                crate::model_routing::ModelPurpose::Research,
+                &topic,
+                fallback,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => return ToolResult::err(format!("研究模型不可用：{e}")),
         };
         let Some(exec) = self.spawn_executor.read().clone() else {
             return ToolResult::err("spawn 执行器未装配（运行时未就绪）");
@@ -171,18 +183,11 @@ impl ToolGateway {
 产出要点清单，每个要点后附来源 URL（格式：`要点文字 [来源: URL]`）；\
 只输出有来源支撑的要点，没有可靠来源就写「（本子问题未找到可靠来源）」。"
             );
-            let tools = vec![
-                ToolName::WebSearch,
-                ToolName::WebFetch,
-                ToolName::Read,
-            ];
+            let tools = vec![ToolName::WebSearch, ToolName::WebFetch, ToolName::Read];
             futures.push(async move {
                 let fut = exec(&agent, &session, &task, tools);
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(per_stage_timeout),
-                    fut,
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_secs(per_stage_timeout), fut)
+                    .await
                 {
                     Ok(Ok(text)) => (q.clone(), text),
                     Ok(Err(e)) => (q.clone(), format!("（子任务失败：{e}）")),
@@ -318,7 +323,8 @@ impl ToolGateway {
 fn extract_urls(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for tok in text.split_whitespace() {
-        let tok = tok.trim_matches(|c: char| c == '[' || c == ']' || c == '`' || c == '(' || c == ')');
+        let tok =
+            tok.trim_matches(|c: char| c == '[' || c == ']' || c == '`' || c == '(' || c == ')');
         if (tok.starts_with("http://") || tok.starts_with("https://"))
             && !out.contains(&tok.to_string())
         {
@@ -332,11 +338,12 @@ fn extract_urls(text: &str) -> Vec<String> {
 fn parse_json_array(text: &str) -> Option<Vec<String>> {
     let start = text.find('[')?;
     let end = text.rfind(']')?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&text[start..=end]).ok()?;
-    parsed
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+    let parsed: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
+    parsed.as_array().map(|a| {
+        a.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -416,8 +423,8 @@ mod research_tool_tests {
     use super::super::*;
     use crate::store::Store;
     use crate::types::Tier;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     struct TestRig {
         gw: ToolGateway,
@@ -465,7 +472,13 @@ mod research_tool_tests {
         registry.set_primary("t", "orch-1").unwrap();
         registry.set_active_group("t").unwrap();
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let mut gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        let mut gw = ToolGateway::new(
+            &dir,
+            store.clone(),
+            registry,
+            events,
+            SecurityConfig::default(),
+        );
         if with_backend {
             gw = gw.with_search(crate::config::SearchConfig {
                 backends: Vec::new(),
@@ -536,21 +549,22 @@ mod research_tool_tests {
         // spawn 替身：记录白名单与任务数，回流带来源 URL
         let spawned = Arc::new(AtomicUsize::new(0));
         let s2 = spawned.clone();
-        rig.gw.set_spawn_executor(Arc::new(move |_a, _s, task, tools| {
-            let spawned = s2.clone();
-            Box::pin(async move {
-                spawned.fetch_add(1, Ordering::SeqCst);
-                // 白名单断言素材：只读三件套
-                assert!(
-                    tools.contains(&ToolName::WebSearch)
-                        && tools.contains(&ToolName::WebFetch)
-                        && !tools.contains(&ToolName::Terminal),
-                    "spawn 白名单必须是只读检索面"
-                );
-                let _ = task;
-                Ok("要点：相关数据 [来源: https://example.com/market]".to_string())
-            })
-        }));
+        rig.gw
+            .set_spawn_executor(Arc::new(move |_a, _s, task, tools| {
+                let spawned = s2.clone();
+                Box::pin(async move {
+                    spawned.fetch_add(1, Ordering::SeqCst);
+                    // 白名单断言素材：只读三件套
+                    assert!(
+                        tools.contains(&ToolName::WebSearch)
+                            && tools.contains(&ToolName::WebFetch)
+                            && !tools.contains(&ToolName::Terminal),
+                        "spawn 白名单必须是只读检索面"
+                    );
+                    let _ = task;
+                    Ok("要点：相关数据 [来源: https://example.com/market]".to_string())
+                })
+            }));
         let r = rig
             .gw
             .execute(
@@ -578,14 +592,21 @@ mod research_tool_tests {
         let path = outbox[0]["path"].as_str().unwrap();
         let report = std::fs::read_to_string(rig.dir.join(path)).unwrap_or_default();
         assert!(report.contains("（综合推断）"), "伪造引用拦截：报告含标注");
-        assert!(report.contains("[1] https://example.com/market"), "来源清单保留");
+        assert!(
+            report.contains("[1] https://example.com/market"),
+            "来源清单保留"
+        );
         // 事件：四阶段 + finished（list_events 回 Envelope JSON；CoreEvent 的
         // kind 字段 serde rename 为 "type"，嵌在 Envelope.payload 下）
         let events = rig.store.list_events("s-rs").unwrap_or_default();
         let stages: Vec<String> = events
             .iter()
             .filter(|env| env["payload"]["type"] == "research.stage")
-            .filter_map(|env| env["payload"]["payload"]["stage"].as_str().map(String::from))
+            .filter_map(|env| {
+                env["payload"]["payload"]["stage"]
+                    .as_str()
+                    .map(String::from)
+            })
             .collect();
         assert_eq!(
             stages,

@@ -736,7 +736,6 @@ pub(crate) fn shell_quote(v: &str) -> String {
 
 // ---------------------------------------------------------------- 记忆工具与工具面快照（组 8 单测）
 
-
 // ---------------------------------------------------------------- root 提权识别（agent-exec-confinement）
 
 /// 提权/切换用户命令首 token（agent-exec-confinement）：
@@ -759,7 +758,9 @@ pub(crate) fn is_elevation_command(cmd: &str) -> bool {
     let bare = strip_quoted(cmd);
     let has_chain_sep = SHELL_CHAIN_SEPARATORS.iter().any(|m| bare.contains(m));
     if has_chain_sep {
-        return split_chain_segments(cmd).iter().any(|seg| is_elevation_segment(seg));
+        return split_chain_segments(cmd)
+            .iter()
+            .any(|seg| is_elevation_segment(seg));
     }
     is_elevation_segment(cmd)
 }
@@ -816,7 +817,9 @@ mod elevation_tests {
         assert!(is_elevation_command("sudo apt install -y tmux"));
         assert!(is_elevation_command("doas apk add curl"));
         assert!(is_elevation_command("run0 systemctl restart nginx"));
-        assert!(is_elevation_command("su - postgres -c 'psql -c \"select 1\"'"));
+        assert!(is_elevation_command(
+            "su - postgres -c 'psql -c \"select 1\"'"
+        ));
         assert!(is_elevation_command("runuser -u www -- nginx -t"));
         assert!(is_elevation_command("sudo -u deploy git pull"));
     }
@@ -847,9 +850,18 @@ mod elevation_tests {
 
     #[test]
     fn 剥离冗余提权壳() {
-        assert_eq!(strip_redundant_elevation("sudo apt install -y tmux"), "apt install -y tmux");
-        assert_eq!(strip_redundant_elevation("doas apk add curl"), "apk add curl");
-        assert_eq!(strip_redundant_elevation("run0 systemctl restart nginx"), "systemctl restart nginx");
+        assert_eq!(
+            strip_redundant_elevation("sudo apt install -y tmux"),
+            "apt install -y tmux"
+        );
+        assert_eq!(
+            strip_redundant_elevation("doas apk add curl"),
+            "apk add curl"
+        );
+        assert_eq!(
+            strip_redundant_elevation("run0 systemctl restart nginx"),
+            "systemctl restart nginx"
+        );
     }
 
     #[test]
@@ -858,8 +870,14 @@ mod elevation_tests {
             strip_redundant_elevation("su - postgres -c 'psql -c \"select 1\"'"),
             "su - postgres -c 'psql -c \"select 1\"'"
         );
-        assert_eq!(strip_redundant_elevation("sudo -u deploy git pull"), "sudo -u deploy git pull");
-        assert_eq!(strip_redundant_elevation("runuser -u www -- nginx -t"), "runuser -u www -- nginx -t");
+        assert_eq!(
+            strip_redundant_elevation("sudo -u deploy git pull"),
+            "sudo -u deploy git pull"
+        );
+        assert_eq!(
+            strip_redundant_elevation("runuser -u www -- nginx -t"),
+            "runuser -u www -- nginx -t"
+        );
     }
 
     #[test]
@@ -940,11 +958,56 @@ const TERMINAL_DENY: &[&str] = &[
 /// 只读探测命令（Safe 档）：白名单 ∩ 无副作用语义。
 /// 与 TERMINAL_ALLOW 的关系：Safe ⊂ Controlled 白名单集，分档只是叠加语义标注。
 const TERMINAL_SAFE: &[&str] = &[
-    "dir", "ls", "type", "findstr", "where", "which", "whoami", "uname", "pwd", "date",
-    "head", "tail", "cat", "wc", "diff", "rg", "grep", "find", "stat", "du", "df", "ps",
-    "file", "basename", "dirname", "realpath", "md5sum", "sha256sum", "free", "uptime",
-    "hostname", "id", "groups", "locale", "env", "sort", "uniq", "cut", "tr", "column",
-    "jq", "yq", "ping", "dig", "nslookup", "host", "base64", "uuidgen", "xxd", "echo",
+    "dir",
+    "ls",
+    "type",
+    "findstr",
+    "where",
+    "which",
+    "whoami",
+    "uname",
+    "pwd",
+    "date",
+    "head",
+    "tail",
+    "cat",
+    "wc",
+    "diff",
+    "rg",
+    "grep",
+    "find",
+    "stat",
+    "du",
+    "df",
+    "ps",
+    "file",
+    "basename",
+    "dirname",
+    "realpath",
+    "md5sum",
+    "sha256sum",
+    "free",
+    "uptime",
+    "hostname",
+    "id",
+    "groups",
+    "locale",
+    "env",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "column",
+    "jq",
+    "yq",
+    "ping",
+    "dig",
+    "nslookup",
+    "host",
+    "base64",
+    "uuidgen",
+    "xxd",
+    "echo",
 ];
 
 /// 判定单段命令的分档。链式命令的整条分档 = 各段最严档（见 tier_of_command）。
@@ -1012,13 +1075,19 @@ pub fn tier_gate(
             // 只读探测：任何能执行工具的档位直通（不产生审批单——探测被审批
             // 拦住只会让 agent 「看一眼」都要人工介入，违背审批经济学）
             if !scope.allows_tools() {
-                return (false, Some("当前通道能力边界为「仅聊天」，终端命令不可用。".into()));
+                return (
+                    false,
+                    Some("当前通道能力边界为「仅聊天」，终端命令不可用。".into()),
+                );
             }
             (true, None)
         }
         CommandTier::Controlled => {
             if !scope.allows_tools() {
-                return (false, Some("当前通道能力边界为「仅聊天」，终端命令不可用。".into()));
+                return (
+                    false,
+                    Some("当前通道能力边界为「仅聊天」，终端命令不可用。".into()),
+                );
             }
             // 白名单受控命令：off 直通（历史行为）；risky/always 由审批闸门按
             // 高危特征与全拦语义处理（本函数不重复审批判定，返回放行由调用方
@@ -1030,9 +1099,10 @@ pub fn tier_gate(
         }
         CommandTier::Denied => {
             if !scope.allows_tools() {
-                return (false, Some(format!(
-                    "当前通道能力边界为「仅聊天」，命令不可用：{cmd}"
-                )));
+                return (
+                    false,
+                    Some(format!("当前通道能力边界为「仅聊天」，命令不可用：{cmd}")),
+                );
             }
             // 破坏性命令：不直通，全部走审批闸门（off 档也不放——这是分档的
             // 语义升级点：off 只对白名单受控命令宽松，对 Denied 永远审批）
@@ -1061,12 +1131,21 @@ mod tier_tests {
     #[test]
     fn 分档_整条命令取最严() {
         assert_eq!(tier_of_command("ls -la"), CommandTier::Safe);
-        assert_eq!(tier_of_command("cargo build --release"), CommandTier::Controlled);
+        assert_eq!(
+            tier_of_command("cargo build --release"),
+            CommandTier::Controlled
+        );
         // 链式：一段 Denied 整条 Denied
-        assert_eq!(tier_of_command("cat a.txt && rm b.txt"), CommandTier::Denied);
+        assert_eq!(
+            tier_of_command("cat a.txt && rm b.txt"),
+            CommandTier::Denied
+        );
         assert_eq!(tier_of_command("ls && cat x"), CommandTier::Safe);
         // 破坏性子串兜底（命令名不在 DENY 清单但参数高危）
-        assert_eq!(tier_of_command("git push --force origin"), CommandTier::Denied);
+        assert_eq!(
+            tier_of_command("git push --force origin"),
+            CommandTier::Denied
+        );
         assert_eq!(tier_of_command("find / -name x | sort"), CommandTier::Safe);
     }
 
@@ -1088,10 +1167,12 @@ mod tier_tests {
         let (ok4, _) = tier_gate("cargo build", ToolScope::Tools, "off");
         assert!(ok4);
         let (ok5, _) = tier_gate("cargo build", ToolScope::Tools, "always");
-        assert!(ok5, "Controlled+risky/always 返回放行，由审批闸门按模式处理");
+        assert!(
+            ok5,
+            "Controlled+risky/always 返回放行，由审批闸门按模式处理"
+        );
     }
 }
-
 
 use super::gateway::ToolGateway;
 use super::ToolName;

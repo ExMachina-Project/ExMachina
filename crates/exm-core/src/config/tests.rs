@@ -17,6 +17,17 @@ mod config_tests {
         assert!(cfg.identity.group_gate_default, "新装门控应默认开");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
         assert!(
+            !cfg.experiments.device_connectivity.enabled,
+            "新工作区的设备实验必须默认关闭"
+        );
+        assert!(cfg.nexus.devices.is_empty(), "新工作区不应自动登记设备");
+        for action in ["device.audio.play", "device.camera.capture"] {
+            assert!(
+                crate::types::ToolName::parse(action).is_none(),
+                "默认工具注册表不应暴露设备动作：{action}"
+            );
+        }
+        assert!(
             !cfg.identity.identity_required,
             "身份管控默认关（白名单即全权）"
         );
@@ -31,7 +42,7 @@ mod config_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// v1 → v2 迁移：补齐全部新段；既有安装群聊门控显式置关（保持升级前行为）；
+    /// v1 → 当前版本迁移：补齐新段；既有安装群聊门控显式置关（保持升级前行为）；
     /// 迁移结果回写配置文件（版本号 + 新段落盘）
     #[test]
     fn 配置迁移_v1补齐新段并关门控() {
@@ -46,7 +57,7 @@ mod config_tests {
         .unwrap();
 
         let cfg = ExmConfig::load(&dir);
-        assert_eq!(cfg.config_version, 2, "迁移后应为 v2");
+        assert_eq!(cfg.config_version, CONFIG_VERSION, "迁移后应为当前版本");
         assert!(!cfg.identity.group_gate_default, "升级迁移门控应置关");
         assert_eq!(cfg.identity.pairing_ttl_secs, 600);
         assert_eq!(cfg.max_concurrency, 4, "历史字段保留");
@@ -55,13 +66,50 @@ mod config_tests {
         assert!(!cfg.mcp_serve.enabled);
         assert!(cfg.notify.enabled);
 
-        // 回写校验：文件落盘为 v2 且新段可再读出
+        // 回写校验：文件落盘为当前版本且新段可再读出
         let raw = std::fs::read_to_string(state.join("config.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["configVersion"], 2);
+        assert_eq!(v["configVersion"], CONFIG_VERSION);
         assert_eq!(v["identity"]["groupGateDefault"], false);
         assert!(v["triggers"]["fileWatch"].is_object());
         assert!(v["mcpServe"].is_object());
+        assert_eq!(v["experiments"]["deviceConnectivity"]["enabled"], false);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 配置迁移_v2增加默认关闭的设备实验且保留旧nexus连结体() {
+        let dir = std::env::temp_dir().join(format!("exm-cfg-v2-{}", uuid::Uuid::new_v4()));
+        let state = dir.join(".exmachina");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("config.json"),
+            r#"{"configVersion":2,"nexus":{"links":[{"id":"remote","name":"远程","kind":"exmachina","endpoint":"https://agent.example.invalid","apiKey":"fixture-key","command":"","enabled":true}]},"experiments":{"dynamicCompaction":true}}"#,
+        )
+        .unwrap();
+
+        let cfg = ExmConfig::load(&dir);
+        assert_eq!(cfg.config_version, CONFIG_VERSION);
+        assert!(cfg.experiments.dynamic_compaction, "旧实验字段必须保留");
+        assert!(!cfg.experiments.device_connectivity.enabled);
+        assert!(cfg.nexus.devices.is_empty());
+        assert_eq!(cfg.nexus.links.len(), 1);
+        assert_eq!(cfg.nexus.links[0].api_key, "fixture-key");
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(written["configVersion"], CONFIG_VERSION);
+        assert_eq!(written["experiments"]["dynamicCompaction"], true);
+        assert_eq!(
+            written["experiments"]["deviceConnectivity"]["enabled"],
+            false
+        );
+        assert_eq!(written["nexus"]["links"][0]["apiKey"], "fixture-key");
+        assert!(
+            written["nexus"]["devices"].is_null(),
+            "空设备列表不注入旧配置"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -132,6 +180,7 @@ mod config_tests {
         let d = ExperimentsConfig::default();
         assert!(!d.llm_driven_memory, "自主记忆摘要默认关");
         assert!(!d.sliding_context_window, "滑动窗口默认关");
+        assert!(!d.device_connectivity.enabled, "设备连接实验默认关");
         // 旧 config（只有既有实验字段）可反序列化：新字段回落 false
         let legacy = serde_json::json!({ "dynamicCompaction": true, "groupSharedContext": false });
         let parsed: ExperimentsConfig = serde_json::from_value(legacy).expect("旧格式可加载");
@@ -146,6 +195,41 @@ mod config_tests {
             text.contains("slidingContextWindow"),
             "schema 缺滑动窗口开关"
         );
+        for key in [
+            "experiments.deviceConnectivity.enabled",
+            "experiments.deviceConnectivity.maxDiscoverySecs",
+            "experiments.deviceConnectivity.maxDiscoveryResults",
+            "experiments.deviceConnectivity.maxAudioBytes",
+            "experiments.deviceConnectivity.maxAudioDurationSecs",
+            "experiments.deviceConnectivity.maxImageBytes",
+            "experiments.deviceConnectivity.maxImageEdge",
+            "experiments.deviceConnectivity.captureIntervalSecs",
+        ] {
+            assert!(text.contains(key), "schema 缺设备配置字段 {key}");
+        }
+    }
+
+    #[test]
+    fn 设备连接配置_资源限制强制收敛到安全范围() {
+        let mut cfg: DeviceConnectivityConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "maxDiscoverySecs": 9999,
+            "maxDiscoveryResults": 9999,
+            "maxAudioBytes": 9999999999u64,
+            "maxAudioDurationSecs": 9999,
+            "maxImageBytes": 9999999999u64,
+            "maxImageEdge": 99999,
+            "captureIntervalSecs": 0
+        }))
+        .unwrap();
+        cfg = cfg.bounded();
+        assert_eq!(cfg.max_discovery_secs, 300);
+        assert_eq!(cfg.max_discovery_results, 256);
+        assert_eq!(cfg.max_audio_bytes, 100 * 1024 * 1024);
+        assert_eq!(cfg.max_audio_duration_secs, 3600);
+        assert_eq!(cfg.max_image_bytes, 50 * 1024 * 1024);
+        assert_eq!(cfg.max_image_edge, 8192);
+        assert_eq!(cfg.capture_interval_secs, 1);
     }
 }
 

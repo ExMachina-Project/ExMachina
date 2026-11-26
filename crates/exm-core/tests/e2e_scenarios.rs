@@ -143,7 +143,8 @@ async fn 场景3_spawn派生检索子任务() {
     let caller = serde_json::from_value(serde_json::json!({
         "identifier": "a1", "name": "检索主智能体", "description": "派生检索测试",
         "domain": "测试", "tier": "unit"
-    })).unwrap();
+    }))
+    .unwrap();
     core.registry().upsert_single(caller, None).unwrap();
     core.registry().set_active_single(Some("a1")).unwrap();
     let s = core.create_session("派生").unwrap();
@@ -160,7 +161,11 @@ async fn 场景3_spawn派生检索子任务() {
         .execute(
             "a1",
             &s.id,
-            &[exm_core::types::ToolName::Spawn],
+            &[
+                exm_core::types::ToolName::Spawn,
+                exm_core::types::ToolName::Grep,
+                exm_core::types::ToolName::Read,
+            ],
             exm_core::types::ToolName::Spawn,
             &serde_json::json!({
                 "task": "在工作区检索关键字 ALPHA-X9 并报告所在文件与行",

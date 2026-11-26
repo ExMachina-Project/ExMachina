@@ -40,7 +40,9 @@ impl AgentRuntime {
             let handle = tokio::spawn(async move { stream_provider.stream(req_clone, tx).await });
             struct AbortStream(tokio::task::AbortHandle);
             impl Drop for AbortStream {
-                fn drop(&mut self) { self.0.abort(); }
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
             }
             let _stream = AbortStream(handle.abort_handle());
 
@@ -75,7 +77,10 @@ impl AgentRuntime {
                     if resp.content.trim().is_empty() && resp.tool_calls.is_empty() {
                         // 流式空响应退化非流式
                         let fallback = provider.chat(req).await?;
-                        anyhow::ensure!(!fallback.content.trim().is_empty() || !fallback.tool_calls.is_empty(),"模型返回空响应：{pid}/{model}");
+                        anyhow::ensure!(
+                            !fallback.content.trim().is_empty() || !fallback.tool_calls.is_empty(),
+                            "模型返回空响应：{pid}/{model}"
+                        );
                         self.tools.emit_and_persist(crate::types::CoreEvent {
                             kind:"model.used".into(),session_id:session_id.to_string(),
                             payload:serde_json::json!({"profile":pid,"model":model,"agentId":hint}),
@@ -88,8 +93,9 @@ impl AgentRuntime {
                         return Ok((fallback.content, fallback.tool_calls, usage, model));
                     }
                     self.tools.emit_and_persist(crate::types::CoreEvent {
-                        kind:"model.used".into(),session_id:session_id.to_string(),
-                        payload:serde_json::json!({"profile":pid,"model":model,"agentId":hint}),
+                        kind: "model.used".into(),
+                        session_id: session_id.to_string(),
+                        payload: serde_json::json!({"profile":pid,"model":model,"agentId":hint}),
                     });
                     let usage = (resp.prompt_tokens, resp.completion_tokens);
                     return Ok((resp.content, resp.tool_calls, usage, model));

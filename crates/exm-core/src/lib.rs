@@ -6,24 +6,29 @@
 //! 集群兼容：Bus / Registry / Scheduler 均为接口或可替换实现；
 //! 单体实现先行，替换为分布式实现时上层业务零改动。
 
+pub mod autonomy;
 pub mod browser;
 pub mod budget;
 pub mod bus;
-pub mod autonomy;
-pub mod compaction;
 pub mod collaboration;
 pub mod command;
 mod command_extensions;
 pub mod command_service;
+pub mod compaction;
 pub mod computer;
 pub mod config;
 pub mod config_schema;
+pub mod connections;
+pub mod context_files;
 pub mod cron;
+pub mod device;
+pub mod exec_backend;
 pub mod execution_context;
 pub mod fsdb;
 pub mod image_stash;
 pub mod inbox_stash;
 pub mod knowledge;
+pub mod learning_candidates;
 pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
@@ -45,14 +50,14 @@ pub mod runtime;
 pub mod session_origin;
 pub mod store;
 pub mod store_sqlite;
-pub mod task_queue;
 pub mod task;
+pub mod task_queue;
 pub mod todo;
-pub mod workflow;
 pub mod tools;
 pub mod trajectory;
 pub mod trash;
 pub mod types;
+pub mod workflow;
 pub mod workspace;
 
 use crate::bus::{InProcessBus, MessageBus};
@@ -128,6 +133,11 @@ pub struct Core {
     pub memory: Arc<MemoryStore>,
     pub knowledge: Arc<crate::knowledge::KnowledgeStore>,
     pub events: broadcast::Sender<CoreEvent>,
+    /// 实验性物理设备注册表与运行态服务；与远程 Nexus links 分离。
+    pub device_service: Arc<crate::device::DeviceService>,
+    /// 统一连接层的本地登记与不透明凭据引用；不包含来源配置或执行授权。
+    pub connection_registrations:
+        Arc<crate::connections::registration_store::ConnectionRegistrationStore>,
     pub cron: Arc<CronStore>,
     /// Auto Agent 运行态（实验性 experiments.autoAgent）：空转计数 + 上次 tick 分钟
     auto_state: parking_lot::RwLock<AutoAgentState>,
@@ -146,7 +156,8 @@ pub struct Core {
     /// 审批决定互斥（竞态 P1-1）：审批 id → 执行锁。decide 全程 try_lock 占位，
     /// 双击/多端并发时第二击等先到者收束后返回最新单据（先到者代执行语义），
     /// 命令只执行一次。锁条目不清理（审批单量有限，内存开销可忽略）。
-    approval_locks: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    approval_locks:
+        parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 流级互斥（竞态 P1-3）：flow_id → 锁。同 chat_key 并发消息的
     /// 「查绑定→建会话→回写绑定」与「touch 预览」各自临界区——否则双建会话
     /// （孤儿+绑定互抹）或 touch 读改写覆盖他方 bind（上下文永久分裂）。
@@ -154,7 +165,9 @@ pub struct Core {
     /// 会话级审批授权（approval-ergonomics）：会话 → {命令前缀 → ()}。
     /// 「本会话允许」档批准时写入；内存态（重启即清）、随会话删除清理。
     /// 红线：[root] 提权单与破坏性命令永不入表（写入侧校验）。
-    session_grants: parking_lot::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, ()>>>,
+    session_grants: parking_lot::Mutex<
+        std::collections::HashMap<String, std::collections::HashMap<String, ()>>,
+    >,
     /// 自引用弱句柄（approval-ergonomics）：attach_session_grant_probe 首次注入后
     /// 缓存；orchestrator 重建路径（rebind_plugin_tools）用它重挂授权探针。
     self_weak: parking_lot::RwLock<Option<std::sync::Weak<Core>>>,
@@ -169,7 +182,6 @@ pub struct Core {
     orchestrator: RwLock<Arc<Orchestrator>>,
     config: Arc<RwLock<Arc<ExmConfig>>>,
 }
-
 
 /// 跨会话投递执行器工厂：闭包持 Weak<Core>，避免 tools ↔ orchestrator ↔ Core 成环。
 fn session_send_exec(weak: std::sync::Weak<Core>) -> crate::tools::SessionSendExec {
@@ -202,8 +214,66 @@ fn session_send_exec(weak: std::sync::Weak<Core>) -> crate::tools::SessionSendEx
 fn bind_plugin_credentials(gateway: &ToolGateway, config: &Arc<RwLock<Arc<ExmConfig>>>) {
     let config = config.clone();
     gateway.set_plugin_credentials_resolver(Box::new(move |pid, key| {
-        config.read().plugins.credentials.get(pid).and_then(|keys| keys.get(key)).cloned()
+        config
+            .read()
+            .plugins
+            .credentials
+            .get(pid)
+            .and_then(|keys| keys.get(key))
+            .cloned()
     }));
+}
+
+fn should_announce_preparation(text: &str) -> bool {
+    let text = text.trim();
+    text.chars().count() >= 80
+        || [
+            "帮我修复",
+            "请修复",
+            "修复",
+            "实现",
+            "重构",
+            "开发",
+            "调查",
+            "分析",
+            "研究",
+            "排查",
+            "编写",
+            "写一个",
+            "完善",
+            "迁移",
+            "部署",
+            "验证",
+            "测试",
+            "整理",
+            "梳理",
+            "设计",
+            "更新",
+            "创建",
+            "配置",
+            "生成",
+            "改进",
+            "补全",
+            "升级",
+        ]
+        .iter()
+        .any(|verb| text.contains(verb))
+}
+
+fn preparation_message(text: &str) -> String {
+    let summary: String = text
+        .lines()
+        .next()
+        .unwrap_or(text)
+        .trim()
+        .chars()
+        .take(48)
+        .collect();
+    if summary.is_empty() {
+        "我先检查当前会话上下文和可用约束，再开始处理。".into()
+    } else {
+        format!("准备处理「{summary}」：我先检查当前会话上下文和约束，再执行并验证结果。")
+    }
 }
 
 impl Core {
@@ -212,14 +282,28 @@ impl Core {
     }
 
     pub fn with_config(cfg: ExmConfig) -> anyhow::Result<Self> {
+        cfg.experiments.connection_fabric.validate()?;
         let store = Arc::new(Store::open(&cfg.data_dir)?);
         let memory = Arc::new(MemoryStore::open(&cfg.data_dir)?);
         let knowledge = Arc::new(crate::knowledge::KnowledgeStore::open(&cfg.data_dir)?);
         let cron = Arc::new(CronStore::open(&cfg.data_dir)?);
+        let connection_registrations = Arc::new(
+            crate::connections::registration_store::ConnectionRegistrationStore::open(
+                &cfg.data_dir,
+            )?,
+        );
         let auto_state = parking_lot::RwLock::new(AutoAgentState::default());
         let registry = Arc::new(LocalRegistry::new(&cfg.agents_dir)?);
         let bus: Arc<dyn MessageBus> = Arc::new(InProcessBus::new());
         let (events, _rx) = broadcast::channel(8192);
+        let device_service = Arc::new(crate::device::DeviceService::new(
+            cfg.experiments.device_connectivity.clone(),
+            cfg.nexus.devices.clone(),
+            events.clone(),
+        )?);
+        // 注册无副作用的宿主探测入口；真正的发现只有显式请求且实验开关开启后才会触发。
+        device_service
+            .register_adapter(Arc::new(crate::device::BluetoothAdapter::host_default()))?;
         let mcp_handle = crate::mcp::McpRegistry::shared();
         mcp_handle.configure(&cfg.mcp_servers);
         // 插件装载：plugins/ 目录扫描 + builtin 静态注册（exm-gateway 在 create 后补 video）
@@ -271,9 +355,13 @@ impl Core {
             memory,
             knowledge,
             events,
+            device_service,
+            connection_registrations,
             cron,
             auto_state,
-            meta_state: parking_lot::RwLock::new(MetaAgentState { last_tick_minute: 0 }),
+            meta_state: parking_lot::RwLock::new(MetaAgentState {
+                last_tick_minute: 0,
+            }),
             run_locks: parking_lot::Mutex::new(std::collections::HashMap::new()),
             collaboration_runs: Mutex::default(),
             flow_unread: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -300,11 +388,11 @@ impl Core {
         let weak = std::sync::Arc::downgrade(self);
         *self.self_weak.write() = Some(weak.clone());
         let orch = self.orchestrator.read().clone();
-        orch.tools.set_session_grant_probe(std::sync::Arc::new(
-            move |sid: &str, cmd: &str| {
-                weak.upgrade().is_some_and(|c| c.session_granted(sid, cmd).is_some())
-            },
-        ));
+        orch.tools
+            .set_session_grant_probe(std::sync::Arc::new(move |sid: &str, cmd: &str| {
+                weak.upgrade()
+                    .is_some_and(|c| c.session_granted(sid, cmd).is_some())
+            }));
     }
 
     /// 装配跨会话投递执行器（sessions 工具 op=send）：必须经 Arc<Core> 调用。
@@ -314,12 +402,20 @@ impl Core {
         let weak = std::sync::Arc::downgrade(self);
         *self.self_weak.write() = Some(weak.clone());
         let orch = self.orchestrator.read().clone();
-        orch.tools.set_session_send_executor(session_send_exec(weak));
+        orch.tools
+            .set_session_send_executor(session_send_exec(weak));
     }
 
     /// 配置热更新（设置页）：重建 Provider / Runtime / Orchestrator
     pub fn apply_config(&self, cfg: ExmConfig) -> anyhow::Result<()> {
+        crate::device::DeviceService::validate_records(&cfg.nexus.devices)?;
         cfg.save()?;
+        let device_context = crate::device::DeviceRequestContext::new("core.config", None);
+        self.device_service.apply_config(
+            &device_context,
+            cfg.experiments.device_connectivity.clone(),
+            cfg.nexus.devices.clone(),
+        )?;
         self.mcp.configure(&cfg.mcp_servers);
         // 插件状态热更新：重扫目录并应用启停覆盖（进程插件重启在桥接层处理）
         self.plugins.read().load_all(&cfg.plugins.state);
@@ -350,51 +446,20 @@ impl Core {
         )?;
         // 回接：插件工具面（T1 声明式 + T2 进程运行时）挂到新 orchestrator
         self.rebind_plugin_tools(&orch);
-        let orch=Arc::new(orch);
+        let orch = Arc::new(orch);
         orch.bind_model_tools();
         *self.orchestrator.write() = orch;
         *self.config.write() = Arc::new(cfg);
         Ok(())
     }
 
-
     // ---------------- 插件安装/更新（plugin-ecosystem；CLI 与 REST 共用面） ----------------
-
-
-
 
     // ---------------- 记忆系统便捷方法（组感知，docs/09 §6） ----------------
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // ---------------- 人设（说话风格） ----------------
 
-
-
-
-
-
-
-
-
-
     // ---------------- 文件检查点（写前快照的回看与回滚） ----------------
-
-
 
     /// 工作区文件保存（WebUI 编辑器写入口径）：路径防 `..` 兜底、写前检查点、工具审计。
     /// 与写类工具同规则（当日首次改动前的版本落 `.exmachina/checkpoints/`，供回滚）。
@@ -405,14 +470,28 @@ impl Core {
     }
 
     /// Bind an editor save to the project captured by its HTTP request.
-    pub fn save_workspace_file_in(&self, root: &std::path::Path, rel: &str, content: &str) -> anyhow::Result<String> {
+    pub fn save_workspace_file_in(
+        &self,
+        root: &std::path::Path,
+        rel: &str,
+        content: &str,
+    ) -> anyhow::Result<String> {
         let orchestrator = self.orchestrator();
         let root = root.canonicalize()?;
-        anyhow::ensure!(root == orchestrator.tools.editor_path(".")?, "工作区已切换，请重新打开文件");
+        anyhow::ensure!(
+            root == orchestrator.tools.editor_path(".")?,
+            "工作区已切换，请重新打开文件"
+        );
         let target = orchestrator.tools.editor_path_in(&root, rel)?;
-        let norm = target.strip_prefix(&root)?.to_string_lossy().replace('\\', "/");
+        let norm = target
+            .strip_prefix(&root)?
+            .to_string_lossy()
+            .replace('\\', "/");
         if let Ok(meta) = std::fs::symlink_metadata(&target) {
-            anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "只能保存普通文件");
+            anyhow::ensure!(
+                meta.is_file() && !meta.file_type().is_symlink(),
+                "只能保存普通文件"
+            );
         }
         if target.is_file() {
             let day: String = crate::types::now_iso().chars().take(10).collect();
@@ -425,14 +504,19 @@ impl Core {
             // Checkpoint directories must not redirect the backup outside this project.
             let mut parent = dst.parent();
             while let Some(p) = parent {
-                if p == root { break; }
+                if p == root {
+                    break;
+                }
                 if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
                     anyhow::bail!("检查点目录不能是符号链接");
                 }
                 parent = p.parent();
             }
             if let Ok(meta) = std::fs::symlink_metadata(&dst) {
-                anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "检查点不能是符号链接或特殊文件");
+                anyhow::ensure!(
+                    meta.is_file() && !meta.file_type().is_symlink(),
+                    "检查点不能是符号链接或特殊文件"
+                );
             } else {
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -451,23 +535,12 @@ impl Core {
             "编辑器保存",
             0,
         );
-        Ok(format!(
-            "已保存 {norm}（{} 字节）",
-            content.len()
-        ))
+        Ok(format!("已保存 {norm}（{} 字节）", content.len()))
     }
 
     // ---------------- 通道身份与配对码（gateway 身份闸门共用） ----------------
 
-
-
-
-
-
-
-
     // ---------------- 聊天流（chat flow）：外部通道的对话单元与会话绑定 ----------------
-
 
     /// 流级锁的 Arc（竞态 P1-3）：同 flow 的「查绑定→建会话→回写绑定」/
     /// 「touch 预览」临界区互斥。锁粒度 = flow_id（不同流互不影响）；
@@ -478,35 +551,22 @@ impl Core {
     fn flow_lock_arc(&self, channel_id: &str, chat_key: &str) -> Arc<Mutex<()>> {
         let id = Self::flow_id(channel_id, chat_key);
         let mut locks = self.flow_locks.lock();
-        locks.entry(id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        locks
+            .entry(id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /// 供网关在执行前拒绝时发运行错误事件（配额 / 治理类短路，走既有回帖通路）
     pub fn emit_run_error(&self, session_id: &str, message: &str) {
-        let _ = self.events.send(crate::types::CoreEvent {
-            kind: "run.error".into(),
-            session_id: session_id.to_string(),
-            payload: serde_json::json!({ "message": message }),
-        });
+        crate::types::broadcast_core_event(
+            &self.events,
+            crate::types::CoreEvent {
+                kind: "run.error".into(),
+                session_id: session_id.to_string(),
+                payload: serde_json::json!({ "message": message }),
+            },
+        );
     }
 
     /// 通用会话事件广播 + 落事件库（task_queue.updated 等运行时状态面；
@@ -517,7 +577,8 @@ impl Core {
             session_id: session_id.to_string(),
             payload,
         };
-        let _ = self.events.send(evt.clone());
+        let evt = crate::tools::redact_core_event(evt);
+        crate::types::broadcast_core_event(&self.events, evt.clone());
         let env = crate::types::Envelope::new(
             format!("session.{session_id}.events"),
             "core",
@@ -532,9 +593,10 @@ impl Core {
     /// 入站消毒审计事件（inbound-sanitization）：广播 + 落事件库（事件页可查）。
     /// payload 只记模式摘要（通道/账号/模式/处置），MUST NOT 含原文全文。
     pub fn emit_sanitize_finding(&self, payload: serde_json::Value) {
-        self.orchestrator.read().emit("", "sanitize.finding", payload);
+        self.orchestrator
+            .read()
+            .emit("", "sanitize.finding", payload);
     }
-
 
     // ---------------- 会话历史管控（undo / 编辑重发 / fork，组 9） ----------------
 
@@ -559,9 +621,6 @@ impl Core {
             .map(|s| s.message_count)
             .ok_or_else(|| anyhow::anyhow!("轮次快照不存在: turn {turn}（该轮未落快照或已被裁剪）"))
     }
-
-
-
 
     pub async fn chat(&self, session_id: &str, text: &str) -> anyhow::Result<()> {
         // 默认能力边界：完整工具面 + Computer（WebUI / CLI / 定时任务的既有行为）
@@ -615,8 +674,15 @@ impl Core {
         agent: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        self.chat_round(session_id, text, crate::types::ToolScope::Computer, None, Some(agent), None)
-            .await
+        self.chat_round(
+            session_id,
+            text,
+            crate::types::ToolScope::Computer,
+            None,
+            Some(agent),
+            None,
+        )
+        .await
     }
 
     async fn chat_round(
@@ -633,11 +699,18 @@ impl Core {
         if let Some(check) = check {
             check()?;
         }
-        let session = self.store.get_session(session_id)?
+        let session = self
+            .store
+            .get_session(session_id)?
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
-        anyhow::ensure!(session.collaboration_id.is_none(), "请从协作群聊向该成员发消息");
+        anyhow::ensure!(
+            session.collaboration_id.is_none(),
+            "请从协作群聊向该成员发消息"
+        );
         let _round = crate::round_trace::RoundGuard::begin(session_id);
-        let result = self.execute_chat_round(&session, text, scope, origin, agent).await;
+        let result = self
+            .execute_chat_round(&session, text, scope, origin, agent)
+            .await;
         let unreconciled = crate::round_trace::take_or_close_steering(session_id);
         if !unreconciled.is_empty() {
             let ids: Vec<String> = unreconciled.iter().map(|input| input.id.clone()).collect();
@@ -682,23 +755,52 @@ impl Core {
         // （旧实现写全局态再还原，run.finished 事件先于还原到达时会泄漏临时态）。
         // 归属目标已删除 → scope None → 回落全局激活态（轮次不中断）。
         let ctx = crate::core::sessions::parse_session_scope(&self.registry, &session.group_id);
-        let workspace = session.workspace.as_deref().map(crate::workspace::pinned).transpose()?;
-        anyhow::ensure!(workspace.is_none() || ctx.is_some(), "项目会话的对话对象已不存在");
-        crate::workspace::scope(workspace, crate::registry::round_scope_decl::ROUND_SCOPE.scope(ctx, async {
+        let workspace = session
+            .workspace
+            .as_deref()
+            .map(crate::workspace::pinned)
+            .transpose()?;
+        anyhow::ensure!(
+            workspace.is_none() || ctx.is_some(),
+            "项目会话的对话对象已不存在"
+        );
+        crate::workspace::scope(
+            workspace,
+            crate::registry::round_scope_decl::ROUND_SCOPE.scope(ctx, async {
                 let orch = self.orchestrator();
-                let caller_id=agent.map(str::to_string).unwrap_or_else(||orch.orch_id());
-                let caller=crate::model_routing::ModelCaller {agent_id:caller_id,session_id:session_id.to_string()};
-                crate::model_routing::MODEL_CALLER.scope(caller,async {
-                if let Some(agent) = agent {
-                    let result = orch.unit_direct_round_origin(session_id, agent, text, origin).await;
-                    orch.finalize_round(session_id, result, scope).await
-                } else {
-                    orch.handle_user_message_scoped(session_id, text, scope, origin).await
-                }
-                }).await
-            })).await
+                let caller_id = agent.map(str::to_string).unwrap_or_else(|| orch.orch_id());
+                let progress_agent_id = caller_id.clone();
+                let caller = crate::model_routing::ModelCaller {
+                    agent_id: caller_id,
+                    session_id: session_id.to_string(),
+                };
+                crate::model_routing::MODEL_CALLER
+                    .scope(caller, async {
+                        orch.emit(
+                            session_id,
+                            "run.progress",
+                            serde_json::json!({
+                                "stage": "preparing",
+                                "message": preparation_message(text),
+                                "announce": should_announce_preparation(text),
+                                "agentId": progress_agent_id,
+                            }),
+                        );
+                        if let Some(agent) = agent {
+                            let result = orch
+                                .unit_direct_round_origin(session_id, agent, text, origin)
+                                .await;
+                            orch.finalize_round(session_id, result, scope).await
+                        } else {
+                            orch.handle_user_message_scoped(session_id, text, scope, origin)
+                                .await
+                        }
+                    })
+                    .await
+            }),
+        )
+        .await
     }
-
 
     pub fn mcp(&self) -> Arc<crate::mcp::McpRegistry> {
         self.mcp.clone()
@@ -835,7 +937,7 @@ impl Core {
                             payload: serde_json::to_value(g.to_graph())
                                 .unwrap_or(serde_json::Value::Null),
                         };
-                        let _ = events.send(evt);
+                        crate::types::broadcast_core_event(&events, evt);
                     },
                 )
                 .await;
@@ -853,17 +955,20 @@ impl Core {
             Some(orch.orch_id().as_str()),
             statements.clone(),
         )?;
-        let _ = self.events.send(crate::types::CoreEvent {
-            kind: "run.finished".into(),
-            session_id: session_id.to_string(),
-            payload: serde_json::json!({
-                "routeLevel": "L2",
-                "agentId": orch.orch_id(),
-                "graph": model.to_graph(),
-                "statements": statements,
-                "resumed": true,
-            }),
-        });
+        crate::types::broadcast_core_event(
+            &self.events,
+            crate::types::CoreEvent {
+                kind: "run.finished".into(),
+                session_id: session_id.to_string(),
+                payload: serde_json::json!({
+                    "routeLevel": "L2",
+                    "agentId": orch.orch_id(),
+                    "graph": model.to_graph(),
+                    "statements": statements,
+                    "resumed": true,
+                }),
+            },
+        );
         Ok(())
     }
 
@@ -916,15 +1021,16 @@ impl Core {
         // 会话授权探针重挂（approval-ergonomics）：orchestrator 重建后 ToolGateway
         // 是新实例,旧探针闭包指向旧网关——用缓存的 Weak<Core> 重新注入。
         if let Some(weak) = self.self_weak.read().clone() {
-            orch.tools.set_session_grant_probe(std::sync::Arc::new(
-                move |sid: &str, cmd: &str| {
-                    weak.upgrade().is_some_and(|c| c.session_granted(sid, cmd).is_some())
-                },
-            ));
+            orch.tools
+                .set_session_grant_probe(std::sync::Arc::new(move |sid: &str, cmd: &str| {
+                    weak.upgrade()
+                        .is_some_and(|c| c.session_granted(sid, cmd).is_some())
+                }));
         }
         // 跨会话投递执行器重挂（sessions 工具）：与授权探针同生命周期。
         if let Some(weak) = self.self_weak.read().clone() {
-            orch.tools.set_session_send_executor(session_send_exec(weak));
+            orch.tools
+                .set_session_send_executor(session_send_exec(weak));
         }
     }
 
@@ -941,6 +1047,10 @@ impl Core {
         self.config.read().clone()
     }
 
+    pub fn devices(&self) -> Arc<crate::device::DeviceService> {
+        self.device_service.clone()
+    }
+
     pub fn is_mock(&self) -> bool {
         self.config.read().use_mock
     }
@@ -950,15 +1060,6 @@ impl Core {
     }
 
     // ---------------- 会话与编成便捷方法 ----------------
-
-
-
-
-
-
-
-
-
 
     /// 会话来源派生补齐（session-management）：title 约定解析 + flow 表 join。
     /// 通道会话 origin = `channel:{id}:{key}`、origin_label = `流显示名·标签`；
@@ -998,11 +1099,6 @@ impl Core {
             }
         }
     }
-
-
-
-
-
 
     pub fn agents(&self) -> Vec<AgentDefinition> {
         self.registry.list()
@@ -1154,17 +1250,6 @@ impl Core {
 
     // ---------------- 平台能力：技能包 / 定时任务 / 执行审批（docs/10） ----------------
 
-
-
-
-
-
-
-
-
-
-
-
     // ---------------- 视频互动审批（video__act 批准代发） ----------------
 
     pub fn register_video_act_executor(&self, exec: crate::types::VideoActExecutor) {
@@ -1199,21 +1284,16 @@ impl Core {
             .workbench_file(path, offset, limit)
     }
 
-
-
-
-
-
-
     fn emit_approval_resolved(&self, req: &ApprovalRequest) {
-        let _ = self.events.send(CoreEvent {
-            kind: "approval.resolved".into(),
-            session_id: req.session_id.clone(),
-            payload: serde_json::json!({ "approvalId": req.id, "status": req.status, "command": req.command }),
-        });
+        crate::types::broadcast_core_event(
+            &self.events,
+            CoreEvent {
+                kind: "approval.resolved".into(),
+                session_id: req.session_id.clone(),
+                payload: serde_json::json!({ "approvalId": req.id, "status": req.status, "command": req.command }),
+            },
+        );
     }
-
-
 
     // ---------------------------------------------------------------- Auto Agent（experiments.autoAgent）
 
@@ -1224,22 +1304,22 @@ impl Core {
         (st.idle_streak, st.last_tick_minute)
     }
 
-
-
-
     /// 指挥体身份 = 激活组主智能体 identifier（自定义组随组切换）
     /// 应用 [meta] 提议（批准后）：按 kind 分发到既有写路径。
     /// - prompt：组内 prompts/ 追加补段（带锚点注释）+ 旧版备份 prompts/history/
     /// - adaptation：save_adaptation（自动版本留痕）
     /// - roster：两阶段（全量校验 → 逐 op 应用,失败逆序回滚）
     /// - build：注册新个体（agent_manage create 同校验）
-    async fn apply_meta_proposal(&self, req: &crate::types::ApprovalRequest) -> anyhow::Result<String> {
+    async fn apply_meta_proposal(
+        &self,
+        req: &crate::types::ApprovalRequest,
+    ) -> anyhow::Result<String> {
         let raw = req
             .meta_json
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("提议单缺 meta_json 载荷"))?;
-        let p: crate::tools::MetaProposal = serde_json::from_str(raw)
-            .map_err(|e| anyhow::anyhow!("提议载荷解析失败: {e}"))?;
+        let p: crate::tools::MetaProposal =
+            serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("提议载荷解析失败: {e}"))?;
         let orch = self.orchestrator.read().clone();
         match p.kind.as_str() {
             "prompt" => {
@@ -1294,7 +1374,6 @@ impl Core {
     }
 
     pub fn orchestrator_id(&self) -> String {
-
         self.registry
             .primary()
             .map(|p| p.identifier)
@@ -1527,11 +1606,7 @@ pub fn build_orchestrator(
 // ---------------------------------------------------------------- [meta] 提议应用辅助（meta-agent）
 
 /// prompt 类应用：组内提示词追加补段（锚点注释定位）+ 旧版备份 history/
-fn append_prompt_patch(
-    orch: &Orchestrator,
-    target: &str,
-    patch: &str,
-) -> anyhow::Result<String> {
+fn append_prompt_patch(orch: &Orchestrator, target: &str, patch: &str) -> anyhow::Result<String> {
     let Some(gdir) = orch.registry.group_dir_of_agent(target) else {
         anyhow::bail!("个体不在激活组内（提示词补段只作用于组内成员）: {target}");
     };
@@ -1541,10 +1616,7 @@ fn append_prompt_patch(
     let hist_dir = gdir.join("prompts").join("history");
     std::fs::create_dir_all(&hist_dir)?;
     let stamp = crate::types::now_iso().replace(':', "-");
-    std::fs::write(
-        hist_dir.join(format!("{target}-{stamp}.md")),
-        &old,
-    )?;
+    std::fs::write(hist_dir.join(format!("{target}-{stamp}.md")), &old)?;
     // 追加补段（锚点注释 = 生成时间,人工可 grep 定位全部元智能体改动）
     let anchor = format!("<!-- meta: {} -->", crate::types::now_iso());
     let new = format!("{old}\n\n{anchor}\n{patch}\n");
@@ -1611,7 +1683,13 @@ async fn apply_roster_ops(
             .unwrap_or_else(|| meta.clone());
         let res = orch.tools.agent_manage_op(&live_meta, &managed_op(opk), op);
         match res {
-            Ok(_) => applied.push((opk.clone(), op.get("identifier").and_then(|v| v.as_str()).unwrap_or("").to_string())),
+            Ok(_) => applied.push((
+                opk.clone(),
+                op.get("identifier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )),
             Err(e) => {
                 // 逆序回滚
                 for (aop, aid) in applied.iter().rev() {
@@ -1620,14 +1698,20 @@ async fn apply_roster_ops(
                     } else {
                         serde_json::json!({ "op": "create", "identifier": aid, "name": aid, "description": "回滚占位（roster 中断恢复）" })
                     };
-                    let lm = orch.registry.active_group_meta().unwrap_or_else(|| meta.clone());
+                    let lm = orch
+                        .registry
+                        .active_group_meta()
+                        .unwrap_or_else(|| meta.clone());
                     let _ = orch.tools.agent_manage_op(&lm, "delete", &undo);
                 }
                 anyhow::bail!("roster 应用中断（{e}）;已回滚 {} 项", applied.len());
             }
         }
     }
-    Ok(format!("roster 提议已应用: {} 项操作全部成功", checked.len()))
+    Ok(format!(
+        "roster 提议已应用: {} 项操作全部成功",
+        checked.len()
+    ))
 }
 
 /// build 类应用：注册新个体（走 agent_manage create 同校验路径）

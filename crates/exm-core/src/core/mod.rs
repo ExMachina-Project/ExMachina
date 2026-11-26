@@ -4,6 +4,7 @@
 
 pub(crate) mod approvals;
 pub(crate) mod autonomy;
+pub(crate) mod goal_continue;
 pub(crate) mod identity;
 pub(crate) mod memory;
 pub(crate) mod plugins;

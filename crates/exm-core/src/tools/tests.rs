@@ -47,17 +47,21 @@ mod knowledge_tool_tests {
         registry.set_active_group("t").unwrap();
         let (events, _rx) = tokio::sync::broadcast::channel(64);
         let knowledge = Arc::new(crate::knowledge::KnowledgeStore::open(dir.join("data")).unwrap());
-        let gw = ToolGateway::new(&dir, store.clone(), registry.clone(), events.clone(), SecurityConfig::default())
-            .with_knowledge(knowledge);
-        // 未装配对照组：恒下发但知识库未注入时应明确报错而非静默失败
-        let no_knowledge_gw = ToolGateway::new(
+        let gw = ToolGateway::new(
             &dir,
-            store,
-            registry,
-            events,
+            store.clone(),
+            registry.clone(),
+            events.clone(),
             SecurityConfig::default(),
-        );
-        TestRig { gw, no_knowledge_gw }
+        )
+        .with_knowledge(knowledge);
+        // 未装配对照组：恒下发但知识库未注入时应明确报错而非静默失败
+        let no_knowledge_gw =
+            ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        TestRig {
+            gw,
+            no_knowledge_gw,
+        }
     }
 
     async fn k_write(gw: &ToolGateway, title: &str, body: &str, tags: &[&str]) -> ToolResult {
@@ -139,11 +143,7 @@ mod knowledge_tool_tests {
             "重复写入回显去重提升：{}",
             w2.output
         );
-        assert!(
-            w2.output.contains(&id),
-            "去重回显原条目 id：{}",
-            w2.output
-        );
+        assert!(w2.output.contains(&id), "去重回显原条目 id：{}", w2.output);
         // 来源标注：写入个体与会话
         let g2 = k_read(&rig.gw, serde_json::json!({ "op": "get", "id": id })).await;
         assert!(g2.output.contains("来源: t"), "来源标注写入个体");
@@ -244,7 +244,13 @@ mod image_gen_tool_tests {
         registry.set_primary("t", "orch-1").unwrap();
         registry.set_active_group("t").unwrap();
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        let gw = ToolGateway::new(
+            &dir,
+            store.clone(),
+            registry,
+            events,
+            SecurityConfig::default(),
+        );
         TestRig { gw, store }
     }
 
@@ -373,7 +379,13 @@ mod chart_tool_tests {
         registry.set_primary("t", "orch-1").unwrap();
         registry.set_active_group("t").unwrap();
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        let gw = ToolGateway::new(
+            &dir,
+            store.clone(),
+            registry,
+            events,
+            SecurityConfig::default(),
+        );
         TestRig { gw, store }
     }
 
@@ -485,9 +497,9 @@ mod chart_tool_tests {
 }
 mod memory_tool_tests {
     use super::*;
-    use std::sync::Arc;
     use crate::store::Store;
     use crate::types::{AgentDefinition, GroupMeta, Tier};
+    use std::sync::Arc;
 
     struct TestRig {
         gw: ToolGateway,
@@ -618,7 +630,8 @@ mod memory_tool_tests {
     /// 通道记忆隔离（memory_isolation）：memory_write/read 必须跟随会话分区，
     /// 否则隔离平台的会话会把知识写进共享组、或读到共享组的记忆——隔离形同虚设。
     #[test]
-    fn 记忆隔离_工具读写跟随会话分区() {        let r = rig();
+    fn 记忆隔离_工具读写跟随会话分区() {
+        let r = rig();
         let mk = |title: &str, body: &str| serde_json::json!({ "kind": "fact", "title": title, "body": body });
         // 两个会话同组：shared 共享记忆；iso 开了隔离（模拟通道写入分区键）
         let shared = r.gw.store.create_session("共享会话", "t").unwrap();
@@ -1106,11 +1119,13 @@ mod memory_tool_tests {
         let primary = def("orch-1", Tier::Orchestrator, &[ToolName::Read]);
         let allow = ToolGateway::runtime_allowlist(&primary, Some(&group_meta("orch-1", true)));
         // 深层开启：三工具照常下发（兼容口径不变）
-        let deep = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
+        let deep =
+            ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         assert!(deep.iter().any(|s| s.name == "memory_write"));
         assert!(deep.iter().any(|s| s.name == "memory_link"));
         // 文件模式：write/link 不承诺（必然失败的工具不下发），read 保留（读 md 有意义）
-        let file = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, false);
+        let file =
+            ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, false);
         assert!(
             file.iter().any(|s| s.name == "memory_read"),
             "memory_read 保留"
@@ -1335,7 +1350,12 @@ mod terminal_gate_tests {
 
     /// 测试执行器闭包形态（spawn 白名单断言用；长类型起别名避免 clippy type_complexity）
     type SpawnExec = Arc<
-        dyn Fn(&str, &str, &str, Vec<ToolName>) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
+        dyn Fn(
+                &str,
+                &str,
+                &str,
+                Vec<ToolName>,
+            ) -> futures_util::future::BoxFuture<'static, anyhow::Result<String>>
             + Send
             + Sync,
     >;
@@ -1701,7 +1721,9 @@ mod terminal_gate_tests {
         // 引号内的管道不参与分段
         assert!(chain_allowed("echo \"a | b\" | cat"));
         // `2>&1`：stderr 合并只读惯用法放行（部署实测：子个体查错被拒后乱绕行白耗步数）
-        assert!(!contains_shell_chain("git status --porcelain 2>&1 | head -20"));
+        assert!(!contains_shell_chain(
+            "git status --porcelain 2>&1 | head -20"
+        ));
         assert!(chain_allowed("python3 -c \"print(1)\" 2>&1 | tail -2"));
         // 但写重定向仍拒：`2>&1` 摘除后裸 `>` 仍在
         assert!(contains_shell_chain("echo x > out.txt 2>&1"));
@@ -1753,7 +1775,7 @@ mod terminal_gate_tests {
             .execute(
                 "a1",
                 "s1",
-                &[ToolName::Spawn],
+                &[ToolName::Spawn, ToolName::Read, ToolName::Grep],
                 ToolName::Spawn,
                 &serde_json::json!({
                     "task": "检索测试",
@@ -1767,12 +1789,23 @@ mod terminal_gate_tests {
             .execute(
                 "a1",
                 "s1",
-                &[ToolName::Spawn],
+                &[ToolName::Spawn, ToolName::Read],
                 ToolName::Spawn,
                 &serde_json::json!({ "task": "x", "tools": ["spawn", "agent_manage"] }),
             )
             .await;
         assert!(!r2.ok, "全剔除的白名单应报错");
+        // 子任务不得扩权（capability-parity 5.5）：请求超出父授权面的工具被裁剪
+        let r3 = gw
+            .execute(
+                "a1",
+                "s1",
+                &[ToolName::Spawn, ToolName::Read],
+                ToolName::Spawn,
+                &serde_json::json!({ "task": "x", "tools": ["read", "terminal", "edit"] }),
+            )
+            .await;
+        assert!(r3.ok, "收窄后仍应执行（read 保留）：{:?}", r3.error);
     }
 
     /// 超时：执行器睡眠超过 timeoutSecs → 超时终止说明
@@ -1790,7 +1823,7 @@ mod terminal_gate_tests {
             .execute(
                 "a1",
                 "s1",
-                &[ToolName::Spawn],
+                &[ToolName::Spawn, ToolName::Read],
                 ToolName::Spawn,
                 &serde_json::json!({ "task": "慢任务", "timeoutSecs": 10 }),
             )
@@ -1819,7 +1852,7 @@ mod terminal_gate_tests {
                 gw2.execute(
                     "a1",
                     "s1",
-                    &[ToolName::Spawn],
+                    &[ToolName::Spawn, ToolName::Read],
                     ToolName::Spawn,
                     &serde_json::json!({ "task": "占位", "timeoutSecs": 60 }),
                 )
@@ -1831,7 +1864,7 @@ mod terminal_gate_tests {
             .execute(
                 "a1",
                 "s1",
-                &[ToolName::Spawn],
+                &[ToolName::Spawn, ToolName::Read],
                 ToolName::Spawn,
                 &serde_json::json!({ "task": "第五个" }),
             )
@@ -2203,18 +2236,21 @@ mod terminal_gate_tests {
     #[test]
     fn 实验开关_动态压缩关闭时schema剔除context_compact() {
         let allow = [ToolName::Terminal, ToolName::ContextCompact];
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
+        let specs =
+            ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, false, false, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
             "开关关闭时 context_compact 不应下发"
         );
         // 开启时保留
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
+        let specs =
+            ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, false, false);
         assert!(specs.iter().any(|s| s.name == "context_compact"));
         // 滑动窗口互斥：dynamic=true + sliding=true 仍不下发
-        let specs = ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
+        let specs =
+            ToolGateway::tool_specs_gated(&allow, false, false, false, false, false, false, true);
         let specs = ToolGateway::tool_specs_experiments(specs, true, true, false);
         assert!(
             specs.iter().all(|s| s.name != "context_compact"),
@@ -2854,7 +2890,13 @@ mod tool_budget_tests {
         let dir = gw.workspace_root.clone();
         // 第 1 次：放行（工具本身可能因参数缺失失败,但不是预算受限）
         let r1 = gw
-            .execute_named("a1", "s-b", &[], "fs_read", &serde_json::json!({ "path": "x" }))
+            .execute_named(
+                "a1",
+                "s-b",
+                &[],
+                "fs_read",
+                &serde_json::json!({ "path": "x" }),
+            )
             .await;
         assert!(
             !r1.error.clone().unwrap_or_default().contains("预算受限"),
@@ -2863,7 +2905,13 @@ mod tool_budget_tests {
         );
         // 第 2 次：预算受限（不执行工具本体）
         let r2 = gw
-            .execute_named("a1", "s-b", &[], "fs_read", &serde_json::json!({ "path": "x" }))
+            .execute_named(
+                "a1",
+                "s-b",
+                &[],
+                "fs_read",
+                &serde_json::json!({ "path": "x" }),
+            )
             .await;
         assert!(!r2.ok);
         assert!(r2.error.unwrap_or_default().contains("【预算受限】"));
@@ -2927,9 +2975,14 @@ mod tier_gate_tests {
         // 审批单已落库且带红线标记
         let pending = gw.store.list_approvals(Some("pending"), 10).unwrap();
         assert!(
-            pending.iter().any(|a| a.command.contains("[红线]") && a.command.contains("rm -rf")),
+            pending
+                .iter()
+                .any(|a| a.command.contains("[红线]") && a.command.contains("rm -rf")),
             "应落 [红线] 审批单: {:?}",
-            pending.iter().map(|a| a.command.clone()).collect::<Vec<_>>()
+            pending
+                .iter()
+                .map(|a| a.command.clone())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2996,13 +3049,20 @@ mod search_discipline_tests {
             "未配置后端时浏览器可用即注入（浏览器搜索通路）"
         );
         // proactive 默认 true（serde 兼容旧配置）
-        let legacy: crate::config::SearchConfig =
-            serde_json::from_str(r#"{"provider":"tavily","endpoint":"","apiKey":"k","maxResults":5}"#).unwrap();
+        let legacy: crate::config::SearchConfig = serde_json::from_str(
+            r#"{"provider":"tavily","endpoint":"","apiKey":"k","maxResults":5}"#,
+        )
+        .unwrap();
         assert!(legacy.proactive, "旧配置缺字段默认开");
         // 浏览器搜索引擎缺省 bing（serde 兼容旧配置）
-        let legacy_browser: crate::config::BrowserConfig =
-            serde_json::from_str(r#"{"executable":"","headless":true,"timeoutSecs":30,"maxChars":8000}"#).unwrap();
-        assert_eq!(legacy_browser.search_engine, "bing", "旧 browser 配置缺字段默认 bing");
+        let legacy_browser: crate::config::BrowserConfig = serde_json::from_str(
+            r#"{"executable":"","headless":true,"timeoutSecs":30,"maxChars":8000}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_browser.search_engine, "bing",
+            "旧 browser 配置缺字段默认 bing"
+        );
     }
 }
 
@@ -3074,7 +3134,9 @@ mod schedule_tool_tests {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         let store = Arc::new(Store::open(dir.join("data")).unwrap());
         let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
-        registry.create_group(Some("t".into()), "测试组", "").unwrap();
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
         let _ = registry.upsert_agent(
             "t",
             AgentDefinition {
@@ -3144,7 +3206,10 @@ mod schedule_tool_tests {
         assert!(out.contains("推送通道=qq:12345,tg:77"), "{out}");
         // 落库校验
         let job = rig.cron.list().unwrap().into_iter().next().unwrap();
-        assert_eq!(job.notify_channels, vec!["qq:12345".to_string(), "tg:77".to_string()]);
+        assert_eq!(
+            job.notify_channels,
+            vec!["qq:12345".to_string(), "tg:77".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&rig.dir);
     }
 
@@ -3164,7 +3229,10 @@ mod schedule_tool_tests {
         .await;
         assert!(out.contains("已排程"), "{out}");
         assert!(out.contains("下次执行="), "回显缺下次执行：{out}");
-        assert!(out.contains("08:00"), "上海 8 点任务应渲染本地 08:00：{out}");
+        assert!(
+            out.contains("08:00"),
+            "上海 8 点任务应渲染本地 08:00：{out}"
+        );
         assert!(!out.contains("T08:00"), "不应是 UTC RFC3339 形态：{out}");
         let _ = std::fs::remove_dir_all(&rig.dir);
     }
@@ -3211,7 +3279,9 @@ mod speech_tool_tests {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         let store = Arc::new(Store::open(dir.join("data")).unwrap());
         let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
-        registry.create_group(Some("t".into()), "测试组", "").unwrap();
+        registry
+            .create_group(Some("t".into()), "测试组", "")
+            .unwrap();
         let _ = registry.upsert_agent(
             "t",
             AgentDefinition {
@@ -3238,7 +3308,13 @@ mod speech_tool_tests {
         registry.set_primary("t", "orch-1").unwrap();
         registry.set_active_group("t").unwrap();
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let gw = ToolGateway::new(&dir, store.clone(), registry, events, SecurityConfig::default());
+        let gw = ToolGateway::new(
+            &dir,
+            store.clone(),
+            registry,
+            events,
+            SecurityConfig::default(),
+        );
         if let Some(bytes) = synth {
             let b = bytes.to_vec();
             gw.set_speech_synth(Arc::new(move |_text| {
@@ -3325,13 +3401,110 @@ mod speech_tool_tests {
         let registry = Arc::new(LocalRegistry::new(&dir).unwrap());
         let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
         assert!(!gw.speech_ready(), "未注入合成器不算就绪");
-        let off = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, false, false, false);
+        let off = ToolGateway::tool_specs(
+            &[ToolName::Speech],
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
         assert!(off.is_empty(), "未装配不下发 speech_reply");
         gw.set_speech_synth(Arc::new(|_t| Box::pin(async { Ok(vec![1u8]) })));
         assert!(gw.speech_ready());
-        let on = ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true, false, false);
+        let on =
+            ToolGateway::tool_specs(&[ToolName::Speech], false, false, false, true, false, false);
         assert_eq!(on.len(), 1);
         assert_eq!(on[0].name, "speech_reply");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// fs 圈禁校验（agent-exec-confinement 1.3）：execUser 开启时 filesystem-ops
+/// 的路径必须落在 execHome 内。数字 uid + 显式 execHome 构造，不依赖真实用户。
+/// 覆盖：界内放行 / 界外拒绝（含穿越） / 约束关闭放行 / 符号链接绕出拒绝。
+mod exec_confinement_fs_tests {
+    use super::*;
+    use crate::store::Store;
+    use std::sync::Arc;
+
+    /// 约束开启：数字 uid 911 + execHome = workspace 目录（界内 = workspace 内相对路径）
+    fn rig_constrained() -> (ToolGateway, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("exm-confine-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let security = SecurityConfig {
+            exec_user: "911".into(),
+            exec_home: dir.display().to_string(),
+            ..SecurityConfig::default()
+        };
+        let gw = ToolGateway::new(&dir, store, registry, events, security);
+        (gw, dir)
+    }
+
+    /// 约束关闭：execUser 空 = 旧行为
+    fn rig_free() -> (ToolGateway, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("exm-free-{}", crate::types::new_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let store = Arc::new(Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let gw = ToolGateway::new(&dir, store, registry, events, SecurityConfig::default());
+        (gw, dir)
+    }
+
+    #[test]
+    fn fs圈禁_界内路径放行() {
+        let (gw, dir) = rig_constrained();
+        // workspace 内相对路径（即 execHome 内）正常解析
+        let p = gw.editor_path("notes/a.md").expect("界内应放行");
+        assert!(p.ends_with("notes/a.md"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs圈禁_界外路径拒绝() {
+        // execHome 指向 workspace，请求的绝对路径在界外 → 拒绝
+        let (gw, dir) = rig_constrained();
+        let err = gw
+            .resolve_safe("/etc/passwd")
+            .expect_err("界外绝对路径应拒绝");
+        assert!(err.to_string().contains("越界"), "实际: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs圈禁_穿越拒绝() {
+        let (gw, dir) = rig_constrained();
+        let err = gw
+            .editor_path("../../../etc/passwd")
+            .expect_err("穿越应拒绝");
+        assert!(err.to_string().contains("越界"), "实际: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs圈禁_约束关闭放行() {
+        let (gw, dir) = rig_free();
+        let p = gw.editor_path("free/a.md").expect("约束关闭应放行");
+        assert!(p.ends_with("free/a.md"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs圈禁_符号链接绕出拒绝() {
+        let (gw, dir) = rig_constrained();
+        // 界内建符号链接指向界外目录 → 解析时拒绝（不读取或写入符号链接）
+        let outside = std::env::temp_dir().join(format!("exm-out-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
+        let err = gw.editor_path("escape/x").expect_err("符号链接应拒绝");
+        assert!(err.to_string().contains("符号链接"), "实际: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

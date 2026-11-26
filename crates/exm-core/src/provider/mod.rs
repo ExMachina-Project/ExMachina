@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// 原生 function calling：暴露给模型的工具定义（parameters = JSON Schema 对象）
@@ -339,7 +339,6 @@ impl StreamDelta {
     }
 }
 
-
 /// 回退候选链：按顺序尝试，失败（未发出内容前）切换下一候选并冷却失败者
 pub struct ModelChain {
     pub candidates: Vec<(String, std::sync::Arc<dyn LlmProvider>, String)>,
@@ -369,7 +368,12 @@ pub trait LlmProvider: Send + Sync {
     }
     /// 图像生成（prompt → 图片字节）；默认不支持，openai 协议实现。
     /// 返回 PNG/JPEG/WebP 任一格式的原始字节（b64_json 优先，URL 回落下载）
-    async fn image_generate(&self, _model: &str, _prompt: &str, _size: &str) -> anyhow::Result<Vec<u8>> {
+    async fn image_generate(
+        &self,
+        _model: &str,
+        _prompt: &str,
+        _size: &str,
+    ) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("该通道不支持图像生成")
     }
     /// 流式：增量通过 tx 发出，最终返回完整响应
@@ -384,10 +388,10 @@ pub trait LlmProvider: Send + Sync {
 
 mod compat;
 mod effort;
-mod mock;
+mod identity;
+pub mod mock;
 mod pool;
 mod responses;
-mod identity;
 mod stream;
 
 pub use compat::*;

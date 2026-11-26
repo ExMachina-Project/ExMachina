@@ -71,12 +71,124 @@ pub fn redact_str(s: &str) -> String {
                 .collect()
         });
     let mut out = s.to_string();
+    static KEY_VALUE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?i)(\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|authorization|credential)\b[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'|(?:bearer\s+)?[^\s\"'&,;}\]]+)"#,
+        )
+        .expect("redaction key/value regex must compile")
+    });
+    out = KEY_VALUE
+        .replace_all(&out, |captures: &regex::Captures<'_>| {
+            let value = &captures[2];
+            let mask = if value.starts_with('"') {
+                "\"***\""
+            } else if value.starts_with('\'') {
+                "'***'"
+            } else if value.to_ascii_lowercase().starts_with("bearer ") {
+                "Bearer ***"
+            } else {
+                "***"
+            };
+            format!("{}{mask}", &captures[1])
+        })
+        .into_owned();
     for (re, mask) in PATTERNS.iter() {
         if let std::borrow::Cow::Owned(replaced) = re.replace_all(&out, *mask) {
             out = replaced;
         }
     }
     out
+}
+
+/// Sanitize the public payload before a CoreEvent crosses a broadcast boundary.
+pub(crate) fn redact_core_event(mut event: crate::types::CoreEvent) -> crate::types::CoreEvent {
+    event.payload = redact_observation(&event.payload);
+    event
+}
+
+/// Observations contain typed IDs and token counters, not just tool arguments. Keep
+/// those protocol fields intact; arbitrary tool arguments still use the stricter rule.
+pub fn redact_observation(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| {
+                    let safe = match key.as_str() {
+                        "args" | "arguments" | "parameters" => redact_json(value),
+                        "sessionId"
+                        | "session_id"
+                        | "childSessionId"
+                        | "evidenceSessionId"
+                        | "authorizationRevision" => redact_observation(value),
+                        "promptTokens" | "completionTokens" | "inputTokens" | "outputTokens"
+                        | "totalTokens" | "reasoningTokens" | "maxTokens" | "maxSessionTokens"
+                        | "beforeTokens" | "afterTokens" | "tokenBudget" | "token_budget"
+                            if value.is_number() || value.is_null() =>
+                        {
+                            value.clone()
+                        }
+                        "tokenUsage" | "tokenBudget" if value.is_object() || value.is_null() => {
+                            redact_observation(value)
+                        }
+                        _ if is_sensitive_key(key) => Value::String("***".into()),
+                        _ => redact_observation(value),
+                    };
+                    (key.clone(), safe)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_observation).collect()),
+        Value::String(text) => Value::String(redact_str(text)),
+        other => other.clone(),
+    }
+}
+
+/// A tool may echo an opaque credential without its key name. Carry sensitive input
+/// values only for this call's observation formatting, never into the audit record.
+pub(crate) struct ToolRedactor {
+    secrets: Vec<String>,
+}
+
+impl ToolRedactor {
+    pub(crate) fn from_args(args: &Value) -> Self {
+        fn collect(value: &Value, sensitive: bool, secrets: &mut Vec<String>) {
+            match value {
+                Value::String(text) if sensitive && !text.is_empty() => secrets.push(text.clone()),
+                Value::Object(fields) => {
+                    for (key, value) in fields {
+                        collect(value, sensitive || is_sensitive_key(key), secrets);
+                    }
+                }
+                Value::Array(items) => {
+                    for value in items {
+                        collect(value, sensitive, secrets);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut secrets = Vec::new();
+        collect(args, false, &mut secrets);
+        secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets.dedup();
+        Self { secrets }
+    }
+
+    pub(crate) fn text(&self, text: &str) -> String {
+        redact_str(
+            &self
+                .secrets
+                .iter()
+                .fold(text.to_owned(), |text, secret| text.replace(secret, "***")),
+        )
+    }
+
+    pub(crate) fn result(&self, mut result: super::ToolResult) -> super::ToolResult {
+        result.output = self.text(&result.output);
+        result.error = result.error.as_deref().map(|error| self.text(error));
+        result
+    }
 }
 
 /// JSON 载荷脱敏（事件 args / 审计 entry 通用）：
@@ -137,6 +249,75 @@ mod tests {
         assert!(r.contains("sk-***"), "{r}");
         assert!(r.contains("AKIA***"), "{r}");
         assert!(!r.contains("abcdefgh1234567890"));
+    }
+
+    #[test]
+    fn 错误与结果中的键值文本脱敏() {
+        for input in [
+            r#"operation failed: api_key="e2e-sensitive-canary-91b7""#,
+            "request rejected: Authorization: Bearer e2e-sensitive-canary-91b7",
+            "token=e2e-sensitive-canary-91b7",
+            "password='words with spaces'",
+        ] {
+            let redacted = redact_str(input);
+            assert!(
+                !redacted.contains("e2e-sensitive-canary-91b7"),
+                "{redacted}"
+            );
+            assert!(!redacted.contains("words with spaces"), "{redacted}");
+            assert!(redacted.contains("***"), "{redacted}");
+        }
+        assert_eq!(
+            redact_str("token budget: 20 calls"),
+            "token budget: 20 calls",
+            "Ordinary prose following a key-like word should remain intact",
+        );
+    }
+
+    #[test]
+    fn 观察脱敏保留身份与用量但不放宽参数() {
+        let value = json!({
+            "sessionId": "session-a", "session_id": "session-b",
+            "promptTokens": 13, "completionTokens": 5,
+            "tokenUsage": { "prompt": 13, "completion": 5 },
+            "args": { "session_id": "private-cookie", "promptTokens": "opaque-secret" },
+            "authorizationRevision": "revision-2", "apiKey": "private-key"
+        });
+        let safe = redact_observation(&value);
+        assert_eq!(safe["sessionId"], "session-a");
+        assert_eq!(safe["session_id"], "session-b");
+        assert_eq!(safe["promptTokens"], 13);
+        assert_eq!(safe["completionTokens"], 5);
+        assert_eq!(safe["tokenUsage"], value["tokenUsage"]);
+        assert_eq!(safe["authorizationRevision"], "revision-2");
+        assert_eq!(safe["args"]["session_id"], "***");
+        assert_eq!(safe["args"]["promptTokens"], "***");
+        assert_eq!(safe["apiKey"], "***");
+    }
+
+    #[test]
+    fn 结果中的不透明凭据按本次参数替换() {
+        let redactor = ToolRedactor::from_args(&json!({"token": "opaque-fixture-value"}));
+        let result = redactor.result(super::super::ToolResult::err("echo opaque-fixture-value"));
+        assert_eq!(result.error.as_deref(), Some("echo ***"));
+    }
+
+    #[test]
+    fn 观察脱敏保留压缩计数与可选预算的类型() {
+        let value = json!({
+            "beforeTokens": 100, "afterTokens": 20, "tokenBudget": 50_000,
+            "token_budget": null,
+            "args": { "beforeTokens": 100, "tokenBudget": 50_000 }
+        });
+        let safe = redact_observation(&value);
+        assert_eq!(safe["beforeTokens"], 100);
+        assert_eq!(safe["afterTokens"], 20);
+        assert_eq!(safe["tokenBudget"], 50_000);
+        assert!(safe["token_budget"].is_null());
+        assert_eq!(safe["args"]["beforeTokens"], "***");
+        assert_eq!(safe["args"]["tokenBudget"], "***");
+        let secret = redact_observation(&json!({"tokenBudget": "opaque-fixture-secret"}));
+        assert_eq!(secret["tokenBudget"], "***");
     }
 
     #[test]

@@ -32,6 +32,9 @@ pub struct PlanItem {
 pub fn is_write_tool(tool: ToolName, args: &serde_json::Value) -> bool {
     match tool {
         ToolName::Edit | ToolName::Patch => true,
+        // programmatic 子步骤可能含写：计划模式下整体拦截（子步骤展开发生在
+        // 批准后的回放执行期——回放时计划模式已退出，子调用各自走闸门）
+        ToolName::Programmatic => true,
         ToolName::Filesystem => {
             args.get("op").and_then(|v| v.as_str()).unwrap_or("write") != "list"
         }
@@ -92,6 +95,20 @@ pub fn to_plan_item(tool: ToolName, args: &serde_json::Value) -> PlanItem {
             .chars()
             .take(80)
             .collect(),
+        // programmatic：清单摘要（步数 + 工具序列，供计划清单呈现）
+        ToolName::Programmatic => {
+            let steps = args
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|s| s.get("tool").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" → ")
+                })
+                .unwrap_or_default();
+            steps.chars().take(80).collect()
+        }
         _ => String::new(),
     };
     let action = match tool {
@@ -102,6 +119,7 @@ pub fn to_plan_item(tool: ToolName, args: &serde_json::Value) -> PlanItem {
         ToolName::Computer => "input",
         ToolName::Git => "git",
         ToolName::Spawn => "spawn",
+        ToolName::Programmatic => "batch",
         _ => "other",
     }
     .to_string();

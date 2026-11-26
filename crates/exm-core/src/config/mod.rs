@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// 配置结构版本（新增字段时 +1，并在 `migrate_file` 中补默认值）
-pub const CONFIG_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------- 域分文件
 
 mod automation;
 mod client_identity;
+mod connection_fabric;
 mod exec_identity;
 mod llm;
 mod misc;
@@ -24,6 +25,7 @@ mod security;
 
 pub use automation::*;
 pub use client_identity::*;
+pub use connection_fabric::*;
 pub use exec_identity::*;
 pub use llm::*;
 pub use misc::*;
@@ -32,7 +34,6 @@ pub use security::*;
 
 #[cfg(test)]
 mod tests;
-
 
 fn default_true() -> bool {
     true
@@ -436,6 +437,14 @@ struct AutomationFile {
     memory_digest_min_turns: Option<usize>,
     #[serde(default)]
     timezone: Option<String>,
+    #[serde(default)]
+    goal_continue_interval_minutes: Option<u32>,
+    #[serde(default)]
+    goal_continue_max_steps: Option<usize>,
+    #[serde(default)]
+    goal_continue_max_rounds: Option<usize>,
+    #[serde(default)]
+    goal_continue_round_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -614,6 +623,18 @@ impl ExmConfig {
                 .timezone
                 .clone()
                 .unwrap_or_else(|| AutomationConfig::default().timezone),
+            goal_continue_interval_minutes: file_auto
+                .goal_continue_interval_minutes
+                .unwrap_or_else(|| AutomationConfig::default().goal_continue_interval_minutes),
+            goal_continue_max_steps: file_auto
+                .goal_continue_max_steps
+                .unwrap_or_else(|| AutomationConfig::default().goal_continue_max_steps),
+            goal_continue_max_rounds: file_auto
+                .goal_continue_max_rounds
+                .unwrap_or_else(|| AutomationConfig::default().goal_continue_max_rounds),
+            goal_continue_round_timeout_secs: file_auto
+                .goal_continue_round_timeout_secs
+                .unwrap_or_else(|| AutomationConfig::default().goal_continue_round_timeout_secs),
         };
 
         let mut llm = LlmConfig {
@@ -724,7 +745,9 @@ impl ExmConfig {
             memory_semantic_model: file_mem.semantic_model.clone().unwrap_or_default(),
             knowledge_inject_top_k: file_knowledge.inject_top_k.unwrap_or(0),
             knowledge_inject_max_chars: file_knowledge.inject_max_chars.unwrap_or(500),
-            chart_endpoint: file_chart.endpoint.unwrap_or_else(|| "https://kroki.io".into()),
+            chart_endpoint: file_chart
+                .endpoint
+                .unwrap_or_else(|| "https://kroki.io".into()),
             speech_model: file_cap.speech.unwrap_or_default(),
             stt_model: file_cap.transcribe.unwrap_or_default(),
             vision_relay_model: file_cap.vision_relay.unwrap_or_default(),
@@ -765,13 +788,18 @@ impl ExmConfig {
             mcp_serve: file.mcp_serve.clone().unwrap_or_default(),
             notify: file.notify.clone().unwrap_or_default(),
             nexus: file.nexus.clone().unwrap_or_default(),
-            experiments: file.experiments.clone().unwrap_or_default(),
+            experiments: file
+                .experiments
+                .clone()
+                .unwrap_or_default()
+                .bounded_device_connectivity(),
             compaction: file.compaction.clone().unwrap_or_default(),
             plugins: file.plugins.clone().unwrap_or_default(),
         }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
+        self.experiments.connection_fabric.validate()?;
         self.llm.client_identity.request_headers()?;
         for profile in &self.llm_profiles {
             profile.client_identity.request_headers()?;
@@ -860,6 +888,14 @@ impl ExmConfig {
                 flow_idle_days: Some(self.automation.flow_idle_days),
                 memory_digest_min_turns: Some(self.automation.memory_digest_min_turns),
                 timezone: Some(self.automation.timezone.clone()),
+                goal_continue_interval_minutes: Some(
+                    self.automation.goal_continue_interval_minutes,
+                ),
+                goal_continue_max_steps: Some(self.automation.goal_continue_max_steps),
+                goal_continue_max_rounds: Some(self.automation.goal_continue_max_rounds),
+                goal_continue_round_timeout_secs: Some(
+                    self.automation.goal_continue_round_timeout_secs,
+                ),
             }),
             search: Some(self.search.clone()),
             hooks: Some(self.hooks.clone()),
@@ -909,8 +945,42 @@ fn read_config_file(path: &Path) -> ConfigFile {
 
 /// 版本迁移：低版本文件补齐新字段默认值后回写
 fn migrate_file(mut file: ConfigFile, path: &Path) -> ConfigFile {
+    // Retain invalid new configuration for an explicit startup error; never
+    // serialize the loader's safe placeholders back over a user's input.
+    if file
+        .experiments
+        .as_ref()
+        .is_some_and(|experiments| experiments.connection_fabric.validate().is_err())
+    {
+        return file;
+    }
     let version = file.config_version.unwrap_or(0);
     if version >= CONFIG_VERSION {
+        return file;
+    }
+    if version == 3 {
+        // 本次迁移只增加一个独立配置段。保留来源的原始JSON（包括未知字段和
+        // 省略的默认字段），不因新版本触发旧来源的结构归一化或凭据重写。
+        if let Ok(raw) = std::fs::read(path) {
+            if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("configVersion".into(), serde_json::json!(CONFIG_VERSION));
+                    let experiments = object
+                        .entry("experiments")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(experiments) = experiments.as_object_mut() {
+                        experiments.entry("connectionFabric").or_insert_with(|| {
+                            serde_json::to_value(ConnectionFabricConfig::default()).unwrap()
+                        });
+                        if let Ok(serialized) = serde_json::to_vec_pretty(&value) {
+                            let _ = std::fs::write(path, serialized);
+                        }
+                    }
+                }
+            }
+        }
+        file.config_version = Some(CONFIG_VERSION);
+        file.experiments = Some(file.experiments.take().unwrap_or_default());
         return file;
     }
     if file.llm.is_none() {
@@ -959,9 +1029,30 @@ fn migrate_file(mut file: ConfigFile, path: &Path) -> ConfigFile {
             file.notify = Some(NotifyConfig::default());
         }
     }
+    // v<3：设备能力的实验配置单独迁移，旧实验字段保持原值；新增开关默认关闭。
+    if version < 3 {
+        file.experiments = Some(file.experiments.take().unwrap_or_default());
+    }
+    // v<4：只补新的默认关闭配置，不登记来源、不迁移授权或活动任务。
+    if version < 4 {
+        file.experiments = Some(file.experiments.take().unwrap_or_default());
+    }
     file.config_version = Some(CONFIG_VERSION);
-    if let Ok(s) = serde_json::to_string_pretty(&file) {
-        let _ = std::fs::write(path, s);
+    if let Ok(mut migrated) = serde_json::to_value(&file) {
+        // 较早版本仍执行既有默认字段迁移，但来源记录也保持原始结构，
+        // 不因本次新增连接配置而重写省略字段、扩展字段或旧凭据。
+        if let Ok(raw) = std::fs::read(path) {
+            if let Ok(original) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                for field in ["nexus", "mcpServers", "plugins"] {
+                    if let Some(value) = original.get(field) {
+                        migrated[field] = value.clone();
+                    }
+                }
+            }
+        }
+        if let Ok(s) = serde_json::to_string_pretty(&migrated) {
+            let _ = std::fs::write(path, s);
+        }
     }
     file
 }
@@ -980,7 +1071,6 @@ fn env_or(key: &str, file_value: &str, default: &str) -> String {
 }
 
 // ---------------------------------------------------------------- 配置 Schema（UI/向导驱动）
-
 
 // ---------------------------------------------------------------- Agent 执行身份约束（Linux）
 

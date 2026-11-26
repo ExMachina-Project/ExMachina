@@ -37,7 +37,6 @@ pub(crate) fn placeholder_names(template: &str) -> Vec<String> {
     out
 }
 
-
 pub(crate) fn interpolate(
     template: &str,
     vals: &std::collections::BTreeMap<String, String>,
@@ -65,7 +64,10 @@ pub(crate) fn interpolate(
 
 /// 简化 JSON path 求值：`$.a.b[0].c`（点取字段 / 下标取数组；前导 `$.` 可省）。
 /// 命中返回子树；路径不存在/类型不符返回 None。
-pub(crate) fn json_path<'v>(root: &'v serde_json::Value, path: &str) -> Option<&'v serde_json::Value> {
+pub(crate) fn json_path<'v>(
+    root: &'v serde_json::Value,
+    path: &str,
+) -> Option<&'v serde_json::Value> {
     let p = path.trim();
     let p = p.strip_prefix('$').unwrap_or(p);
     let p = p.strip_prefix('.').unwrap_or(p);

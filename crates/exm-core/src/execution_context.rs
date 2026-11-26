@@ -160,7 +160,7 @@ impl ExecutionAuthorization {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancellationBinding {
     /// 运行时取消状态的索引；不是用户可猜测的 taskId。
@@ -171,16 +171,6 @@ pub struct CancellationBinding {
     pub inherited: bool,
     #[serde(default)]
     pub explicitly_cancelled: bool,
-}
-
-impl Default for CancellationBinding {
-    fn default() -> Self {
-        Self {
-            token_id: String::new(),
-            inherited: false,
-            explicitly_cancelled: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

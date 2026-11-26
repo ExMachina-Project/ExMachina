@@ -1,4 +1,4 @@
-//! tools/sandbox_helpers.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Shared helpers for sandboxed process setup.
 
 use super::*;
 
@@ -146,7 +146,17 @@ impl ToolGateway {
         let max_procs = self.sandbox.max_processes as u32;
         #[cfg(not(target_os = "windows"))]
         {
-            if self.sandbox.use_bwrap && bwrap_available() {
+            let bwrap_ready = self.sandbox.use_bwrap && bwrap_available();
+            if let Some(reason) = crate::exec_backend::strict_isolation_refusal(
+                self.sandbox.strict(),
+                self.sandbox.use_bwrap,
+                bwrap_ready,
+            ) {
+                let mut bad = ShellOpts::plain();
+                bad.configuration_error = Some(reason.into());
+                return bad;
+            }
+            if bwrap_ready {
                 let root_s = root.display().to_string();
                 let mut args: Vec<String> = vec![
                     "--ro-bind".into(),

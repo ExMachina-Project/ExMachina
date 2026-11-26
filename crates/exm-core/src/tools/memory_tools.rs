@@ -102,7 +102,7 @@ impl ToolGateway {
                         (None, None) => "全局".to_string(),
                     };
                     lines.push(format!(
-                        "- [{}|{}|置信{:.2}|重要{:.2}|{}] {}：{}（id: {}）",
+                        "- [{}|{}|置信{:.2}|重要{:.2}|{}] {}：{}（id: {} v{}）",
                         h.entry.kind.key(),
                         source,
                         h.entry.confidence,
@@ -110,7 +110,9 @@ impl ToolGateway {
                         if h.entry.pinned { "置顶" } else { "常规" },
                         h.entry.title,
                         h.entry.body.replace('\n', " "),
-                        h.entry.id
+                        h.entry.id,
+                        // capability-parity 6.5：回执带版本——模型看到的与注入/审计的是同一版
+                        h.entry.version_label()
                     ));
                 }
                 ToolResult::ok(lines.join("\n"))

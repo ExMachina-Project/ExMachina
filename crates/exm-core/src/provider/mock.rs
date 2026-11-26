@@ -74,6 +74,195 @@ pub struct MockLlmProvider;
 pub static MOCK_EVAL_ACT_ONCE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// goal 自动继续注入开关（capability-parity 4.2 测试面，仅测试启用）：
+/// - `MOCK_GOAL_ROUND_ERROR`：置位后下一次推进轮请求直接失败（驱动 error 收束）；
+/// - `MOCK_GOAL_ROUND_HANG`：置位后下一次推进轮请求挂起 8s（驱动 time limit 收束）；
+///
+/// 用毕复位（一次性）。
+pub static MOCK_GOAL_ROUND_ERROR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub static MOCK_GOAL_ROUND_HANG: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 请求内容探测器（capability-parity 6.3 测试面，仅测试启用）：测试在
+/// [`mock_probe_scope`] 里跑轮次，Mock 在每次 chat/stream 里累计「含各标记的请求
+/// 消息数」，`fut` 结束后 scope 把计数表交还给测试。
+///
+/// **必须认领请求，而不能只按标记/句柄区分**：同进程内多个测试并行、各自跑 Core，
+/// 共用这一个全局替身；不同测试的请求里会出现同一段固定文本（如 Mock 压缩器的
+/// 固定摘要输出）。只按句柄区分「读取」是不够的——任何一个测试的请求都会给所有
+/// 登记了该标记的探针计数，「禁用后不出现」的断言就会被邻居的请求顶成「出现」
+/// （实测：单独运行通过、三测并行 6/6 失败）。
+///
+/// 认领靠 `scope`：该测试独有、且出现在它每个请求里的片段（放进智能体名称/提示词，
+/// 会进入系统提示）。只有同时含作用域片段的请求才计数。这里**不能**用 task-local
+/// 沿 await 链传递：`call_llm` 里的 provider 调用是 `tokio::spawn` 出去的，task-local
+/// 不跨 spawn。
+///
+/// 轮次 future 必须装箱：`core.chat` 的状态机约 40KB，async 块默认按值捕获、整个
+/// 复制进自己的状态机（实测套一层 40KB → 122KB），多层包装后测试 future 超过
+/// 测试线程 2MB 栈，一进 poll 就溢出。装箱后各层只移动一个指针。
+///
+/// 「只增不减」避免「最后一次请求」式快照被一轮里的多次调用冲掉；整域取走即注销，
+/// 不长期增长。
+///
+/// 未登记的标记不在返回的表里——所以每个用它的测试都必须先有一条「启用时全部在场」
+/// 的基线断言，否则标记/作用域写错会让「禁用后不出现」空洞地通过。
+type ProbeTable = std::collections::HashMap<String, u32>;
+
+struct MockProbe {
+    /// 认领条件：请求的任一条消息含此片段
+    scope: String,
+    markers: ProbeTable,
+    /// 各标记在**单条消息里**的最大出现次数（整域最大值，按键）。默认计数只回答
+    /// 「含标记的消息数」，数不出同一条消息里的重复——而「同一段被注入两遍」正是
+    /// 重复发生的一类缺陷（上下文段按字符预算装填，重复等于预算翻倍）。
+    /// `mock_probe_scope_repeat` 把它交还给调用方；只应对「每份内容里只应出现一次」
+    /// 的标记断言 `== 1`（按标记分别记录：同一域里其它标记天然重复不影响判断）。
+    /// 从未出现的标记不在表里。
+    max_repeat: ProbeTable,
+}
+
+static MOCK_PROBES: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<usize, MockProbe>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+static MOCK_PROBE_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 取走并注销探测域 `domain`：(标记 → 含该标记的请求消息数, 标记 → 单条消息里的最大出现次数)。
+fn probe_take(domain: usize) -> (ProbeTable, ProbeTable) {
+    MOCK_PROBES
+        .lock()
+        .remove(&domain)
+        .map(|p| (p.markers, p.max_repeat))
+        .unwrap_or_default()
+}
+
+/// `fut` panic 展开时注销当前探测域（正常返回时由 [`mock_probe_scope`] 注销并交出
+/// 结果），不把本测试的域遗留在全局表里。
+struct DomainOnUnwind(usize);
+
+impl Drop for DomainOnUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let _ = probe_take(self.0);
+        }
+    }
+}
+
+/// 在一个新的探测域里执行 `fut`，登记 `markers`（初始命中数 0）；`fut` 结束后返回
+/// (各标记的命中数, `fut` 的输出)。只有**含 `scope` 片段**的模型请求才会被计数——
+/// 调用方保证 `scope` 是本测试独有、且出现在它每个请求里的片段（见类型注释）。
+/// `fut` 内不要并发跑多个轮次（计数是整域合计的）。
+pub async fn mock_probe_scope<F: std::future::Future>(
+    scope: &str,
+    markers: &[&str],
+    fut: F,
+) -> (ProbeTable, F::Output) {
+    let (table, _max_repeat, out) = mock_probe_scope_repeat(scope, markers, fut).await;
+    (table, out)
+}
+
+/// 同 [`mock_probe_scope`]，另外返回「各标记在单条消息里的最大出现次数」。
+///
+/// 用途是守住「每份内容在一个请求里只注入一次」：对按设计每份内容里只出现一次的
+/// 片段（如上下文文件里的唯一标记）断言最大出现次数 `== 1`。默认计数只回答「含标记
+/// 的消息数」，同一条消息里出现两遍也只记 1——数不出重复注入。按标记分别记录，
+/// 所以同一域里天然重复的其它标记不影响判断；从未出现的标记不在重复度表里。
+pub async fn mock_probe_scope_repeat<F: std::future::Future>(
+    scope: &str,
+    markers: &[&str],
+    fut: F,
+) -> (ProbeTable, ProbeTable, F::Output) {
+    let domain = MOCK_PROBE_NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
+    {
+        let mut probes = MOCK_PROBES.lock();
+        assert!(
+            probes.values().all(|p| p.scope != scope),
+            "探测作用域重复登记：{scope}——作用域必须是测试内唯一的"
+        );
+        probes.insert(
+            domain,
+            MockProbe {
+                scope: scope.to_string(),
+                markers: markers
+                    .iter()
+                    .map(|m| (m.to_string(), 0))
+                    .collect::<ProbeTable>(),
+                max_repeat: ProbeTable::default(),
+            },
+        );
+    }
+    // 轮次 future 很大（`core.chat` 约 40KB 的状态机），而每个 async 块默认按值
+    // 捕获它、把它整个复制进自己的状态机——三层包装下来测试 future 就超过测试
+    // 线程的 2MB 栈（实测栈溢出）。装箱后各层只移动一个指针。
+    let mut fut = Box::pin(fut);
+    let out = async {
+        let _guard = DomainOnUnwind(domain);
+        fut.as_mut().await
+    }
+    .await;
+    let (table, max_repeat) = probe_take(domain);
+    (table, max_repeat, out)
+}
+
+fn probe_scan(req: &ChatRequest) {
+    // 压缩器请求不是「注入」：它的输入天然带旧摘要（增量压缩的「已有摘要：」段），
+    // 计入会让「摘要是否注入」的观测失真——只观测面向推理的请求。
+    if req
+        .messages
+        .first()
+        .is_some_and(|m| m.content.contains(crate::compaction::COMPACTER_SYSTEM))
+    {
+        return;
+    }
+    let mut probes = MOCK_PROBES.lock();
+    for p in probes.values_mut() {
+        // 认领：不是本探测域的请求（别的测试的 Core）不计数
+        if !req
+            .messages
+            .iter()
+            .any(|m| m.content.contains(p.scope.as_str()))
+        {
+            continue;
+        }
+        for m in &req.messages {
+            for (marker, hits) in p.markers.iter_mut() {
+                if m.content.contains(marker.as_str()) {
+                    *hits += 1;
+                    // 重复度：单条消息里的非重叠出现次数，各标记分别取整域最大值
+                    let n = m.content.split(marker.as_str()).count() as u32 - 1;
+                    let max = p.max_repeat.entry(marker.clone()).or_insert(0);
+                    if n > *max {
+                        *max = n;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 推进轮注入（4.2 测试面）：当前任务输入以「goal 自动继续轮」纪律头开头时
+/// 按开关注入失败/挂起（一次性，用毕复位）。chat/stream 共用。按「用户任务
+/// 输入段」识别当前轮（历史注入的规划请求里，历史文本不带该精确序列）。
+async fn goal_round_inject(req: &ChatRequest) -> anyhow::Result<()> {
+    let is_goal_round = req.messages.iter().any(|m| {
+        m.content
+            .contains("用户任务输入：## 工作法（goal 自动继续轮）")
+            || m.content.starts_with("## 工作法（goal 自动继续轮）")
+    });
+    if !is_goal_round {
+        return Ok(());
+    }
+    if MOCK_GOAL_ROUND_ERROR.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("mock 注入：goal 推进轮失败（网络异常）");
+    }
+    if MOCK_GOAL_ROUND_HANG.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    }
+    Ok(())
+}
+
 /// 确定性伪嵌入（Mock 通道）：64 维，token 哈希累加后归一——同义文本向量稳定相近
 fn mock_embedding(text: &str) -> Vec<f32> {
     let mut v = vec![0f32; 64];
@@ -100,6 +289,11 @@ impl LlmProvider for MockLlmProvider {
     }
 
     async fn chat(&self, req: ChatRequest) -> anyhow::Result<ChatResponse> {
+        // goal 自动继续注入（4.2 测试面）：error 直接失败 / hang 挂起 8s
+        // （respond 是同步纯函数，注入在 async 方法里做；推进轮的纪律头拼在
+        // user 文本里，按内容标记识别）
+        goal_round_inject(&req).await?;
+        probe_scan(&req);
         Ok(ChatResponse {
             content: respond(&req),
             reasoning: String::new(),
@@ -118,6 +312,8 @@ impl LlmProvider for MockLlmProvider {
         req: ChatRequest,
         tx: UnboundedSender<StreamDelta>,
     ) -> anyhow::Result<ChatResponse> {
+        goal_round_inject(&req).await?;
+        probe_scan(&req);
         let content = respond(&req);
         // 思维链分轨：先流一段确定性思考（与真实推理模型同形状：思考 → 正文），
         // 让过程轨迹（有序步骤）在 Mock 联调/验收环境同样有数据可走。
@@ -141,7 +337,12 @@ impl LlmProvider for MockLlmProvider {
 
     /// 图像生成替身：确定性 1×1 纯色 PNG（红）。
     /// 生图链路（工具槽位回接 → 魔数嗅探 → outbox 登记）在 Mock 环境可全链验收。
-    async fn image_generate(&self, _model: &str, _prompt: &str, _size: &str) -> anyhow::Result<Vec<u8>> {
+    async fn image_generate(
+        &self,
+        _model: &str,
+        _prompt: &str,
+        _size: &str,
+    ) -> anyhow::Result<Vec<u8>> {
         use base64::Engine;
         const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
         Ok(base64::engine::general_purpose::STANDARD
@@ -191,6 +392,15 @@ fn respond(req: &ChatRequest) -> String {
     if system.contains("记忆压缩") {
         let kept: String = user.chars().take(120).collect();
         format!("- 【已压缩】{kept}\n- 细节已归档，按需查阅")
+    } else if system.contains("元认知反思器") {
+        // 元认知反思（meta-agent 3.1 e2e/单测）：确定性策略输出——user 文本带
+        // 标记时按标记产出（replan/redirect/compact），缺省 continue（不注入）
+        let strategy = ["replan", "redirect", "compact"]
+            .iter()
+            .find(|s| user.contains(&format!("策略:{s}")))
+            .copied()
+            .unwrap_or("continue");
+        format!(r#"{{"strategy": "{strategy}", "note": "确定性反思输出"}}"#)
     } else if system.contains("Auto Agent Eval") {
         // Auto Agent 自评（9.2 e2e）：确定性两态——开关拨动（一次性）或 user 文本
         // 带标记时产出「值得做」，否则保守拒绝（与 parse_auto_eval 契约对齐，
@@ -198,13 +408,40 @@ fn respond(req: &ChatRequest) -> String {
         let act = MOCK_EVAL_ACT_ONCE.swap(false, std::sync::atomic::Ordering::SeqCst)
             || user.contains("值得做");
         if act {
-            r#"{"act": true, "task": "检查记忆库健康度", "why": "e2e 驱动的确定性自评"}"#.to_string()
+            r#"{"act": true, "task": "检查记忆库健康度", "why": "e2e 驱动的确定性自评"}"#
+                .to_string()
         } else {
             r#"{"act": false}"#.to_string()
         }
+    } else if system.contains("goal 裁决体") {
+        // goal judge（capability-parity 4.2 测试面）：user 文本带「判定:<v>」标记
+        // 时按标记产出确定性裁决；缺省 continue（推进下一轮）
+        let verdict = ["done", "blocked", "needs_user", "continue"]
+            .iter()
+            .find(|v| user.contains(&format!("判定:{v}")))
+            .copied()
+            .unwrap_or("continue");
+        format!(r#"{{"verdict": "{verdict}", "evidence": "mock judge 确定性裁决（{verdict}）"}}"#)
+    } else if user.contains("用户任务输入：## 工作法（goal 自动继续轮）")
+        || user.starts_with("## 工作法（goal 自动继续轮）")
+    {
+        // goal 自动继续推进轮（4.2）：确定性收束回复（带「判定:」标记透传给
+        // judge 轮——最新进展进 judge 的 user 文本，形成闭环驱动）。
+        // 特判按「用户任务输入段以纪律头开头」识别：规划请求把历史拼进 user
+        // （「## 最近对话」前缀），历史里的旧报告文本不能劫持规划分支
+        //（否则计划解析失败）。error/hang 注入见 goal_round_inject。
+        let mark = ["done", "blocked", "needs_user", "continue"]
+            .iter()
+            .find(|v| user.contains(&format!("判定:{v}")))
+            .copied()
+            .unwrap_or("continue");
+        format!("【报告】本轮推进完成（可验证增量已交付）。判定:{mark}")
     } else if system.contains("自主记忆摘要") {
         // 记忆归纳（9.1）：确定性摘要输出（不依赖模型质量，驱动去重/落库断言）
-        format!("E2E 会话主题归纳。{}", user.chars().take(60).collect::<String>())
+        format!(
+            "E2E 会话主题归纳。{}",
+            user.chars().take(60).collect::<String>()
+        )
     } else if system.contains("会话压缩") {
         "目标与进展：用户持续在推进当前任务；关键结论与未决事项已由最近对话承载。".to_string()
     } else if system.contains("经验改进要点合成") {
@@ -215,6 +452,10 @@ fn respond(req: &ChatRequest) -> String {
     } else if user.contains("触发工具循环") {
         // 智能体直接循环第一步:文本协议工具调用(确定性)
         r#"{"tool": "terminal", "args": {"command": "echo exm-tool-loop-ok"}}"#.to_string()
+    } else if user.contains("触发派生子智能体") {
+        // 智能体直接循环第一步：派生一个子智能体（确定性，走 Core 装配的派生执行器 →
+        // runtime.chat_execute）。子级收到任务书后不带这句触发语，于是落到普通回复并收敛。
+        r#"{"tool": "spawn", "args": {"task": "请阅读任务说明后用一句话复述目标。exm-tool-loop-ok"}}"#.to_string()
     } else if user.starts_with("【收束请求】") {
         converge_text(&user)
     } else if user.contains("你是研究规划师") {
@@ -459,4 +700,3 @@ fn converge_text(user: &str) -> String {
     ]
     .join("\n")
 }
-

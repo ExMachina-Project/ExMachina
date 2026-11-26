@@ -1,8 +1,8 @@
 use crate::config::ExmConfig;
 use crate::provider::{ChatRequest, ChatResponse, LlmProvider, ModelPool, StreamDelta};
-use crate::{Core, build_orchestrator, round_trace};
+use crate::{build_orchestrator, round_trace, Core};
 use std::sync::Arc;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{mpsc, Semaphore};
 
 struct ControlledProvider {
     entered: mpsc::UnboundedSender<()>,
@@ -12,16 +12,30 @@ struct ControlledProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for ControlledProvider {
-    fn name(&self) -> &'static str { "controlled" }
+    fn name(&self) -> &'static str {
+        "controlled"
+    }
     async fn chat(&self, _: ChatRequest) -> anyhow::Result<ChatResponse> {
         unreachable!("the fixture always returns nonempty stream content")
     }
-    async fn stream(&self, _: ChatRequest, tx: mpsc::UnboundedSender<StreamDelta>) -> anyhow::Result<ChatResponse> {
+    async fn stream(
+        &self,
+        _: ChatRequest,
+        tx: mpsc::UnboundedSender<StreamDelta>,
+    ) -> anyhow::Result<ChatResponse> {
         self.entered.send(()).unwrap();
         tx.send(StreamDelta::Thinking("in flight".into())).unwrap();
         self.release.acquire().await.unwrap().forget();
-        if self.fail { anyhow::bail!("fixture failure"); }
-        Ok(ChatResponse { content: "done".into(), reasoning: String::new(), prompt_tokens: 10, completion_tokens: 5, tool_calls: vec![] })
+        if self.fail {
+            anyhow::bail!("fixture failure");
+        }
+        Ok(ChatResponse {
+            content: "done".into(),
+            reasoning: String::new(),
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            tool_calls: vec![],
+        })
     }
 }
 
@@ -48,39 +62,72 @@ impl Fixture {
         let def = serde_json::from_value(serde_json::json!({
             "name": "Unit", "identifier": "unit", "description": "test", "domain": "test", "tier": "unit"
         })).unwrap();
-        core.registry.upsert_single(def, Some("answer briefly".into())).unwrap();
+        core.registry
+            .upsert_single(def, Some("answer briefly".into()))
+            .unwrap();
         core.registry.set_active_single(Some("unit")).unwrap();
         let (tx, entered) = mpsc::unbounded_channel();
         let release = Arc::new(Semaphore::new(0));
-        let provider = Arc::new(ControlledProvider { entered: tx, release: release.clone(), fail });
+        let provider = Arc::new(ControlledProvider {
+            entered: tx,
+            release: release.clone(),
+            fail,
+        });
         let mut pool = ModelPool::new();
         pool.insert("fixture", provider, "fixture");
         pool.set_active("fixture");
-        let mut orch = build_orchestrator(&cfg, &core.store, &core.registry, &core.events, &core.memory, &core.knowledge, None, None, Some(core.cron.clone())).unwrap();
+        let mut orch = build_orchestrator(
+            &cfg,
+            &core.store,
+            &core.registry,
+            &core.events,
+            &core.memory,
+            &core.knowledge,
+            None,
+            None,
+            Some(core.cron.clone()),
+        )
+        .unwrap();
         orch.model_pool = Arc::new(pool);
         *core.orchestrator.write() = Arc::new(orch);
-        Self { core: Arc::new(core), root, entered, release }
+        Self {
+            core: Arc::new(core),
+            root,
+            entered,
+            release,
+        }
     }
     async fn started(&mut self) {
-        tokio::time::timeout(std::time::Duration::from_secs(3), self.entered.recv()).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), self.entered.recv())
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 impl Drop for Fixture {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }
 
 #[tokio::test]
 async fn direct_chat_serializes_with_normal_chat_and_records_history() {
     let mut f = Fixture::new(false);
     let id = f.core.create_session("direct").unwrap().id;
-    let core = f.core.clone(); let sid = id.clone();
+    let core = f.core.clone();
+    let sid = id.clone();
     let first = tokio::spawn(async move { core.chat_with_agent(&sid, "unit", "first").await });
     f.started().await;
     assert!(round_trace::is_running(&id));
     assert!(f.core.undo_session(&id, 0, false).await.is_err());
-    let core = f.core.clone(); let sid = id.clone();
+    let core = f.core.clone();
+    let sid = id.clone();
     let second = tokio::spawn(async move { core.chat(&sid, "second").await });
-    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), f.entered.recv()).await.is_err());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), f.entered.recv())
+            .await
+            .is_err()
+    );
     f.release.add_permits(1);
     first.await.unwrap().unwrap();
     f.started().await;
@@ -92,11 +139,62 @@ async fn direct_chat_serializes_with_normal_chat_and_records_history() {
 }
 
 #[tokio::test]
+async fn chat_announces_preparation_before_waiting_for_the_model() {
+    let mut fixture = Fixture::new(false);
+    let session = fixture.core.create_session("preparation notice").unwrap();
+    let mut events = fixture.core.subscribe();
+    let core = fixture.core.clone();
+    let session_id = session.id.clone();
+    let task = tokio::spawn(async move { core.chat(&session_id, "帮我实现一个小功能").await });
+
+    fixture.started().await;
+    let mut saw_preparation = false;
+    while let Ok(event) = events.try_recv() {
+        if event.kind == "run.progress"
+            && event.payload["stage"] == "preparing"
+            && event.payload["announce"] == true
+        {
+            saw_preparation = true;
+            break;
+        }
+    }
+    assert!(saw_preparation, "模型请求发出前应产生可观察的准备说明事件");
+    assert_eq!(
+        crate::round_trace::activity_snapshot(&session.id)
+            .first()
+            .unwrap()
+            .kind,
+        "run.progress"
+    );
+    fixture.release.add_permits(1);
+    task.await.unwrap().unwrap();
+    assert!(crate::round_trace::activity_snapshot(&session.id).is_empty());
+    assert!(fixture
+        .core
+        .store
+        .list_events(&session.id)
+        .unwrap()
+        .iter()
+        .all(|event| event["payload"]["type"] != "run.progress"));
+}
+
+#[test]
+fn preparation_announcement_is_limited_to_nontrivial_work() {
+    assert!(!crate::should_announce_preparation("你好"));
+    assert!(!crate::should_announce_preparation("这个词是什么意思？"));
+    assert!(crate::should_announce_preparation("帮我修复登录失败的问题"));
+    assert!(crate::should_announce_preparation(
+        &"梳理整个项目并提出改进方向。".repeat(4)
+    ));
+}
+
+#[tokio::test]
 async fn direct_chat_errors_and_aborted_futures_release_running_state() {
     for fail in [false, true] {
         let mut f = Fixture::new(fail);
         let id = f.core.create_session("cleanup").unwrap().id;
-        let core = f.core.clone(); let sid = id.clone();
+        let core = f.core.clone();
+        let sid = id.clone();
         let task = tokio::spawn(async move { core.chat_with_agent(&sid, "unit", "test").await });
         f.started().await;
         assert!(f.core.stop_session(&id).is_ok());
@@ -152,7 +250,11 @@ async fn missing_sessions_never_leave_a_running_marker() {
     let f = Fixture::new(false);
     assert!(f.core.chat("missing", "hi").await.is_err());
     assert!(!round_trace::is_running("missing"));
-    assert!(f.core.chat_with_agent("missing", "unit", "hi").await.is_err());
+    assert!(f
+        .core
+        .chat_with_agent("missing", "unit", "hi")
+        .await
+        .is_err());
     assert!(!round_trace::is_running("missing"));
 }
 
@@ -160,7 +262,15 @@ async fn missing_sessions_never_leave_a_running_marker() {
 async fn im_greetings_require_a_real_provider_response_and_propagate_errors() {
     for fail in [false, true] {
         let mut f = Fixture::new(fail);
-        for text in ["在吗", "你好！", "谢谢", "晚安", "OK", "test", "@2511705734 在吗"] {
+        for text in [
+            "在吗",
+            "你好！",
+            "谢谢",
+            "晚安",
+            "OK",
+            "test",
+            "@2511705734 在吗",
+        ] {
             let id = f.core.create_session("im-greeting").unwrap().id;
             crate::orchestrator::mark_im_session(&id);
             let mut events = f.core.subscribe();
@@ -173,19 +283,41 @@ async fn im_greetings_require_a_real_provider_response_and_propagate_errors() {
             let result = task.await.unwrap();
             assert_eq!(result.is_err(), fail);
             let messages = f.core.store.list_messages(&id, 0).unwrap();
-            let replies: Vec<_> = messages.iter().filter(|m| m.role == crate::types::MessageRole::Orchestrator).collect();
+            let replies: Vec<_> = messages
+                .iter()
+                .filter(|m| m.role == crate::types::MessageRole::Orchestrator)
+                .collect();
             if fail {
-                assert!(replies.is_empty(), "A failed model cannot create a successful greeting");
-                assert!(messages.iter().any(|m| m.role == crate::types::MessageRole::System && m.statements.iter().any(|s| s.text.contains("fixture failure"))));
+                assert!(
+                    replies.is_empty(),
+                    "A failed model cannot create a successful greeting"
+                );
+                assert!(messages
+                    .iter()
+                    .any(|m| m.role == crate::types::MessageRole::System
+                        && m.statements
+                            .iter()
+                            .any(|s| s.text.contains("fixture failure"))));
             } else {
                 assert_eq!(replies.len(), 1);
                 assert_eq!(replies[0].statements[0].text, "done");
             }
             let emitted: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
             assert_eq!(emitted.iter().any(|event| event.kind == "run.error"), fail);
-            assert!(!emitted.iter().any(|event| event.payload.get("shortCircuit").is_some()));
+            assert!(!emitted
+                .iter()
+                .any(|event| event.payload.get("shortCircuit").is_some()));
             assert!(!round_trace::is_running(&id));
-            assert_eq!(f.core.store.list_turn_snapshots(&id).unwrap().last().unwrap().status, if fail { "failed" } else { "done" });
+            assert_eq!(
+                f.core
+                    .store
+                    .list_turn_snapshots(&id)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .status,
+                if fail { "failed" } else { "done" }
+            );
             crate::orchestrator::unmark_im_session(&id);
         }
     }

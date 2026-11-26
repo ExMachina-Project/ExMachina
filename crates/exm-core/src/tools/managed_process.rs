@@ -36,7 +36,7 @@ pub(super) struct JobOutcome {
 impl JobOutcome {
     fn note_cleanup_error(&mut self, error: String) {
         if let Some(previous) = &mut self.cleanup_error {
-            previous.push_str("；");
+            previous.push(',');
             previous.push_str(&error);
         } else {
             self.cleanup_error = Some(error);

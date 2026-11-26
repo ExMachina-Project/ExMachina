@@ -227,7 +227,10 @@ pub async fn ensure_compacted(
 /// 双判据触发判定（纯函数，单测口径）：
 /// token 占比（估算字符 > budget_chars × trigger_ratio）先到 → token-ratio；
 /// 条数超 trigger 兜底 → count-fallback；都不满足 → 不压缩。
-pub(crate) fn compact_trigger(msgs: &[ChatMessage], params: &CompactParams) -> (bool, &'static str) {
+pub(crate) fn compact_trigger(
+    msgs: &[ChatMessage],
+    params: &CompactParams,
+) -> (bool, &'static str) {
     // token 判据（0 或无预算基数 = 关闭）
     if let Some(budget) = params.budget_chars {
         if params.trigger_ratio > 0.0 {
@@ -248,7 +251,12 @@ pub(crate) fn compact_trigger(msgs: &[ChatMessage], params: &CompactParams) -> (
 /// 消息正文总字符数（statements 拼接，与 budget.rs 估算口径一致）
 fn history_chars_of(msgs: &[ChatMessage]) -> usize {
     msgs.iter()
-        .map(|m| m.statements.iter().map(|s| s.text.chars().count()).sum::<usize>())
+        .map(|m| {
+            m.statements
+                .iter()
+                .map(|s| s.text.chars().count())
+                .sum::<usize>()
+        })
         .sum()
 }
 

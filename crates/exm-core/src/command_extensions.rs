@@ -96,6 +96,222 @@ impl Core {
         }))
     }
 
+    /// 模型工具面能力快照（capability-parity 5.1）：按执行身份（个体）、
+    /// 项目/会话（工作区 scope）、后端就绪（search/browser/computer/speech/
+    /// image_gen/chart）与依赖（实验开关/记忆模式/插件进程）计算每个工具的
+    /// CapabilityItem——与 runtime/chat.rs 的 schema 组装链走同一判定函数
+    /// （tool_specs_gated / tool_specs_experiments / visible_to / MCP allowedAgents），
+    /// 快照声明与实际下发/执行一致性由此保证，不建第二套判定。
+    ///
+    /// 状态语义（agent-tool-surface delta「能力依赖未就绪」）：
+    /// `Available` 当前会出现在该身份该作用域的模型工具 schema 里；
+    /// `Forbidden` 作用域/个体工具面裁剪（chat 档/编成 tools 未声明）；
+    /// `MissingDependency` 后端未就绪/实验开关未开/文件记忆模式/插件未起。
+    /// 目录存在 ≠ 可执行：非 Available 一律不下发 schema。
+    pub fn tool_surface_capabilities(
+        self: &Arc<Self>,
+        context: &CommandTransportContext,
+        scope: ToolScope,
+        session_id: Option<&str>,
+    ) -> Vec<CapabilityItem> {
+        let orchestrator = self.orchestrator();
+        let tools = orchestrator.tools.clone();
+        // 个体定义：快照按执行身份裁剪；无会话上下文时回落主智能体定义，
+        // 连主智能体都没有（异常装配）时按「全量 allowlist + 无身份附加面」
+        // 判定——不虚报也不静默清空。
+        let def = context
+            .session
+            .as_deref()
+            .and_then(|_| self.extension_subject(context).ok().flatten())
+            .map(|subject| subject.agent)
+            .or_else(|| orchestrator.registry.primary());
+        // purpose 判定代理：无个体定义时直接用 fallback ready（与 runtime 对
+        // 缺路由表的降级一致）
+        let purpose_ready = |purpose: crate::model_routing::ModelPurpose, fallback: bool| match &def
+        {
+            Some(def) => tools.agent_purpose_ready(def, purpose, fallback),
+            None => fallback,
+        };
+        let experiments = orchestrator.config_snapshot().experiments;
+        let mut items = Vec::new();
+        let mut record = |name: String, status: CapabilityStatus, reason: Option<String>| {
+            items.push(CapabilityItem {
+                name,
+                status,
+                reason,
+            });
+        };
+
+        // 内置工具：同一 gated 组装链（tool_specs_gated+experiments）反推状态——
+        // 判定输入与 runtime 完全一致（同 ready 源、同 experiments、同 allowlist 语义）
+        let allowlist: Vec<crate::types::ToolName> = match &def {
+            Some(def) if !def.tools.is_empty() => def.tools.clone(),
+            // 无个体定义或编成未声明 = 全量口径：按全枚举逐一判定
+            _ => crate::types::ToolName::all().to_vec(),
+        };
+        let scoped_allowlist = scope.filter_allowlist(&allowlist);
+        let specs = crate::tools::ToolGateway::tool_specs_gated(
+            &scoped_allowlist,
+            tools.search_ready(),
+            tools.browser_ready(),
+            tools.computer_ready(),
+            purpose_ready(
+                crate::model_routing::ModelPurpose::Speech,
+                tools.speech_ready(),
+            ),
+            purpose_ready(
+                crate::model_routing::ModelPurpose::ImageGen,
+                tools.image_gen_ready(),
+            ),
+            tools.chart_ready(),
+            tools.memory_deep(),
+        );
+        let specs = crate::tools::ToolGateway::tool_specs_experiments(
+            specs,
+            experiments.dynamic_compaction,
+            experiments.sliding_context_window,
+            experiments.meta_agent,
+        );
+        let dispatched: std::collections::HashSet<&str> =
+            specs.iter().map(|s| s.name.as_str()).collect();
+        for tool in crate::types::ToolName::all() {
+            let key = tool.key();
+            let name = format!("tool.{key}");
+            if !allowlist.contains(tool) {
+                record(
+                    name,
+                    CapabilityStatus::Forbidden,
+                    Some("个体编成未声明该工具".into()),
+                );
+                continue;
+            }
+            if !scope
+                .filter_allowlist(std::slice::from_ref(tool))
+                .contains(tool)
+            {
+                record(
+                    name,
+                    CapabilityStatus::Forbidden,
+                    Some("当前作用域不下发该工具（如 computer 仅 Computer 档）".into()),
+                );
+                continue;
+            }
+            if dispatched.contains(key) {
+                record(name, CapabilityStatus::Available, None);
+            } else {
+                // allowlist 过审但未下发：按 ready 门逐一归因
+                let (status, reason) = match tool {
+                    crate::types::ToolName::WebSearch if !tools.search_ready() => (
+                        CapabilityStatus::MissingDependency,
+                        "联网搜索后端未配置".into(),
+                    ),
+                    crate::types::ToolName::Browser if !tools.browser_ready() => (
+                        CapabilityStatus::MissingDependency,
+                        "未探测到浏览器可执行文件".into(),
+                    ),
+                    crate::types::ToolName::Computer if !tools.computer_ready() => (
+                        CapabilityStatus::MissingDependency,
+                        "Computer Use 未启用".into(),
+                    ),
+                    crate::types::ToolName::Speech
+                        if !purpose_ready(
+                            crate::model_routing::ModelPurpose::Speech,
+                            tools.speech_ready(),
+                        ) =>
+                    {
+                        (
+                            CapabilityStatus::MissingDependency,
+                            "TTS 能力模型未装配".into(),
+                        )
+                    }
+                    crate::types::ToolName::ImageGen
+                        if !purpose_ready(
+                            crate::model_routing::ModelPurpose::ImageGen,
+                            tools.image_gen_ready(),
+                        ) =>
+                    {
+                        (CapabilityStatus::MissingDependency, "生图槽位未配置".into())
+                    }
+                    crate::types::ToolName::RenderChart if !tools.chart_ready() => (
+                        CapabilityStatus::MissingDependency,
+                        "chart.endpoint 为空（关闭）".into(),
+                    ),
+                    crate::types::ToolName::MemoryWrite | crate::types::ToolName::MemoryLink
+                        if !tools.memory_deep() =>
+                    {
+                        (
+                            CapabilityStatus::MissingDependency,
+                            "文件记忆模式下记忆写必然失败".into(),
+                        )
+                    }
+                    crate::types::ToolName::ContextCompact
+                        if !experiments.dynamic_compaction
+                            || experiments.sliding_context_window =>
+                    {
+                        (
+                            CapabilityStatus::MissingDependency,
+                            "实验开关未开或与滑动窗口互斥".into(),
+                        )
+                    }
+                    crate::types::ToolName::MetaObserve
+                    | crate::types::ToolName::MetaPropose
+                    | crate::types::ToolName::MetaBuild
+                        if !experiments.meta_agent =>
+                    {
+                        (
+                            CapabilityStatus::MissingDependency,
+                            "metaAgent 实验未开启".into(),
+                        )
+                    }
+                    _ => (CapabilityStatus::Unavailable, "工具未在当前下发面".into()),
+                };
+                record(name, status, Some(reason));
+            }
+        }
+
+        // 自定义/MCP/会话级工具：visible_to / allowedAgents 与 runtime 同源
+        if scope.allows_tools() {
+            let agent_key = def.as_ref().map(|d| d.identifier.as_str()).unwrap_or("");
+            let custom = tools.custom_specs_for(agent_key);
+            let mcp = tools.mcp().tool_snapshot_for(agent_key);
+            let session_tools = session_id
+                .map(|sid| tools.session_tool_specs(sid))
+                .unwrap_or_default();
+            let visible: std::collections::HashSet<String> = custom
+                .iter()
+                .chain(mcp.iter())
+                .chain(session_tools.iter())
+                .map(|s| s.name.clone())
+                .collect();
+            for name in visible {
+                record(format!("tool.{name}"), CapabilityStatus::Available, None);
+            }
+            // MCP 声明存在但 allowedAgents 不含当前身份：Forbidden（不下发）
+            let declared_mcp = tools.mcp().declared_tool_names();
+            for name in declared_mcp {
+                if !custom.iter().any(|s| s.name == name)
+                    && !mcp.iter().any(|s| s.name == name)
+                    && !session_tools.iter().any(|s| s.name == name)
+                {
+                    record(
+                        format!("tool.{name}"),
+                        CapabilityStatus::Forbidden,
+                        Some("MCP 工具未对当前个体开放（allowedAgents）".into()),
+                    );
+                }
+            }
+        } else {
+            for name in tools.mcp().declared_tool_names() {
+                record(
+                    format!("tool.{name}"),
+                    CapabilityStatus::Forbidden,
+                    Some("仅聊天档不下发任何工具 schema".into()),
+                );
+            }
+        }
+        items
+    }
+
     /// 每次查询和派发均重建动态部分；安装、禁用、依赖故障和卸载不会留下旧 handler。
     fn extension_service(
         self: &Arc<Self>,
@@ -979,5 +1195,162 @@ mod tests {
             CommandErrorCategory::Unavailable
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// capability-parity 5.1：工具面能力快照与模型 schema 组装链同源一致。
+    /// 断言：① 每个内置工具都有状态项（全枚举覆盖）；② Available 集合与
+    /// tool_specs_gated+experiments 实际下发集合完全一致（快照不虚报）；
+    /// ③ 后端未就绪 → MissingDependency 且带归因；④ 个体工具面裁剪 →
+    /// Forbidden；⑤ chat 档全部 Forbidden；⑥ 目录存在 ≠ 可执行。
+    #[test]
+    fn 工具面能力快照与schema下发链一致() {
+        let fixture = Fixture::new();
+        let ctx = fixture.context(CommandEntry::Http, "owner");
+        let items = fixture.core.tool_surface_capabilities(
+            &ctx,
+            ToolScope::Computer,
+            Some(&fixture.session),
+        );
+
+        // ① 全枚举覆盖（每个内置工具都有快照项）
+        for tool in crate::types::ToolName::all() {
+            assert!(
+                items
+                    .iter()
+                    .any(|i| i.name == format!("tool.{}", tool.key())),
+                "快照缺内置工具 {}",
+                tool.key()
+            );
+        }
+
+        // ② 一致性：Available 的内置工具集合 == 同判定链实际下发的集合
+        let orchestrator = fixture.core.orchestrator();
+        let tools = orchestrator.tools.clone();
+        let def = orchestrator.registry.primary().unwrap();
+        let experiments = orchestrator.config_snapshot().experiments;
+        let specs = crate::tools::ToolGateway::tool_specs_gated(
+            &def.tools,
+            tools.search_ready(),
+            tools.browser_ready(),
+            tools.computer_ready(),
+            tools.agent_purpose_ready(
+                &def,
+                crate::model_routing::ModelPurpose::Speech,
+                tools.speech_ready(),
+            ),
+            tools.agent_purpose_ready(
+                &def,
+                crate::model_routing::ModelPurpose::ImageGen,
+                tools.image_gen_ready(),
+            ),
+            tools.chart_ready(),
+            tools.memory_deep(),
+        );
+        let specs = crate::tools::ToolGateway::tool_specs_experiments(
+            specs,
+            experiments.dynamic_compaction,
+            experiments.sliding_context_window,
+            experiments.meta_agent,
+        );
+        let dispatched: std::collections::HashSet<&str> =
+            specs.iter().map(|s| s.name.as_str()).collect();
+        let available: std::collections::HashSet<&str> = items
+            .iter()
+            .filter(|i| i.status == CapabilityStatus::Available)
+            .filter_map(|i| i.name.strip_prefix("tool."))
+            .filter(|n| crate::types::ToolName::all().iter().any(|t| t.key() == *n))
+            .collect();
+        assert_eq!(
+            available, dispatched,
+            "快照 Available 集合必须与 schema 下发集合一致"
+        );
+
+        // ③ 后端未就绪如实归因（fixture 无搜索后端配置：web_search 必为
+        // MissingDependency 而非 Available——目录存在 ≠ 可执行）
+        let web_search = items
+            .iter()
+            .find(|i| i.name == "tool.web_search")
+            .expect("web_search 快照项");
+        if !tools.search_ready() {
+            assert_eq!(web_search.status, CapabilityStatus::MissingDependency);
+            assert!(web_search.reason.as_deref().unwrap_or("").contains("搜索"));
+        }
+        // 实验开关默认关闭：context_compact / meta_* 为 MissingDependency
+        for key in ["context_compact", "meta_observe"] {
+            let item = items
+                .iter()
+                .find(|i| i.name == format!("tool.{key}"))
+                .expect("实验工具快照项");
+            if !experiments.dynamic_compaction || !experiments.meta_agent {
+                assert_eq!(
+                    item.status,
+                    CapabilityStatus::MissingDependency,
+                    "{key} 应因实验开关关闭而 MissingDependency"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn 工具面快照_作用域与编成裁剪() {
+        let fixture = Fixture::new();
+        let ctx = fixture.context(CommandEntry::Http, "owner");
+
+        // chat 档：所有内置工具 Forbidden（仅聊天不下发 schema）
+        let chat_items =
+            fixture
+                .core
+                .tool_surface_capabilities(&ctx, ToolScope::Chat, Some(&fixture.session));
+        let builtin_forbidden = chat_items
+            .iter()
+            .filter(|i| {
+                crate::types::ToolName::all()
+                    .iter()
+                    .any(|t| i.name == format!("tool.{}", t.key()))
+            })
+            .all(|i| i.status == CapabilityStatus::Forbidden);
+        assert!(builtin_forbidden, "chat 档内置工具应全部 Forbidden");
+
+        // tools 档：computer 工具 Forbidden（仅 Computer 档）
+        let tools_items =
+            fixture
+                .core
+                .tool_surface_capabilities(&ctx, ToolScope::Tools, Some(&fixture.session));
+        let computer = tools_items
+            .iter()
+            .find(|i| i.name == "tool.computer")
+            .expect("computer 快照项");
+        assert_eq!(computer.status, CapabilityStatus::Forbidden);
+        // tools 档读类基础工具可用
+        let read = tools_items
+            .iter()
+            .find(|i| i.name == "tool.read")
+            .expect("read 快照项");
+        assert_eq!(read.status, CapabilityStatus::Available);
+
+        // 编成裁剪：给个体收窄 tools 后，未声明工具 Forbidden
+        fixture
+            .core
+            .registry
+            .upsert_single(
+                serde_json::from_value(json!({
+                    "name": "Fixture", "identifier": "fixture-user-agent", "domain": "测试",
+                    "description": "仅用于测试", "tier": "unit", "tools": ["read", "grep"]
+                }))
+                .unwrap(),
+                None,
+            )
+            .unwrap();
+        fixture.core.rebuild_orchestrator().expect("重装配");
+        let narrow =
+            fixture
+                .core
+                .tool_surface_capabilities(&ctx, ToolScope::Tools, Some(&fixture.session));
+        let terminal = narrow
+            .iter()
+            .find(|i| i.name == "tool.terminal")
+            .expect("terminal 快照项");
+        assert_eq!(terminal.status, CapabilityStatus::Forbidden);
+        assert!(terminal.reason.as_deref().unwrap_or("").contains("编成"));
     }
 }

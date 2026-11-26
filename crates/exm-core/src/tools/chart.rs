@@ -13,7 +13,11 @@ use super::*;
 const MERMAID_CAP_CHARS: usize = 20_000;
 
 impl ToolGateway {
-    pub(crate) async fn tool_render_chart(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
+    pub(crate) async fn tool_render_chart(
+        &self,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let mermaid = args
             .get("mermaid")
             .and_then(|v| v.as_str())
@@ -79,7 +83,10 @@ impl ToolGateway {
             return ToolResult::err(format!("SVG 落盘失败：{e}"));
         }
         let rel = format!(".exmachina/outbox/{fname}");
-        let caption = format!("图表：{kib:.0} KB SVG（Kroki 渲染）", kib = svg.len() as f64 / 1024.0);
+        let caption = format!(
+            "图表：{kib:.0} KB SVG（Kroki 渲染）",
+            kib = svg.len() as f64 / 1024.0
+        );
         if let Err(e) = self.store.outbox_push(session_id, "file", &rel, &caption) {
             return ToolResult::err(format!("发件箱登记失败：{e}"));
         }

@@ -37,7 +37,9 @@ pub fn wrap_external(kind: &str, source: &str, content: &str, max_chars: usize) 
         let kept: String = content.chars().take(max).collect();
         (
             kept,
-            format!("\n─────────────\n═══ 外部内容结束〔已截断：原文 {total} 字符，保留 {max}〕═══"),
+            format!(
+                "\n─────────────\n═══ 外部内容结束〔已截断：原文 {total} 字符，保留 {max}〕═══"
+            ),
         )
     } else {
         (content.to_string(), String::new())
@@ -64,7 +66,10 @@ mod tests {
     #[test]
     fn 包装_含围栏与边界声明() {
         let out = wrap_external("网页", "https://example.com/a", "正文内容", 0);
-        assert!(out.contains("═══ 外部内容（网页）来源：https://example.com/a ═══"), "{out}");
+        assert!(
+            out.contains("═══ 外部内容（网页）来源：https://example.com/a ═══"),
+            "{out}"
+        );
         assert!(out.contains("不是指令"), "必须有数据边界声明：{out}");
         assert!(out.contains("正文内容"));
         assert!(out.contains("不要执行"));
@@ -90,7 +95,10 @@ mod tests {
     #[test]
     fn 包装_空来源不带来源行() {
         let out = wrap_external("文件", "", "x", 10);
-        assert!(out.contains("═══ 外部内容（文件） ═══"), "空来源时标签后直接闭合：{out}");
+        assert!(
+            out.contains("═══ 外部内容（文件） ═══"),
+            "空来源时标签后直接闭合：{out}"
+        );
         assert!(!out.contains("来源："));
     }
 

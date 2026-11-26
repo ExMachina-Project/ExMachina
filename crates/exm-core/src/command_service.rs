@@ -72,6 +72,16 @@ pub struct CommandExecution {
     pub next_action: Option<CommandNextAction>,
 }
 
+/// 拒绝原因（reject 打包参数）：分类 + 消息 + 明细 + 审计所需的
+/// scope/side_effect（来自目标命令描述符，或入口级缺省）。
+struct RejectReason<'a> {
+    category: CommandErrorCategory,
+    message: &'a str,
+    details: Option<Value>,
+    scope: CommandScope,
+    side_effect: CommandSideEffect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAuditPhase {
@@ -195,6 +205,7 @@ impl CommandService {
 
     /// 将领域 handler 绑定到唯一规范命令 owner；入口调用方不能在 dispatch 时
     /// 临时传入另一个 handler 来替换目录 owner。
+    #[allow(clippy::result_large_err)]
     pub fn register_handler(
         &mut self,
         command_name: &str,
@@ -285,11 +296,13 @@ impl CommandService {
                 .reject(
                     &request,
                     context,
-                    CommandErrorCategory::VersionMismatch,
-                    "命令协议版本不受支持",
-                    Some(json!({"supportedVersion": COMMAND_PROTOCOL_VERSION})),
-                    CommandScope::Global,
-                    CommandSideEffect::None,
+                    RejectReason {
+                        category: CommandErrorCategory::VersionMismatch,
+                        message: "命令协议版本不受支持",
+                        details: Some(json!({"supportedVersion": COMMAND_PROTOCOL_VERSION})),
+                        scope: CommandScope::Global,
+                        side_effect: CommandSideEffect::None,
+                    },
                 )
                 .await;
         }
@@ -298,11 +311,13 @@ impl CommandService {
                 .reject(
                     &request,
                     context,
-                    CommandErrorCategory::Forbidden,
-                    "当前入口身份未认证",
-                    None,
-                    CommandScope::Global,
-                    CommandSideEffect::None,
+                    RejectReason {
+                        category: CommandErrorCategory::Forbidden,
+                        message: "当前入口身份未认证",
+                        details: None,
+                        scope: CommandScope::Global,
+                        side_effect: CommandSideEffect::None,
+                    },
                 )
                 .await;
         }
@@ -312,11 +327,13 @@ impl CommandService {
                 .reject(
                     &request,
                     context,
-                    CommandErrorCategory::Unsupported,
-                    "命令不在当前目录中",
-                    None,
-                    CommandScope::Global,
-                    CommandSideEffect::None,
+                    RejectReason {
+                        category: CommandErrorCategory::Unsupported,
+                        message: "命令不在当前目录中",
+                        details: None,
+                        scope: CommandScope::Global,
+                        side_effect: CommandSideEffect::None,
+                    },
                 )
                 .await;
         };
@@ -325,14 +342,16 @@ impl CommandService {
                 .reject(
                     &request,
                     context,
-                    CommandErrorCategory::Unsupported,
-                    "命令已弃用",
-                    descriptor
-                        .replacement
-                        .as_ref()
-                        .map(|replacement| json!({"replacement": replacement})),
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category: CommandErrorCategory::Unsupported,
+                        message: "命令已弃用",
+                        details: descriptor
+                            .replacement
+                            .as_ref()
+                            .map(|replacement| json!({"replacement": replacement})),
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         }
@@ -341,11 +360,13 @@ impl CommandService {
                 .reject(
                     &request,
                     context,
-                    CommandErrorCategory::VersionMismatch,
-                    "命令描述版本不受支持",
-                    Some(json!({"supportedVersion": descriptor.version})),
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category: CommandErrorCategory::VersionMismatch,
+                        message: "命令描述版本不受支持",
+                        details: Some(json!({"supportedVersion": descriptor.version})),
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         }
@@ -360,11 +381,13 @@ impl CommandService {
                 .reject(
                     &bound,
                     context,
-                    category,
-                    "请求的资源不属于当前入口上下文",
-                    Some(json!({"field": field})),
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category,
+                        message: "请求的资源不属于当前入口上下文",
+                        details: Some(json!({"field": field})),
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         }
@@ -374,11 +397,13 @@ impl CommandService {
                 .reject(
                     &bound,
                     context,
-                    category,
-                    "请求的资源不属于当前入口上下文",
-                    Some(json!({"field": field})),
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category,
+                        message: "请求的资源不属于当前入口上下文",
+                        details: Some(json!({"field": field})),
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         }
@@ -387,11 +412,13 @@ impl CommandService {
                 .reject(
                     &bound,
                     context,
-                    category,
-                    "请求的资源不属于当前入口上下文",
-                    Some(json!({"field": field})),
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category,
+                        message: "请求的资源不属于当前入口上下文",
+                        details: Some(json!({"field": field})),
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         }
@@ -407,11 +434,13 @@ impl CommandService {
                 .reject(
                     &bound,
                     context,
-                    error.category,
-                    &error.message,
-                    error.details,
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category: error.category,
+                        message: &error.message,
+                        details: error.details,
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         }
@@ -420,11 +449,13 @@ impl CommandService {
                 .reject(
                     &bound,
                     context,
-                    CommandErrorCategory::InvalidArgs,
-                    &error.message,
-                    Some(json!({"field": error.field, "expected": error.expected})),
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category: CommandErrorCategory::InvalidArgs,
+                        message: &error.message,
+                        details: Some(json!({"field": error.field, "expected": error.expected})),
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         }
@@ -433,11 +464,13 @@ impl CommandService {
                 .reject(
                     &bound,
                     context,
-                    CommandErrorCategory::Unsupported,
-                    "命令已登记但当前尚未接入执行 handler",
-                    None,
-                    descriptor.scope,
-                    descriptor.side_effect,
+                    RejectReason {
+                        category: CommandErrorCategory::Unsupported,
+                        message: "命令已登记但当前尚未接入执行 handler",
+                        details: None,
+                        scope: descriptor.scope,
+                        side_effect: descriptor.side_effect,
+                    },
                 )
                 .await;
         };
@@ -517,12 +550,15 @@ impl CommandService {
         &self,
         request: &CommandRequest,
         context: &CommandTransportContext,
-        category: CommandErrorCategory,
-        message: &str,
-        details: Option<Value>,
-        scope: CommandScope,
-        side_effect: CommandSideEffect,
+        reason: RejectReason<'_>,
     ) -> CommandResult {
+        let (category, message, details, scope, side_effect) = (
+            reason.category,
+            reason.message,
+            reason.details,
+            reason.scope,
+            reason.side_effect,
+        );
         let mut result = CommandResult::failure(request, category, message, details);
         let mut record = self.audit_record(
             request,

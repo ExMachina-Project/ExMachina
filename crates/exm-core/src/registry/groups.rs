@@ -111,8 +111,13 @@ impl LocalRegistry {
         if new_dir.exists() {
             anyhow::bail!("目标编成目录已存在: {}", new_dir.display());
         }
-        std::fs::rename(&g.dir, &new_dir)
-            .with_context(|| format!("编成目录改名失败: {} → {}", g.dir.display(), new_dir.display()))?;
+        std::fs::rename(&g.dir, &new_dir).with_context(|| {
+            format!(
+                "编成目录改名失败: {} → {}",
+                g.dir.display(),
+                new_dir.display()
+            )
+        })?;
         g.dir = new_dir;
         g.meta.id = new_id.to_string();
         let meta_path = g.dir.join("group.json");
@@ -566,5 +571,4 @@ impl LocalRegistry {
             Ok(false)
         }
     }
-
 }

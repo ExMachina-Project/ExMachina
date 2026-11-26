@@ -21,22 +21,21 @@ pub use allowlist::{command_head, is_destructive_command};
 pub use dynamic::{dynamic_exec, dynamic_exec_images, DynamicToolExec, DynamicToolOutput};
 /// 外部内容隔离包装（inbound-sanitization）：供网关侧工具（RSS digest 等）复用
 pub use external_wrap::wrap_external as wrap_external_for;
+pub(crate) use gateway::PluginCommandTarget;
 pub use gateway::{
     scope_budget, PluginCredResolver, SessionGrantProbe, SessionSendExec, SpawnExec, ToolGateway,
 };
-pub(crate) use gateway::PluginCommandTarget;
 pub use hooks::run_hook_command;
-pub use redact::{redact_json, redact_str};
+pub(crate) use redact::redact_core_event;
+pub use redact::{redact_json, redact_observation, redact_str};
 pub use result::ToolResult;
 pub use sandbox::{
     execute_shell_command_timed, execute_shell_with, is_network_command, windows_job_available,
     ShellOpts, WinJob,
 };
 pub use terminal::{SpawnBgState, SpawnBgTask};
-pub use terminal_jobs::BackgroundLimits;
-pub(crate) use terminal_jobs::{
-    terminal_action_from_approval, TerminalApprovalAction, TerminalApprovalRequest,
-};
+pub(crate) use terminal_jobs::terminal_action_from_approval;
+pub use terminal_jobs::{BackgroundLimits, TerminalJobSnapshot};
 
 // 跨子模块共享的内部项（原 tools.rs 同文件私有；拆分后经 tools 根再导出保持 sibling 可见）。
 // #[allow(unused_imports)]：这些符号经 `use super::*` glob 链被各子模块使用，
@@ -72,6 +71,7 @@ mod hooks;
 mod managed_process;
 mod memory_tools;
 mod meta;
+mod programmatic;
 mod result;
 mod sandbox;
 mod sandbox_helpers;

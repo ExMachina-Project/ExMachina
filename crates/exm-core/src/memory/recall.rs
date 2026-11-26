@@ -36,14 +36,37 @@ impl MemoryStore {
         group: Option<&str>,
         qe: Option<&[f32]>,
     ) -> anyhow::Result<Vec<RecallHit>> {
-        self.recall_filtered(query, limit, None, AgentLayer::Agent(agent_id), group, qe, None)
+        self.recall_filtered(
+            query,
+            limit,
+            None,
+            AgentLayer::Agent(agent_id),
+            group,
+            qe,
+            None,
+        )
     }
 
     /// Agent-aware retrieval compares vectors only within the same provider/model space.
-    pub fn recall_with_model(&self, agent: Option<&str>, query:&str, limit:usize, group:Option<&str>,
-        embedding:Option<(&str,&[f32])>) -> Result<Vec<RecallHit>> {
-        self.recall_filtered(query,limit,None,agent.map(AgentLayer::Agent).unwrap_or(AgentLayer::SharedOnly),group,
-            embedding.map(|(_,v)|v),embedding.map(|(m,_)|m))
+    pub fn recall_with_model(
+        &self,
+        agent: Option<&str>,
+        query: &str,
+        limit: usize,
+        group: Option<&str>,
+        embedding: Option<(&str, &[f32])>,
+    ) -> Result<Vec<RecallHit>> {
+        self.recall_filtered(
+            query,
+            limit,
+            None,
+            agent
+                .map(AgentLayer::Agent)
+                .unwrap_or(AgentLayer::SharedOnly),
+            group,
+            embedding.map(|(_, v)| v),
+            embedding.map(|(m, _)| m),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -398,5 +421,4 @@ impl MemoryStore {
     }
 
     // ---------------- memory.md 渲染（基础记忆） ----------------
-
 }

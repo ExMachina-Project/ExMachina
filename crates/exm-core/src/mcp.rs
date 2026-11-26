@@ -5,10 +5,10 @@
 //! 服务器配置在 .exmachina/config.json 的 mcpServers 段，apply_config 热重建。
 
 use crate::provider::ToolSpec;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 /// MCP 服务器配置（config.json → mcpServers[]）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,12 +336,13 @@ impl McpConnection {
         // 单调用超时（审计 错误处理 P1-2）：HTTP 端点僵死或 stdio 进程停responding时
         // send/read_line 永久阻塞且（在注册表内）持锁——超时判定失败，调用方得以释放。
         // stdio 侧进程可能仍在后台挂着半截请求：下次调用按 id 匹配天然跳过残留行，不修复也不放大。
-        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + '_>> =
-            match &mut self.transport {
-                Some(Transport::Http(c)) => Box::pin(c.call_raw(id, method, params)),
-                Some(Transport::Stdio(c)) => Box::pin(c.call_raw(id, method, params)),
-                None => anyhow::bail!("MCP 未初始化"),
-            };
+        let fut: std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send + '_>,
+        > = match &mut self.transport {
+            Some(Transport::Http(c)) => Box::pin(c.call_raw(id, method, params)),
+            Some(Transport::Stdio(c)) => Box::pin(c.call_raw(id, method, params)),
+            None => anyhow::bail!("MCP 未初始化"),
+        };
         let timeout_secs = if self.cfg.call_timeout_secs == 0 {
             60
         } else {
@@ -661,9 +662,9 @@ impl McpRegistry {
             if !cfg.enabled {
                 continue;
             }
-            let conn = drained
-                .remove(&cfg.id)
-                .unwrap_or_else(|| std::sync::Arc::new(tokio::sync::Mutex::new(McpConnection::new(cfg.clone()))));
+            let conn = drained.remove(&cfg.id).unwrap_or_else(|| {
+                std::sync::Arc::new(tokio::sync::Mutex::new(McpConnection::new(cfg.clone())))
+            });
             // 连接内容可能正被调用占用：锁内比对配置并按需换新（保持原 Arc 槽位，
             // 等待中的调用者拿锁后自然看到新连接）
             match conn.try_lock() {
@@ -722,6 +723,16 @@ impl McpRegistry {
                 cfg.allowed_agents.is_empty() || cfg.allowed_agents.iter().any(|a| a == agent_id)
             })
             .flat_map(|(_, specs)| specs.clone())
+            .collect()
+    }
+
+    /// 已声明 MCP 工具全名清单（能力快照用：声明存在 ≠ 对当前身份开放，
+    /// 可见性仍由 tool_snapshot_for 判定——两者合用得出 Forbidden 归因）
+    pub fn declared_tool_names(&self) -> Vec<String> {
+        self.snapshot
+            .lock()
+            .values()
+            .flat_map(|(_, specs)| specs.iter().map(|s| s.name.clone()))
             .collect()
     }
 

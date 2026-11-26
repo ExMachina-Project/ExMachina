@@ -979,6 +979,146 @@ mod tool_loop_tests {
         );
     }
 
+    /// 学习候选证据门的真实入口验收（capability-parity 6.4）。
+    ///
+    /// 此前候选核验只读「已落盘消息」，而工具回执要到轮次收束才落盘——模型在同一轮内
+    /// 提交候选时，本轮真实回执全部核验失败，证据门在生产里形同关闭。本测试走真实
+    /// `run_tool_calls`，**不落盘任何消息**，直接用回填给模型的回执 id 提交候选：
+    /// - 成功调用：回填文本回显的回执 id == 模型自己的 call id（模型引用得到）；
+    /// - 同轮暂存的回执可被核验（tool_receipt 通过、test_result 要求命令具备测试语义）；
+    /// - 失败调用：不回显回执 id，且引用它必然核验失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 学习候选_同轮回执可核验_且回执标识对模型可见() {
+        let provider = Arc::new(crate::provider::MockLlmProvider);
+        let (rt, fixture) = runtime_with_files(provider);
+        let base = fixture.project().to_path_buf();
+        // 真实的「检查通过」命令：Makefile 的 check 目标确实执行并通过
+        std::fs::write(base.join("Makefile"), "check:\n\t@echo check-ok\n").unwrap();
+        let session = "trace-receipt";
+        crate::round_trace::begin(session);
+        let allow = vec![
+            crate::types::ToolName::Terminal,
+            crate::types::ToolName::Read,
+        ];
+        let calls = vec![
+            ToolCall {
+                id: "model-call-check".into(),
+                name: "terminal".into(),
+                arguments: serde_json::json!({ "command": "make check" }),
+            },
+            ToolCall {
+                id: "model-call-fail".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "no-such-file.txt" }),
+            },
+        ];
+        let feedbacks = rt
+            .run_tool_calls(
+                "coding-agent",
+                session,
+                &allow,
+                &calls,
+                false,
+                ToolScope::Computer,
+            )
+            .await;
+        let (ok_fb, fail_fb) = (&feedbacks[0].0, &feedbacks[1].0);
+        assert!(
+            ok_fb.contains("〔回执 model-call-check〕"),
+            "成功结果须回显与模型 call id 一致的回执标识，实际：{ok_fb}"
+        );
+        assert!(!ok_fb.contains("t1"), "不应回显内部生成的 id");
+        assert!(
+            !fail_fb.contains("〔回执"),
+            "失败调用不是证据，不得回显回执标识，实际：{fail_fb}"
+        );
+
+        // 落盘记录里的 callId 与模型 call id 对齐（前端工具卡 / 审计 / 模型引用三者一致）
+        // （只读并发与串行写分开执行，落盘顺序 ≠ 调用顺序是既有行为；回执按 id 检索，
+        // 不依赖顺序——故只断言集合，不断言顺序。）
+        let records = crate::round_trace::snapshot_tool_records(session, 10);
+        let mut ids: Vec<String> = records.iter().map(|r| r.call_id.clone()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "model-call-check".to_string(),
+                "model-call-fail".to_string()
+            ],
+            "落盘 callId 须采用模型 call id（含只读并发分支），不得混入内部生成的 id"
+        );
+
+        // 尚无任何消息落盘——证据只能来自本轮暂存
+        let store = crate::store::Store::open(base.join("data")).unwrap();
+        assert!(
+            store.list_messages(session, 0).unwrap().is_empty(),
+            "前置：本轮尚未收束落盘"
+        );
+        let triggers = vec!["检查".to_string()];
+        use crate::learning_candidates::{CandidateDraft, CandidateEvidenceKind};
+        fn draft<'a>(
+            session: &'a str,
+            scope: &'a str,
+            triggers: &'a [String],
+            evidence: &'a [(CandidateEvidenceKind, String)],
+        ) -> CandidateDraft<'a> {
+            CandidateDraft {
+                target: "skill",
+                target_id: Some("make-check"),
+                title: "提交前跑 make check",
+                content: "改动后先执行 make check，通过再报告完成。",
+                scope,
+                triggers,
+                source_session: session,
+                source_goal: "加输出",
+                evidence,
+            }
+        }
+        let book = crate::learning_candidates::CandidateBook::new(&store);
+        // tool_receipt：成功调用 → 通过
+        let ev = vec![(
+            crate::learning_candidates::CandidateEvidenceKind::ToolReceipt,
+            "model-call-check".into(),
+        )];
+        let cand = book
+            .submit(None, &draft(session, "global", &triggers, &ev))
+            .expect("同轮真实回执应核验通过");
+        assert_eq!(cand.evidence[0].verification, "verified");
+        // test_result：命令具备测试语义且成功 → 通过
+        let ev = vec![(
+            crate::learning_candidates::CandidateEvidenceKind::TestResult,
+            "model-call-check".into(),
+        )];
+        let cand2 = book
+            .submit(None, &draft(session, "group", &triggers, &ev))
+            .expect("真实测试回执应核验通过");
+        assert_eq!(cand2.evidence[0].verification, "verified");
+        // 失败调用：无论按哪种证据引用都核验失败
+        for kind in [
+            crate::learning_candidates::CandidateEvidenceKind::ToolReceipt,
+            crate::learning_candidates::CandidateEvidenceKind::TestResult,
+        ] {
+            let ev = vec![(kind, "model-call-fail".into())];
+            let err = book
+                .submit(None, &draft(session, "global", &triggers, &ev))
+                .expect_err("失败调用不得作为证据");
+            assert!(
+                err.iter().any(|r| r.contains("核验")),
+                "失败回执应核验失败：{err:?}"
+            );
+        }
+        // 编造的 id：核验失败
+        let ev = vec![(
+            crate::learning_candidates::CandidateEvidenceKind::ToolReceipt,
+            "model-call-made-up".into(),
+        )];
+        let err = book
+            .submit(None, &draft(session, "global", &triggers, &ev))
+            .expect_err("编造回执不得通过");
+        assert!(err.iter().any(|r| r.contains("核验")), "{err:?}");
+        crate::round_trace::end(session);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 运行中_steering_不取消写工具并在安全检查点生效() {
         let fixture = acceptance_fixture::IsolatedProject::new("steering-write");
@@ -1962,6 +2102,203 @@ mod report_rejected_tests {
                 "attempt 递增"
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// 元认知反思（meta-agent 3.1 补实现）：阈值触发 / 每轮一次上限 / 失败降级 / 事件落库。
+/// 反思 LLM 调用用 mock 确定性分支驱动（系统提示「元认知反思器」→ 策略 JSON）。
+mod meta_reflect_tests {
+    use super::*;
+    use crate::config::ExperimentsConfig;
+    use crate::store::Store;
+
+    /// 反思状态（每实例独立——并行测试不互相污染）：
+    /// strategy 决定反思输出策略；fail 置位后反思调用失败（驱动降级分支）。
+    #[derive(Default)]
+    struct ReflectState {
+        fail: std::sync::atomic::AtomicBool,
+        strategy: std::sync::Mutex<String>,
+    }
+
+    struct ReflectProvider {
+        state: std::sync::Arc<ReflectState>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ReflectProvider {
+        fn name(&self) -> &'static str {
+            "reflect-mock"
+        }
+        async fn chat(&self, req: ChatRequest) -> anyhow::Result<crate::provider::ChatResponse> {
+            if self.state.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("反思通道不可用");
+            }
+            let system = req
+                .messages
+                .iter()
+                .find(|m| m.role == "system")
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let content = if system.contains("元认知反思器") {
+                let strategy = self.state.strategy.lock().unwrap().clone();
+                format!("{{\"strategy\": \"{strategy}\", \"note\": \"测试策略\"}}")
+            } else {
+                "工具循环正常回复".to_string()
+            };
+            Ok(crate::provider::ChatResponse {
+                content,
+                ..Default::default()
+            })
+        }
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+            _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+        ) -> anyhow::Result<crate::provider::ChatResponse> {
+            anyhow::bail!("测试替身不支持流式")
+        }
+        async fn embed(&self, _model: &str, _texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            anyhow::bail!("测试替身不支持嵌入")
+        }
+        async fn transcribe(
+            &self,
+            _model: &str,
+            _audio: &[u8],
+            _filename: &str,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("测试替身不支持转写")
+        }
+        async fn speak(&self, _model: &str, _text: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::bail!("测试替身不支持语音")
+        }
+    }
+
+    fn reflect_runtime(
+        strategy: &str,
+    ) -> (
+        AgentRuntime,
+        std::path::PathBuf,
+        std::sync::Arc<ReflectState>,
+    ) {
+        let base = std::env::temp_dir().join(format!("exm-reflect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let reg_dir = base.join("entities");
+        std::fs::create_dir_all(reg_dir.join("prompts")).unwrap();
+        let meta = crate::types::GroupMeta {
+            id: "exmachina".into(),
+            name: "测试组".into(),
+            description: String::new(),
+            primary: None,
+            workspace: None,
+            model: None,
+            model_routing: None,
+            capabilities: None,
+            self_optimize: None,
+            builtin: true,
+            created_at: crate::types::now_iso(),
+        };
+        std::fs::write(
+            reg_dir.join("group.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        let registry = Arc::new(LocalRegistry::new(&reg_dir).expect("注册表失败"));
+        let store = Arc::new(Store::open(base.join("data")).expect("存储失败"));
+        let (events, _rx) = tokio::sync::broadcast::channel::<crate::types::CoreEvent>(16);
+        let tools = Arc::new(ToolGateway::new(
+            &base,
+            store,
+            registry.clone(),
+            events,
+            crate::config::SecurityConfig::default(),
+        ));
+        let state = std::sync::Arc::new(ReflectState::default());
+        *state.strategy.lock().unwrap() = strategy.to_string();
+        let provider = Arc::new(ReflectProvider {
+            state: state.clone(),
+        });
+        let experiments = ExperimentsConfig {
+            meta_agent: true,
+            ..ExperimentsConfig::default()
+        };
+        let rt = AgentRuntime::new(registry, provider, tools, "test-model")
+            .with_experiments(experiments);
+        (rt, base, state)
+    }
+
+    /// 反思产出策略并注入提示（meta_reflect 直测：连续失败入口）
+    #[tokio::test]
+    async fn 反思_策略注入与事件落库() {
+        let (rt, base, _state) = reflect_runtime("replan");
+        crate::round_trace::begin("s-reflect-1");
+        let hint = rt
+            .meta_reflect("s-reflect-1", &2, &["terminal".into(), "files".into()])
+            .await
+            .expect("replan 应注入提示");
+        assert!(hint.contains("【元认知】"), "提示带标记: {hint}");
+        assert!(hint.contains("重新审视任务分解"), "replan 文案: {hint}");
+        // 事件落库可查（append_event 走 tools.store）
+        let evts = rt.tools.store.list_events("s-reflect-1").unwrap();
+        assert!(
+            evts.iter().any(|e| e["payload"]["type"] == "meta.reflect"),
+            "meta.reflect 事件应落库: {evts:?}"
+        );
+        crate::round_trace::end("s-reflect-1");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// continue 策略 = 不注入提示但仍发事件（审计可见反思发生过）
+    #[tokio::test]
+    async fn 反思_continue不注入但事件可见() {
+        let (rt, base, _state) = reflect_runtime("continue");
+        crate::round_trace::begin("s-reflect-2");
+        let hint = rt
+            .meta_reflect("s-reflect-2", &2, &["terminal".into()])
+            .await;
+        assert!(hint.is_none(), "continue 不注入");
+        let evts = rt.tools.store.list_events("s-reflect-2").unwrap();
+        assert!(
+            evts.iter().any(|e| e["payload"]["type"] == "meta.reflect"
+                && e["payload"]["payload"]["strategy"] == "continue"),
+            "continue 反思事件仍落库: {evts:?}"
+        );
+        crate::round_trace::end("s-reflect-2");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 反思调用失败 → 降级 None（不阻塞主流程）
+    #[tokio::test]
+    async fn 反思_调用失败降级() {
+        let (rt, base, state) = reflect_runtime("replan");
+        state.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::round_trace::begin("s-reflect-3");
+        let hint = rt
+            .meta_reflect("s-reflect-3", &2, &["terminal".into()])
+            .await;
+        assert!(hint.is_none(), "失败降级为 None");
+        crate::round_trace::end("s-reflect-3");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 条件②（低产出）入口：trigger=low_yield 事件可区分
+    #[tokio::test]
+    async fn 反思_低产出触发入口() {
+        let (rt, base, _state) = reflect_runtime("redirect");
+        crate::round_trace::begin("s-reflect-4");
+        let hint = rt
+            .meta_reflect_low_yield("s-reflect-4", &["search".into()], 0.2)
+            .await
+            .expect("redirect 应注入");
+        assert!(hint.contains("更换工具"), "redirect 文案: {hint}");
+        assert!(hint.contains("产出占比 20%"), "占比标注: {hint}");
+        let evts = rt.tools.store.list_events("s-reflect-4").unwrap();
+        assert!(
+            evts.iter()
+                .any(|e| e["payload"]["payload"]["trigger"] == "low_yield"),
+            "低产出 trigger 事件: {evts:?}"
+        );
+        crate::round_trace::end("s-reflect-4");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

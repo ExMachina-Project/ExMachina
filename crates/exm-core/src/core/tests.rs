@@ -31,7 +31,12 @@ mod im_discipline_tests {
             .collect();
         assert!(!group_ids.contains(&a.id), "归档态不进组内主列表");
         assert!(group_ids.contains(&b.id));
-        let all_ids: Vec<String> = core.list_sessions().unwrap().into_iter().map(|s| s.id).collect();
+        let all_ids: Vec<String> = core
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         assert!(!all_ids.contains(&a.id), "归档态不进全量主列表");
         // 归档区：a 可见且带 archived_at 时间戳
         let archived = core.list_archived_sessions().unwrap();
@@ -47,7 +52,10 @@ mod im_discipline_tests {
             .map(|s| s.id)
             .collect();
         assert!(group_ids.contains(&a.id), "恢复后回主列表");
-        assert!(core.list_archived_sessions().unwrap().is_empty(), "归档区清空");
+        assert!(
+            core.list_archived_sessions().unwrap().is_empty(),
+            "归档区清空"
+        );
         // 不存在的会话：报错不 panic
         assert!(core.set_session_archived("no-such", true).is_err());
     }
@@ -80,10 +88,16 @@ mod im_discipline_tests {
             "无名建流保持空"
         );
         core.ensure_flow_named("ch1", "67890", "终夜", false);
-        assert_eq!(core.channel_flow("ch1", "67890").unwrap().display_name, "终夜");
+        assert_eq!(
+            core.channel_flow("ch1", "67890").unwrap().display_name,
+            "终夜"
+        );
         // 空串补名是 no-op（解析失败的适配器不该写入空名）
         core.ensure_flow_named("ch1", "67890", "", false);
-        assert_eq!(core.channel_flow("ch1", "67890").unwrap().display_name, "终夜");
+        assert_eq!(
+            core.channel_flow("ch1", "67890").unwrap().display_name,
+            "终夜"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -585,7 +599,7 @@ mod plan_tests {
             decided_at: None,
             origin_user: None,
             origin_role: None,
-        
+
             meta_json: None,
         };
         core.store.add_approval(&req).unwrap();
@@ -688,14 +702,17 @@ mod root_approval_tests {
             decided_at: None,
             origin_user: None,
             origin_role: None,
-        
+
             meta_json: None,
         };
         core.store.add_approval(&ap).unwrap();
         // 批准 → 剥 sudo 壳以 root 执行 id
         let decided = core.approval_decide(&ap.id, true).await.unwrap();
         assert_eq!(decided.status, "executed");
-        assert!(decided.result.as_deref().unwrap_or("").contains("uid="), "应执行 id 并带输出");
+        assert!(
+            decided.result.as_deref().unwrap_or("").contains("uid="),
+            "应执行 id 并带输出"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -715,7 +732,7 @@ mod root_approval_tests {
             decided_at: None,
             origin_user: None,
             origin_role: None,
-        
+
             meta_json: None,
         };
         core.store.add_approval(&ap).unwrap();
@@ -741,14 +758,17 @@ mod root_approval_tests {
             decided_at: None,
             origin_user: None,
             origin_role: None,
-        
+
             meta_json: None,
         };
         core.store.add_approval(&ap).unwrap();
         let decided = core.approval_decide(&ap.id, true).await.unwrap();
         // su 原样执行:用户不存在 → failed(但结果里应见 [root 执行] su 原文,证明未剥壳)
         let text = decided.result.as_deref().unwrap_or("");
-        assert!(text.contains("[root 执行] su - nonexistentuser"), "su 语义保留: {text}");
+        assert!(
+            text.contains("[root 执行] su - nonexistentuser"),
+            "su 语义保留: {text}"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -764,7 +784,11 @@ mod root_approval_tests {
         cfg.memory_enabled = false;
         let core = Core::with_config(cfg).expect("创建 Core 失败");
         let ws = core.config().workspace_root.clone();
-        std::process::Command::new("git").arg("init").current_dir(&ws).output().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&ws)
+            .output()
+            .unwrap();
         // 直通参照
         let orch = core.orchestrator.read().clone();
         let eff = orch.tools.effective_root();
@@ -781,7 +805,7 @@ mod root_approval_tests {
             decided_at: None,
             origin_user: None,
             origin_role: None,
-        
+
             meta_json: None,
         };
         core.store.add_approval(&ap).unwrap();
@@ -807,7 +831,7 @@ mod root_approval_tests {
             decided_at: None,
             origin_user: None,
             origin_role: None,
-        
+
             meta_json: None,
         };
         core.store.add_approval(&ap).unwrap();
@@ -881,7 +905,10 @@ mod session_grant_tests {
         core.approval_decide_scoped(&ap.id, ApprovalScope::Once { approve: true })
             .await
             .unwrap();
-        assert!(core.session_granted(&sid, "mkdir /tmp/y").is_none(), "once 档不建授权");
+        assert!(
+            core.session_granted(&sid, "mkdir /tmp/y").is_none(),
+            "once 档不建授权"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -896,8 +923,15 @@ mod session_grant_tests {
             .unwrap();
         assert_eq!(decided.status, "executed");
         // 红线：[root] 单不允许升档——结果无 [会话授权] 注记（有 [红线] 降级说明）,也不建授权
-        assert!(!decided.result.as_deref().unwrap_or("").contains("[会话授权]"));
-        assert!(decided.result.as_deref().unwrap_or("").contains("[红线]"), "应注明降级");
+        assert!(!decided
+            .result
+            .as_deref()
+            .unwrap_or("")
+            .contains("[会话授权]"));
+        assert!(
+            decided.result.as_deref().unwrap_or("").contains("[红线]"),
+            "应注明降级"
+        );
         assert!(core.session_granted(&sid, "id").is_none());
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
@@ -912,7 +946,11 @@ mod session_grant_tests {
             .await
             .unwrap();
         // 执行本身按 once 发生(可能失败——force push 无远端;关键是档位被降)
-        assert!(!decided.result.as_deref().unwrap_or("").contains("[会话授权]"));
+        assert!(!decided
+            .result
+            .as_deref()
+            .unwrap_or("")
+            .contains("[会话授权]"));
         assert!(core.session_granted(&sid, "git push").is_none());
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
@@ -928,12 +966,14 @@ mod session_grant_tests {
             .unwrap();
         assert!(decided.result.as_deref().unwrap_or("").contains("白名单"));
         // 前缀口径 = 命令名 + 首 token（echo allowlist-test）,与 command_head 一致
-        assert!(core
-            .config()
-            .security
-            .exec_allowlist
-            .iter()
-            .any(|p| p == "echo allowlist-test"), "前缀应写入 execAllowlist");
+        assert!(
+            core.config()
+                .security
+                .exec_allowlist
+                .iter()
+                .any(|p| p == "echo allowlist-test"),
+            "前缀应写入 execAllowlist"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -942,9 +982,13 @@ mod session_grant_tests {
         let core = grant_core();
         let sid = core.create_session("删除").unwrap().id;
         core.grant_session(&sid, "cargo build");
-        assert!(core.session_granted(&sid, "cargo build --release").is_some());
+        assert!(core
+            .session_granted(&sid, "cargo build --release")
+            .is_some());
         core.delete_session(&sid).unwrap();
-        assert!(core.session_granted(&sid, "cargo build --release").is_none());
+        assert!(core
+            .session_granted(&sid, "cargo build --release")
+            .is_none());
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -1115,7 +1159,8 @@ mod meta_approval_tests {
     #[tokio::test]
     async fn meta提议_内置组保护() {
         let core = meta_core();
-        core.orchestrator.read()
+        core.orchestrator
+            .read()
             .registry
             .set_active_group("exmachina")
             .unwrap();
@@ -1131,11 +1176,7 @@ mod meta_approval_tests {
         core.store.add_approval(&ap).unwrap();
         let decided = core.approval_decide(&ap.id, true).await.unwrap();
         assert_eq!(decided.status, "failed");
-        assert!(decided
-            .result
-            .as_deref()
-            .unwrap_or("")
-            .contains("内置组"));
+        assert!(decided.result.as_deref().unwrap_or("").contains("内置组"));
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -1159,11 +1200,10 @@ mod meta_approval_tests {
         core.store.add_approval(&ap).unwrap();
         let decided = core.approval_decide(&ap.id, true).await.unwrap();
         assert_eq!(decided.status, "executed");
-        assert!(core
-            .orchestrator()
-            .registry
-            .get("builder")
-            .is_some(), "新个体应注册进激活组");
+        assert!(
+            core.orchestrator().registry.get("builder").is_some(),
+            "新个体应注册进激活组"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 
@@ -1188,10 +1228,12 @@ mod meta_approval_tests {
         assert_eq!(decided.status, "executed");
         let reg = &core.orchestrator().registry;
         assert!(reg.get("scout").is_some(), "scout 应被加入");
-        assert!(reg
-            .get("worker")
-            .map(|d| d.description.contains("数据整理"))
-            .unwrap_or(false), "worker 描述应被更新");
+        assert!(
+            reg.get("worker")
+                .map(|d| d.description.contains("数据整理"))
+                .unwrap_or(false),
+            "worker 描述应被更新"
+        );
         let _ = std::fs::remove_dir_all(&core.config().workspace_root);
     }
 }
@@ -1247,7 +1289,11 @@ mod session_origin_tests {
         assert_eq!(labeled.origin_label.as_deref(), Some("技术群·20251101"));
 
         let orphan = &by_title["channel:c-qq:g9"];
-        assert_eq!(orphan.origin_label.as_deref(), Some("g9"), "无流记录回落 chat_key");
+        assert_eq!(
+            orphan.origin_label.as_deref(),
+            Some("g9"),
+            "无流记录回落 chat_key"
+        );
 
         let console = &by_title["控制台随手记"];
         assert_eq!(console.origin.as_deref(), Some("console"));
@@ -1289,7 +1335,7 @@ mod flow_archive_tests {
     fn age(c: &Core, id: &str, days: i64) {
         let iso = (Utc.with_ymd_and_hms(2026, 11, 4, 4, 0, 0).unwrap()
             - chrono::Duration::days(days))
-            .to_rfc3339();
+        .to_rfc3339();
         c.store.set_session_active_at(id, &iso).unwrap();
     }
 
@@ -1313,8 +1359,20 @@ mod flow_archive_tests {
         assert_eq!(archived_list.len(), 1);
         assert_eq!(archived_list[0].id, s_old.id);
         // 新鲜流会话与控制台会话不受影响
-        assert!(c.store.get_session(&s_fresh.id).unwrap().unwrap().archived_at.is_none());
-        assert!(c.store.get_session(&s_console.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c
+            .store
+            .get_session(&s_fresh.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert!(c
+            .store
+            .get_session(&s_console.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
         let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 
@@ -1325,7 +1383,13 @@ mod flow_archive_tests {
         age(&c, &s.id, 365);
         let (archived, _) = c.archive_idle_flow_sessions(0, at(0)).unwrap();
         assert_eq!(archived, 0, "0 = 关闭零行为");
-        assert!(c.store.get_session(&s.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c
+            .store
+            .get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
         let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 
@@ -1345,11 +1409,35 @@ mod flow_archive_tests {
             })
             .unwrap();
         assert_eq!((archived, skipped), (1, 1), "流内旧会话归档、绑定豁免");
-        assert!(c.store.get_session(&f1_old.id).unwrap().unwrap().archived_at.is_some());
-        assert!(c.store.get_session(&f1_active.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c
+            .store
+            .get_session(&f1_old.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_some());
+        assert!(c
+            .store
+            .get_session(&f1_active.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
         // 范围外不受影响
-        assert!(c.store.get_session(&f2.id).unwrap().unwrap().archived_at.is_none());
-        assert!(c.store.get_session(&other.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c
+            .store
+            .get_session(&f2.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert!(c
+            .store
+            .get_session(&other.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
         let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 
@@ -1368,10 +1456,34 @@ mod flow_archive_tests {
             })
             .unwrap();
         assert_eq!((archived, skipped), (2, 1));
-        assert!(c.store.get_session(&a1.id).unwrap().unwrap().archived_at.is_some());
-        assert!(c.store.get_session(&a2.id).unwrap().unwrap().archived_at.is_some());
-        assert!(c.store.get_session(&bound.id).unwrap().unwrap().archived_at.is_none());
-        assert!(c.store.get_session(&b.id).unwrap().unwrap().archived_at.is_none());
+        assert!(c
+            .store
+            .get_session(&a1.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_some());
+        assert!(c
+            .store
+            .get_session(&a2.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_some());
+        assert!(c
+            .store
+            .get_session(&bound.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert!(c
+            .store
+            .get_session(&b.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
         let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 }
@@ -1390,7 +1502,10 @@ mod once_flag_tests {
         assert!(c.consume_once_flag(key), "首次返回 true");
         assert!(!c.consume_once_flag(key), "后续返回 false");
         assert!(!c.consume_once_flag(key));
-        assert!(c.consume_once_flag("budget-notified:s2"), "不同 key 互不影响");
+        assert!(
+            c.consume_once_flag("budget-notified:s2"),
+            "不同 key 互不影响"
+        );
         let _ = std::fs::remove_dir_all(&c.config().workspace_root);
     }
 }

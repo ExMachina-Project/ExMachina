@@ -204,7 +204,10 @@ impl ToolGateway {
 
     /// git 只读动作 → argv 数组（与 tool_git 内的命令文本构造一一对应；
     /// 数组化不经 shell，天然无注入面）。动态参数校验后混入。
-    pub(crate) fn git_readonly_argv(action: &str, args: &serde_json::Value) -> Result<Vec<String>, String> {
+    pub(crate) fn git_readonly_argv(
+        action: &str,
+        args: &serde_json::Value,
+    ) -> Result<Vec<String>, String> {
         let s = |k: &str| {
             args.get(k)
                 .and_then(|v| v.as_str())

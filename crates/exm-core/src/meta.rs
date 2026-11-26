@@ -73,13 +73,15 @@ pub fn system_observation(store: &Store, registry: &LocalRegistry) -> SystemObse
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let obs = agents.entry(agent_id.to_string()).or_insert_with(|| AgentObservation {
-            identifier: agent_id.to_string(),
-            tool_stats: BTreeMap::new(),
-            recent_failures: Vec::new(),
-            adaptation_revision: None,
-            adaptation_updated_at: None,
-        });
+        let obs = agents
+            .entry(agent_id.to_string())
+            .or_insert_with(|| AgentObservation {
+                identifier: agent_id.to_string(),
+                tool_stats: BTreeMap::new(),
+                recent_failures: Vec::new(),
+                adaptation_revision: None,
+                adaptation_updated_at: None,
+            });
         let st = obs.tool_stats.entry(tool.to_string()).or_insert(ToolStats {
             calls: 0,
             failures: 0,
@@ -157,20 +159,45 @@ mod tests {
         let store = Store::open(&dir).unwrap();
         // agent a1:web_search 3 调 1 失;terminal 1 调全成
         store
-            .audit_tool_ex("a1", "web_search", &serde_json::json!({}), "ok r1", 100, true)
+            .audit_tool_ex(
+                "a1",
+                "web_search",
+                &serde_json::json!({}),
+                "ok r1",
+                100,
+                true,
+            )
             .unwrap();
         store
-            .audit_tool_ex("a1", "web_search", &serde_json::json!({}), "timeout", 300, false)
+            .audit_tool_ex(
+                "a1",
+                "web_search",
+                &serde_json::json!({}),
+                "timeout",
+                300,
+                false,
+            )
             .unwrap();
         store
-            .audit_tool_ex("a1", "web_search", &serde_json::json!({}), "ok r3", 200, true)
+            .audit_tool_ex(
+                "a1",
+                "web_search",
+                &serde_json::json!({}),
+                "ok r3",
+                200,
+                true,
+            )
             .unwrap();
         store
             .audit_tool_ex("a1", "terminal", &serde_json::json!({}), "done", 50, true)
             .unwrap();
         let registry = crate::registry::LocalRegistry::new(&dir).unwrap();
         let obs = system_observation(&store, &registry);
-        let a1 = obs.agents.iter().find(|a| a.identifier == "a1").expect("a1");
+        let a1 = obs
+            .agents
+            .iter()
+            .find(|a| a.identifier == "a1")
+            .expect("a1");
         let ws = a1.tool_stats.get("web_search").expect("web_search");
         assert_eq!(ws.calls, 3);
         assert_eq!(ws.failures, 1);
@@ -191,7 +218,11 @@ mod tests {
             .unwrap();
         let registry = crate::registry::LocalRegistry::new(&dir).unwrap();
         let obs = system_observation(&store, &registry);
-        let a2 = obs.agents.iter().find(|a| a.identifier == "a2").expect("a2");
+        let a2 = obs
+            .agents
+            .iter()
+            .find(|a| a.identifier == "a2")
+            .expect("a2");
         let g = a2.tool_stats.get("grep").expect("grep");
         assert_eq!(g.failures, 0, "旧条目缺 ok 位应视为成功");
         let _ = std::fs::remove_dir_all(&dir);
@@ -239,7 +270,11 @@ pub fn parse_meta_eval(output: &str) -> Option<(String, String)> {
     if focus.is_empty() {
         return None;
     }
-    let why = v.get("why").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let why = v
+        .get("why")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     Some((focus, why))
 }
 
@@ -259,12 +294,18 @@ mod eval_tests {
 
     #[test]
     fn 解析_meta_eval() {
-        let (f, w) = parse_meta_eval(r#"{"act": true, "focus": "researcher", "why": "web_search 失败率 42%"}"#).unwrap();
+        let (f, w) = parse_meta_eval(
+            r#"{"act": true, "focus": "researcher", "why": "web_search 失败率 42%"}"#,
+        )
+        .unwrap();
         assert_eq!(f, "researcher");
         assert!(w.contains("42%"));
         // act=false / 围栏 / 空 focus
         assert!(parse_meta_eval(r#"{"act": false}""#).is_none());
-        assert!(parse_meta_eval("```json\n{\"act\": true, \"focus\": \"x\", \"why\": \"\"}\n```").is_some());
+        assert!(
+            parse_meta_eval("```json\n{\"act\": true, \"focus\": \"x\", \"why\": \"\"}\n```")
+                .is_some()
+        );
         assert!(parse_meta_eval(r#"{"act": true, "focus": "", "why": ""}"#).is_none());
         assert!(parse_meta_eval("非 JSON 输出").is_none());
     }

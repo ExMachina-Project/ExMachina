@@ -179,6 +179,23 @@ pub struct AutomationConfig {
     /// 空 = UTC（既有行为）；at 一次性任务本就带偏移不受影响。
     #[serde(default)]
     pub timezone: String,
+    /// goal 自动继续轮间隔（分钟，capability-parity 4.2）：用户明确 resume/start
+    /// 后每该间隔检查 Active goal 是否需要推进一轮。0 = 关闭（默认）。
+    #[serde(default)]
+    pub goal_continue_interval_minutes: u32,
+    /// goal 自动继续单次推进的工具步数预算（0 = 用 unit_max_steps）
+    #[serde(default)]
+    pub goal_continue_max_steps: usize,
+    /// goal 自动继续累计轮数上限（防无限自我续跑；达到即 block 并提示）
+    #[serde(default = "default_goal_continue_max_rounds")]
+    pub goal_continue_max_rounds: usize,
+    /// goal 自动继续单轮时间预算（秒；0 = 不限时，仅受轮数/步数约束）
+    #[serde(default)]
+    pub goal_continue_round_timeout_secs: u64,
+}
+
+fn default_goal_continue_max_rounds() -> usize {
+    10
 }
 
 impl Default for AutomationConfig {
@@ -198,6 +215,10 @@ impl Default for AutomationConfig {
             flow_idle_days: 0,
             memory_digest_min_turns: default_memory_digest_min_turns(),
             timezone: String::new(),
+            goal_continue_interval_minutes: 0,
+            goal_continue_max_steps: 0,
+            goal_continue_max_rounds: default_goal_continue_max_rounds(),
+            goal_continue_round_timeout_secs: 0,
         }
     }
 }
@@ -243,4 +264,3 @@ pub struct TriggersConfig {
     pub file_watch: FileWatchConfig,
     pub event_webhook: EventWebhookConfig,
 }
-

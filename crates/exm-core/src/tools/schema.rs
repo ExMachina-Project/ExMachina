@@ -202,6 +202,25 @@ impl ToolGateway {
             },
             "required": ["topic"]
         }));
+        push(ToolName::Programmatic, "有界程序化工具组合：一次受限执行里按序完成「循环读取/检索/筛选/计算」等多步工作，中间结果不占模型上下文，只返回逐步状态与最终摘要。steps 为 JSON 步骤清单，每步 {tool, args}；args 字符串里的 $1/$2… 会替换为前步输出（截断）。只能使用当前已授权的内置工具（读写文件/grep/终端等）；不能嵌套 programmatic、spawn、computer、MCP 或插件工具。任一步失败即停止（已完成步骤保留在结果里）；步骤数上限 16、总输出上限 64KiB", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "description": "步骤清单（按序执行）；每项 {tool: 内置工具 key, args: 对象}",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": { "type": "string", "description": "内置工具 key（如 read/grep/glob/filesystem/terminal）" },
+                            "args": { "type": "object", "description": "该工具的参数；字符串值里的 $1/$2… 引用前步输出" }
+                        },
+                        "required": ["tool"]
+                    },
+                    "maxItems": 16
+                }
+            },
+            "required": ["steps"]
+        }));
         push(ToolName::KnowledgeWrite, "写入共享知识库：沉淀对全体智能体通用的客观知识（部署约束、平台特性、方法论、踩坑经验）。内容哈希去重——重复写入会提升既有条目热度而非新建。沉淀纪律：只存跨会话可复用的通用结论，不存会话私有细节、用户个人信息或一次性流水；与记忆的分工——记忆存本组经历，知识存实例级通用事实。正文超 8000 字符会被拒绝，超长内容请拆分为多条聚焦知识", serde_json::json!({
             "type": "object",
             "properties": {
@@ -331,17 +350,25 @@ impl ToolGateway {
             },
             "required": ["op"]
         }));
-        push(ToolName::SkillManage, "技能包自管理：把可复用的流程沉淀为技能（SKILL.md 标准格式），或列示/更新/删除既有技能。技能在后续派发中按触发词自动注入相关个体。完成任务后若形成了可复用方法，应主动沉淀（id 稳定、触发词具体、指令可执行）；发现技能与实测不符时用 update 修正", serde_json::json!({
+        push(ToolName::SkillManage, "技能包候选与查询：把可复用的流程**提议**为技能候选（SKILL.md 标准格式），或列示/导出既有技能。create/update/import 不直接写入技能目录——你提交的是学习候选，必须绑定本会话的真实证据（工具回执 id / 测试回执 id / 工作区内文件），经用户确认后才生效；没有证据的「经验」会被拒绝，这是有意设计。完成任务后若形成了可复用方法且确有成功证据，提议为候选（id 稳定、触发词具体、指令可执行）；发现技能与实测不符时用 update 提议修正。删除技能须由用户操作（exm skill remove / DELETE /api/skills/:id）", serde_json::json!({
             "type": "object",
             "properties": {
-                "op": { "type": "string", "enum": ["list", "create", "update", "delete", "export", "import"], "description": "动作（缺省 list）" },
+                "op": { "type": "string", "enum": ["list", "create", "update", "export", "import"], "description": "动作（缺省 list）" },
                 "id": { "type": "string", "description": "技能 id（仅字母/数字/-/_）" },
                 "name": { "type": "string", "description": "技能名" },
                 "description": { "type": "string", "description": "一句话说明" },
                 "triggers": { "type": "array", "items": { "type": "string" }, "description": "触发词：任务目标/节点标题包含任一词即注入" },
                 "instructions": { "type": "string", "description": "作业指令正文（create/update 必填）：步骤、约束、验收口径" },
                 "agents": { "type": "array", "items": { "type": "string" }, "description": "适用个体 identifier；空 = 全体" },
-                "content": { "type": "string", "description": "import：SKILL.md 原文（含 frontmatter）" }
+                "content": { "type": "string", "description": "import：SKILL.md 原文（含 frontmatter）" },
+                "evidence": { "type": "array", "description": "支撑本候选的真实证据（create/update/import 必填，至少一条且全部核验通过）：kind=tool_receipt|test_result 的 reference 填工具结果末尾〔回执 …〕里的标识；artifact_file 填工作区内相对路径；session_evidence 填证据条目 id", "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["tool_receipt", "test_result", "artifact_file", "session_evidence"] },
+                        "reference": { "type": "string", "description": "回执标识 / 工作区相对路径 / 证据条目 id" }
+                    },
+                    "required": ["kind", "reference"]
+                } }
             },
             "required": ["op"]
         }));

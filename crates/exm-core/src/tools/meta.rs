@@ -45,7 +45,12 @@ impl ToolGateway {
 
     /// 改进提议 → [meta] 审批单。
     /// kind=prompt（提示词补段）/ adaptation（经验要点）/ roster（成员增删调，≤5 op）
-    fn meta_propose(&self, agent_id: &str, session_id: &str, args: &serde_json::Value) -> ToolResult {
+    fn meta_propose(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let proposal = match validate_proposal(self, args) {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
@@ -53,10 +58,7 @@ impl ToolGateway {
         // 未决单去重：同 target+kind 已 pending 则拒
         if let Ok(pending) = self.store.list_approvals(Some("pending"), 200) {
             let sig = format!("[meta] {} {}", proposal.kind, proposal.target);
-            if pending
-                .iter()
-                .any(|p| p.command.starts_with(&sig))
-            {
+            if pending.iter().any(|p| p.command.starts_with(&sig)) {
                 return ToolResult::err(format!(
                     "已有未决提议（{sig}…）: 等待该审批处理后再提交同类提议"
                 ));
@@ -107,11 +109,19 @@ impl ToolGateway {
         if description.len() < 8 {
             return ToolResult::err("description 过短（≥8 字符,说清新个体的职责）");
         }
-        let definition = args.get("definition").cloned().unwrap_or(serde_json::Value::Null);
+        let definition = args
+            .get("definition")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         if !definition.is_object() {
-            return ToolResult::err("definition 必须是对象（agent 定义草稿:name/domain/tier/description/tools/prompt）");
+            return ToolResult::err(
+                "definition 必须是对象（agent 定义草稿:name/domain/tier/description/tools/prompt）",
+            );
         }
-        let name = definition.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let name = definition
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if name.trim().is_empty() {
             return ToolResult::err("definition.name 不能为空");
         }
@@ -221,7 +231,10 @@ fn validate_proposal(gw: &ToolGateway, args: &serde_json::Value) -> Result<MetaP
     if rationale.trim().len() < 8 {
         return Err("rationale 过短（≥8 字符,说明依据的数据与预期收益）".into());
     }
-    let change = args.get("change").cloned().unwrap_or(serde_json::Value::Null);
+    let change = args
+        .get("change")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     match kind {
         "prompt" => {
             let patch = change
@@ -297,23 +310,59 @@ mod meta_tool_tests {
     #[test]
     fn 提议校验_拒绝坏载荷() {
         let gw = tool_gw();
-        let mk = |kind: &str, change: serde_json::Value, rationale: &str| {
-            serde_json::json!({ "kind": kind, "target": "worker", "change": change, "rationale": rationale })
-        };
+        let mk = |kind: &str, change: serde_json::Value, rationale: &str| serde_json::json!({ "kind": kind, "target": "worker", "change": change, "rationale": rationale });
         // kind 非法
-        assert!(validate_proposal(&gw, &mk("evil", serde_json::json!({}), "理由足够长的提议")).is_err());
+        assert!(
+            validate_proposal(&gw, &mk("evil", serde_json::json!({}), "理由足够长的提议")).is_err()
+        );
         // rationale 过短
-        assert!(validate_proposal(&gw, &mk("prompt", serde_json::json!({ "promptPatch": "一段足够长的提示词补段内容" }), "短")).is_err());
+        assert!(validate_proposal(
+            &gw,
+            &mk(
+                "prompt",
+                serde_json::json!({ "promptPatch": "一段足够长的提示词补段内容" }),
+                "短"
+            )
+        )
+        .is_err());
         // promptPatch 过短
-        assert!(validate_proposal(&gw, &mk("prompt", serde_json::json!({ "promptPatch": "短" }), "依据数据做出的充分理由")).is_err());
+        assert!(validate_proposal(
+            &gw,
+            &mk(
+                "prompt",
+                serde_json::json!({ "promptPatch": "短" }),
+                "依据数据做出的充分理由"
+            )
+        )
+        .is_err());
         // ops 非数组 / 超量
-        assert!(validate_proposal(&gw, &mk("roster", serde_json::json!({ "ops": "x" }), "依据数据做出的充分理由")).is_err());
+        assert!(validate_proposal(
+            &gw,
+            &mk(
+                "roster",
+                serde_json::json!({ "ops": "x" }),
+                "依据数据做出的充分理由"
+            )
+        )
+        .is_err());
         let six: Vec<serde_json::Value> = (0..6)
             .map(|i| serde_json::json!({ "op": "add", "identifier": format!("a{i}"), "name": format!("a{i}") }))
             .collect();
-        assert!(validate_proposal(&gw, &mk("roster", serde_json::json!({ "ops": six }), "依据数据做出的充分理由")).is_err());
+        assert!(validate_proposal(
+            &gw,
+            &mk(
+                "roster",
+                serde_json::json!({ "ops": six }),
+                "依据数据做出的充分理由"
+            )
+        )
+        .is_err());
         // 合法载荷通过
-        let ok = mk("prompt", serde_json::json!({ "promptPatch": "编码任务先读相邻文件再动手" }), "edit 失败集中于未读上下文");
+        let ok = mk(
+            "prompt",
+            serde_json::json!({ "promptPatch": "编码任务先读相邻文件再动手" }),
+            "edit 失败集中于未读上下文",
+        );
         assert!(validate_proposal(&gw, &ok).is_ok());
     }
 
@@ -348,7 +397,10 @@ mod meta_tool_tests {
         assert!(
             pending.iter().any(|p| p.command.starts_with("[meta]")),
             "审批库应有 [meta] 未决单: {:?}",
-            pending.iter().map(|p| p.command.clone()).collect::<Vec<_>>()
+            pending
+                .iter()
+                .map(|p| p.command.clone())
+                .collect::<Vec<_>>()
         );
         // 同 target+kind 再提 → 去重拒绝
         let r2 = gw
@@ -382,12 +434,12 @@ mod meta_tool_tests {
             .await;
         assert!(r.ok, "提议应落单: {:?}", r.error);
         let events = gw.store.list_events("s-ev").unwrap_or_default();
-        let hit = events
-            .iter()
-            .any(|env| env["payload"]["type"] == "meta.proposal"
+        let hit = events.iter().any(|env| {
+            env["payload"]["type"] == "meta.proposal"
                 && env["payload"]["payload"]["phase"] == "created"
                 && env["payload"]["payload"]["kind"] == "prompt"
-                && env["payload"]["payload"]["target"] == "worker");
+                && env["payload"]["payload"]["target"] == "worker"
+        });
         assert!(hit, "meta.proposal(created) 事件应落库: {events:?}");
     }
 }

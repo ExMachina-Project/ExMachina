@@ -179,7 +179,11 @@ impl Core {
         let Some((task, why)) = crate::autonomy::parse_auto_eval(&output) else {
             // 无任务：空转计数 +1（退避拉长），发审计事件（广播 + 落库，事件页可查）
             self.auto_state.write().idle_streak += 1;
-            orch.emit("", "auto.eval", serde_json::json!({ "ok": true, "act": false }));
+            orch.emit(
+                "",
+                "auto.eval",
+                serde_json::json!({ "ok": true, "act": false }),
+            );
             return None;
         };
         // Eval 通过：空传统计复位，开自主行动会话执行

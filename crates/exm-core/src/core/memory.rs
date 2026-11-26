@@ -60,13 +60,26 @@ impl Core {
         limit: Option<usize>,
         agent: Option<&str>,
     ) -> anyhow::Result<Vec<RecallHit>> {
-        let caller=crate::model_routing::ModelCaller {agent_id:agent.map(str::to_string).unwrap_or_else(||self.orchestrator().orch_id()),session_id:String::new()};
+        let caller = crate::model_routing::ModelCaller {
+            agent_id: agent
+                .map(str::to_string)
+                .unwrap_or_else(|| self.orchestrator().orch_id()),
+            session_id: String::new(),
+        };
         let router = self.orchestrator();
-        let qe=crate::model_routing::MODEL_CALLER.scope(caller,router.memory_query_model_embedding(query)).await;
+        let qe = crate::model_routing::MODEL_CALLER
+            .scope(caller, router.memory_query_model_embedding(query))
+            .await;
         let gid = self.registry.active_group();
         let cfg = self.config();
         let limit = limit.unwrap_or(cfg.memory_recall_limit);
-        self.memory.recall_with_model(agent,query,limit,Some(&gid),qe.as_ref().map(|(m,v)|(m.as_str(),v.as_slice())))
+        self.memory.recall_with_model(
+            agent,
+            query,
+            limit,
+            Some(&gid),
+            qe.as_ref().map(|(m, v)| (m.as_str(), v.as_slice())),
+        )
     }
     /// 个体检索：该智能体私有 + 群体共享（范围 = 激活组 + 全局条目）
     pub fn memory_recall_for_agent(
@@ -127,12 +140,86 @@ impl Core {
         self.render_memory_md()?;
         Ok(())
     }
+
+    /// 记忆版本历史（capability-parity 6.5）。条目已被遗忘时历史仍在——
+    /// 遗忘是可审计、可撤销的状态，不是抹除。
+    pub fn memory_history(&self, id: &str) -> anyhow::Result<Vec<crate::memory::MemoryHistoryRow>> {
+        self.memory.history(id)
+    }
+
+    /// 按 id 读取条目（None = 不存在或已遗忘）。
+    pub fn memory_get_entry(&self, id: &str) -> anyhow::Result<Option<crate::memory::MemoryEntry>> {
+        self.memory.get_entry_public(id)
+    }
+
+    /// 条目是否「已遗忘且可撤销」。
+    pub fn memory_is_forgotten(&self, id: &str) -> anyhow::Result<bool> {
+        self.memory.is_forgotten(id)
+    }
+
+    /// 已遗忘（可撤销）的条目清单，最近遗忘的在前——治理面「撤销遗忘」入口的数据源。
+    pub fn memory_list_forgotten(&self) -> anyhow::Result<Vec<crate::memory::MemoryEntry>> {
+        self.memory.list_forgotten()
+    }
+
+    /// 撤销遗忘：以被遗忘时的内容重建条目（版本号接着走，不倒退）。
+    /// 事件归治理流——与 CLI/面板/通道的记忆写操作同一版本事实源。
+    pub fn memory_restore(&self, id: &str, by: &str) -> anyhow::Result<crate::memory::MemoryEntry> {
+        let e = self.memory.restore(id)?;
+        self.render_memory_md()?;
+        self.emit_session_event(
+            Self::GOVERNANCE_EVENTS,
+            "memory.restored",
+            serde_json::json!({
+                "id": e.id, "version": e.version_label(), "title": e.title, "by": by,
+            }),
+        );
+        Ok(e)
+    }
+
+    /// 回滚到历史版本：该版本的内容经同一校验后成为新版本行（单调递增）。
+    pub fn memory_rollback(
+        &self,
+        id: &str,
+        to_version: u64,
+        by: &str,
+    ) -> anyhow::Result<crate::memory::MemoryEntry> {
+        let rolled = self.memory.rollback(id, to_version)?;
+        self.render_memory_md()?;
+        self.emit_session_event(
+            Self::GOVERNANCE_EVENTS,
+            "memory.rolled_back",
+            serde_json::json!({
+                "id": rolled.id, "toVersion": to_version,
+                "newVersion": rolled.version_label(), "by": by,
+            }),
+        );
+        Ok(rolled)
+    }
+
+    /// 遗忘一条记忆：条目立即从召回/列表/注入消失；历史与归属留在墓碑里，
+    /// [`Self::memory_restore`] 可撤销。事件带被遗忘时的版本号。
     pub fn memory_forget(&self, id: &str) -> anyhow::Result<()> {
+        let version = self
+            .memory
+            .get_entry_public(id)
+            .ok()
+            .flatten()
+            .map(|e| e.version_label());
         self.memory.forget(id)?;
         self.render_memory_md()?;
+        if let Some(v) = version {
+            self.emit_session_event(
+                Self::GOVERNANCE_EVENTS,
+                "memory.forgotten",
+                serde_json::json!({ "id": id, "version": v }),
+            );
+        }
         Ok(())
     }
-    /// 条目编辑（assistant-parity T3）：改后同步刷 memory.md（面板与文件记忆同源）
+    /// 条目编辑（assistant-parity T3）：改后同步刷 memory.md（面板与文件记忆同源）。
+    /// capability-parity 6.5 起是版本化写入：校验通过才升版并记一行历史，校验失败
+    /// 旧版本不变；回执带新版本号，事件归治理流。
     pub fn memory_update(
         &self,
         id: &str,
@@ -142,8 +229,13 @@ impl Core {
         kind: Option<&str>,
     ) -> anyhow::Result<Option<crate::memory::MemoryEntry>> {
         let entry = self.memory.update(id, title, body, tags, kind)?;
-        if entry.is_some() {
+        if let Some(e) = &entry {
             self.render_memory_md()?;
+            self.emit_session_event(
+                Self::GOVERNANCE_EVENTS,
+                "memory.updated",
+                serde_json::json!({ "id": e.id, "version": e.version_label(), "title": e.title }),
+            );
         }
         Ok(entry)
     }
@@ -201,9 +293,21 @@ impl Core {
         orch.transcribe_audio(audio, filename).await
     }
 
-    pub async fn transcribe_for_target(&self,target:Option<&str>,audio:&[u8],filename:&str)->anyhow::Result<String> {
-        let (provider,model)=self.orchestrator().target_model(target,crate::model_routing::ModelPurpose::Transcribe,filename).await?;
-        provider.transcribe(&model,audio,filename).await
+    pub async fn transcribe_for_target(
+        &self,
+        target: Option<&str>,
+        audio: &[u8],
+        filename: &str,
+    ) -> anyhow::Result<String> {
+        let (provider, model) = self
+            .orchestrator()
+            .target_model(
+                target,
+                crate::model_routing::ModelPurpose::Transcribe,
+                filename,
+            )
+            .await?;
+        provider.transcribe(&model, audio, filename).await
     }
     /// 语音合成（全局生效档案，tts 系模型；文本 → mp3 字节）
     pub async fn speak(&self, text: &str) -> anyhow::Result<Vec<u8>> {
@@ -263,8 +367,15 @@ impl Core {
             .join("\n");
 
         let orch = self.orchestrator();
-        let session=self.store.get_session(session_id).ok().flatten()?;
-        let (provider,model)=orch.target_model(Some(&session.group_id),crate::model_routing::ModelPurpose::Summary,"总结会话中的长期事实与经验").await.ok()?;
+        let session = self.store.get_session(session_id).ok().flatten()?;
+        let (provider, model) = orch
+            .target_model(
+                Some(&session.group_id),
+                crate::model_routing::ModelPurpose::Summary,
+                "总结会话中的长期事实与经验",
+            )
+            .await
+            .ok()?;
         let req = crate::provider::ChatRequest::new(
             model,
             vec![
@@ -317,5 +428,4 @@ impl Core {
             }
         }
     }
-
 }

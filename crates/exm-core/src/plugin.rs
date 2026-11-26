@@ -271,7 +271,10 @@ impl PluginManager {
         {
             let mut entries = self.entries.write();
             let mut providers = self.providers.write();
-            for (id, entry) in entries.iter_mut().filter(|(_, entry)| entry.form != "virtual") {
+            for (id, entry) in entries
+                .iter_mut()
+                .filter(|(_, entry)| entry.form != "virtual")
+            {
                 if enabled_overrides.get(id) == Some(&false) {
                     entry.enabled = false;
                     providers.remove(id);
@@ -660,10 +663,16 @@ fn validate(m: &PluginManifest, dir_id: &str, host: &str) -> Result<(), String> 
         let valid = crate::command::valid_namespace_part(name)
             && !m.id.contains("__")
             && (m.is_process() || m.tools.iter().any(|tool| &tool.name == name));
-        if !valid || declaration.version == 0 || declaration.requires.iter().any(|name| {
-            name.trim().is_empty() || name.starts_with("command.handler.")
-        }) {
-            return Err(format!("插件命令声明非法：{name} 必须引用本插件工具、使用正整数版本及合法依赖"));
+        if !valid
+            || declaration.version == 0
+            || declaration
+                .requires
+                .iter()
+                .any(|name| name.trim().is_empty() || name.starts_with("command.handler."))
+        {
+            return Err(format!(
+                "插件命令声明非法：{name} 必须引用本插件工具、使用正整数版本及合法依赖"
+            ));
         }
     }
     Ok(())

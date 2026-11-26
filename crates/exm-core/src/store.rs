@@ -42,6 +42,21 @@ pub struct Store {
 const MAX_AUDIT_LINES: usize = 2000;
 pub(crate) const MAX_TERMINAL_LOG_BYTES: usize = 4 * 1024 * 1024;
 
+fn redact_chat_message(mut message: ChatMessage) -> ChatMessage {
+    if message.role == MessageRole::User {
+        return message;
+    }
+    for statement in &mut message.statements {
+        statement.text = crate::tools::redact_str(&statement.text);
+    }
+    message.thinking = message.thinking.map(|text| crate::tools::redact_str(&text));
+    for call in &mut message.tool_calls {
+        call.args = crate::tools::redact_json(&call.args);
+        call.summary = crate::tools::redact_str(&call.summary);
+    }
+    message
+}
+
 /// Persisted metadata for a supervised terminal process. PIDs and control
 /// handles are deliberately excluded: they are never valid across restarts.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -406,6 +421,76 @@ impl Store {
         self.db.put("sessions", session_id, &session)
     }
 
+    // ---------------- 上下文来源治理（capability-parity 6.3） ----------------
+
+    /// 会话级上下文来源禁用清单（jsonl 追加：{"disabled": ["file:AGENTS.md", ...]}，
+    /// 末行生效）。来源键 = "file:<name>" / "memory" / "retrieval" / "skills"。
+    pub fn disabled_context_sources(&self, session_id: &str) -> Vec<String> {
+        self.db
+            .read_lines::<serde_json::Value>("context_disabled", session_id, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .last()
+            .and_then(|v| {
+                v.get("disabled").and_then(|d| d.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// 更新禁用清单（全量覆盖语义：传空数组 = 全部启用）。
+    pub fn set_disabled_context_sources(
+        &self,
+        session_id: &str,
+        disabled: &[String],
+    ) -> Result<()> {
+        let value = serde_json::json!({ "disabled": disabled, "at": now_iso() });
+        self.db.append_line("context_disabled", session_id, &value)
+    }
+
+    // ---------------- 学习候选账本（capability-parity 6.4） ----------------
+
+    /// 全量候选（追加账本按 id 去重取最新——update 是补写终态行）。
+    pub fn list_learning_candidates(&self) -> Vec<crate::learning_candidates::LearningCandidate> {
+        let mut by_id: std::collections::BTreeMap<
+            String,
+            crate::learning_candidates::LearningCandidate,
+        > = std::collections::BTreeMap::new();
+        for row in self
+            .db
+            .list_all_lines("learning_candidates")
+            .unwrap_or_default()
+        {
+            if let Ok(cand) =
+                serde_json::from_value::<crate::learning_candidates::LearningCandidate>(row)
+            {
+                by_id.insert(cand.id.clone(), cand);
+            }
+        }
+        let mut list: Vec<_> = by_id.into_values().collect();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list
+    }
+
+    /// 追加候选行。
+    pub fn append_learning_candidate(
+        &self,
+        candidate: &crate::learning_candidates::LearningCandidate,
+    ) -> Result<()> {
+        self.db.append_line("learning_candidates", "all", candidate)
+    }
+
+    /// 裁决落账（补写终态行；读取侧按 id 去重取最新）。
+    pub fn update_learning_candidate(
+        &self,
+        candidate: &crate::learning_candidates::LearningCandidate,
+    ) -> Result<()> {
+        self.db.append_line("learning_candidates", "all", candidate)
+    }
+
     /// 会话归属组迁移（组改 id 的引用清扫，group-id-migration）：只改 group_id，
     /// 不动标题/时间戳/账目——组维度的列表与过滤随新 id 即时生效。
     pub fn update_session_group(&self, session_id: &str, group_id: &str) -> Result<()> {
@@ -465,9 +550,14 @@ impl Store {
         session_id: &str,
         role: MessageRole,
         agent_id: Option<&str>,
-        statements: Vec<Statement>,
+        mut statements: Vec<Statement>,
         turn: Option<usize>,
     ) -> Result<ChatMessage> {
+        if role != MessageRole::User {
+            for statement in &mut statements {
+                statement.text = crate::tools::redact_str(&statement.text);
+            }
+        }
         let msg = ChatMessage {
             id: new_id(),
             session_id: session_id.to_string(),
@@ -496,7 +586,7 @@ impl Store {
         session_id: &str,
         role: MessageRole,
         agent_id: Option<&str>,
-        statements: Vec<Statement>,
+        mut statements: Vec<Statement>,
         thinking: Option<String>,
         tool_calls: Vec<crate::round_trace::ToolCallRecord>,
         steps: Vec<crate::round_trace::TraceStep>,
@@ -508,9 +598,23 @@ impl Store {
             .flatten()
             .map(|s| s.turn + 1)
             .or(Some(1));
+        if role != MessageRole::User {
+            for statement in &mut statements {
+                statement.text = crate::tools::redact_str(&statement.text);
+            }
+        }
         let mut msg = self.add_message_with_turn(session_id, role, agent_id, statements, turn)?;
-        msg.thinking = thinking.filter(|s| !s.trim().is_empty());
-        msg.tool_calls = tool_calls;
+        msg.thinking = thinking
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| crate::tools::redact_str(&s));
+        msg.tool_calls = tool_calls
+            .into_iter()
+            .map(|mut call| {
+                call.args = crate::tools::redact_json(&call.args);
+                call.summary = crate::tools::redact_str(&call.summary);
+                call
+            })
+            .collect();
         msg.steps = steps;
         // 消息是 jsonl 追加日志:add_message 已追加无过程数据的行,这里按 id 原位替换。
         // (此前用 put 写独立文档,read_lines 只读 jsonl——思维链/工具轨迹刷新后即失)
@@ -523,7 +627,9 @@ impl Store {
     }
 
     pub fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<ChatMessage>> {
-        self.db.read_lines("messages", session_id, limit)
+        self.db
+            .read_lines::<ChatMessage>("messages", session_id, limit)
+            .map(|messages| messages.into_iter().map(redact_chat_message).collect())
     }
 
     /// 按消息 id 回填入站附件（im-inbound-attach）：落库与暂存取走之间无原子性，
@@ -811,7 +917,7 @@ impl Store {
         duration_ms: u64,
         ok: bool,
     ) -> Result<()> {
-        let entry = serde_json::json!({
+        let entry = crate::tools::redact_json(&serde_json::json!({
             "id": new_id(),
             "agentId": agent_id,
             "tool": tool,
@@ -820,7 +926,7 @@ impl Store {
             "durationMs": duration_ms,
             "ok": ok,
             "createdAt": now_iso(),
-        });
+        }));
         self.db.append_line("tool_audit", agent_id, &entry)?;
 
         // 容量裁剪：超过上限时保留最近一半
@@ -833,14 +939,17 @@ impl Store {
     }
 
     pub fn list_tool_audit(&self, agent_id: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
-        self.db.read_lines("tool_audit", agent_id, limit)
+        self.db
+            .read_lines::<serde_json::Value>("tool_audit", agent_id, limit)
+            .map(|entries| entries.iter().map(crate::tools::redact_json).collect())
     }
 
     /// 子代理派发审计（agent-budget-audit 3.4）：按主会话追加 jsonl。
     /// 记录面：派发者会话 / 目标个体 / 任务摘要 / 耗时 / token 消耗 / 结果状态；
     /// 异常（failed/blocked/timeout）由查询侧按 status 高亮。
     pub fn audit_dispatch(&self, session_id: &str, entry: &serde_json::Value) -> Result<()> {
-        self.db.append_line("dispatch_audit", session_id, entry)?;
+        let safe = crate::tools::redact_observation(entry);
+        self.db.append_line("dispatch_audit", session_id, &safe)?;
         // 容量裁剪与 tool_audit 同口径
         let mut lines: Vec<serde_json::Value> =
             self.db.read_lines("dispatch_audit", session_id, 0)?;
@@ -857,12 +966,20 @@ impl Store {
         session_id: &str,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
-        self.db.read_lines("dispatch_audit", session_id, limit)
+        self.db
+            .read_lines::<serde_json::Value>("dispatch_audit", session_id, limit)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(crate::tools::redact_observation)
+                    .collect()
+            })
     }
 
     /// 跨会话派发审计聚合（时间倒序 limit 封顶；审计页数据源）
     pub fn list_dispatch_audit_all(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
         let mut all: Vec<serde_json::Value> = self.db.list_all_lines("dispatch_audit")?;
+        all = all.iter().map(crate::tools::redact_observation).collect();
         all.reverse();
         all.truncate(limit);
         Ok(all)
@@ -878,6 +995,7 @@ impl Store {
         // 审计是追加日志（{agentId}.jsonl），须用 list_all_lines 跨文件枚举——
         // 此前误用 list()（只扫 .json 文档）导致审计面永远为空
         let mut all: Vec<serde_json::Value> = self.db.list_all_lines("tool_audit")?;
+        all = all.iter().map(crate::tools::redact_observation).collect();
         if let Some(a) = agent {
             all.retain(|v| v.get("agentId").and_then(|x| x.as_str()) == Some(a));
         }
@@ -950,11 +1068,20 @@ impl Store {
     // ---------------- 事件溯源 ----------------
 
     pub fn append_event(&self, env: &Envelope) -> Result<()> {
-        self.db.append_line("events", &env.session_id, env)
+        let mut safe = env.clone();
+        safe.payload = crate::tools::redact_observation(&safe.payload);
+        self.db.append_line("events", &safe.session_id, &safe)
     }
 
     pub fn list_events(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
-        self.db.read_lines("events", session_id, 0)
+        self.db
+            .read_lines::<serde_json::Value>("events", session_id, 0)
+            .map(|events| {
+                events
+                    .iter()
+                    .map(crate::tools::redact_observation)
+                    .collect()
+            })
     }
 
     // ---------------- 执行审批（docs/10） ----------------

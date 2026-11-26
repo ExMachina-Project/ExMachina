@@ -753,32 +753,53 @@ impl LocalRegistry {
         } else {
             Some(m.to_string())
         };
-        if let Some(routing)=&mut g.meta.model_routing {routing.set_default_model(m);}
+        if let Some(routing) = &mut g.meta.model_routing {
+            routing.set_default_model(m);
+        }
         let meta_path = g.dir.join("group.json");
         std::fs::write(&meta_path, serde_json::to_string_pretty(&g.meta)?)?;
         Ok(())
     }
 
-    pub fn set_group_model_routing(&self, gid: &str, routing: crate::model_routing::ModelRouting) -> anyhow::Result<()> {
+    pub fn set_group_model_routing(
+        &self,
+        gid: &str,
+        routing: crate::model_routing::ModelRouting,
+    ) -> anyhow::Result<()> {
         routing.validate()?;
         let mut groups = self.groups.write();
         let group = groups.get_mut(gid).context("组不存在")?;
         let mut meta = group.meta.clone();
         meta.model_routing = Some(routing);
-        std::fs::write(group.dir.join("group.json"), serde_json::to_vec_pretty(&meta)?)?;
+        std::fs::write(
+            group.dir.join("group.json"),
+            serde_json::to_vec_pretty(&meta)?,
+        )?;
         group.meta = meta;
         Ok(())
     }
 
     /// Explicit owner prevents duplicate member identifiers in different groups from colliding.
-    pub fn set_agent_model_routing(&self, group: Option<&str>, identifier: &str, routing: crate::model_routing::ModelRouting) -> anyhow::Result<AgentDefinition> {
+    pub fn set_agent_model_routing(
+        &self,
+        group: Option<&str>,
+        identifier: &str,
+        routing: crate::model_routing::ModelRouting,
+    ) -> anyhow::Result<AgentDefinition> {
         routing.validate()?;
         if let Some(gid) = group {
             let mut groups = self.groups.write();
             let group = groups.get_mut(gid).context("组不存在")?;
-            let mut def = group.defs.get(identifier).context("组内智能体不存在")?.clone();
+            let mut def = group
+                .defs
+                .get(identifier)
+                .context("组内智能体不存在")?
+                .clone();
             def.model_routing = Some(routing);
-            std::fs::write(Self::def_path_in(&group.dir, identifier), serde_json::to_vec_pretty(&def)?)?;
+            std::fs::write(
+                Self::def_path_in(&group.dir, identifier),
+                serde_json::to_vec_pretty(&def)?,
+            )?;
             group.defs.insert(identifier.to_string(), def.clone());
             Ok(def)
         } else {
@@ -839,7 +860,9 @@ impl LocalRegistry {
                 anyhow::bail!("个体不存在: {identifier}");
             };
             def.model_hint = hint;
-            if let Some(routing)=&mut def.model_routing {routing.set_default_model(m);}
+            if let Some(routing) = &mut def.model_routing {
+                routing.set_default_model(m);
+            }
             let path = self.single_def_path(identifier);
             std::fs::create_dir_all(path.parent().unwrap())?;
             std::fs::write(&path, serde_json::to_string_pretty(def)?)?;
@@ -852,7 +875,9 @@ impl LocalRegistry {
                 g.defs.get(identifier).map(|def| {
                     let mut d = def.clone();
                     d.model_hint = hint.clone();
-                    if let Some(routing)=&mut d.model_routing {routing.set_default_model(m);}
+                    if let Some(routing) = &mut d.model_routing {
+                        routing.set_default_model(m);
+                    }
                     (g.meta.id.clone(), Self::def_path_in(&g.dir, identifier), d)
                 })
             })

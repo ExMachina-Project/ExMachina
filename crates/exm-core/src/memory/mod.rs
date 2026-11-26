@@ -5,6 +5,8 @@
 //!   `memory/hash_index/{hash}.json`   内容哈希 → 条目 id（去重键）
 //!   `memory/terms/bucket-XX.json`     倒排索引分桶：term → [(entry_id, weight)]
 //!   `memory/links/{entryId}.jsonl`    记忆关联（derived_from/contradicts/supersedes）
+//!   `memory/history/{entryId}.jsonl`  版本历史（capability-parity 6.5）：每行一个版本
+//!                                     `{version, title, body, tags, kind, changedAt, change}`
 //!   `memory/agent_stats/{agentId}.json` 个体可靠性统计
 //!
 //! 基础记忆 `memory.md` 由条目渲染（可随时再生成），是 DB 的人读视图。
@@ -19,6 +21,10 @@ const ENTRIES: &str = "memory/entries";
 const HASH_INDEX: &str = "memory/hash_index";
 const TERMS: &str = "memory/terms";
 const LINKS: &str = "memory/links";
+const HISTORY: &str = "memory/history";
+/// 遗忘墓碑：条目被遗忘时保留其归属与统计字段，仅供撤销遗忘（`restore`）使用，
+/// 不参与任何读取路径。
+const TOMBSTONES: &str = "memory/tombstones";
 const STATS: &str = "memory/agent_stats";
 
 // ---------------------------------------------------------------- 类型
@@ -113,6 +119,11 @@ pub struct MemoryEntry {
     pub last_accessed_at: Option<String>,
     #[serde(default)]
     pub access_count: u32,
+    /// 内容版本号（capability-parity 6.5）：新建 = 1，每次内容更新 +1，回滚/撤销遗忘
+    /// 也产生新版本（单调递增，不倒退）。`0` 只出现在本字段引入之前写入的旧条目上
+    /// （serde default）——对外一律按 v1 陈述。注入与召回结果用它标注「哪一版生效」。
+    #[serde(default)]
+    pub version: u64,
     /// 语义向量（混合记忆检索；None = 未嵌入，仅参与词项召回）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
@@ -123,11 +134,40 @@ pub struct MemoryEntry {
 }
 
 impl MemoryEntry {
+    /// 对外陈述的版本号：旧条目（字段引入前写入，default 0）视为 v1。
+    pub fn version_label(&self) -> u64 {
+        self.version.max(1)
+    }
+
     fn vector_for(&self, model: Option<&str>) -> Option<&[f32]> {
         match model {
             Some(model) => self.model_embeddings.get(model).map(Vec::as_slice),
             None => self.embedding.as_deref(),
         }
+    }
+}
+
+/// 一条版本历史（`memory/history/{id}.jsonl` 的一行）。`change` 说明这一版是怎么来的：
+/// `created`（新建）| `updated`（内容编辑）| `rolled_back`（回滚：以旧版本内容写新版本）|
+/// `restored`（撤销遗忘：以被遗忘时的内容重建）| `forgotten`（遗忘——此行是条目的最后状态，
+/// 条目本身已移除，历史保留以便撤销与审计）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryHistoryRow {
+    pub version: u64,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub kind: MemoryKind,
+    pub changed_at: String,
+    pub change: String,
+}
+
+impl MemoryHistoryRow {
+    /// 这一行是否对应一个「可被回滚到」的内容版本（遗忘行不是内容版本，是终态标记）。
+    pub fn is_content_version(&self) -> bool {
+        self.change != "forgotten"
     }
 }
 
@@ -265,7 +305,6 @@ enum AgentLayer<'a> {
     /// 某个体可见范围：其私有 + 群体
     Agent(&'a str),
 }
-
 
 // ---------------------------------------------------------------- 域分文件
 

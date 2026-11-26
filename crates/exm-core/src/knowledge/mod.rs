@@ -153,7 +153,8 @@ impl KnowledgeStore {
             updated_at: now,
         };
         self.save(&entry)?;
-        self.db.put(HASH_INDEX, &hash, &serde_json::json!(entry.id))?;
+        self.db
+            .put(HASH_INDEX, &hash, &serde_json::json!(entry.id))?;
         self.index_entry(&entry)?;
         Ok(KnowledgeWriteOutcome::Created(entry))
     }
@@ -232,7 +233,8 @@ impl KnowledgeStore {
 
     /// 最近条目（createdAt 倒序）
     pub fn recent(&self, limit: usize) -> Vec<KnowledgeEntry> {
-        let mut all: Vec<KnowledgeEntry> = self.db.list::<KnowledgeEntry>(ENTRIES).unwrap_or_default();
+        let mut all: Vec<KnowledgeEntry> =
+            self.db.list::<KnowledgeEntry>(ENTRIES).unwrap_or_default();
         all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         all.truncate(limit);
         all
@@ -391,7 +393,10 @@ mod tests {
             .write(&KnowledgeDraft {
                 source_agent: "creative-agent".into(),
                 source_session: Some("sess-1".into()),
-                ..draft("napcat 图片直发", "QQ 官方机器人 files 上行仅支持 png/jpg，file_data 为 base64")
+                ..draft(
+                    "napcat 图片直发",
+                    "QQ 官方机器人 files 上行仅支持 png/jpg，file_data 为 base64",
+                )
             })
             .unwrap();
         let _ = store.write(&KnowledgeDraft {
@@ -411,7 +416,9 @@ mod tests {
     #[test]
     fn 知识_重复内容去重提升() {
         let store = test_store();
-        let first = store.write(&draft("部署约束", "构建环境无 C 编译器，依赖必须纯 Rust")).unwrap();
+        let first = store
+            .write(&draft("部署约束", "构建环境无 C 编译器，依赖必须纯 Rust"))
+            .unwrap();
         assert!(!first.deduped(), "首写应为新建");
         let again = store
             .write(&KnowledgeDraft {
@@ -422,10 +429,7 @@ mod tests {
         assert!(again.deduped(), "同正文再写应去重提升");
         assert_eq!(again.entry().id, first.entry().id, "条目 id 不变");
         assert!(again.entry().hits >= 1, "去重提升应累加 hits");
-        assert!(
-            again.entry().tags.contains(&"build".into()),
-            "标签并集补充"
-        );
+        assert!(again.entry().tags.contains(&"build".into()), "标签并集补充");
         assert_eq!(store.list_all().len(), 1, "库里只有一条");
     }
 
@@ -441,11 +445,16 @@ mod tests {
     #[test]
     fn 知识_删除与检索清理() {
         let store = test_store();
-        let e = store.write(&draft("时区配置", "automation.timezone 接受 IANA 时区名")).unwrap();
+        let e = store
+            .write(&draft("时区配置", "automation.timezone 接受 IANA 时区名"))
+            .unwrap();
         assert!(store.delete(&e.entry().id).unwrap(), "删除应成功");
         assert!(!store.delete(&e.entry().id).unwrap(), "二次删除返回 false");
         assert!(store.get(&e.entry().id).unwrap().is_none());
-        assert!(store.search("时区", 5).unwrap().is_empty(), "删除后不应命中");
+        assert!(
+            store.search("时区", 5).unwrap().is_empty(),
+            "删除后不应命中"
+        );
     }
 
     // ---------------- 提示词注入（inject_prompt_section） ----------------
@@ -454,7 +463,9 @@ mod tests {
     #[test]
     fn 知识注入_默认零注入() {
         let store = test_store();
-        store.write(&draft("部署约束", "构建环境无 C 编译器，依赖必须纯 Rust")).unwrap();
+        store
+            .write(&draft("部署约束", "构建环境无 C 编译器，依赖必须纯 Rust"))
+            .unwrap();
         let out = inject_prompt_section(&store, "部署 Rust 依赖", 0, 500);
         assert!(out.is_empty(), "top_k=0 必须零注入（默认零行为变化）");
     }
@@ -487,7 +498,10 @@ mod tests {
     fn 知识注入_空查询与无命中() {
         let store = test_store();
         store.write(&draft("主题A", "内容甲")).unwrap();
-        assert!(inject_prompt_section(&store, "  ", 3, 500).is_empty(), "空查询不注入");
+        assert!(
+            inject_prompt_section(&store, "  ", 3, 500).is_empty(),
+            "空查询不注入"
+        );
         assert!(
             inject_prompt_section(&store, "完全无关的词项", 3, 500).is_empty(),
             "无命中不注入"

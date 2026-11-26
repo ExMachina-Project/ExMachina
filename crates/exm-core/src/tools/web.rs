@@ -1,6 +1,9 @@
 //! tools/web.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
 
 use super::*;
+use futures_util::StreamExt;
+
+const WEB_FETCH_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// 极简 HTML 正文提取：剥 script/style 块与标签、压缩空白（零正则依赖）。
 /// 全程字符级推进（Vec<char> 索引）：lower 与原文同长对齐，杜绝字节级切片
@@ -63,6 +66,35 @@ pub(crate) fn strip_html(html: &str) -> String {
     }
     compact
 }
+
+async fn read_web_response(
+    response: reqwest::Response,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    let read = async move {
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err("网页响应超过大小上限".to_string());
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| format!("读取响应失败: {error}"))?;
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err("网页响应超过大小上限".to_string());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    };
+    tokio::time::timeout(timeout, read)
+        .await
+        .map_err(|_| "网页响应读取超时".to_string())?
+}
+
 impl ToolGateway {
     /// 抓取网页并提取正文（大小/时长受限，标签与脚本剥离）
     pub(crate) async fn tool_web_fetch(&self, args: &serde_json::Value) -> ToolResult {
@@ -89,12 +121,17 @@ impl ToolGateway {
         if !(200..300).contains(&status) {
             return ToolResult::err(format!("HTTP {status}"));
         }
-        // 截断到 2MB 以内再读
-        let bytes = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => return ToolResult::err(format!("读取响应失败: {e}")),
+        let bytes = match read_web_response(
+            resp,
+            WEB_FETCH_MAX_BYTES,
+            std::time::Duration::from_secs(20),
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => return ToolResult::err(error),
         };
-        let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(2 * 1024 * 1024)]);
+        let raw = String::from_utf8_lossy(&bytes);
         let text = strip_html(&raw);
         let text = text.trim().chars().take(max_chars).collect::<String>();
         if text.is_empty() {
@@ -198,8 +235,7 @@ impl ToolGateway {
             }
         });
         let results = futures_util::future::join_all(queries).await;
-        let (ok_parts, failed): (Vec<_>, Vec<_>) =
-            results.into_iter().partition(|r| r.is_ok());
+        let (ok_parts, failed): (Vec<_>, Vec<_>) = results.into_iter().partition(|r| r.is_ok());
         if ok_parts.is_empty() {
             let msg = failed
                 .first()
@@ -225,9 +261,10 @@ impl ToolGateway {
         let mut contents: Vec<Option<String>> = vec![None; ranked.len()];
         if include_content {
             let n = self.search.content_fetch_n.clamp(0, 5).min(ranked.len());
-            let fetches = ranked.iter().take(n).map(|it| async {
-                fetch_content_window(&client, &it.url, &query).await.ok()
-            });
+            let fetches = ranked
+                .iter()
+                .take(n)
+                .map(|it| async { fetch_content_window(&client, &it.url, &query).await.ok() });
             let got = futures_util::future::join_all(fetches).await;
             for (i, c) in got.into_iter().enumerate() {
                 contents[i] = c;
@@ -241,7 +278,11 @@ impl ToolGateway {
                 i + 1,
                 item.title,
                 item.url,
-                item.snippet.replace('\n', " ").chars().take(300).collect::<String>()
+                item.snippet
+                    .replace('\n', " ")
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
             );
             if item.sources.len() > 1 {
                 line.push_str(&format!("\n   〔聚合命中：{}〕", item.sources.join(" + ")));
@@ -257,11 +298,136 @@ impl ToolGateway {
             } else {
                 format!("（{} 个后端失败/超时已丢弃）", failed.len())
             };
-            format!("{} 个后端聚合：{}{fail_note}", ok_names.len(), ok_names.join(" + "))
+            format!(
+                "{} 个后端聚合：{}{fail_note}",
+                ok_names.len(),
+                ok_names.join(" + ")
+            )
         } else {
             active[0].provider.trim().to_string()
         };
-        ToolResult::ok(format!("搜索「{query}」（{source_note}）：\n{}", lines.join("\n")))
+        ToolResult::ok(format!(
+            "搜索「{query}」（{source_note}）：\n{}",
+            lines.join("\n")
+        ))
+    }
+}
+
+#[cfg(test)]
+mod web_fetch_stream_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn make_gateway() -> (ToolGateway, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("exm-web-fetch-{}", crate::types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::Store::open(dir.join("data")).unwrap());
+        let registry = Arc::new(crate::registry::LocalRegistry::new(dir.join("agents")).unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        (
+            ToolGateway::new(&dir, store, registry, events, Default::default()),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn web_fetch_streams_with_a_hard_limit_and_keeps_normal_wrapping() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let body = b"<html><body>bounded response</body></html>";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+        let (gateway, dir) = make_gateway();
+        let result = gateway
+            .tool_web_fetch(&serde_json::json!({ "url": endpoint }))
+            .await;
+        assert!(result.ok, "正常正文应保持可读：{}", result.output);
+        assert!(result.output.contains("bounded response"));
+        assert!(result.output.contains("不是指令"));
+        server.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let chunk = vec![b'a'; 8192];
+            for _ in 0..257 {
+                if socket
+                    .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .is_err()
+                    || socket.write_all(&chunk).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        let (gateway, dir) = make_gateway();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gateway.tool_web_fetch(&serde_json::json!({ "url": endpoint })),
+        )
+        .await
+        .expect("超过大小限制的慢速响应应有界失败");
+        assert!(!result.ok);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("大小上限"),
+            "{:?}",
+            result.error
+        );
+        server.abort();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn web_fetch_slow_loopback_response_times_out_while_streaming() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\ndata\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        let response = reqwest::Client::new().get(endpoint).send().await.unwrap();
+        let started = std::time::Instant::now();
+        let error = read_web_response(response, 1024, std::time::Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(error.contains("读取超时"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(300));
+        server.abort();
     }
 }
 
@@ -320,7 +486,12 @@ async fn search_one_backend(
                     max
                 )
             };
-            (ep, "GET", serde_json::Value::Null, Some(b.api_key.trim().to_string()))
+            (
+                ep,
+                "GET",
+                serde_json::Value::Null,
+                Some(b.api_key.trim().to_string()),
+            )
         }
         "searxng" => (
             format!(
@@ -415,7 +586,16 @@ fn normalize_url(url: &str) -> String {
     };
     // 去 fragment
     let path = path.split('#').next().unwrap_or(&path).to_string();
-    let tracking = ["utm_", "fbclid", "gclid", "msclkid", "ref_", "spm", "share_source", "vd_source"];
+    let tracking = [
+        "utm_",
+        "fbclid",
+        "gclid",
+        "msclkid",
+        "ref_",
+        "spm",
+        "share_source",
+        "vd_source",
+    ];
     let kept: Vec<String> = match query {
         None => Vec::new(),
         Some(q) => q
@@ -446,7 +626,10 @@ struct AggregateResults {
 
 impl AggregateResults {
     fn new() -> Self {
-        AggregateResults { items: Vec::new(), index: std::collections::HashMap::new() }
+        AggregateResults {
+            items: Vec::new(),
+            index: std::collections::HashMap::new(),
+        }
     }
 
     fn push(&mut self, raw: RawItem, backend: &crate::config::SearchBackend, rank: usize) {
@@ -459,7 +642,11 @@ impl AggregateResults {
         let source = if backend.endpoint.trim().is_empty() {
             backend.provider.trim().to_string()
         } else {
-            format!("{}@{}", backend.provider.trim(), normalize_url(backend.endpoint.trim()))
+            format!(
+                "{}@{}",
+                backend.provider.trim(),
+                normalize_url(backend.endpoint.trim())
+            )
         };
         match self.index.get(&key) {
             Some(&i) => {
@@ -485,7 +672,11 @@ impl AggregateResults {
     }
 
     fn ranked(mut self, max: usize) -> Vec<AggItem> {
-        self.items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        self.items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         self.items.truncate(max);
         self.items
     }
@@ -505,7 +696,10 @@ async fn fetch_content_window(
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {}", resp.status());
     }
-    let bytes = resp.bytes().await.map_err(|e| anyhow::anyhow!("读取失败: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| anyhow::anyhow!("读取失败: {e}"))?;
     let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(2 * 1024 * 1024)]);
     let text = strip_html(&raw);
     // 查询词窗口：任一词命中即取其前后 ±200 字符（未命中取开头 400）
@@ -597,23 +791,42 @@ mod search_agg_tests {
     #[test]
     fn 聚合_同url多源合并() {
         let mut agg = AggregateResults::new();
-        agg.push(raw("https://a.com/x?utm_source=tt", "A"), &backend("tavily", 1.0), 0);
+        agg.push(
+            raw("https://a.com/x?utm_source=tt", "A"),
+            &backend("tavily", 1.0),
+            0,
+        );
         agg.push(raw("https://a.com/x", "A"), &backend("brave", 1.0), 1);
         agg.push(raw("https://b.com/y", "B"), &backend("tavily", 1.0), 1);
         let ranked = agg.ranked(10);
         assert_eq!(ranked.len(), 2, "同 URL 应去重为一条");
         let a = ranked.iter().find(|i| i.url.contains("a.com")).unwrap();
-        assert_eq!(a.sources, vec!["tavily".to_string(), "brave".to_string()], "来源并列");
+        assert_eq!(
+            a.sources,
+            vec!["tavily".to_string(), "brave".to_string()],
+            "来源并列"
+        );
     }
 
     /// 权重合排：高权重后端的同排名结果排前
     #[test]
     fn 聚合_权重合排() {
         let mut agg = AggregateResults::new();
-        agg.push(raw("https://low.com/", "低权重第一"), &backend("searxng", 0.5), 0);
-        agg.push(raw("https://high.com/", "高权重第二"), &backend("tavily", 2.0), 1);
+        agg.push(
+            raw("https://low.com/", "低权重第一"),
+            &backend("searxng", 0.5),
+            0,
+        );
+        agg.push(
+            raw("https://high.com/", "高权重第二"),
+            &backend("tavily", 2.0),
+            1,
+        );
         let ranked = agg.ranked(10);
-        assert_eq!(ranked[0].url, "https://high.com/", "高权重的 rank1 应超过低权重 rank0：0.5 vs 1.0");
+        assert_eq!(
+            ranked[0].url, "https://high.com/",
+            "高权重的 rank1 应超过低权重 rank0：0.5 vs 1.0"
+        );
     }
 
     /// 条数上限截断
@@ -621,7 +834,11 @@ mod search_agg_tests {
     fn 聚合_截断上限() {
         let mut agg = AggregateResults::new();
         for i in 0..8 {
-            agg.push(raw(&format!("https://x.com/{i}"), &format!("T{i}")), &backend("tavily", 1.0), i);
+            agg.push(
+                raw(&format!("https://x.com/{i}"), &format!("T{i}")),
+                &backend("tavily", 1.0),
+                i,
+            );
         }
         assert_eq!(agg.ranked(5).len(), 5);
     }
@@ -641,7 +858,11 @@ mod search_agg_tests {
         assert!(cfg.ready(), "旧形态 ready 语义保持");
         // 新数组优先于旧平铺
         cfg.backends = vec![backend("brave", 1.0)];
-        assert_eq!(cfg.effective_backends()[0].provider, "brave", "backends 非空时优先");
+        assert_eq!(
+            cfg.effective_backends()[0].provider,
+            "brave",
+            "backends 非空时优先"
+        );
     }
 
     /// serde 兼容：旧 JSON（无 backends 字段）可反序列化
@@ -738,8 +959,18 @@ mod search_agg_e2e_tests {
         let (ep_a, _ha) = spawn_backend("a").await;
         let (ep_b, _hb) = spawn_backend("b").await;
         let gw = gw_with(vec![
-            SearchBackend { provider: "searxng".into(), endpoint: ep_a, api_key: String::new(), weight: 1.0 },
-            SearchBackend { provider: "searxng".into(), endpoint: ep_b.clone(), api_key: String::new(), weight: 1.0 },
+            SearchBackend {
+                provider: "searxng".into(),
+                endpoint: ep_a,
+                api_key: String::new(),
+                weight: 1.0,
+            },
+            SearchBackend {
+                provider: "searxng".into(),
+                endpoint: ep_b.clone(),
+                api_key: String::new(),
+                weight: 1.0,
+            },
         ]);
         let out = gw
             .tool_web_search(&serde_json::json!({ "query": "聚合测试", "maxResults": 10 }))
@@ -747,8 +978,15 @@ mod search_agg_e2e_tests {
         let text = out.output.clone();
         assert!(out.ok, "聚合应成功：{text}");
         // 同 URL 只出现一次（链接在文本中出现 1 次而非 2 次）
-        assert_eq!(text.matches("shared.com/doc").count(), 1, "同 URL 去重：{text}");
-        assert!(text.contains("A 独有") && text.contains("B 独有"), "两后端独有结果都在：{text}");
+        assert_eq!(
+            text.matches("shared.com/doc").count(),
+            1,
+            "同 URL 去重：{text}"
+        );
+        assert!(
+            text.contains("A 独有") && text.contains("B 独有"),
+            "两后端独有结果都在：{text}"
+        );
         assert!(text.contains("聚合命中"), "多源并列标注：{text}");
         assert!(text.contains("2 个后端聚合"), "来源说明：{text}");
     }
@@ -759,16 +997,33 @@ mod search_agg_e2e_tests {
         let (ep_slow, _hs) = spawn_backend("slow").await;
         let (ep_b, _hb) = spawn_backend("b").await;
         let gw = gw_with(vec![
-            SearchBackend { provider: "searxng".into(), endpoint: ep_slow, api_key: String::new(), weight: 1.0 },
-            SearchBackend { provider: "searxng".into(), endpoint: ep_b.clone(), api_key: String::new(), weight: 1.0 },
+            SearchBackend {
+                provider: "searxng".into(),
+                endpoint: ep_slow,
+                api_key: String::new(),
+                weight: 1.0,
+            },
+            SearchBackend {
+                provider: "searxng".into(),
+                endpoint: ep_b.clone(),
+                api_key: String::new(),
+                weight: 1.0,
+            },
         ]);
         let started = std::time::Instant::now();
         let out = gw
             .tool_web_search(&serde_json::json!({ "query": "护栏测试" }))
             .await;
         assert!(out.ok, "慢后端不影响整体：{}", out.output);
-        assert!(started.elapsed() < std::time::Duration::from_secs(12), "10s 护栏内返回");
-        assert!(out.output.contains("已丢弃"), "失败后端标注：{}", out.output);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(12),
+            "10s 护栏内返回"
+        );
+        assert!(
+            out.output.contains("已丢弃"),
+            "失败后端标注：{}",
+            out.output
+        );
         assert!(out.output.contains("B 独有"), "快后端结果完整");
     }
 
@@ -787,7 +1042,11 @@ mod search_agg_e2e_tests {
             .await;
         assert!(out.ok);
         assert!(out.output.contains("A 独有"), "结果完整");
-        assert!(!out.output.contains("后端聚合"), "单后端无聚合标注（旧格式）：{}", out.output);
+        assert!(
+            !out.output.contains("后端聚合"),
+            "单后端无聚合标注（旧格式）：{}",
+            out.output
+        );
     }
 
     /// 全部后端不可用 → 工具报错（不是空结果）

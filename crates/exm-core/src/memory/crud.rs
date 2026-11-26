@@ -1,7 +1,7 @@
 //! memory 域分文件（自 memory.rs 按域拆出，纯搬移零行为变更）。
 
+use super::render::{age_days, cap_chars, content_hash, decayed_importance};
 use super::*;
-use super::render::{cap_chars, content_hash, decayed_importance, age_days};
 
 impl MemoryStore {
     /// `data_dir` 为工作区数据根目录（与 Store 共用，但各自分集合）
@@ -66,6 +66,7 @@ impl MemoryStore {
             updated_at: now,
             last_accessed_at: None,
             access_count: 0,
+            version: 1,
             embedding: None,
             model_embeddings: Default::default(),
         };
@@ -73,11 +74,120 @@ impl MemoryStore {
         self.db
             .put(HASH_INDEX, &hash, &serde_json::json!(entry.id))?;
         self.index_entry(&entry)?;
+        // 版本链起点（capability-parity 6.5）：v1 = created。历史写失败不算写入失败——
+        // 条目已落盘且可检索，缺一行历史只影响审计完整度，不应让「记住」整体失败。
+        let _ = self.append_history(&entry, "created");
         Ok(entry)
     }
 
     pub(crate) fn save_entry(&self, entry: &MemoryEntry) -> Result<()> {
         self.db.put(ENTRIES, &entry.id, entry)
+    }
+
+    // ---------------- 版本链（capability-parity 6.5，spec: agent-learning-loop「受控写入和版本回滚」） ----------------
+
+    /// 追加一行版本历史（`memory/history/{id}.jsonl`）。调用方持有写锁。
+    fn append_history(&self, entry: &MemoryEntry, change: &str) -> Result<()> {
+        self.db.append_line(
+            HISTORY,
+            &entry.id,
+            &MemoryHistoryRow {
+                version: entry.version_label(),
+                title: entry.title.clone(),
+                body: entry.body.clone(),
+                tags: entry.tags.clone(),
+                kind: entry.kind,
+                changed_at: entry.updated_at.clone(),
+                change: change.to_string(),
+            },
+        )
+    }
+
+    /// 版本历史（旧→新）。条目已被遗忘时历史仍在——遗忘是可审计、可撤销的状态，不是抹除。
+    pub fn history(&self, id: &str) -> Result<Vec<MemoryHistoryRow>> {
+        self.db.read_lines(HISTORY, id, 0)
+    }
+
+    /// 编辑内容的校验（格式/越界）：通过才允许进入版本化写入。返回具体拒绝原因。
+    fn validate_content(title: &str, body: &str) -> Result<()> {
+        anyhow::ensure!(!title.trim().is_empty(), "title 不能为空");
+        anyhow::ensure!(!body.trim().is_empty(), "body 不能为空");
+        Ok(())
+    }
+
+    /// 版本化内容更新：校验 → 归档当前版本 → 写新版本（version+1）。
+    /// 任何校验失败都发生在落盘之前，旧版本保持不变、不留半成品。
+    /// `reason` 进历史行（`updated` = 用户/工具编辑；`rolled_back` / `restored` 由回滚与
+    /// 撤销遗忘传入），`changed_at` 取当前时间。
+    pub(crate) fn update_versioned(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        tags: Option<Vec<String>>,
+        kind: Option<&MemoryKind>,
+        reason: &str,
+    ) -> Result<Option<MemoryEntry>> {
+        let _guard = self.write_lock.lock();
+        let Some(mut e) = self.get_entry(id)? else {
+            return Ok(None);
+        };
+        // ---- 1. 校验：全部在改动任何持久状态之前完成 ----
+        let new_title = match title {
+            Some(t) => cap_chars(t.trim(), Self::TITLE_CAP_CHARS),
+            None => e.title.clone(),
+        };
+        let new_body = match body {
+            Some(b) => cap_chars(b.trim(), Self::BODY_CAP_CHARS),
+            None => e.body.clone(),
+        };
+        Self::validate_content(&new_title, &new_body)?;
+        let new_kind = match kind {
+            Some(k) => *k,
+            None => e.kind,
+        };
+        let new_tags = tags.unwrap_or_else(|| e.tags.clone());
+        let old_hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
+        let new_hash = content_hash(&new_title, &new_body, e.group_id.as_deref());
+        if new_hash != old_hash {
+            // 与其它条目撞内容哈希时拒绝：覆盖会让对方失去去重索引，remember 语义随之漂移
+            if let Some(other) = self.hash_lookup(&new_hash)? {
+                if other != id {
+                    anyhow::bail!("已存在相同内容的记忆条目：{other}");
+                }
+            }
+        }
+        // ---- 2. 内容与元数据都没变：不升版、不写历史（没有变更就没有变更记录）----
+        let content_changed = new_hash != old_hash;
+        if !content_changed && new_tags == e.tags && new_kind == e.kind {
+            return Ok(Some(e));
+        }
+        // ---- 3. 写新版本（version+1）并记一行历史 ----
+        // 不变量：历史里每个版本号恰好一行，行内存该版本的内容；`change` 说明这一版怎么来的。
+        // 旧版本的内容已在它自己那一行里，这里不重复归档。
+        let old_version = e.version_label();
+        // 先清旧内容的倒排项——unindex_entry 按条目「当前」title/body/tags 取词项，
+        // 必须在字段被覆盖之前调用。先覆盖再 unindex 删的是新词项（此刻还不存在），
+        // 旧词项会永久留在索引里：编辑过的记忆仍会被旧内容的关键词召回（过期内容回流）。
+        self.unindex_entry(&e)?;
+        e.title = new_title;
+        e.body = new_body;
+        e.tags = new_tags;
+        e.kind = new_kind;
+        e.version = old_version + 1;
+        e.updated_at = now_iso();
+        if content_changed {
+            // 哈希迁移：内容变了去重键跟着变
+            e.embedding = None;
+            e.model_embeddings.clear();
+            self.db.delete(HASH_INDEX, &old_hash)?;
+            self.db
+                .put(HASH_INDEX, &new_hash, &serde_json::json!(e.id))?;
+        }
+        self.index_entry(&e)?;
+        self.save_entry(&e)?;
+        let _ = self.append_history(&e, reason);
+        Ok(Some(e))
     }
 
     pub(crate) fn get_entry(&self, id: &str) -> Result<Option<MemoryEntry>> {
@@ -149,9 +259,9 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// 条目编辑（assistant-parity T3）：title/body/tags/kind 可改——
-    /// 读改写同款串行；内容变更时重算哈希（删旧-index 新）并重建倒排索引，
-    /// 保持「同内容二次写入命中去重」与检索所见即所得。
+    /// 条目编辑（assistant-parity T3）：title/body/tags/kind 可改。
+    /// capability-parity 6.5 起走版本化写入（见 [`Self::update_versioned`]）：校验通过才
+    /// 归档旧版本并升版；校验失败旧版本不变。
     pub fn update(
         &self,
         id: &str,
@@ -160,59 +270,165 @@ impl MemoryStore {
         tags: Option<Vec<String>>,
         kind: Option<&str>,
     ) -> Result<Option<MemoryEntry>> {
-        let _guard = self.write_lock.lock();
-        let Some(mut e) = self.get_entry(id)? else {
-            return Ok(None);
+        let kind = match kind {
+            Some(k) => Some(
+                crate::memory::MemoryKind::parse(k)
+                    .ok_or_else(|| anyhow::anyhow!("未知记忆类型：{k}"))?,
+            ),
+            None => None,
         };
-        let old_hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
-        if let Some(t) = title {
-            e.title = cap_chars(t.trim(), Self::TITLE_CAP_CHARS);
-        }
-        if let Some(b) = body {
-            e.body = cap_chars(b.trim(), Self::BODY_CAP_CHARS);
-        }
-        if let Some(t) = tags {
-            e.tags = t;
-        }
-        if let Some(k) = kind {
-            e.kind = crate::memory::MemoryKind::parse(k)
-                .ok_or_else(|| anyhow::anyhow!("未知记忆类型：{k}"))?;
-        }
-        e.updated_at = now_iso();
-        // 内容变更：哈希迁移 + 倒排重索引（先删后建，与 forget+remember 同口径）
-        let new_hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
-        if new_hash != old_hash {
-            e.embedding = None;
-            e.model_embeddings.clear();
-            // 与其它条目撞内容哈希时拒绝：覆盖会让对方失去去重索引，remember 语义随之漂移
-            if let Some(other) = self.hash_lookup(&new_hash)? {
-                if other != id {
-                    anyhow::bail!("已存在相同内容的记忆条目：{other}");
-                }
-            }
-            self.unindex_entry(&e)?;
-            self.db.delete(HASH_INDEX, &old_hash)?;
-            self.db.put(HASH_INDEX, &new_hash, &serde_json::json!(e.id))?;
-            self.index_entry(&e)?;
-        } else {
-            // 内容未变也可能只改了 tags/kind——统一重建索引保一致
-            self.unindex_entry(&e)?;
-            self.index_entry(&e)?;
-        }
-        self.save_entry(&e)?;
-        Ok(Some(e))
+        self.update_versioned(id, title, body, tags, kind.as_ref(), "updated")
     }
 
+    /// 遗忘一条记忆——留痕可撤销（spec「删除状态在后续会话生效并可审计」）：
+    /// 被遗忘时的内容先记入历史（版本号继续 +1，`change=forgotten`），再移除条目、
+    /// 倒排与哈希索引。遗忘后条目立即从召回、列表与 memory.md 消失；历史保留，
+    /// [`Self::restore`] 可撤销，[`Self::rollback`] 可恢复任一历史版本。
     pub fn forget(&self, id: &str) -> Result<()> {
         // 与 remember 互斥：防止「forget 删哈希 → remember 按同哈希新建 → forget 删旧条目」
         // 交错后留下孤儿哈希/悬空索引
         let _guard = self.write_lock.lock();
-        if let Some(e) = self.get_entry(id)? {
+        if let Some(mut e) = self.get_entry(id)? {
             self.unindex_entry(&e)?;
             let hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
             self.db.delete(HASH_INDEX, &hash)?;
+            e.version = e.version_label() + 1;
+            e.updated_at = now_iso();
+            let _ = self.append_history(&e, "forgotten");
+            // 墓碑：保留条目的归属与统计字段（scope/session/agent/group/source_ref/
+            // created_at/importance/confidence/pinned）——历史行只存内容，撤销遗忘时
+            // 要靠它把条目恢复成原来的归属，否则恢复出来的记忆会「换了主人」。
+            // 墓碑不参与任何读取路径（召回/列表/渲染/统计只读 ENTRIES）。
+            let _ = self.db.put(TOMBSTONES, id, &e);
         }
         self.db.delete(ENTRIES, id)
+    }
+
+    /// 墓碑是否存在（条目已遗忘且可撤销）。条目仍存在时为 false。
+    pub fn is_forgotten(&self, id: &str) -> Result<bool> {
+        Ok(self.get_entry(id)?.is_none() && self.db.exists(TOMBSTONES, id)?)
+    }
+
+    /// 已遗忘（可撤销）的条目清单：遗忘时间倒序（`updated_at` 为秒级精度，同秒内按 id）。
+    /// 墓碑保留条目的归属与统计字段，所以这里读出来就是遗忘当时的完整条目——
+    /// 治理面据此提供「撤销遗忘」入口（否则条目从列表消失后用户无处可点）。
+    /// 墓碑与条目互斥（forget 删条目、restore 删墓碑），这里再做一次防御性过滤。
+    pub fn list_forgotten(&self) -> Result<Vec<MemoryEntry>> {
+        let mut rows: Vec<MemoryEntry> = self
+            .db
+            .list::<MemoryEntry>(TOMBSTONES)?
+            .into_iter()
+            .filter(|e| self.get_entry(&e.id).ok().flatten().is_none())
+            .collect();
+        // updated_at 是秒级 ISO 串，同秒内遗忘的多条靠它分不出先后——用 id 作平局裁决，
+        // 保证清单顺序确定（同一数据每次读出来一样），不会随底层 map 迭代序漂移。
+        rows.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(rows)
+    }
+
+    /// 按历史行重建条目：保留 `base` 的全部归属与统计字段（scope/session/agent/group/
+    /// source_ref/created_at/importance/confidence/pinned/access_count），内容取历史行，
+    /// 版本号 = 历史最大版本 + 1（单调递增，不倒退）。调用方持有写锁。
+    /// `base` = 当前条目（回滚）或墓碑（撤销遗忘）。
+    fn materialize(
+        &self,
+        base: &MemoryEntry,
+        row: &MemoryHistoryRow,
+        change: &str,
+    ) -> Result<MemoryEntry> {
+        Self::validate_content(&row.title, &row.body)?;
+        let max_version = self
+            .history(&base.id)?
+            .iter()
+            .map(|r| r.version)
+            .max()
+            .unwrap_or(0);
+        let mut e = base.clone();
+        e.title = row.title.clone();
+        e.body = row.body.clone();
+        e.tags = row.tags.clone();
+        e.kind = row.kind;
+        e.version = max_version + 1;
+        e.updated_at = now_iso();
+        e.embedding = None;
+        e.model_embeddings.clear();
+        let new_hash = content_hash(&e.title, &e.body, e.group_id.as_deref());
+        if let Some(other) = self.hash_lookup(&new_hash)? {
+            if other != e.id {
+                anyhow::bail!("已存在相同内容的记忆条目：{other}");
+            }
+        }
+        // 旧内容的哈希与倒排项必须清掉（条目当前不存在时哈希已在遗忘时删除，删除不存在的键是 no-op）
+        self.unindex_entry(base)?;
+        self.db.delete(
+            HASH_INDEX,
+            &content_hash(&base.title, &base.body, base.group_id.as_deref()),
+        )?;
+        self.db
+            .put(HASH_INDEX, &new_hash, &serde_json::json!(e.id))?;
+        self.index_entry(&e)?;
+        self.save_entry(&e)?;
+        let _ = self.append_history(&e, change);
+        Ok(e)
+    }
+
+    /// 回滚到历史版本：该版本的内容经同一校验后成为新版本行（version 继续
+    /// 单调递增——回滚不是倒退版本号，是「以旧内容写新版本」，审计链不断）。
+    pub fn rollback(&self, id: &str, to_version: u64) -> Result<MemoryEntry> {
+        let _guard = self.write_lock.lock();
+        let base = self.get_entry(id)?.with_context(|| {
+            format!("记忆条目不存在: {id}（已遗忘的条目请用 restore 撤销遗忘）")
+        })?;
+        let history = self.history(id)?;
+        let row = history
+            .iter()
+            .find(|r| r.is_content_version() && r.version == to_version)
+            .with_context(|| format!("历史版本不存在：{id} v{to_version}"))?
+            .clone();
+        self.materialize(&base, &row, "rolled_back")
+    }
+
+    /// 撤销遗忘：条目已不存在且历史末行为遗忘标记时，以被遗忘时的内容重建条目
+    /// （版本号接着走，`change=restored`）。条目仍存在或历史里没有遗忘标记时拒绝。
+    pub fn restore(&self, id: &str) -> Result<MemoryEntry> {
+        let _guard = self.write_lock.lock();
+        anyhow::ensure!(
+            self.get_entry(id)?.is_none(),
+            "记忆条目仍存在，无需撤销遗忘：{id}"
+        );
+        let history = self.history(id)?;
+        let last = history
+            .last()
+            .with_context(|| format!("记忆条目不存在: {id}"))?;
+        anyhow::ensure!(
+            last.change == "forgotten",
+            "记忆条目 {id} 未被遗忘，无可撤销的遗忘"
+        );
+        let tomb = self
+            .db
+            .get::<MemoryEntry>(TOMBSTONES, id)?
+            .with_context(|| format!("记忆条目不存在: {id}（无遗忘记录）"))?;
+        anyhow::ensure!(
+            last.change == "forgotten",
+            "记忆条目 {id} 未被遗忘，无可撤销的遗忘"
+        );
+        // 被遗忘时的内容 = 墓碑条目自身（它的内容就是遗忘那一刻的内容）
+        let row = MemoryHistoryRow {
+            version: tomb.version_label(),
+            title: tomb.title.clone(),
+            body: tomb.body.clone(),
+            tags: tomb.tags.clone(),
+            kind: tomb.kind,
+            changed_at: tomb.updated_at.clone(),
+            change: "forgotten".into(),
+        };
+        let e = self.materialize(&tomb, &row, "restored")?;
+        self.db.delete(TOMBSTONES, id)?;
+        Ok(e)
     }
 
     pub fn link(&self, from: &str, to: &str, relation: &str) -> Result<()> {
@@ -332,5 +548,4 @@ impl MemoryStore {
         }
         Some(dot / (na.sqrt() * nb.sqrt()))
     }
-
 }

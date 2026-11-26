@@ -95,7 +95,9 @@ impl TaskGraphModel {
                 Some(n.id.clone()),
                 &n.depends_on,
             );
-            if let Some(node)=g.nodes.get_mut(&n.id) { node.model_selection=n.model_selection.clone(); }
+            if let Some(node) = g.nodes.get_mut(&n.id) {
+                node.model_selection = n.model_selection.clone();
+            }
         }
         g
     }

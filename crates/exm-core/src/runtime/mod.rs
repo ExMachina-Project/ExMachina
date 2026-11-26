@@ -11,13 +11,23 @@ use tokio::sync::mpsc::unbounded_channel;
 
 pub const SYNC_REWRITE_LIMIT: u32 = 2;
 
+const TASK_PROGRESS_NOTE: &str = "## 长任务的公开进度\n执行工具、检索或多步任务前，先用一两句简洁正文说明接下来准备做什么及验证方式，再调用工具。过程较长或策略改变时简短更新真实进展。不要输出内部推理或凭空编造进度；普通问答直接回答，不为说明进度额外调用模型。";
+
 /// 单个工具调用的回填材料：回填文本 + 截图回灌组（图注 + 图像 data URL 清单）
 pub type ToolFeedback = (String, Option<(String, Vec<String>)>);
 
-/// 工具结果 → 回填文本（【报告】成功 / 【警告】失败），语义与审计一致
-fn tool_feedback(name: &str, r: &crate::tools::ToolResult) -> String {
+/// 工具结果 → 回填文本（【报告】成功 / 【警告】失败），语义与审计一致。
+///
+/// `call_id` 是本次调用在会话消息里落盘的回执标识（`ChatMessage.tool_calls[].callId`）。
+/// 成功结果尾部回显它，模型才**引用得到**本会话的真实回执——学习候选的证据核验
+/// （capability-parity 6.4：tool_receipt / test_result）以该标识为准；不回显则模型
+/// 只能凭空编造引用，证据门在生产中形同虚设。失败结果不回显：失败调用不是证据。
+pub(crate) fn tool_feedback(name: &str, r: &crate::tools::ToolResult, call_id: &str) -> String {
     if r.ok {
-        format!("【报告】工具 {name} 执行结果：\n{}", r.output)
+        format!(
+            "【报告】工具 {name} 执行结果：\n{}\n〔回执 {call_id}〕",
+            r.output
+        )
     } else {
         format!(
             "【警告】工具 {name} 执行失败：{}",
@@ -105,7 +115,6 @@ impl AgentRuntime {
     pub fn default_target(&self) -> (Arc<dyn LlmProvider>, String) {
         (self.provider.clone(), self.model.clone())
     }
-
 }
 
 // ---------------------------------------------------------------- 域分文件

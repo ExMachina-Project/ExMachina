@@ -20,7 +20,10 @@ fn sniff_format(bytes: &[u8]) -> Option<&'static str> {
         Some("png")
     } else if bytes.len() >= 2 && bytes[..2] == [0xFF, 0xD8] {
         Some("jpg")
-    } else if bytes.len() >= 12 && bytes[..4] == [0x52, 0x49, 0x46, 0x46] && bytes[8..12] == [0x57, 0x45, 0x42, 0x50] {
+    } else if bytes.len() >= 12
+        && bytes[..4] == [0x52, 0x49, 0x46, 0x46]
+        && bytes[8..12] == [0x57, 0x45, 0x42, 0x50]
+    {
         Some("webp")
     } else {
         None
@@ -28,7 +31,11 @@ fn sniff_format(bytes: &[u8]) -> Option<&'static str> {
 }
 
 impl ToolGateway {
-    pub(crate) async fn tool_image_gen(&self, session_id: &str, args: &serde_json::Value) -> ToolResult {
+    pub(crate) async fn tool_image_gen(
+        &self,
+        session_id: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         let prompt = args
             .get("prompt")
             .and_then(|v| v.as_str())
@@ -67,7 +74,9 @@ impl ToolGateway {
             Ok(Ok(b)) => b,
             Ok(Err(e)) => return ToolResult::err(format!("图像生成失败：{e}")),
             Err(_) => {
-                return ToolResult::err("图像生成超时（120 秒）：请精炼 prompt 后重试，或改用文字描述")
+                return ToolResult::err(
+                    "图像生成超时（120 秒）：请精炼 prompt 后重试，或改用文字描述",
+                )
             }
         };
         if bytes.is_empty() {
@@ -100,7 +109,11 @@ impl ToolGateway {
         let preview: String = prompt.chars().take(30).collect();
         let caption = format!(
             "生成图片：{preview}{}（{size}）",
-            if prompt.chars().count() > 30 { "…" } else { "" }
+            if prompt.chars().count() > 30 {
+                "…"
+            } else {
+                ""
+            }
         );
         if let Err(e) = self.store.outbox_push(session_id, "image", &rel, &caption) {
             return ToolResult::err(format!("发件箱登记失败：{e}"));

@@ -10,6 +10,7 @@ impl ToolGateway {
     /// - 启动/完成/失败事件进主会话事件流（可观测）
     pub(crate) async fn tool_spawn(
         &self,
+        parent_allowlist: &[ToolName],
         agent_id: &str,
         session_id: &str,
         args: &serde_json::Value,
@@ -35,7 +36,9 @@ impl ToolGateway {
         if task.is_empty() {
             return ToolResult::err("task 不能为空：请提供自包含任务书（目标、范围、期望产出）");
         }
-        // 工具白名单：显式指定或默认只读；强制剔除 spawn/agent_manage
+        // 工具白名单：显式指定或默认只读；强制剔除 spawn/agent_manage。
+        // 子任务不得扩权（capability-parity 5.5）：请求面与父 allowlist 求交——
+        // 请求超出父授权面的工具被裁掉；父 allowlist 为空（未收窄）保持请求原样。
         let requested: Vec<ToolName> = args
             .get("tools")
             .and_then(|v| v.as_array())
@@ -44,15 +47,25 @@ impl ToolGateway {
                     .filter_map(|x| x.as_str())
                     .filter_map(ToolName::parse)
                     .filter(|t| !matches!(t, ToolName::Spawn | ToolName::AgentManage))
+                    .filter(|t| parent_allowlist.is_empty() || parent_allowlist.contains(t))
                     .collect()
             })
             .unwrap_or_else(|| {
-                vec![
+                let default_ro = vec![
                     ToolName::Read,
                     ToolName::Grep,
                     ToolName::Glob,
                     ToolName::WebFetch,
-                ]
+                ];
+                if parent_allowlist.is_empty() {
+                    default_ro
+                } else {
+                    // 默认只读面 ∩ 父授权面（只收窄）
+                    default_ro
+                        .into_iter()
+                        .filter(|t| parent_allowlist.contains(t))
+                        .collect()
+                }
             });
         if requested.is_empty() {
             return ToolResult::err("工具白名单为空（或全部被剔除）：至少保留一个工具");
@@ -203,9 +216,17 @@ impl ToolGateway {
         session_id: &str,
         args: &serde_json::Value,
     ) -> ToolResult {
-        let fallback=self.compactor.read().clone();
-        let (provider,model)=match self.agent_aux_model(crate::model_routing::ModelPurpose::Summary,"压缩会话历史",fallback).await {
-            Ok(value)=>value,Err(e)=>return ToolResult::err(format!("压缩模型不可用：{e}")),
+        let fallback = self.compactor.read().clone();
+        let (provider, model) = match self
+            .agent_aux_model(
+                crate::model_routing::ModelPurpose::Summary,
+                "压缩会话历史",
+                fallback,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => return ToolResult::err(format!("压缩模型不可用：{e}")),
         };
         let keep = args
             .get("keepRecent")
