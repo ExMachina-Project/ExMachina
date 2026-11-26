@@ -10,9 +10,11 @@ import type {
   SessionLedger,
   Statement,
   TaskGraph,
+  TerminalJobSnapshot,
   ToolCallItem,
+  RunProgress,
 } from "./types";
-import type { GatewayConfig, GroupMeta, PlanAppliedItem, PlanInfo, QueuedTaskItem, RecallHit, SpawnBgItem, TodoItem } from "./api";
+import type { ContextSource, ContextSourceGap, GatewayConfig, GroupMeta, PlanAppliedItem, PlanInfo, QueuedTaskItem, RecallHit, SpawnBgItem, TodoItem, WorkflowRelation } from "./api";
 import type { ExmClient } from "./api/client";
 import type { Translate } from "./translate";
 
@@ -58,6 +60,12 @@ export interface ExmState {
   liveParts: Record<string, LivePart[]>;
   /** 当前轮工具执行轨迹（编程软件式过程透明；run.finished 后并入最终消息） */
   runToolCalls: ToolCallItem[];
+  /** Core-provided run status; never inferred from model output. */
+  runProgress: RunProgress | null;
+  /** Session/workspace-scoped background terminal processes. */
+  terminalJobs: TerminalJobSnapshot[];
+  /** Apply the session-detail activity and terminal-job snapshot without side effects. */
+  applyActivitySnapshot: (sessionId: string, events?: WsEvent[], terminalJobs?: TerminalJobSnapshot[], running?: boolean) => void;
   /** 待人工审批单（聊天内联裁决） */
   approvals: ApprovalItem[];
   /** 计划模式（spec plan-mode WebUI 卡片）：当前会话计划数据 + 拉取防抖 */
@@ -68,6 +76,24 @@ export interface ExmState {
   planDirtyAt: number;
   refreshPlan: (sessionId: string) => Promise<void>;
   decidePlan: (action: "approve" | "reject" | "setMode", plan?: boolean) => Promise<void>;
+  /** 会话工作流关联视图（capability-parity 4.6）：goal/spec/plan 三层只读徽标条
+   *  数据源——关系是派生视图，事实仍在 workflow.* 事件；写操作走 CLI/聊天命令。 */
+  workflow: WorkflowRelation | null;
+  refreshWorkflow: (sessionId: string) => Promise<void>;
+  /** 上下文来源（capability-parity 6.3）：文件/记忆/检索/技能的清单——状态、禁用位与
+   *  缺失原因。前端不自算任何状态：清单每次整表向 Core 取（GET /sessions/:id/context），
+   *  停用/恢复/刷新打 Core 的同一治理接口——通道 /context 与 CLI exm context 共用同一事实源。
+   *  null = 尚未成功取到（会话不存在、项目会话未经项目连接等）：界面显示「暂不可用」，
+   *  不伪造空清单（空清单会被读成「没有来源」）。 */
+  contextSources: ContextSource[] | null;
+  /** 整层缺席的文件来源及原因（Core 给出的事实；未绑定项目 → 没有项目层）。
+   *  与 contextSources 同生同灭：清单取到时一并更新，取不到时保持原值。 */
+  contextGaps: ContextSourceGap[];
+  refreshContextSources: (sessionId: string) => Promise<void>;
+  /** 停用/恢复某来源的**自动注入**；清单以 Core 回传为准（不做乐观更新） */
+  setContextSource: (sessionId: string, key: string, disabled: boolean) => Promise<void>;
+  /** 单来源刷新。失败不抛（Core 用 200 + ok=false 回报）；返回是否成功与 Core 给的失败原因 */
+  refreshContextSource: (sessionId: string, key: string) => Promise<{ ok: boolean; error: string }>;
   /** 任务清单（spec agent-todo）：todo.updated 事件快照 */
   todo: { count: number; doneCount: number; allDone: boolean; items: TodoItem[] } | null;
   /** 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件维护 */
@@ -91,6 +117,8 @@ export interface ExmState {
   createGroup: (body: { name: string; id?: string; description?: string }) => Promise<void>;
   refreshAgents: () => Promise<void>;
   selectSession: (id: string) => Promise<void>;
+  /** Refresh selected-session history only; stale responses cannot replace newer live events. */
+  refreshSessionMessages: (id: string) => Promise<void>;
   newSession: () => Promise<void>;
   send: (text: string, images?: string[], mode?: string | null, agent?: string) => Promise<boolean>;
   /** 会话列表已完成首次加载（骨架屏判定） */
@@ -148,6 +176,29 @@ function appendPart(map: Record<string, LivePart[]>, agent: string, part: LivePa
   return { ...map, [agent]: list };
 }
 
+function terminalSnapshot(value: unknown): TerminalJobSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const job = value as Partial<TerminalJobSnapshot>;
+  const statuses: TerminalJobSnapshot["status"][] = ["running", "exited", "cancelled", "timedOut", "failed", "interrupted"];
+  if (typeof job.taskId !== "string" || !job.taskId || !statuses.includes(job.status as TerminalJobSnapshot["status"])) return null;
+  return {
+    taskId: job.taskId,
+    command: String(job.command ?? ""),
+    status: job.status as TerminalJobSnapshot["status"],
+    startedAtMs: Number(job.startedAtMs ?? 0),
+    ...(typeof job.finishedAtMs === "number" ? { finishedAtMs: job.finishedAtMs } : {}),
+    ...(typeof job.exitCode === "number" ? { exitCode: job.exitCode } : {}),
+    outputPreview: String(job.outputPreview ?? ""),
+    outputBytes: Number(job.outputBytes ?? 0),
+    outputTruncated: Boolean(job.outputTruncated),
+    ...(typeof job.error === "string" ? { error: job.error } : {}),
+  };
+}
+
+function orderTerminalJobs(jobs: TerminalJobSnapshot[]): TerminalJobSnapshot[] {
+  return [...jobs].sort((a, b) => b.startedAtMs - a.startedAtMs).slice(0, 32);
+}
+
 /** 会话列表默认选中：跳过子会话（自动落到最近的主会话） */
 function firstMainSession(list: Session[]): Session | undefined {
   return list.find((s) => !s.title.startsWith("sub:")) ?? list[0];
@@ -158,7 +209,8 @@ type StoreApi = Pick<ExmClient["api"], "listSessions" | "agents" | "getConfig" |
   | "getPlan" | "decidePlan" | "listApprovals" | "pinSession" | "sessionTokens" | "sessionArchive" | "listArchivedSessions"
   | "listAllSessions" | "batchSessions" | "renameSession" | "deleteSession" | "searchSessions" | "stopSession"
   | "forkSession" | "editSession" | "sessionSnapshots" | "evidence" | "sessionEvents" | "decidePlan" | "createGroup"
-  | "setGroupModel" | "setAgentModel" | "groupAgents" | "listSingles" | "getTarget" | "llmProfiles" | "decidePlan">;
+  | "setGroupModel" | "setAgentModel" | "groupAgents" | "listSingles" | "getTarget" | "llmProfiles" | "decidePlan" | "getWorkflow"
+  | "getContextSources" | "decideContextSource">;
 
 interface Lifecycle {
   ws: WebSocket | null;
@@ -173,6 +225,7 @@ interface Lifecycle {
   wsWatch: ReturnType<typeof setInterval> | null;
   wsHeartbeat: ReturnType<typeof setInterval> | null;
   wsRetry: ReturnType<typeof setTimeout> | null;
+  replayingActivity: boolean;
 }
 
 function socketRuntime(life: Lifecycle, api: StoreApi, serverBase: () => string, accessKey: () => string,
@@ -205,8 +258,8 @@ function socketRuntime(life: Lifecycle, api: StoreApi, serverBase: () => string,
         if (gen !== life.wsGen || state().sessionId !== sessionId || life.selectSeq !== sequence || life.stateRevision !== revision) return;
         const running = session.running ?? (graph.nodes ?? []).some((node) => ["running", "dispatched", "syncing", "arbitrating"].includes(String(node.status ?? "")));
         state().setWs(true);
-        update({ messages, graph: graph.nodes?.length ? graph : null, running, ledger: session.ledger,
-          ...(!running ? { liveOrch: "", liveThinking: "", liveParts: {}, runToolCalls: [] } : {}) });
+        update({ messages, graph: graph.nodes?.length ? graph : null, running, ledger: session.ledger });
+        state().applyActivitySnapshot(sessionId, session.activity?.events, session.terminalJobs, running);
       }).catch(() => undefined);
     };
     socket.onclose = () => {
@@ -265,7 +318,7 @@ const belongs = (session: Session) => !project || session.workspace === project.
 let disposed = false;
 
 const lifecycle: Lifecycle = { ws: null, wsGen: 0, selectSeq: 0, stateRevision: 0, approvalRevision: 0, approvalRequest: 0,
-  localMessageSeq: 0, wsBackoff: 0, wsLastFrame: 0, wsWatch: null, wsHeartbeat: null, wsRetry: null };
+  localMessageSeq: 0, wsBackoff: 0, wsLastFrame: 0, wsWatch: null, wsHeartbeat: null, wsRetry: null, replayingActivity: false };
 
 async function createSession(target?: string) {
   const selection = lifecycle.selectSeq;
@@ -293,12 +346,17 @@ const useExm = create<ExmState>((set, get) => ({
   liveThinking: "",
   liveParts: {},
   runToolCalls: [],
+  runProgress: null,
+  terminalJobs: [],
   approvals: [],
   plan: null,
   planSession: null,
   planApplied: null,
   planPending: false,
   planDirtyAt: 0,
+  workflow: null,
+  contextSources: null,
+  contextGaps: [],
   todo: null,
   spawns: [],
   taskQueue: null,
@@ -354,6 +412,8 @@ const useExm = create<ExmState>((set, get) => ({
       liveThinking: "",
       liveParts: {},
       runToolCalls: [],
+      runProgress: null,
+      terminalJobs: [],
       approvals: [],
       messages: [],
     });
@@ -381,6 +441,8 @@ const useExm = create<ExmState>((set, get) => ({
       liveThinking: "",
       liveParts: {},
       runToolCalls: [],
+      runProgress: null,
+      terminalJobs: [],
       approvals: [],
       messages: [],
     });
@@ -407,6 +469,8 @@ const useExm = create<ExmState>((set, get) => ({
     // 旧快照整体覆盖会抹掉新状态（切页面后回复消失 bug 的一半根因）。
     // 每次选择递增序号，只有最新请求的响应才允许落盘。
     const seq = ++lifecycle.selectSeq;
+    const wasSelected = get().sessionId === id;
+    const activityRevision = lifecycle.stateRevision;
     const [messages, graph, session] = await Promise.all([
       api.messages(id),
       api.graph(id),
@@ -414,6 +478,7 @@ const useExm = create<ExmState>((set, get) => ({
     ]);
     if (seq !== lifecycle.selectSeq || disposed) return;
     if (!belongs(session)) throw new Error("该会话不属于当前项目");
+    const snapshotIsCurrent = !wasSelected || lifecycle.stateRevision === activityRevision;
     if (project) {
       try { sessionStorage.setItem(`exm.desktop.session.${project.id}`, session.id); } catch { /* storage unavailable */ }
     }
@@ -421,28 +486,41 @@ const useExm = create<ExmState>((set, get) => ({
     set({
       sessionId: id,
       selectedSession: session,
-      messages,
-      graph: graph.nodes?.length ? graph : null,
-      ledger: session.ledger,
-      liveOrch: "",
-      liveThinking: "",
-      liveParts: {},
-      runToolCalls: [],
-      approvals: [],
-      plan: null,
-      planSession: id,
-      planApplied: null,
-      planPending: false,
-      todo: null,
-      spawns: [],
-      taskQueue: null,
-      timeline: [],
-      timelineSession: null,
-      running: session.running ?? (graph.nodes ?? []).some((n) =>
-        ["running", "dispatched", "syncing", "arbitrating"].includes(n.status)),
+      ...(snapshotIsCurrent ? {
+        messages,
+        graph: graph.nodes?.length ? graph : null,
+        ledger: session.ledger,
+        liveOrch: "",
+        liveThinking: "",
+        liveParts: {},
+        runToolCalls: [],
+        runProgress: null,
+        terminalJobs: [],
+        approvals: [],
+        plan: null,
+        planSession: id,
+        planApplied: null,
+        planPending: false,
+        workflow: null,
+        contextSources: null,
+        contextGaps: [],
+        todo: null,
+        spawns: [],
+        taskQueue: null,
+        timeline: [],
+        timelineSession: null,
+        running: session.running ?? (graph.nodes ?? []).some((n) => ["running", "dispatched", "syncing", "arbitrating"].includes(n.status)),
+      } : { running: get().running }),
     });
+    if (snapshotIsCurrent) {
+      get().applyActivitySnapshot(id, session.activity?.events as WsEvent[] | undefined, session.terminalJobs, get().running);
+    }
     // 计划模式：进会话拉取当前清单与模式位（后续靠 plan.* 事件增量刷新）
     void get().refreshPlan(id);
+    // 工作流关联视图（capability-parity 4.6）：goal/spec/plan 只读徽标条
+    void get().refreshWorkflow(id);
+    // 上下文来源清单（capability-parity 6.3）：切会话即整表取；之后靠 context.sources* 事件失效刷新
+    void get().refreshContextSources(id);
     // 任务清单回放（spec agent-todo）：todo 快照只由事件维护，切会话/刷新后
     // 从事件流尾部找回最近一次 todo.updated（含清空语义——找到空清单即无卡）
     void api.sessionEvents(id, 200).then((evts) => {
@@ -486,6 +564,16 @@ const useExm = create<ExmState>((set, get) => ({
     connection.connect();
   },
 
+  refreshSessionMessages: async (id) => {
+    if (get().sessionId !== id) return;
+    const sequence = lifecycle.selectSeq;
+    const revision = lifecycle.stateRevision;
+    try {
+      const messages = await api.messages(id);
+      if (get().sessionId === id && sequence === lifecycle.selectSeq && revision === lifecycle.stateRevision && !disposed) set({ messages });
+    } catch { /* Preserve the last successful history when a refresh fails. */ }
+  },
+
   newSession: () => createSession(project ? get().selectedSession?.groupId : undefined),
 
   send: async (text, images, sendMode, agent): Promise<boolean> => {
@@ -504,6 +592,7 @@ const useExm = create<ExmState>((set, get) => ({
         liveThinking: "",
         liveParts: {},
         runToolCalls: [],
+        runProgress: null,
         timeline: [],
         timelineSession: null,
         lastRecall: [],
@@ -597,6 +686,38 @@ const useExm = create<ExmState>((set, get) => ({
     } catch { /* 会话删除等场景静默 */ }
   },
 
+  /** 拉取工作流关联视图（capability-parity 4.6）：goal/spec/plan 只读快照 */
+  refreshWorkflow: async (sessionId) => {
+    try {
+      const relation = await api.getWorkflow(sessionId);
+      if (get().sessionId === sessionId) set({ workflow: relation });
+    } catch { /* 会话删除等场景静默 */ }
+  },
+
+  /** 上下文来源清单（capability-parity 6.3）：只向 Core 取事实，不在前端拼状态。
+   *  取不到时保持原值（初次失败即保持 null → 界面显示「暂不可用」，而不是空清单）。
+   *  迟到的响应不落到别的会话上（切走后到达的清单丢弃）。 */
+  refreshContextSources: async (sessionId) => {
+    try {
+      const r = await api.getContextSources(sessionId);
+      if (get().sessionId === sessionId) set({ contextSources: r.sources, contextGaps: r.gaps ?? [] });
+    } catch { /* 会话删除 / 项目会话未经项目连接等：保持原值 */ }
+  },
+
+  setContextSource: async (sessionId, key, disabled) => {
+    // 不做乐观更新：「原状态」只有 Core 知道，前端猜会在失败时留下错的状态
+    const r = await api.decideContextSource(sessionId, disabled ? "disable" : "enable", key);
+    if (get().sessionId === sessionId) set({ contextSources: r.sources });
+  },
+
+  refreshContextSource: async (sessionId, key) => {
+    const r = await api.decideContextSource(sessionId, "refresh", key);
+    // 不在前端拼清单：单项刷新后整表重新向 Core 取（其余来源 Core 保证未动，
+    // 顺序 / 原状态 / 禁用叠加都以 Core 为准）
+    if (get().sessionId === sessionId) await get().refreshContextSources(sessionId);
+    return "ok" in r ? { ok: r.ok, error: r.error ?? "" } : { ok: true, error: "" };
+  },
+
   decidePlan: async (action, plan) => {
     const sid = get().sessionId;
     if (!sid) return;
@@ -619,6 +740,38 @@ const useExm = create<ExmState>((set, get) => ({
   },
 
   clearSpawns: () => set({ spawns: [] }),
+  applyActivitySnapshot: (sessionId, events, terminalJobs, running) => {
+    if (get().sessionId !== sessionId) return;
+    const parsedJobs = orderTerminalJobs((terminalJobs ?? []).map(terminalSnapshot).filter((job): job is TerminalJobSnapshot => job !== null));
+    set({
+      ...(terminalJobs !== undefined ? { terminalJobs: parsedJobs } : {}),
+      ...(running === true && events !== undefined ? {
+        liveOrch: "", liveThinking: "", liveParts: {}, runToolCalls: [], runProgress: null,
+        spawns: [], timeline: [], timelineSession: null,
+      } : {}),
+      ...(running === false
+        ? { liveOrch: "", liveThinking: "", liveParts: {}, runToolCalls: [], runProgress: null }
+        : {}),
+    });
+    if (running !== true || events === undefined) return;
+
+    // This is a state-only replay of the server's bounded active-run snapshot. It
+    // must not trigger API fetches, notifications, or make a stale snapshot active.
+    lifecycle.replayingActivity = true;
+    try {
+      for (const event of events) {
+        if (event.sessionId !== sessionId) continue;
+        if (["run.progress", "orchestrator.token", "orchestrator.thinking", "unit.thinking", "unit.token", "unit.finished", "tool.call", "tool.result", "spawn.started", "spawn.finished", "terminal.started", "terminal.updated", "terminal.finished", "model.selected", "model.used", "dispatch.sent", "sync.received"].includes(event.type)) {
+          get().handleEvent(event);
+        }
+      }
+    } finally {
+      lifecycle.replayingActivity = false;
+    }
+    // Events describe content/progress only; run state comes from the authoritative
+    // session detail response, never from a historical event's implicit effects.
+    set({ running: true, ...(terminalJobs !== undefined ? { terminalJobs: parsedJobs } : {}) });
+  },
 
   navRequest: null,
   focusMessage: null,
@@ -692,7 +845,14 @@ const useExm = create<ExmState>((set, get) => ({
 
   handleEvent: (evt) => {
     const p = evt.payload as Record<string, unknown>;
-    if (evt.sessionId === get().sessionId) lifecycle.stateRevision += 1;
+    if (evt.sessionId === get().sessionId && !lifecycle.replayingActivity) lifecycle.stateRevision += 1;
+    if (evt.sessionId === get().sessionId && evt.type.startsWith("terminal.")) {
+      const job = terminalSnapshot(p);
+      if (job) {
+        set({ terminalJobs: orderTerminalJobs([job, ...get().terminalJobs.filter((item) => item.taskId !== job.taskId)]) });
+      }
+      return;
+    }
     // 审批不受当前会话限制：子会话（子个体）里的审批请求同样要在视图内可裁决
     if (evt.type === "approval.required") {
       lifecycle.approvalRevision += 1;
@@ -777,6 +937,14 @@ const useExm = create<ExmState>((set, get) => ({
       set({ spawns: [next, ...get().spawns.filter((s) => s.spawnId !== spawnId)] });
       return;
     }
+    // 上下文来源事件（capability-parity 6.3）：治理写操作（context.sources.updated）、
+    // 单来源刷新（context.source.refreshed）与每轮注入点汇报（context.sources）都只作
+    // 失效信号——清单整表向 Core 重取；前端不从事件载荷拼状态（载荷不含禁用叠加后的视图）
+    if (evt.type === "context.sources.updated" || evt.type === "context.sources" || evt.type === "context.source.refreshed") {
+      const sid = evt.sessionId || get().sessionId;
+      if (sid && sid === get().sessionId) void get().refreshContextSources(sid);
+      return;
+    }
     // 计划事件（spec plan-mode：WebUI 卡片实时刷新，不靠轮询）
     // 卡片只跟随当前会话：子会话的计划条目不混入本视图（切过去自然加载）
     if (evt.type.startsWith("plan.")) {
@@ -825,6 +993,17 @@ const useExm = create<ExmState>((set, get) => ({
     }
     if (evt.sessionId !== get().sessionId) return;
     switch (evt.type) {
+      case "run.progress": {
+        const stage = p.stage;
+        if (stage !== "preparing" && stage !== "planning" && stage !== "working" && stage !== "model") break;
+        set({ running: lifecycle.replayingActivity ? get().running : true, runProgress: {
+          stage,
+          message: String(p.message ?? ""),
+          ...(typeof p.agentId === "string" ? { agentId: p.agentId } : {}),
+          ...(typeof p.announce === "boolean" ? { announce: p.announce } : {}),
+        } });
+        break;
+      }
       case "model.selected":
       case "model.used": {
         const model = [p.profile, p.model].filter(Boolean).join("/");
@@ -885,7 +1064,7 @@ const useExm = create<ExmState>((set, get) => ({
         break;
       }
       case "unit.finished": {
-        if (p.direct) set({ running: false });
+        if (p.direct && !lifecycle.replayingActivity) set({ running: false });
         // 子会话实时视图收尾：清实时段并回拉持久消息（含有序步骤）
         const agent = String(p.agentId ?? "");
         const parts = { ...get().liveParts };
@@ -895,6 +1074,7 @@ const useExm = create<ExmState>((set, get) => ({
         // 回填代际守卫（同 run.finished）：回拉期间的选择切换不得被旧快照覆盖
         const refilSeq2 = lifecycle.selectSeq;
         const revision2 = lifecycle.stateRevision;
+        if (lifecycle.replayingActivity) break;
         void (async () => {
           try {
             const msgs = await api.messages(sid2);
@@ -925,7 +1105,7 @@ const useExm = create<ExmState>((set, get) => ({
           ],
         });
         // 子会话是运行中新出现的会话：列表补拉一次（派发频率低，开销可忽略）
-        if (childSessionId && !get().sessions.some((s) => s.id === childSessionId)) {
+        if (!lifecycle.replayingActivity && childSessionId && !get().sessions.some((s) => s.id === childSessionId)) {
           void api
             .listSessions()
             .then((list) => set({ sessions: list }))
@@ -996,6 +1176,7 @@ const useExm = create<ExmState>((set, get) => ({
         set({ ledger: p as unknown as SessionLedger });
         break;
       case "run.finished": {
+        if (lifecycle.replayingActivity) break;
         options.onEvent?.(evt, get());
         const statements = (p.statements ?? []) as Statement[];
         // 产物附件（send-file 能力）：控制台会话的文件投递——IM 通道由适配器
@@ -1014,6 +1195,7 @@ const useExm = create<ExmState>((set, get) => ({
           liveThinking: "",
           liveParts: {},
           runToolCalls: [],
+          runProgress: null,
           messages: [
             ...get().messages,
             {
@@ -1053,12 +1235,14 @@ const useExm = create<ExmState>((set, get) => ({
         break;
       }
       case "run.error":
+        if (lifecycle.replayingActivity) break;
         set({
           running: false,
           liveOrch: "",
           liveThinking: "",
           liveParts: {},
           runToolCalls: [],
+          runProgress: null,
           timelineSession: evt.sessionId,
           timeline: [...get().timeline, { kind: "error", text: tr("store.tl.error", { msg: String(p.message) }) }],
         });

@@ -1,6 +1,6 @@
 /** 对话视图（整合控制台）：左栏 = 组切换 + 会话列表；右侧 = 消息流 + 实时流 + 输入 */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Dropdown, Input, Modal, Select, Spin, message } from "antd";
+import { Alert, Button, Card, Dropdown, Input, Modal, Select, message } from "antd";
 import { ApartmentOutlined, ArrowLeftOutlined, CloudUploadOutlined, DeleteOutlined, DeploymentUnitOutlined, EditOutlined, ExportOutlined, InboxOutlined, MessageOutlined, MoreOutlined, PaperClipOutlined, PlusOutlined, PushpinOutlined, RobotOutlined, SearchOutlined, TeamOutlined, UnorderedListOutlined, UserOutlined } from "@ant-design/icons";
 import { createPortal } from "react-dom";
 import { useIsNarrow, NARROW_QUERY } from "../useIsNarrow";
@@ -20,6 +20,7 @@ import { relativeTime } from "../time";
 interface TargetInfo { mode: "group" | "single"; id: string; name?: string }
 
 import { PlanCard } from "../components/PlanCard";
+import { ContextSourcesCard } from "../components/ContextSourcesCard";
 import { TaskGraphDag } from "../components/TaskGraphDag";
 import { Markdown } from "../components/Markdown";
 import { AsciiMeter } from "../components/Ascii";
@@ -44,12 +45,17 @@ export function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; tur
   const imSender = isUser && m.agentId?.startsWith("im:") ? m.agentId.slice(3) : null;
   // 群聊旁听：agentId 带 imctx: 前缀 = 门控期记录的他人群消息（Agent 可见上下文，非直接指令）
   const ambientSender = isUser && m.agentId?.startsWith("imctx:") ? m.agentId.slice(6) : null;
+  // 运行中引导（capability-parity 3.5）：agentId 带 steer: 前缀 = 轮次运行中插入的
+  // steering 输入——不另起轮次，只引导当前任务；刷新后靠此标记区分普通输入
+  const steerSource = isUser && m.agentId?.startsWith("steer:") ? m.agentId.slice(6) : null;
   const title = isUser
     ? autoOrigin
       ? tb("chat.role.auto")
       : ambientSender !== null
         ? ambientSender || tb("chat.role.ambient")
-        : imSender ?? tb("chat.role.user")
+        : steerSource !== null
+          ? tb("chat.role.steer")
+          : imSender ?? tb("chat.role.user")
     : m.role === "orchestrator"
       ? (orchLabel ?? tb("chat.role.orchestrator"))
       : (m.agentId ?? tb("chat.role.system"));
@@ -64,6 +70,7 @@ export function MessageBubble({ m, turn, ops, orchLabel }: { m: ChatMessage; tur
         {isUser ? <UserOutlined /> : <RobotOutlined />} <b>{title}</b>
         {autoOrigin && <span className="auto-tag">{autoOrigin}</span>}
         {ambientSender !== null && <span className="auto-tag ambient-tag">{tb("chat.role.ambient")}</span>}
+        {steerSource !== null && <span className="auto-tag steer-tag">{steerSource || "steering"}</span>}
         {turn != null && <span className="msg-turn mono">#{turn}</span>}
         {time && <span className="msg-time mono">{time}</span>}
         <button
@@ -158,7 +165,7 @@ export { relativeTime } from "../time";
 
 export function ChatView(): React.ReactElement {
   const t = useT();
-  const {     messages, focusMessage, liveOrch, liveThinking, liveParts, runToolCalls, approvals,
+  const {     messages, focusMessage, liveOrch, liveThinking, liveParts, runToolCalls, runProgress, terminalJobs, approvals,
     timeline, timelineSession, running, send, wsConnected, decideApproval,
     sessions, sessionId, selectSession, newSession,
     groups, activeGroup, setTarget, agents,
@@ -166,18 +173,49 @@ export function ChatView(): React.ReactElement {
     loadGroups,
     sessionsLoaded,
     plan, planApplied, planPending, decidePlan,
+    workflow,
+    contextSources, contextGaps, setContextSource, refreshContextSource,
     todo,
     taskQueue,
     spawns, clearSpawns,
     graph,
   } = useExm();
-  const streamKey = useMemo(() => ({ liveOrch, liveThinking, liveParts, runToolCalls, timeline }), [liveOrch, liveThinking, liveParts, runToolCalls, timeline]);
+  const streamKey = useMemo(() => ({ liveOrch, liveThinking, liveParts, runToolCalls, timeline, runProgress, terminalJobs, spawns }), [liveOrch, liveThinking, liveParts, runToolCalls, timeline, runProgress, terminalJobs, spawns]);
   const { bottomRef, stickRef, showBottomBtn, usage } = useChatStream(sessionId ?? undefined, messages, running, approvals, streamKey);
   const { images, addImage, removeImage, setImages } = useAttachments(sessionId);
 
   // 会话编排图内嵌（graph-inline）：当前会话有编排图时在消息流上方给可折叠卡——
   // 看图不必跳「编排」页（那页保留全局会话切换视角）
   const [dagOpen, setDagOpen] = useState(true);
+  // 上下文来源卡（6.3）：清单每次向 Core 取（null = 尚未成功拉取过）；
+  // 写操作的回执如实呈现——刷新失败是 Core 的 200 + ok=false，不是异常
+  const onContextDisable = useCallback((key: string) => {
+    const sid = sessionId;
+    if (!sid) return;
+    setContextSource(sid, key, true).catch((e: unknown) => message.error(t("ctx.actionFailed", { error: String(e).slice(0, 160) })));
+  }, [sessionId, setContextSource, t]);
+  const onContextEnable = useCallback((key: string) => {
+    const sid = sessionId;
+    if (!sid) return;
+    setContextSource(sid, key, false).catch((e: unknown) => message.error(t("ctx.actionFailed", { error: String(e).slice(0, 160) })));
+  }, [sessionId, setContextSource, t]);
+  const onContextRefresh = useCallback(async (key: string) => {
+    const sid = sessionId;
+    if (!sid) return;
+    try {
+      const { ok, error } = await refreshContextSource(sid, key);
+      const isFile = contextSources?.find((s) => s.key === key)?.kind === "file";
+      if (!ok) {
+        message.warning(t("ctx.refreshFailed", { key, error }));
+      } else if (isFile) {
+        message.success(t("ctx.refreshOk", { key }));
+      } else {
+        message.info(t("ctx.refreshObserved", { key }));
+      }
+    } catch (e) {
+      message.error(t("ctx.actionFailed", { error: String(e).slice(0, 160) }));
+    }
+  }, [sessionId, refreshContextSource, contextSources, t]);
   const [target, setTargetInfo] = useState<TargetInfo>({ mode: "group", id: activeGroup });
   const [singles, setSinglesList] = useState<{ identifier: string; name: string; modelHint?: string | null }[]>([]);
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
@@ -249,7 +287,6 @@ export function ChatView(): React.ReactElement {
 
   const [text, setText] = useState("");
   const sendPendingRef = useRef(false);
-  const [expandedSpawns, setExpandedSpawns] = useState<string[]>([]);
   /** `@` 文件提及（对话即编码）：输入 @ 触发候选弹层，选中插入路径 */
   const [mention, setMention] = useState<MentionState>({ open: false, query: "", start: 0 });
   const [mentionIdx, setMentionIdx] = useState(0);
@@ -908,7 +945,26 @@ export function ChatView(): React.ReactElement {
             UI 只呈现状态徽标（plan.mode 事件实时刷新），不再提供硬开关；
             计划批准后自动回放执行并回执行模式，全程无需手动切换 */}
         <div className="plan-mode-bar">
-          {plan?.mode === "plan" && (
+          {/* 工作流关联徽标条（capability-parity 4.6）：goal/spec/plan 三层同源
+              只读呈现——写操作走 CLI（exm goal/spec/plan）或聊天命令（/goal /spec
+              /plan），WebUI 不承担第二事实源；workflow.* 事件失效后自动刷新 */}
+          {workflow?.goal && (
+            <span className={`wf-badge wf-goal-${workflow.goal.status}`} title={t("workflow.goalHint", { objective: workflow.goal.objective })}>
+              🎯 {t("workflow.goalBadge", {
+                status: t(`workflow.goalStatus.${workflow.goal.status}`),
+                revision: String(workflow.goal.revision),
+              })}
+            </span>
+          )}
+          {workflow?.spec && (
+            <span className="wf-badge wf-spec" title={t("workflow.specHint", { objective: workflow.spec.objective })}>
+              📄 {t("workflow.specBadge", {
+                revision: String(workflow.spec.revision),
+                linked: workflow.spec.goalId ? t("workflow.linked") : t("workflow.unlinked"),
+              })}
+            </span>
+          )}
+          {workflow?.planMode && (
             <span className="plan-mode-hint" title={t("plan.modeHint")}>
               📋 {t("plan.modePlan")}
             </span>
@@ -935,54 +991,18 @@ export function ChatView(): React.ReactElement {
             ))}
           </div>
         )}
-        {/* 任务队列（task-queue）：智能体入队的新任务（并行/排队）实时状态条 */}
+        {/* 任务队列（capability-parity 3.5 六态呈现）：queued/running 实时状态条 +
+            blocked/pending_recovery 异常态提示（done/failed/cancelled 收束后不常驻） */}
         {taskQueue && (taskQueue.running > 0 || taskQueue.queued > 0) && (
           <div className="tq-strip">
             {taskQueue.items
-              .filter((it) => it.status === "queued" || it.status === "running")
+              .filter((it) => it.status === "queued" || it.status === "running" || it.status === "blocked" || it.status === "pending_recovery")
               .map((it) => (
-                <span key={it.id} className={`tq-chip tq-${it.status}`}>
-                  {it.status === "running" ? "⚙️" : "⏳"}
-                  {it.runMode === "parallel" ? "[并行]" : "[队列]"} {it.task.length > 40 ? `${it.task.slice(0, 40)}…` : it.task}
+                <span key={it.id} className={`tq-chip tq-${it.status}`} title={it.note || undefined}>
+                  {it.status === "running" ? "⚙️" : it.status === "blocked" ? "⛔" : it.status === "pending_recovery" ? "🛟" : "⏳"}
+                  {it.runMode === "parallel" ? "[并行]" : it.source === "webui" || it.source === "chat" || it.source === "cli" ? `[队列]` : "[队列]"} {it.task.length > 40 ? `${it.task.slice(0, 40)}…` : it.task}
                 </span>
               ))}
-          </div>
-        )}
-        {/* 后台子任务卡（spec subagent-spawn WebUI 呈现）：运行中 spinner + 终态展开 + 清除 */}
-        {spawns.length > 0 && (
-          <div className="spawns-strip">
-            {spawns.map((s) => (
-              <div key={s.spawnId} className={`spawn-card spawn-${s.status}`}>
-                <div
-                  className="spawn-card-head"
-                  onClick={() => setExpandedSpawns((prev) => (prev.includes(s.spawnId) ? prev.filter((x) => x !== s.spawnId) : [...prev, s.spawnId]))}
-                >
-                  <span className="spawn-status-icon">
-                    {s.status === "running" ? (
-                      <Spin size="small" />
-                    ) : s.status === "done" ? (
-                      "✅"
-                    ) : s.status === "timeout" ? (
-                      "⏱"
-                    ) : (
-                      "❌"
-                    )}
-                  </span>
-                  <span className="spawn-preview">{s.preview || s.spawnId}</span>
-                  {s.status !== "running" && s.resultPreview && (
-                    <span className="spawn-expand-hint">
-                      {expandedSpawns.includes(s.spawnId) ? t("spawn.foldLess") : t("spawn.foldMore")}
-                    </span>
-                  )}
-                </div>
-                {s.status !== "running" && s.resultPreview && expandedSpawns.includes(s.spawnId) && (
-                  <pre className="spawn-result">{s.resultPreview}</pre>
-                )}
-              </div>
-            ))}
-            <Button type="link" size="small" className="spawn-clear" onClick={clearSpawns}>
-              {t("spawn.clear")}
-            </Button>
           </div>
         )}
         {plan && (plan.items.length > 0 || planPending) && (
@@ -1009,6 +1029,17 @@ export function ChatView(): React.ReactElement {
             {dagOpen && <TaskGraphDag graph={graph} />}
           </div>
         ) : null}
+        {/* 上下文来源卡（capability-parity 6.3）：文件/记忆/检索/技能四类来源的
+            状态、禁用位与缺失原因。事实源只有 Core——清单整表向 Core 取，
+            停用/恢复/重读打同一治理接口；通道 /context 与 CLI exm context 同源 */}
+        <ContextSourcesCard
+          sources={contextSources ?? []}
+          gaps={contextGaps}
+          loading={contextSources === null}
+          onDisable={onContextDisable}
+          onEnable={onContextEnable}
+          onRefresh={(key) => void onContextRefresh(key)}
+        />
         <ChatMessages
           renderMessages={renderMessages}
           running={running}
@@ -1023,6 +1054,10 @@ export function ChatView(): React.ReactElement {
           timeline={timeline}
           timelineSession={timelineSession}
           runToolCalls={runToolCalls}
+          runProgress={runProgress}
+          terminalJobs={terminalJobs}
+          spawns={spawns}
+          onClearSpawns={clearSpawns}
           approvals={approvals}
           sessionId={sessionId}
           showBottomBtn={showBottomBtn}

@@ -9,6 +9,7 @@ import { ToolCallList } from "../../client/src/components/ToolCall";
 import { MessageProcess, ProcessSteps } from "../../client/src/components/ProcessSteps";
 import { FileMentionPopup, mentionCandidates, type MentionState } from "../../client/src/components/FileMention";
 import { PlanCard } from "../../client/src/components/PlanCard";
+import { RunActivityPanel } from "../../client/src/components/RunActivityPanel";
 import { useAttachments } from "../../client/src/hooks/useAttachments";
 import { useChatStream } from "../../client/src/hooks/useChatStream";
 import type { ChatMessage } from "../../client/src/types";
@@ -37,7 +38,7 @@ export function DesktopChat({ onProject, workspace, active, contextVersion }: { 
   const { store: useExm, client: { api, workbenchTree } } = useProjectClient();
   const { message, modal } = App.useApp();
   const state = useExm();
-  const { sessionId, messages, running, liveOrch, liveThinking, liveParts, runToolCalls, timeline, approvals } = state;
+  const { sessionId, messages, running, liveOrch, liveThinking, liveParts, runToolCalls, runProgress, terminalJobs, spawns, timeline, approvals } = state;
   const roomMember = !!state.selectedSession?.collaborationId;
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -61,7 +62,7 @@ export function DesktopChat({ onProject, workspace, active, contextVersion }: { 
   const [mentionLoaded, setMentionLoaded] = useState(false);
   const mentionRequest = useRef(0);
   const attachments = useAttachments(sessionId);
-  const stream = useMemo(() => ({ liveOrch, liveThinking, liveParts, runToolCalls, timeline }), [liveOrch, liveThinking, liveParts, runToolCalls, timeline]);
+  const stream = useMemo(() => ({ liveOrch, liveThinking, liveParts, runToolCalls, timeline, runProgress, terminalJobs, spawns }), [liveOrch, liveThinking, liveParts, runToolCalls, timeline, runProgress, terminalJobs, spawns]);
   const scroll = useChatStream(sessionId ?? undefined, messages, running, approvals, stream);
   const loadContext = useCallback(async () => {
     const request = ++contextRequest.current;
@@ -195,6 +196,7 @@ export function DesktopChat({ onProject, workspace, active, contextVersion }: { 
           {!a.command.startsWith("[") && !isDestructiveCommand(a.command) && <><Button disabled={deciding.includes(a.approvalId)} onClick={() => void decide(a.approvalId, true, "session")}>本会话允许</Button><Button disabled={deciding.includes(a.approvalId)} onClick={() => void decide(a.approvalId, true, "allowlist")}>加入白名单</Button></>}
           <Button aria-label="拒绝" disabled={deciding.includes(a.approvalId)} danger onClick={() => void decide(a.approvalId, false)}>拒绝</Button></div>
       </article>)}
+      <RunActivityPanel running={running} progress={runProgress} terminalJobs={terminalJobs} spawns={spawns} onClearSpawns={() => state.clearSpawns()} />
       <div ref={scroll.bottomRef} />
     </div>
     {scroll.showBottomBtn && <Button className="desk-scroll-bottom" onClick={() => { scroll.stickRef.current = true; scroll.bottomRef.current?.scrollIntoView(); }}>回到最新消息 ↓</Button>}

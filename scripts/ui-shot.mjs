@@ -1,29 +1,10 @@
 #!/usr/bin/env node
-/**
- * UI 视觉验证（ui-visual-language / webui-ux-overhaul 6.1）：
- * puppeteer 全页截图 + 关键 DOM 断言（只锚结构性选择器，不锚文案与像素——主题改版不脆断）。
- *
- * 用法：node scripts/ui-shot.mjs [--base http://localhost:5173] [--out /tmp/opencode/exm-ui]
- * 前置：webui dev server（vite，代理 /api → 生产网关）或任一承载 WebUI 的地址。
- * 输出：<out>/<YYYY-MM-DD>/<view>.png + assert.json（断言结果清单）。
- */
-import { createRequire } from "node:module";
+/** Capture current WebUI routes and assert stable structural selectors. */
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-/** puppeteer-core 解析：项目内优先，回落工具目录（脚本独立于 webui 依赖树） */
-function loadPuppeteer() {
-  const require = createRequire(import.meta.url);
-  for (const base of [process.cwd(), "/tmp/opencode"]) {
-    try {
-      return require(path.join(base, "node_modules", "puppeteer-core"));
-    } catch { /* 尝试下一处 */ }
-  }
-  // 兜底：NODE_PATH 级解析（require 本身会查 node_modules）
-  return require("puppeteer-core");
-}
 const args = process.argv.slice(2);
 const argOf = (name, def) => {
   const i = args.indexOf(name);
@@ -36,36 +17,42 @@ const outputRelativeToDocs = path.relative(docsRoot, path.resolve(OUT_ROOT));
 if (!outputRelativeToDocs || (!outputRelativeToDocs.startsWith(`..${path.sep}`) && outputRelativeToDocs !== ".." && !path.isAbsolute(outputRelativeToDocs))) {
   throw new Error("UI artifacts must be written outside docs/; use a temporary directory.");
 }
-const puppeteer = loadPuppeteer();
 const KEY = process.env.EXM_KEY ?? "exmachina";
 
 /** 页面清单：hash → 结构断言（选择器存在性；不锚文案） */
 const VIEWS = [
-  // wait: 首屏数据量差异——chat 页拉会话列表+编排目标+遥测，冷启动常超 1.8s（实测 3~4s）
-  { name: "chat", hash: "#/chat", wait: 5000, selectors: [".chat-rail", ".session-list"] },
-  { name: "sessions", hash: "#/sessions", selectors: [".sessions-toolbar", ".sessions-table", ".sessions-th"] },
-  { name: "models", hash: "#/models", selectors: [".model-status-row", ".cap-badge"] },
-  { name: "nexus", hash: "#/nexus", selectors: [".nexus-topo-canvas", ".ant-segmented"] },
-  { name: "channels", hash: "#/channels", selectors: [".page-head"] },
-  { name: "groups", hash: "#/groups", selectors: [".page-head"] },
-  { name: "memory", hash: "#/memory", selectors: [".page-head"] },
-  { name: "activity", hash: "#/activity", selectors: [".page-head"] },
-  { name: "settings", hash: "#/settings", selectors: [".page-head"] },
+  { name: "chat", hash: "#/chat", wait: 5000, selectors: [".app-shell[data-view=chat]", ".chat-rail", ".session-list"] },
+  { name: "flows", hash: "#/flows", selectors: [".app-shell[data-view=flows]", ".flows-rail"] },
+  { name: "tasks", hash: "#/tasks", selectors: [".app-shell[data-view=tasks]", ".flows-rail"] },
+  { name: "graph", hash: "#/graph", selectors: [".app-shell[data-view=graph]", ".page-head"] },
+  { name: "agents", hash: "#/agent", selectors: [".app-shell[data-view=agent]", ".page-head"] },
+  { name: "nexus", hash: "#/nexus", selectors: [".app-shell[data-view=nexus]", ".nexus-topo-canvas"] },
+  { name: "skills", hash: "#/skills", selectors: [".app-shell[data-view=skills]", ".page-head"] },
+  { name: "plugins", hash: "#/plugins", selectors: [".app-shell[data-view=plugins]", ".page-head"] },
+  { name: "models", hash: "#/models", selectors: [".app-shell[data-view=models]", ".page-head"] },
+  { name: "automations", hash: "#/automations", selectors: [".app-shell[data-view=automations]", ".page-head"] },
+  { name: "approvals", hash: "#/approvals", selectors: [".app-shell[data-view=approvals]", ".page-head"] },
+  { name: "ledger", hash: "#/ledger", selectors: [".app-shell[data-view=ledger]", ".page-head"] },
+  { name: "memory", hash: "#/memory", selectors: [".app-shell[data-view=memory]", ".page-head"] },
+  { name: "knowledge", hash: "#/knowledge", selectors: [".app-shell[data-view=knowledge]", ".page-head"] },
+  { name: "activity", hash: "#/activity", selectors: [".app-shell[data-view=activity]", ".page-head"] },
+  { name: "settings", hash: "#/settings", selectors: [".app-shell[data-view=settings]", ".page-head"] },
 ];
 
 const day = new Date().toISOString().slice(0, 10);
 const outDir = path.join(OUT_ROOT, day);
 fs.mkdirSync(outDir, { recursive: true });
 
-const browser = await puppeteer.launch({
+// Import only after the output guard: refusing docs output must not load browser dependencies.
+const { chromium } = await import("playwright-core");
+const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium",
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
-  defaultViewport: { width: 1440, height: 900 },
 });
 const results = [];
 try {
-  const page = await browser.newPage();
-  await page.evaluateOnNewDocument((k) => localStorage.setItem("exm.key", k), KEY);
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.addInitScript((k) => localStorage.setItem("exm.key", k), KEY);
   page.on("pageerror", (e) => results.push({ view: "(global)", ok: false, error: String(e).slice(0, 200) }));
   for (const v of VIEWS) {
     const entry = { view: v.name, ok: true, missing: [], shot: null };

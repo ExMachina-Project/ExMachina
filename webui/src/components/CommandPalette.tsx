@@ -60,10 +60,12 @@ export function CommandPalette(): React.ReactElement {
   }, [search.hits]);
 
   const hits = search.hits ?? [];
-  const openHit = (idx: number) => {
+  const openHit = async (idx: number) => {
     const h = hits[idx];
     if (!h) return;
-    void selectSession(h.sessionId);
+    // Publish the destination session before requesting message focus. ChatView
+    // consumes focus requests while the previous session may still be selected.
+    await selectSession(h.sessionId);
     requestNav("chat", h.sessionId, h.snippets[0]?.messageId);
     close();
   };
@@ -96,7 +98,7 @@ export function CommandPalette(): React.ReactElement {
               setSel((i) => Math.max(0, i - 1));
             } else if (e.key === "Enter" && hits.length > 0) {
               e.preventDefault();
-              openHit(sel);
+              void openHit(sel);
             } else if (e.key === "Escape") {
               e.preventDefault();
               close();
@@ -121,7 +123,7 @@ export function CommandPalette(): React.ReactElement {
               type="button"
               className={`cmd-item ${i === sel ? "on" : ""}`}
               onMouseEnter={() => setSel(i)}
-              onClick={() => openHit(i)}
+              onClick={() => void openHit(i)}
             >
               <span className="cmd-item-title">
                 <Highlight text={h.title} query={search.query} />

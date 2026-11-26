@@ -13,11 +13,11 @@ import type {
   TaskGraph,
   ToolCallItem,
 } from "../types";
-import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type QueuedTaskItem, type RecallHit, type SpawnBgItem, type TodoItem } from "../api";
+import { api, serverBase, type GatewayConfig, type GroupMeta, type PlanAppliedItem, type PlanInfo, type QueuedTaskItem, type RecallHit, type SpawnBgItem, type TodoItem, type WorkflowRelation } from "../api";
 import { tr } from "../i18n/core";
 
 export interface TimelineItem {
-  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron" | "budget";
+  kind: "dispatch" | "sync" | "arbitration" | "memory" | "error" | "cron" | "budget" | "steering";
   agentId?: string;
   nodeId?: string;
   /** 派发对应的子会话（可点击跳转查看子个体过程流） */
@@ -67,6 +67,10 @@ export interface ExmState {
   planDirtyAt: number;
   refreshPlan: (sessionId: string) => Promise<void>;
   decidePlan: (action: "approve" | "reject" | "setMode", plan?: boolean) => Promise<void>;
+  /** 会话工作流关联视图（capability-parity 4.6）：goal/spec/plan 三层只读徽标条
+   *  数据源——关系是派生视图，事实仍在 workflow.* 事件；写操作走 CLI/聊天命令。 */
+  workflow: WorkflowRelation | null;
+  refreshWorkflow: (sessionId: string) => Promise<void>;
   /** 任务清单（spec agent-todo）：todo.updated 事件快照 */
   todo: { count: number; doneCount: number; allDone: boolean; items: TodoItem[] } | null;
   /** 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件维护 */

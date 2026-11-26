@@ -247,8 +247,7 @@ input, textarea { caret-color: var(--accent); }
 .app-shell { display: flex; height: 100dvh; overflow: hidden; }
 
 .app-sider {
-  /* 收起态 208px（EN 品牌副标 mono+0.1em 字距 ≈168px 的宽度硬底，双语不折行）；
-     页面侧栏（会话/聊天流/任务会话）在主内容右栏（.subbar-rail，300px），
+  /* 页面侧栏（会话/聊天流/任务会话）在主内容右栏（.subbar-rail，300px），
      主侧栏恒为 208px；移动端抽屉仍为 min(78vw, 300px) */
   width: 208px;
   transition: width var(--dur-fast) var(--ease-out);
@@ -285,16 +284,29 @@ input, textarea { caret-color: var(--accent); }
   animation: led-pulse 2.6s ease-in-out infinite;
   flex: none;
 }
-.brand-sub {
-  /* hero 副标语（ABSOLUTE RATIONALITY · …）语汇：小号大写宽字距灰阶；
-     保留独立第二行，仅随 padding 收紧（margin-top 6→4） */
-  font-family: var(--mono);
-  margin-top: 4px;
-  font-size: 10px;
-  color: var(--rank-3, var(--muted));
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
+.operation-selector { padding: 6px 10px; flex: none; min-width: 0; }
+.operation-target-trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 5px 7px; color: var(--text); background: var(--bg-card); border: 1px solid var(--line); text-align: left; cursor: pointer; font: inherit; }
+.operation-target-trigger > span:not(.anticon):not(.ant-spin) { flex: 1; min-width: 0; }
+.operation-target-trigger small, .operation-target-trigger strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operation-target-trigger small { font: 10px var(--mono); color: var(--muted); }
+.operation-target-trigger strong { font-size: 12px; font-weight: 500; }
+.operation-selector[data-availability="unavailable"] .operation-target-trigger { border-color: var(--red); }
+.operation-popover { width: min(290px, calc(100vw - 44px)); max-height: calc(100dvh - 56px); overflow-y: auto; }
+.operation-help { margin: 0 0 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.operation-directory-state { font-size: 12px; overflow-wrap: anywhere; }
+.operation-directory-state:not(:empty) { padding: 6px 0; }
+.operation-options { max-height: min(280px, 42dvh); overflow-y: auto; margin: 5px 0; }
+.operation-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px; border: 1px solid transparent; background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.operation-option > span:not(.anticon) { min-width: 0; }
+.operation-option strong, .operation-option small { display: block; overflow-wrap: anywhere; }
+.operation-option strong { font-size: 13px; font-weight: 500; }
+.operation-option small { color: var(--muted); font: 11px var(--mono); }
+.operation-option.focused, .operation-option[aria-selected="true"] { border-color: var(--line); background: var(--bg-elevated); }
+.operation-option:disabled { opacity: .6; cursor: not-allowed; }
+.operation-target-trigger:focus-visible, .operation-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.operation-actions { display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+.mobile-operation-target { display: flex; align-items: center; gap: 5px; min-width: 0; max-width: 36vw; margin-left: auto; border: 1px solid var(--line); color: var(--text); background: transparent; font: 11px var(--mono); padding: 4px 6px; cursor: pointer; }
+.mobile-operation-target span:not(.anticon) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .brand-tag {
   margin-left: auto;
   font-size: 11px;
@@ -865,6 +877,9 @@ textarea.ant-input:focus,
 .tl-sync::before { background: var(--green); }
 .tl-arbitration::before { background: var(--amber); }
 .tl-error::before { background: var(--red); }
+/* steering 回执（3.5）：引导中——蓝系，与错误红区分 */
+.tl-steering::before { background: var(--blue); }
+.tl-steering .tl-text { color: var(--blue); }
 /* 预算熔断内联提示：警示琥珀（非错误红——预算是受控收束不是失败） */
 .tl-budget::before { background: var(--amber); }
 .tl-memory .tl-text { color: var(--blue); }
@@ -2223,6 +2238,27 @@ textarea.ant-input:focus,
 
 /* 任务清单（spec agent-todo）：进度条 + 条目 chip 带 */
 .todo-progress { display: inline-flex; align-items: center; gap: 8px; margin-left: 8px; }
+/* 工作流关联徽标条（capability-parity 4.6）：goal/spec 只读徽标 */
+.wf-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  border: 1px solid var(--border, #d9d9d9);
+  color: var(--muted, #888);
+  background: var(--bg-elevated, rgba(0, 0, 0, 0.02));
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.wf-goal-active { color: var(--ok, #46a758); border-color: color-mix(in srgb, var(--ok, #46a758) 40%, transparent); }
+.wf-goal-completed { color: var(--ok, #46a758); }
+.wf-goal-blocked { color: var(--warn, #d46b08); border-color: color-mix(in srgb, var(--warn, #d46b08) 40%, transparent); }
+.wf-goal-paused { color: var(--muted, #888); }
+.wf-spec { color: var(--accent, #1677ff); border-color: color-mix(in srgb, var(--accent, #1677ff) 30%, transparent); }
 .todo-progress-label { font-size: 11px; color: var(--muted); }
 .todo-all-done .todo-progress-label { color: var(--ok, #46a758); }
 .todo-bar {
@@ -2255,6 +2291,12 @@ textarea.ant-input:focus,
 }
 .tq-chip.tq-running { color: var(--text); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
 .tq-chip.tq-queued { color: var(--muted); }
+/* capability-parity 3.5：队列异常终态——blocked（被阻断需人工介入）与
+   pending_recovery（运行异常收束，待恢复决策；不自动换会话重放） */
+.tq-chip.tq-blocked { color: var(--red, #e5695e); border-color: color-mix(in srgb, var(--red, #e5695e) 45%, transparent); }
+.tq-chip.tq-pending_recovery { color: var(--cyan, #4cc0c0); border-color: color-mix(in srgb, var(--cyan, #4cc0c0) 45%, transparent); }
+/* 「加入队列」按钮（3.5）：与发送按钮并排，语义独立 */
+.composer-queue { color: var(--muted); }
 
 /* 后台子任务卡（spec subagent-spawn WebUI 呈现） */
 .spawns-strip {
@@ -2490,6 +2532,12 @@ textarea.ant-input:focus,
 .ambient-tag {
   color: var(--text-sec, #9aa3b0);
   border-color: color-mix(in srgb, var(--text-sec, #9aa3b0) 35%, transparent);
+}
+/* 运行中引导标记（capability-parity 3.5）：蓝系，与 auto（灰）/ambient（暗金）区分——
+   提示「这条引导了当前运行中的轮次，而非独立消息」 */
+.steer-tag {
+  color: var(--blue, #3b82f6);
+  border-color: color-mix(in srgb, var(--blue, #3b82f6) 45%, transparent);
 }
 .code-msg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .code-msg .turn-op { padding: 0 4px; }
@@ -3706,6 +3754,43 @@ mark.search-hit {
 .dag-inline-meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted-dim); }
 .dag-inline-caret { color: var(--muted); }
 .dag-inline .graph-wrap { border-top: 1px solid var(--line); max-height: 300px; overflow: auto; padding: 8px; }
+/* 上下文来源卡（capability-parity 6.3）：四类来源逐项——状态、禁用叠加位（原状态）、缺失原因 */
+.ctx-inline { margin: 0 14px 8px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--bg-raise); }
+.ctx-inline-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 7px 12px;
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; color: var(--text);
+  text-align: left;
+}
+.ctx-inline-head:hover { background: var(--hover); }
+.ctx-inline-title { font-weight: 600; }
+.ctx-inline-meta { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted-dim); }
+.ctx-inline-caret { color: var(--muted); }
+.ctx-inline-body { border-top: 1px solid var(--line); padding: 8px 10px 10px; max-height: 360px; overflow: auto; }
+.ctx-empty { font-size: 12px; color: var(--muted); padding: 4px 2px; }
+.ctx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ctx-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: var(--r-md); border: 1px solid var(--line); }
+.ctx-item.ctx-off { border-style: dashed; opacity: 0.82; }
+.ctx-item-main { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; }
+.ctx-kind { margin-inline-end: 0; }
+.ctx-key { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+.ctx-status { margin-inline-end: 0; }
+.ctx-st-ok { color: var(--ok, #46a758); border-color: color-mix(in srgb, var(--ok, #46a758) 45%, transparent); }
+.ctx-st-warn { color: var(--warn, #d48806); border-color: color-mix(in srgb, var(--warn, #d48806) 45%, transparent); }
+.ctx-st-bad { color: var(--danger, #e5484d); border-color: color-mix(in srgb, var(--danger, #e5484d) 45%, transparent); }
+.ctx-st-muted { color: var(--muted, #888); }
+.ctx-st-off { color: var(--muted, #888); border-style: dashed; }
+.ctx-was { font-size: 11px; color: var(--muted); }
+.ctx-meta { font-family: var(--mono); font-size: 10.5px; color: var(--muted-dim); }
+.ctx-reason { flex-basis: 100%; font-size: 11.5px; color: var(--muted); }
+.ctx-item-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; }
+.ctx-note { margin-top: 8px; font-size: 11px; line-height: 1.6; color: var(--muted-dim); }
+.ctx-gaps { margin-top: 8px; padding: 6px 8px; border: 1px dashed var(--line); border-radius: var(--r-md); }
+.ctx-gaps-title { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.ctx-gap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ctx-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; }
+.ctx-gap .ctx-reason { flex-basis: auto; }
 
 /* ============================================================
    侧栏手风琴（2026-11）：顶部「页面」折叠入口（二级侧边栏已迁右栏常驻）

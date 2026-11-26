@@ -22,6 +22,7 @@
     "test:docs": "node --test scripts/check-docs.test.mjs",
     "setup:hooks": "git config core.hooksPath .githooks",
     "test:ui": "npm run build:desktop-ui && tsx scripts/ui-regression.ts",
+    "test:operation-context": "node --import tsx --test scripts/operation-context.test.ts",
     "gateway": "cargo run -p exm-gateway --release",
     "serve": "cargo run -p exm-gateway --release",
     "exm": "cargo run -p exm-cli --release --bin exm --",

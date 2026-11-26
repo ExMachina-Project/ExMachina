@@ -1,6 +1,6 @@
-//! views/chat/ChatMessages.tsx —— 消息流渲染（codebase-refactor 7.2 拆分）：
+//! Chat message stream rendering:
 //! 空态目标捕获盘、消息气泡、流式卡（指挥体/子个体/加载兜底）、轮次轨迹卡、
-//! 内联审批卡、回底按钮。纯搬移：渲染结构与状态流转零改动。
+//! inline approval cards, and scroll-to-bottom control.
 
 import { Button, Card, Space, Spin, Tag } from "antd";
 import { CheckOutlined, RobotOutlined } from "@ant-design/icons";
@@ -12,8 +12,10 @@ import { UsageBar } from "../../components/UsageBar";
 import { OrbitRings } from "../../components/OrbitRings";
 import { Emblem } from "../../components/Emblem";
 import { ProcessSteps } from "../../components/ProcessSteps";
-import type { ChatMessage, ToolCallItem } from "../../types";
+import { RunActivityPanel } from "../../components/RunActivityPanel";
+import type { ChatMessage, RunProgress, TerminalJobSnapshot, ToolCallItem } from "../../types";
 import type { TimelineItem } from "../../store";
+import type { SpawnBgItem } from "../../api";
 
 import { MessageBubble } from "../ChatView";
 
@@ -31,6 +33,10 @@ export interface ChatMessagesProps {
   timeline: TimelineItem[];
   timelineSession: string | null;
   runToolCalls: ToolCallItem[];
+  runProgress: RunProgress | null;
+  terminalJobs: TerminalJobSnapshot[];
+  spawns: SpawnBgItem[];
+  onClearSpawns: () => void;
   approvals: {
     approvalId: string;
     agentId: string;
@@ -54,7 +60,7 @@ export interface ChatMessagesProps {
 export function ChatMessages(p: ChatMessagesProps): React.ReactElement {
   const {
     renderMessages, running, target, orchLabel, activeMeta, activeGroup, wsConnected,
-    liveOrch, liveThinking, liveUnitEntries, timeline, timelineSession, runToolCalls,
+    liveOrch, liveThinking, liveUnitEntries, timeline, timelineSession, runToolCalls, runProgress, terminalJobs, spawns, onClearSpawns,
     approvals, sessionId, showBottomBtn, bottomRef, onScrollBottom,
     onOpenEdit, onUndo, onFork, onDecideApproval, onOpenSubSession, t, TurnOps, TimelineRows,
   } = p;
@@ -176,6 +182,7 @@ export function ChatMessages(p: ChatMessagesProps): React.ReactElement {
           <pre className="live-pre">{liveOrch}</pre>
         </Card>
       )}
+      <RunActivityPanel running={running} progress={runProgress} terminalJobs={terminalJobs} spawns={spawns} onClearSpawns={onClearSpawns} />
       {/* 内联审批：渲染在消息流内（live 区之后、贴底锚之前）——
           审批到达时随消息流滚动进视线；原先渲染在 chat-scroll 外的静态区，
           流式输出期间用户盯着底部，上方的卡根本看不到（审批交互不可见 bug）。

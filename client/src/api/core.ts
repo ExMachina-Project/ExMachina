@@ -1,5 +1,5 @@
 /* Shared gateway contracts, independent of browser or native storage. */
-export type { AgentDefinition, ChatMessage, EvidenceItem, Session, SessionSearchHit, SessionSnapshot, TaskGraph } from "../types";
+export type { AgentDefinition, ChatMessage, EvidenceItem, QueuedTask, Session, SessionSearchHit, SessionSnapshot, TaskGraph } from "../types";
 import type { ModelCost, ModelPurpose, ModelRouting } from "../modelRouting";
 export type { ModelCost, ModelPurpose, ModelRouting, ModelAssignment } from "../modelRouting";
 
@@ -83,6 +83,20 @@ export interface GatewayConfig {
   trash?: { retentionDays: number; maxBytes: number };
   /** 实验性功能开关 */
   experiments?: {
+    /** 独立默认关闭；这里只是配置，不代表连接执行已就绪。 */
+    connectionFabric?: {
+      enabled: boolean;
+      maxOperationSecs: number;
+      maxCallsPerRoot: number;
+      maxPollsPerRoot: number;
+      maxConcurrentPerConnection: number;
+      maxEventBytes: number;
+      maxResultBytes: number;
+      maxEventsPerMinute: number;
+      maxEventDepth: number;
+      maxPendingEvents: number;
+      catalogPageSize: number;
+    };
     dynamicCompaction: boolean;
     groupSharedContext: boolean;
     llmDrivenMemory: boolean;
@@ -165,6 +179,9 @@ export interface MemoryEntry {
   createdAt: string;
   updatedAt: string;
   accessCount: number;
+  /** 版本号（capability-parity 6.5）：0 = 引入版本字段前的旧条目，展示时按 v1；
+   *  编辑/回滚/撤销遗忘都会产生新版本，单调递增。 */
+  version?: number;
 }
 
 /** 共享知识条目（knowledge-base）：实例级通用知识，全智能体共享不分区 */
@@ -257,6 +274,88 @@ export interface SkillDef {
   lastUsedAt?: string;
   /** manual | agent | import */
   source?: string;
+  /** 版本号（capability-parity 6.5）：每次版本化写入 +1，回滚 = 以旧内容写新版本行 */
+  version?: number;
+}
+
+// ---------------- 版本链（capability-parity 6.5）----------------
+// CLI / WebUI / 通道的治理操作共用后端同一版本事实源；这里只是它的只读投影。
+
+/** 记忆版本历史里的一行（GET /api/memory/:id/versions） */
+export interface MemoryHistoryRow {
+  version: number;
+  /** created | updated | rolled_back | forgotten | restored（置顶不是内容变更，不入版本历史） */
+  change: string;
+  title: string;
+  /** 该版本写时的正文全文（治理面据此判断回滚目标） */
+  body: string;
+  kind: string;
+  tags: string[];
+  changedAt: string;
+}
+
+/** GET /api/memory/:id/versions —— 已遗忘的条目历史仍可读：current=null、forgotten=true */
+export interface MemoryVersionsResponse {
+  id: string;
+  /** 旧 → 新 */
+  versions: MemoryHistoryRow[];
+  /** 当前生效版本号；条目已遗忘时为 null */
+  current: number | null;
+  forgotten: boolean;
+}
+
+/** POST /api/memory/:id/rollback 的回执：回滚 = 以旧内容写新版本行 */
+export interface MemoryRollbackReceipt {
+  id: string;
+  /** 新版本号（单调递增，大于 toVersion） */
+  version: number;
+  rolledBackTo: number;
+  by: string;
+}
+
+/** POST /api/memory/:id/restore 的回执 */
+export interface MemoryRestoreReceipt {
+  id: string;
+  version: number;
+  title: string;
+  by: string;
+}
+
+/** 技能版本历史里的一行（GET /api/skills/:id/versions） */
+export interface SkillHistoryRow {
+  version: number;
+  name: string;
+  /** 该版本写时的描述（归档损坏时为空串） */
+  description: string;
+  /** 该版本写时的完整指令（= SKILL.md 正文）——据此判断回滚目标 */
+  instructions: string;
+}
+
+/** GET /api/skills/:id/versions —— 已删除：current=null、deleted=true */
+export interface SkillVersionsResponse {
+  id: string;
+  /** 旧 → 新 */
+  versions: SkillHistoryRow[];
+  /** 当前生效版本号；技能已删除时为 null */
+  current: number | null;
+  deleted: boolean;
+}
+
+/** GET /api/skills/deleted —— 技能删除后从列表消失，回滚恢复的入口靠这份清单找到目标 */
+export interface DeletedSkill {
+  id: string;
+  /** 删除时间（ISO） */
+  deletedAt: string;
+}
+
+/** POST /api/skills/:id/rollback 的回执 */
+export interface SkillRollbackReceipt {
+  id: string;
+  /** 新版本号（单调递增，大于 toVersion） */
+  version: number;
+  updatedAt: string;
+  rolledBackTo: number;
+  by: string;
 }
 
 /** 插件列表项（GET /api/plugins） */
@@ -404,16 +503,23 @@ export interface TodoItem {
   status: "pending" | "in_progress" | "done";
 }
 
-// 任务队列（task-queue）：task_queue.updated 事件负载中的单条任务
+// 任务队列（task-queue）：task_queue.updated 事件负载中的单条任务。
+// capability-parity 3.5：补齐 seq/revision/source/workspace 与 blocked/pending_recovery
+// 终态（后续任务队列六态呈现；与 REST /sessions/:id/queue 的 QueuedTask 同形）。
 export interface QueuedTaskItem {
   id: string;
+  seq?: number;
   task: string;
   runMode: "parallel" | "queued";
-  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | "blocked" | "pending_recovery";
   spawnId?: string;
+  source?: string;
+  workspace?: string | null;
+  revision?: number;
   createdAt: string;
   finishedAt?: string;
   note?: string;
+  audit?: string[];
 }
 
 // 后台子任务卡（spec subagent-spawn WebUI 呈现）：spawn.started/finished 事件数据
@@ -432,6 +538,96 @@ export interface PlanInfo {
   mode: "plan" | "execute";
   items: PlanItem[];
   count: number;
+}
+
+/** 会话工作流关联视图（capability-parity 4.5/4.6）：goal/spec/plan 三层
+ *  同源共享的只读快照——关系是派生视图，事实仍在 workflow.* 事件。 */
+export interface WorkflowGoalState {
+  id: string;
+  revision: number;
+  objective: string;
+  status: "active" | "paused" | "completed" | "blocked" | "cleared";
+  acceptance: string[];
+  verification: string[];
+  autoContinue: boolean;
+  continueRoundsUsed: number;
+  updatedAt: string;
+}
+
+export interface WorkflowSpecState {
+  id: string;
+  revision: number;
+  goalId?: string;
+  objective: string;
+  scope: string[];
+  constraints: string[];
+  acceptance: string[];
+  verification: string[];
+  source: string;
+  updatedAt: string;
+}
+
+export interface WorkflowRelation {
+  goal?: WorkflowGoalState;
+  spec?: WorkflowSpecState;
+  planMode: boolean;
+  planItems: number;
+  todoPresent: boolean;
+}
+
+/** 上下文来源的一条清单项（capability-parity 6.3；REST GET /sessions/:id/context）。
+ *  `status` 是叠加了禁用位之后的当前状态；`baseStatus` 是未禁用时的原状态
+ *  （仅 disabled 时有意义）；`reason` 是未就绪/读取失败的真实原因。 */
+export interface ContextSource {
+  kind: "file" | "memory" | "retrieval" | "skills" | string;
+  key: string;
+  status: string;
+  baseStatus?: string;
+  disabled: boolean;
+  /** 文件来源：层级（project / user / agent_prompt / system_safety）与字符数 */
+  layer?: string;
+  /** 文件来源：约定文件的相对路径（键去掉 `file:` 前缀） */
+  file?: string;
+  chars?: number | null;
+  /** 文件来源：修改时间（Unix 秒；0 = 未知） */
+  modifiedAt?: number;
+  /** 缺失/未就绪/读取失败的原因；ready / loaded 时为空 */
+  reason?: string | null;
+}
+
+/** 整层缺席的文件来源说明（Core 给出的事实，REST GET /sessions/:id/context 的 `gaps`）。
+ *  某一层没有根时，它的约定文件根本不在清单里——例如未绑定项目的会话没有项目层。
+ *  它是说明不是来源：不在 `sources` 里，不可停用 / 不可刷新。 */
+export interface ContextSourceGap {
+  kind: "file";
+  layer: "project" | "user" | string;
+  reason: string;
+}
+
+/** GET /sessions/:id/context 的响应 */
+export interface ContextSourcesResponse {
+  sessionId: string;
+  sources: ContextSource[];
+  /** 整层缺席的文件来源及原因（清单里一个 file: 都没有时，这是唯一的解释） */
+  gaps?: ContextSourceGap[];
+}
+
+/** 单来源刷新回报（REST POST {action:"refresh", key}）：`ok=false` 时带 `error`；
+ *  `others` 是刷新前其余来源的原样快照——调用方据此断言「失败不波及其余」。 */
+export interface ContextSourceRefreshReport extends ContextSourcesResponse {
+  key: string;
+  ok: boolean;
+  refreshed: boolean;
+  error?: string | null;
+  source: ContextSource;
+  others?: ContextSource[];
+}
+
+/** disable / enable 的响应 */
+export interface ContextSourceSetResponse extends ContextSourcesResponse {
+  key: string;
+  disabled: boolean;
+  disabledKeys: string[];
 }
 
 export interface PlanAppliedItem {

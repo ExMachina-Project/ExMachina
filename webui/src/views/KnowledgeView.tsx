@@ -95,7 +95,7 @@ export function KnowledgeView(): React.ReactElement {
 
   return (
     <div className="memory-wrap">
-      <PageHeader en="KNOWLEDGE" title={t("nav.knowledge")} desc={t("knowledge.desc")} />
+      <PageHeader en="KNOWLEDGE BASE" title={t("nav.knowledge")} desc={t("knowledge.desc")} />
       <Card
         size="small"
         className="memory-card"

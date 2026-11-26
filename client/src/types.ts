@@ -137,6 +137,30 @@ export interface Session {
   origin?: string;
   /** 来源展示名（通道会话 = 流显示名·标签；控制台会话缺省） */
   originLabel?: string;
+  /** In-memory snapshot of the current run; absent once the run has finished. */
+  activity?: { events: { type: string; sessionId: string; payload: unknown }[] };
+  /** Session/workspace-scoped background terminal jobs returned by the session detail API. */
+  terminalJobs?: TerminalJobSnapshot[];
+}
+
+export interface RunProgress {
+  stage: "preparing" | "planning" | "working" | "model";
+  message: string;
+  agentId?: string;
+  announce?: boolean;
+}
+
+export interface TerminalJobSnapshot {
+  taskId: string;
+  command: string;
+  status: "running" | "exited" | "cancelled" | "timedOut" | "failed" | "interrupted";
+  startedAtMs: number;
+  finishedAtMs?: number;
+  exitCode?: number;
+  outputPreview: string;
+  outputBytes: number;
+  outputTruncated: boolean;
+  error?: string;
 }
 
 /** 会话检索命中片段（session-search） */
@@ -169,6 +193,24 @@ export interface SessionSnapshot {
   completionTokens: number;
   createdAt: string;
   preview: string;
+}
+
+/** 后续任务队列项（capability-parity 3.3/3.5）：显式 /queue 或「加入队列」产生。
+ *  status：queued | running | done | failed | cancelled | blocked | pending_recovery */
+export interface QueuedTask {
+  id: string;
+  seq: number;
+  task: string;
+  runMode: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | "blocked" | "pending_recovery";
+  spawnId?: string;
+  source?: string;
+  workspace?: string | null;
+  revision: number;
+  createdAt: string;
+  finishedAt?: string;
+  note?: string;
+  audit?: string[];
 }
 
 export type TaskStatus =

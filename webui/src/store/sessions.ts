@@ -58,6 +58,7 @@ export const useExm = create<ExmState>((set, get) => ({
   planApplied: null,
   planPending: false,
   planDirtyAt: 0,
+  workflow: null,
   todo: null,
   spawns: [],
   taskQueue: null,
@@ -178,6 +179,7 @@ export const useExm = create<ExmState>((set, get) => ({
       planSession: id,
       planApplied: null,
       planPending: false,
+      workflow: null,
       todo: null,
       spawns: [],
       taskQueue: null,
@@ -187,6 +189,9 @@ export const useExm = create<ExmState>((set, get) => ({
     });
     // 计划模式：进会话拉取当前清单与模式位（后续靠 plan.* 事件增量刷新）
     void get().refreshPlan(id);
+    // 工作流关联视图（4.6）：goal/spec/plan 三层只读徽标条（写操作走
+    // CLI/聊天命令，WebUI 只呈现——关系是派生视图，不承担第二事实源）
+    void get().refreshWorkflow(id);
     // 任务清单回放（spec agent-todo）：todo 快照只由事件维护，切会话/刷新后
     // 从事件流尾部找回最近一次 todo.updated（含清空语义——找到空清单即无卡）
     void api.sessionEvents(id, 200).then((evts) => {
@@ -206,11 +211,14 @@ export const useExm = create<ExmState>((set, get) => ({
           break;
         }
       }
-      // 任务队列回放：快照只由事件维护（与 todo 同口径），刷新后从事件尾恢复
+      // 任务队列回放：快照只由事件维护（与 todo 同口径），刷新后从事件尾恢复。
+      // 防御：跳过旧格式（升级前无 items 快照的 add 事件）——回放它会得到
+      // running/queued/items 全空的虚假空队列，宁可继续向前找最近的完整快照。
       for (let i = evts.length - 1; i >= 0; i--) {
         const p = evts[i].payload as { type?: string; payload?: Record<string, unknown> } | undefined;
         if (p?.type === "task_queue.updated") {
           const d = (p.payload ?? {}) as Record<string, unknown>;
+          if (!Array.isArray(d.items)) continue;
           set({
             taskQueue: {
               running: Number(d.running ?? 0),
@@ -333,6 +341,16 @@ export const useExm = create<ExmState>((set, get) => ({
     try {
       const info = await api.getPlan(sessionId);
       if (get().planSession === sessionId) set({ plan: info, planSession: sessionId });
+    } catch { /* 会话删除等场景静默 */ }
+  },
+
+  /** 拉取工作流关联视图（4.6 只读徽标条）：goal/spec/plan 三层同源快照。
+   *  workflow.goal.updated / workflow.spec.* / plan.* 事件后由 handleEvent
+   *  触发轻量刷新（视图是派生的，事件只作失效信号）。 */
+  refreshWorkflow: async (sessionId) => {
+    try {
+      const relation = await api.getWorkflow(sessionId);
+      if (get().sessionId === sessionId) set({ workflow: relation });
     } catch { /* 会话删除等场景静默 */ }
   },
 
@@ -513,6 +531,14 @@ export const useExm = create<ExmState>((set, get) => ({
       set({ spawns: [next, ...get().spawns.filter((s) => s.spawnId !== spawnId)] });
       return;
     }
+    // 工作流事件（capability-parity 4.6）：goal/spec 变更后轻量刷新关联视图
+    // （视图是派生的，事件只作失效信号；徽标条只读，写操作走 CLI/聊天命令）
+    if (evt.type.startsWith("workflow.")) {
+      const sid = evt.sessionId || get().sessionId;
+      if (sid && sid === get().sessionId) void get().refreshWorkflow(sid);
+      // plan.* 部分交由下方计划事件分支处理
+      return;
+    }
     // 计划事件（spec plan-mode：WebUI 卡片实时刷新，不靠轮询）
     // 卡片只跟随当前会话：子会话的计划条目不混入本视图（切过去自然加载）
     if (evt.type.startsWith("plan.")) {
@@ -523,18 +549,16 @@ export const useExm = create<ExmState>((set, get) => ({
           // 新条目累积：防抖拉取最新清单（条目可能连续到达）
           void get().refreshPlan(sid);
           break;
-        case "plan.pending":
-          set({ planPending: true });
-          void get().refreshPlan(sid);
-          break;
         case "plan.mode":
           // agent 经 plan__mode 工具切换模式（plan-mode-tools）：plan 接口返回 mode 位，
           // 防抖拉取刷新徽标（reason 由工具结果呈现给用户，前端不重复展示）
           void get().refreshPlan(sid);
+          void get().refreshWorkflow(sid);
           break;
         case "plan.approved":
           // 回放中：applied 事件会带逐条结果
           set({ planPending: false });
+          void get().refreshWorkflow(sid);
           break;
         case "plan.rejected":
           set({ planPending: false });
@@ -797,6 +821,15 @@ export const useExm = create<ExmState>((set, get) => ({
           running: false,
           timelineSession: evt.sessionId,
           timeline: [...get().timeline, { kind: "error", text: tr("store.tl.error", { msg: String(p.message) }) }],
+        });
+        break;
+      // steering 回执（capability-parity 3.4/3.5）：运行中普通发送被受理为
+      // steering——时间线提示「已接收引导」，running 保持（被引导轮次仍在跑，
+      // 后续 run.finished 才收束）。回执不冒充完成：仅状态说明。
+      case "session.steering_receipt":
+        set({
+          timelineSession: evt.sessionId,
+          timeline: [...get().timeline, { kind: "steering", text: String(p.message ?? "") }],
         });
         break;
       // 工具预算熔断（agent-budget-audit）：消息流内联提示——说明本轮为何停止。

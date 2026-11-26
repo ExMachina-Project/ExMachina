@@ -35,7 +35,7 @@ export function createClient(connection: ClientConnection, tr: Translate) {
     }
     return response.json() as Promise<T>;
   };
-  const sessions = createSessionsApi({ req, serverBase, authHeaders }, tr);
+  const sessions = createSessionsApi({ req, serverBase, authHeaders, workspace }, tr);
   const approvals = createApprovalsApi(req);
   const query = (extra: Record<string, string> = {}) => new URLSearchParams({ ...(workspace ? { workspace } : {}), ...extra }).toString();
   const clientApi = {

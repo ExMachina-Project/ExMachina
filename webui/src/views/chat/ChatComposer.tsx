@@ -98,7 +98,9 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
           if (mention.open) return; // 提及弹层接管 Enter
           if (!e.shiftKey) {
             e.preventDefault();
-            if (text.trim() && !running && !isSubSession) {
+            // running 时同样允许发送（capability-parity 3.5）：/chat 已分流
+            // steering——运行中补充的普通消息引导当前任务，不取消不开新轮。
+            if (text.trim() && !isSubSession) {
               doSend();
             }
           }
@@ -169,7 +171,36 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
           </span>
         </div>
         <div className="composer-actions">
-          <span className="composer-hint">{t("chat.enterHint")}</span>
+          <span className="composer-hint">
+            {running && !isSubSession ? t("chat.steeringHint") : t("chat.enterHint")}
+          </span>
+          {/* 加入队列（capability-parity 3.5）：显式排队为后续独立任务——与普通
+              发送的 steering 语义严格分离（session-steering spec「应用界面显式
+              加入队列」）；提交与 CLI/聊天走同一 REST 面与规范请求体。 */}
+          <Button
+            size="small"
+            className="composer-queue"
+            title={t("chat.queueTip")}
+            aria-label={t("chat.queue")}
+            disabled={isSubSession || !text.trim() || !sessionId}
+            onClick={() => {
+              const task = text.trim();
+              if (!sessionId || !task) return;
+              api.queueAdd(sessionId, task)
+                .then((r) => {
+                  // 回执如实（queued+pending，不冒充完成）；pending 计数后端未回，
+                  // 以 seq 呈现序号即可，待处理数留给队列条实时呈现
+                  message.success(t("chat.queueDone", { seq: String(r.seq) }));
+                  setText("");
+                  if (sessionId) setDraft(sessionId, "");
+                })
+                .catch((e) => message.error(t("chat.queueFail", { err: String(e).slice(0, 120) })));
+            }}
+          >
+            {t("chat.queue")}
+          </Button>
+          {/* 停止按钮（独立控制操作）与发送按钮并存：运行中普通发送 = steering
+              （不取消运行），停止仍走显式确认——两种操作语义分离（3.4/3.5）。 */}
           {running && sessionId ? (
             <Popconfirm
               title={t("chat.stopConfirm")}
@@ -188,16 +219,15 @@ export function ChatComposer(p: ChatComposerProps): React.ReactElement {
                 aria-label={t("chat.stop")}
               />
             </Popconfirm>
-          ) : (
-            <Button
-              className="composer-send"
-              shape="circle"
-              icon={<ArrowUpOutlined />}
-              disabled={isSubSession || running || !text.trim()}
-              onClick={doSend}
-              aria-label={t("chat.send")}
-            />
-          )}
+          ) : null}
+          <Button
+            className="composer-send"
+            shape="circle"
+            icon={<ArrowUpOutlined />}
+            disabled={isSubSession || !text.trim()}
+            onClick={doSend}
+            aria-label={t("chat.send")}
+          />
         </div>
       </div>
     </div>

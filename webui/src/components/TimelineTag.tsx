@@ -14,6 +14,8 @@ const TL_COLOR: Record<string, string | undefined> = {
   cron: undefined,
   model: undefined,
   error: "red",
+  // steering 回执（capability-parity 3.5）：引导中——非错误非完成，蓝系中性
+  steering: "blue",
 };
 
 export function TimelineTag({ kind, ns }: { kind: string; ns: "chat" | "activity" }): React.ReactElement {

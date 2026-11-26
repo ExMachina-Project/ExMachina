@@ -5,8 +5,8 @@
  *  读起来是「终端输出」。本项目的语汇是后者 —— 界面应该像一份被打印出来的机器记录。
  *
  *  全部组件都是纯装饰（aria-hidden），不承载语义，避免给读屏软件添噪音。
- *  只保留实际在用的三个：AsciiBar（页头通栏线）、AsciiDivider（分节线）、
- *  AsciiMeter（字符进度条）。不做大而全的字符零件库 —— 用不到的先不写。
+ *  仅保留实际使用的 AsciiBar（页头通栏线）和 AsciiMeter（字符进度条）。
+ *  不做大而全的字符零件库 —— 用不到的先不写。
  */
 import React from "react";
 
@@ -24,30 +24,6 @@ export function AsciiBar({
   return (
     <div className={`ascii-bar ${className ?? ""}`} aria-hidden="true">
       {glyph.repeat(count)}
-    </div>
-  );
-}
-
-/** 字符流分节线：``├─ LABEL ─────────────────┤``
- *  用在面板顶部或小节之间，替代纯 CSS 的 border-top。 */
-export function AsciiDivider({
-  label,
-  className,
-}: {
-  label?: string;
-  className?: string;
-}): React.ReactElement {
-  return (
-    <div className={`ascii-divider ${className ?? ""}`} aria-hidden="true">
-      <span className="ad-cap">├─</span>
-      {label ? (
-        <>
-          <span className="ad-label">{label}</span>
-          <span className="ad-cap">─</span>
-        </>
-      ) : null}
-      <span className="ad-fill" />
-      <span className="ad-cap">┤</span>
     </div>
   );
 }

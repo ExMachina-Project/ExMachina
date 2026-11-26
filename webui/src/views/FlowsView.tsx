@@ -20,19 +20,21 @@ import {
 } from "@ant-design/icons";
 import { api, assetUrl, downloadUrl, type Channel, type ChannelFlow } from "../api";
 import type { InboundAttachment } from "../types";
-import { useSessionMessages } from "../hooks/useSessionMessages";
 import { relativeTime } from "../time";
 import { useExm } from "../store";
 import { useT } from "../i18n/core";
 import { StatementList } from "../components/Statements";
-import { MessageProcess } from "../components/ProcessSteps";
+import { MessageProcess, ProcessSteps } from "../components/ProcessSteps";
+import { ToolCallList } from "../components/ToolCall";
+import { UsageBar } from "../components/UsageBar";
+import { RunActivityPanel } from "../components/RunActivityPanel";
 import { useIsNarrow } from "../useIsNarrow";
 import { createPortal } from "react-dom";
 import { useSubbarSlot } from "../components/Subbar";
 import { SessionManagementDrawer } from "../components/SessionManagementDrawer";
 import type { Session } from "../types";
 
-/** 平台短标（通道 type → 展示名），与 FlowRailSection 同口径 */
+/** 平台短标（通道 type → 展示名），与通道页保持一致 */
 const PLATFORM_LABEL: Record<string, string> = {
   napcat: "QQ",
   snowluma: "QQ",
@@ -53,6 +55,19 @@ export function FlowsView(): React.ReactElement {
   const subbarSlot = useSubbarSlot();
   const selectSession = useExm((st) => st.selectSession);
   const activeSessionId = useExm((st) => st.sessionId);
+  const activeSession = useExm((st) => st.selectedSession);
+  const running = useExm((st) => st.running);
+  const liveOrch = useExm((st) => st.liveOrch);
+  const liveThinking = useExm((st) => st.liveThinking);
+  const liveParts = useExm((st) => st.liveParts);
+  const runToolCalls = useExm((st) => st.runToolCalls);
+  const runProgress = useExm((st) => st.runProgress);
+  const terminalJobs = useExm((st) => st.terminalJobs);
+  const spawns = useExm((st) => st.spawns);
+  const clearSpawns = useExm((st) => st.clearSpawns);
+  const approvals = useExm((st) => st.approvals);
+  const sessionMessages = useExm((st) => st.messages);
+  const refreshSessionMessages = useExm((st) => st.refreshSessionMessages);
 
   const [flows, setFlows] = useState<ChannelFlow[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -61,9 +76,35 @@ export function FlowsView(): React.ReactElement {
   const [selected, setSelected] = useState<ChannelFlow | null>(null);
   const [selectedArchived, setSelectedArchived] = useState<Session | null>(null);
   const [sessionManagerOpen, setSessionManagerOpen] = useState(false);
+  const pendingFlowSelection = useRef<string | null>(null);
+  const railOnly = useRef(false);
+  const archivedSelection = useRef(false);
+  const selectFlowSession = useCallback((id: string) => {
+    if (pendingFlowSelection.current === id || (!pendingFlowSelection.current && useExm.getState().sessionId === id)) return;
+    pendingFlowSelection.current = id;
+    void selectSession(id).catch(() => undefined).finally(() => {
+      if (pendingFlowSelection.current === id) pendingFlowSelection.current = null;
+    });
+  }, [selectSession]);
   /** 选中流的消息流（只读） */
   const viewingSessionId = selectedArchived?.id ?? selected?.activeSession;
-  const { messages, loading: msgLoading } = useSessionMessages(viewingSessionId, 4000);
+  const msgLoading = Boolean(viewingSessionId && viewingSessionId !== activeSessionId);
+  const messages = viewingSessionId === activeSessionId ? sessionMessages : [];
+  useEffect(() => {
+    if (!viewingSessionId || viewingSessionId !== activeSessionId) return;
+    const refresh = (event?: Event) => {
+      const id = event && (event as CustomEvent<string | undefined>).detail;
+      if ((!id || id === viewingSessionId) && document.visibilityState === "visible") void refreshSessionMessages(viewingSessionId);
+    };
+    window.addEventListener("exm:bound-refresh", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    const timer = window.setInterval(refresh, 4000); // Inbound user-message fallback; run activity stays WS-driven.
+    return () => {
+      window.removeEventListener("exm:bound-refresh", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.clearInterval(timer);
+    };
+  }, [viewingSessionId, activeSessionId, refreshSessionMessages]);
   /** 消息流容器：加载/新消息后滚到底（只读页最新消息在底部） */
   const msgBoxRef = useRef<HTMLDivElement | null>(null);
   // 贴底跟随（与对话页同口径）：用户本来就贴底才跟随新消息，中途上翻回看不打断
@@ -77,7 +118,7 @@ export function FlowsView(): React.ReactElement {
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, [selected?.id]);
+  }, [viewingSessionId]);
 
   const load = useCallback(async () => {
     try {
@@ -87,6 +128,7 @@ export function FlowsView(): React.ReactElement {
       // 选中态纠偏：当前选中流不存在（被删）→ 回落；优先选中绑定会话与
       // 全局会话一致的流（跨页跳转 requestNav 落地时右侧直接呈现目标流）
       setSelected((prev) => {
+        if (railOnly.current || archivedSelection.current) return null;
         const updated = prev && f.find((x) => x.id === prev.id);
         if (updated) return updated;
         const cur = useExm.getState().sessionId;
@@ -115,23 +157,45 @@ export function FlowsView(): React.ReactElement {
   const archivedRequest = useRef<string | null>(null);
   useEffect(() => {
     if (!activeSessionId || loading) return;
-    if (flows.some((flow) => flow.activeSession === activeSessionId)) {
+    if (railOnly.current || (pendingFlowSelection.current && pendingFlowSelection.current !== activeSessionId)) return;
+    const activeFlow = flows.find((flow) => flow.activeSession === activeSessionId);
+    if (activeFlow) {
+      archivedRequest.current = null;
+      archivedSelection.current = false;
       setSelectedArchived(null);
+      setSelected(activeFlow);
       return;
     }
     if (archivedRequest.current === activeSessionId) return;
     archivedRequest.current = activeSessionId;
     let active = true;
     void api.getSession(activeSessionId).then((session) => {
-      if (!active || !session.title.startsWith("channel:")) return;
+      if (!active || useExm.getState().sessionId !== activeSessionId || (pendingFlowSelection.current && pendingFlowSelection.current !== activeSessionId) || !session.title.startsWith("channel:")) return;
+      archivedSelection.current = true;
       setSelectedArchived(session);
       setSelected(null);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [activeSessionId, flows, loading]);
 
+  // The flow shown on first mount must own the shared session subscription too;
+  // otherwise only a click creates a WS for it. Preserve explicit archived views.
+  useEffect(() => {
+    if (!selected?.activeSession || selectedArchived || activeSessionId === selected.activeSession) return;
+    if (activeSession?.title.startsWith("channel:") && !flows.some((flow) => flow.activeSession === activeSessionId)) return;
+    selectFlowSession(selected.activeSession);
+  }, [activeSession, activeSessionId, flows, selectFlowSession, selected?.activeSession, selectedArchived]);
+
   /** 选中流变化 → 拉绑定会话消息（只读） */
   const activeSid = viewingSessionId;
+  const liveBelongsToViewingSession = Boolean(activeSid && activeSessionId === activeSid);
+  const visibleLiveOrch = liveBelongsToViewingSession ? liveOrch : "";
+  const visibleLiveThinking = liveBelongsToViewingSession ? liveThinking : "";
+  const visibleLiveParts = liveBelongsToViewingSession ? liveParts : {};
+  const visibleToolCalls = liveBelongsToViewingSession ? runToolCalls : [];
+  const visibleRunning = liveBelongsToViewingSession && running;
+  const representedToolIds = new Set(Object.values(visibleLiveParts).flat().filter((part) => part.kind === "tool").map((part) => part.callId));
+  const extraToolCalls = visibleToolCalls.filter((call) => !representedToolIds.has(call.callId));
   /** 消息加载完成/更新 → 滚到底（旁观视角默认关注最新；上翻回看时不抢滚动条） */
   // 定位语义：切流后首次拿到「非空消息列表」时瞬时定位到最新（骨架期与空列表不定位——
   // 那时容器还没内容高度，滚了也无效；此后同流增量更新平滑跟随）。
@@ -149,17 +213,19 @@ export function FlowsView(): React.ReactElement {
     }
     if (!stickRef.current) return;
     msgBoxRef.current?.scrollTo({ top: msgBoxRef.current.scrollHeight });
-  }, [messages, msgLoading, activeSid]);
+  }, [messages, msgLoading, activeSid, liveOrch, liveThinking, liveParts, runToolCalls, runProgress, terminalJobs, spawns, approvals]);
 
-  /** 打开流：未读清零（乐观）+ 切换全局会话（与其他页同源）+ 选中 */
+  /** 打开流：未读清零（乐观）+ 选中；selection effect owns the shared session/WS switch. */
   const openFlow = (f: ChannelFlow) => {
+    railOnly.current = false;
+    archivedSelection.current = false;
     setSelectedArchived(null);
     setSelected(f);
     if (f.unread) {
       setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, unread: 0 } : x)));
       void api.readChannelFlow(f.id).catch(() => undefined);
     }
-    if (f.activeSession) void selectSession(f.activeSession);
+    if (f.activeSession) selectFlowSession(f.activeSession);
   };
 
   /** 按通道分组（保持通道顺序） */
@@ -270,7 +336,7 @@ export function FlowsView(): React.ReactElement {
             className="flows-back"
             type="text"
             icon={<ArrowLeftOutlined />}
-            onClick={() => { setSelected(null); setSelectedArchived(null); }}
+            onClick={() => { railOnly.current = true; setSelected(null); setSelectedArchived(null); }}
           >
             {t("nav.flows")}
           </Button>
@@ -337,6 +403,32 @@ export function FlowsView(): React.ReactElement {
                     </div>
                   );
                 })}
+              {liveBelongsToViewingSession && Object.entries(visibleLiveParts).filter(([, parts]) => parts.length > 0).map(([agent, parts]) => (
+                <div key={`live-${agent}`} className="flows-msg orchestrator live-card">
+                  <div className="flows-msg-head"><span className="flows-msg-role">{agent}</span><Tag color="processing">{t("chat.executing")}</Tag></div>
+                  <ProcessSteps parts={parts} toolCalls={visibleToolCalls} live={visibleRunning}
+                    labelThinking={(n) => t("chat.usedThinking", { n: String(n) })}
+                    labelTools={(n) => t("chat.usedTools", { n: String(n) })} />
+                </div>
+              ))}
+              {liveBelongsToViewingSession && (visibleLiveOrch || visibleLiveThinking || extraToolCalls.length > 0) && (
+                <div className="flows-msg orchestrator live-card">
+                  <div className="flows-msg-head">
+                    <span className="flows-msg-role">{t("flows.fromAgent")}</span>
+                    {visibleRunning && <Tag color="processing">{t("chat.streaming")}</Tag>}
+                  </div>
+                  {visibleLiveThinking.trim() && <UsageBar live label={t("chat.usedThinking", { n: String(visibleLiveThinking.length) })}><pre className="usage-think">{visibleLiveThinking}</pre></UsageBar>}
+                  {extraToolCalls.length > 0 && <UsageBar live label={t("chat.usedTools", { n: String(extraToolCalls.length) })}><ToolCallList calls={extraToolCalls} /></UsageBar>}
+                  {visibleLiveOrch && <pre className="live-pre">{visibleLiveOrch}</pre>}
+                </div>
+              )}
+              {liveBelongsToViewingSession && <RunActivityPanel running={visibleRunning} progress={runProgress} terminalJobs={terminalJobs} spawns={spawns} onClearSpawns={clearSpawns} />}
+              {liveBelongsToViewingSession && approvals.filter((approval) => !approval.sessionId || approval.sessionId === activeSid).map((approval) => (
+                <div key={approval.approvalId} className="approval-card flow-approval-card">
+                  <div className="approval-head"><span className="approval-title">⏸ {t("chat.approvalTitle")}</span><span className="approval-agent mono">{approval.agentId}</span></div>
+                  <pre className="approval-cmd">{approval.command}</pre>
+                </div>
+              ))}
             </div>
             {/* 只读声明条（替代输入框位置）：聊天页的消息由外部用户发起 */}
             <div className="flows-readonly">{t("flows.readonlyHint")}</div>

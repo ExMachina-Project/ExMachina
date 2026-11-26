@@ -1,11 +1,29 @@
 /** 技能包管理：派发时按触发词自动携带的指令包（数据化技能，热装载） */
 import React, { useCallback, useEffect, useState } from "react";
-import { Button, Card, Form, Input, Modal, Popconfirm, Space, Spin, Tag, message } from "antd";
+import {
+  Button,
+  Card,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Tooltip,
+  message,
+} from "antd";
 import { BrandEmpty } from "../components/BrandEmpty";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
-import { api, type SkillDef } from "../api";
+import { HistoryOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  api,
+  type DeletedSkill,
+  type SkillDef,
+  type SkillHistoryRow,
+} from "../api";
 import { PageHeader } from "../components/PageHeader";
-import { useT } from "../i18n/core";
+import { tr, useT } from "../i18n/core";
 
 export function SkillsView(): React.ReactElement {
   const t = useT();
@@ -14,11 +32,21 @@ export function SkillsView(): React.ReactElement {
   const [modal, setModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
+  // 版本链（capability-parity 6.5 / 6.6）：删除后技能从列表消失，「回滚恢复」入口靠已删除清单
+  const [deleted, setDeleted] = useState<DeletedSkill[]>([]);
+  const [historyFor, setHistoryFor] = useState<{ id: string; name: string } | null>(null);
+  const [history, setHistory] = useState<SkillHistoryRow[]>([]);
+  const [historyCurrent, setHistoryCurrent] = useState<number | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setSkills(await api.skills());
+      // 与技能列表同等对待：清单读失败就是加载失败，不静默降级成「没有已删除技能」
+      const [list, del] = await Promise.all([api.skills(), api.deletedSkills()]);
+      setSkills(list);
+      setDeleted(del.skills);
     } finally {
       setLoading(false);
     }
@@ -27,6 +55,39 @@ export function SkillsView(): React.ReactElement {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const openHistory = async (id: string, name: string) => {
+    setHistoryFor({ id, name });
+    setHistory([]);
+    setHistoryCurrent(null);
+    setHistoryLoading(true);
+    try {
+      const r = await api.skillVersions(id);
+      setHistory(r.versions);
+      setHistoryCurrent(r.current);
+      setHistoryFor({ id, name: r.versions.at(-1)?.name ?? name });
+    } catch (e) {
+      message.error(tr("common.loadFailed", { err: String(e) }));
+      setHistoryFor(null);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const rollback = async (id: string, to: number) => {
+    setBusyId(id);
+    try {
+      const r = await api.rollbackSkill(id, to);
+      message.success(tr("skills.rollbackDone", { to, v: r.version }));
+      const [h] = await Promise.all([api.skillVersions(id), load()]);
+      setHistory(h.versions);
+      setHistoryCurrent(h.current);
+    } catch (e) {
+      message.error(tr("common.opFailed", { err: String(e) }));
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const submit = async () => {
     const v = await form.validateFields();
@@ -88,15 +149,28 @@ export function SkillsView(): React.ReactElement {
               title={
                 <Space>
                   <span>{s.name}</span>
+                  {/* 照实显示版本号（legacy 技能为 v0）：与 CLI / REST 同一口径，回滚命令里的 --to 才对得上 */}
+                  <Tag>{tr("skills.versionTag", { v: s.version ?? 0 })}</Tag>
                   <span className="mono dim">{s.id}</span>
                 </Space>
               }
               extra={
-                <Popconfirm title={t("skills.deleteConfirm")} onConfirm={() => void remove(s.id)}>
-                  <Button size="small" danger>
-                    {t("common.delete")}
-                  </Button>
-                </Popconfirm>
+                <Space size={4}>
+                  <Tooltip title={t("skills.historyTip")}>
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<HistoryOutlined />}
+                      disabled={busyId === s.id}
+                      onClick={() => void openHistory(s.id, s.name)}
+                    />
+                  </Tooltip>
+                  <Popconfirm title={t("skills.deleteConfirm")} onConfirm={() => void remove(s.id)}>
+                    <Button size="small" danger disabled={busyId === s.id}>
+                      {t("common.delete")}
+                    </Button>
+                  </Popconfirm>
+                </Space>
               }
             >
               {s.description && <div className="dim">{s.description}</div>}
@@ -125,6 +199,116 @@ export function SkillsView(): React.ReactElement {
           <BrandEmpty description={t("skills.empty")} className="graph-empty" />
         )}
       </Spin>
+
+      <Card
+        size="small"
+        className="hud"
+        style={{ marginTop: 16 }}
+        title={
+          <Space>
+            <span>{t("skills.deletedCard")}</span>
+            <Tag>{tr("skills.deletedCount", { n: deleted.length })}</Tag>
+          </Space>
+        }
+      >
+        {deleted.length === 0 ? (
+          <BrandEmpty description={t("skills.deletedEmpty")} />
+        ) : (
+          <Space orientation="vertical" size={8} style={{ width: "100%" }}>
+            {deleted.map((d) => (
+              <div key={d.id} className="skill-line">
+                <Tag color="red">{t("skills.deletedBadge")}</Tag>
+                <span className="mono">{d.id}</span>
+                <span className="dim">
+                  {d.deletedAt ? ` · ${d.deletedAt}` : ""}
+                </span>
+                <Button
+                  size="small"
+                  type="link"
+                  icon={<HistoryOutlined />}
+                  disabled={busyId === d.id}
+                  onClick={() => void openHistory(d.id, d.id)}
+                >
+                  {t("skills.historyTip")}
+                </Button>
+              </div>
+            ))}
+          </Space>
+        )}
+      </Card>
+
+      <Modal
+        open={historyFor !== null}
+        title={
+          historyFor
+            ? tr("skills.historyTitle", { name: historyFor.name })
+            : t("skills.historyTip")
+        }
+        footer={null}
+        width={760}
+        onCancel={() => setHistoryFor(null)}
+        destroyOnHidden
+      >
+        {historyLoading ? null : history.length === 0 ? (
+          <BrandEmpty description={t("skills.historyEmpty")} />
+        ) : (
+          <Table<SkillHistoryRow>
+            size="small"
+            rowKey="version"
+            dataSource={history}
+            pagination={false}
+            columns={[
+              {
+                title: t("skills.colVersion"),
+                dataIndex: "version",
+                width: 110,
+                render: (v: number) => (
+                  <Space size={4}>
+                    <Tag color={v === historyCurrent ? "blue" : "default"}>
+                      {tr("skills.versionTag", { v })}
+                    </Tag>
+                    {v === historyCurrent && <Tag color="blue">{t("skills.currentVersion")}</Tag>}
+                  </Space>
+                ),
+              },
+              {
+                title: t("skills.instructionsPreview"),
+                key: "instructions",
+                render: (_, r) => (
+                  <Space orientation="vertical" size={0}>
+                    <span>
+                      <b>{r.name}</b>
+                      {r.description && <span className="dim"> · {r.description}</span>}
+                    </span>
+                    {/* 每版写了什么：名字各版相同，光看名字无从选回滚目标 */}
+                    <span className="memory-body">{r.instructions.slice(0, 200)}</span>
+                  </Space>
+                ),
+              },
+              {
+                key: "ops",
+                width: 160,
+                render: (_, r) =>
+                  r.version === historyCurrent ? null : (
+                    <Popconfirm
+                      title={tr("skills.rollbackConfirm", { to: r.version })}
+                      onConfirm={() => rollback(historyFor?.id ?? "", r.version)}
+                    >
+                      <Button
+                        size="small"
+                        type="link"
+                        icon={<ReloadOutlined />}
+                        disabled={busyId === historyFor?.id}
+                      >
+                        {t("skills.rollbackTip")}
+                      </Button>
+                    </Popconfirm>
+                  ),
+              },
+            ]}
+          />
+        )}
+      </Modal>
 
       <Modal
         open={modal}

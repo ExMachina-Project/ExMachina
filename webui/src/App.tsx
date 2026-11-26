@@ -1,4 +1,4 @@
-/** 主框架：纯导航侧栏——组切换在对话页内，组管理独立成页 */
+/** 主框架：导航与UI操作默认对象；已有资源的归属不随默认选择改变。 */
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { message, Menu, Tag } from "antd";
 import {
@@ -34,6 +34,7 @@ import { DataStream } from "./components/DataStream";
 import { Emblem } from "./components/Emblem";
 import { OrbitRings } from "./components/OrbitRings";
 import { TelemetryBar } from "./components/TelemetryBar";
+import { OperationTargetSelector, OperationTargetMobileButton } from "./components/OperationTargetSelector";
 /* 视图懒加载（React.lazy + 动态 import）：按视图切分 chunk，首屏只拉 shell + 当前视图，
  * 其余视图在导航到时才加载（vendor 三方库另行在 vite.config.ts 的 manualChunks 分组缓存） */
 const LoginView = lazy(() => import("./views/LoginView").then((m) => ({ default: m.LoginView })));
@@ -122,13 +123,13 @@ export const NAV_ITEMS: {
   { key: "nexus", en: "NEXUS", labelKey: "nav.nexus", icon: <ClusterOutlined /> },
   { key: "graph", en: "DAG", labelKey: "nav.dag", icon: <ApartmentOutlined /> },
   { key: "automations", en: "CRON", labelKey: "nav.cron", icon: <ClockCircleOutlined /> },
+  { key: "memory", en: "MEMORY GRAPH", labelKey: "nav.memory", icon: <DatabaseOutlined /> },
+  { key: "knowledge", en: "KNOWLEDGE BASE", labelKey: "nav.knowledge", icon: <BookOutlined /> },
   { key: "skills", en: "SKILLS", labelKey: "nav.skills", icon: <DeploymentUnitOutlined /> },
   { key: "plugins", en: "PLUGINS", labelKey: "nav.plugins", icon: <AppstoreAddOutlined /> },
   { key: "models", en: "MODELS", labelKey: "nav.models", icon: <ApiOutlined /> },
   { key: "approvals", en: "APPROVALS", labelKey: "nav.approvals", icon: <BellOutlined /> },
   { key: "ledger", en: "LEDGER", labelKey: "nav.ledger", icon: <FundOutlined /> },
-  { key: "memory", en: "MEMORY", labelKey: "nav.memory", icon: <DatabaseOutlined /> },
-  { key: "knowledge", en: "KNOWLEDGE", labelKey: "nav.knowledge", icon: <BookOutlined /> },
   { key: "activity", en: "EVENTS", labelKey: "nav.events", icon: <FileTextOutlined /> },
   { key: "settings", en: "CONFIG", labelKey: "nav.settings", icon: <SettingOutlined /> },
 ];
@@ -379,21 +380,21 @@ export default function App(): React.ReactElement {
         {navOpen ? <CloseOutlined /> : <MenuOutlined />}
       </button>
       <span>{t(NAV_ITEMS.find((item) => item.key === view)!.labelKey)}</span>
+      <OperationTargetMobileButton openNavigation={() => setNavOpen(true)} />
       <span className="mobile-appbar-brand">EX·MACHINA</span>
       </header>
       {navOpen && <div className="nav-mask" onClick={() => setNavOpen(false)} />}
       <aside id="app-navigation" className={`app-sider ${navOpen ? "open" : ""} top-open`}>
         {/* 字符流放在侧栏背景里（见 styles.css 的层级说明） */}
         <CharStream />
-        {/* 品牌区：LED + 名称一行，副标语保留独立第二行（2026-11 回退：
-            副标语并行尾挤成一行被斥「谁叫你压成这样的」——只减 padding 不并排） */}
+        {/* 品牌行下方为只读目录选择器，不切换服务器激活对象或当前会话。 */}
         <div className="brand">
           <div className="brand-row">
             <span className="brand-led" />
             <span className="brand-name">EX·MACHINA</span>
           </div>
-          <div className="brand-sub">{t("brand.sub")}</div>
         </div>
+        <OperationTargetSelector />
 
         {/* ── 页面导航：全量平铺（NAV_ITEMS 全量入口 + 角标；与原菜单同款行）──
             标题头已删（2026-11：平铺形态下「页面」标题无信息量，被指留着干嘛） */}

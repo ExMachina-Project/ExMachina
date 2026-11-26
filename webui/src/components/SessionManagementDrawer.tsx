@@ -30,7 +30,7 @@ type KindFilter = "all" | SessionKind;
 type LayoutMode = "flat" | "grouped";
 type SessionIdentity = Pick<Session, "title"> & Partial<Pick<Session, "origin" | "originLabel" | "groupId">>;
 
-/** 平台短标（通道 type → 展示名）：与 FlowRailSection 的 PLATFORM_LABEL 同口径 */
+/** 平台短标（通道 type → 展示名），与通道页保持一致 */
 const PLATFORM_LABEL: Record<string, string> = {
   napcat: "QQ",
   snowluma: "QQ",
@@ -406,8 +406,10 @@ export function SessionManagementDrawer({ open, onClose }: { open: boolean; onCl
     onClose();
   };
   /** 打开检索命中：跳会话并定位到命中消息（无片段时只打开会话） */
-  const openHit = (h: SessionSearchHit) => {
-    void selectSession(h.sessionId);
+  const openHit = async (h: SessionSearchHit) => {
+    // Wait for selectSession to publish the target session/messages before setting
+    // focusMessage; otherwise ChatView sees the old session and discards the focus.
+    await selectSession(h.sessionId);
     requestNav("chat", h.sessionId, h.snippets[0]?.messageId);
     onClose();
   };
