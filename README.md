@@ -4,7 +4,11 @@
 > [!WARNING]
 > 项目处于开发阶段（pre-alpha），接口与数据格式可能破坏性变更，请勿用于生产环境。
 
+<div align="center">
+
 ![EXMACHINA —— 让我们摒弃拟人表达，让 AI 回归绝对理性](assets/branding/logo-animated-tagline.svg)
+
+</div>
 
 <div align="center">
 
@@ -355,7 +359,27 @@ exm memory add --kind fact "构建入口" "cargo build --release" --pin         
 exm memory add --kind fact "常用探针" "curl /api/health" --agent machina     # 某个体私有
 exm memory stats                                                  # 群体/个体统计 + 个体可靠性
 exm memory decay && exm memory reindex                            # 衰减整理 + 重建索引
+exm memory versions <id>                                          # 版本史（变更类型/时间/该版正文）
+exm memory rollback <id> --to 2                                    # 回滚=以旧内容写新版本（版本号继续 +1）
+exm memory restore <id>                                            # 撤销遗忘（恢复同样 +1）
+exm skill versions <id> && exm skill rollback <id> --to 2          # 技能走同构版本链
 ```
+
+遗忘不是硬删：forget 版本 +1 并追加 `forgotten` 行，历史可读、可 `restore`；更新/回滚/恢复都
+只追加新版本，格式错误或越界的更新不改变旧版本。面板 `/memory versions|rollback|restore`、
+`/skills versions|rollback` 与 CLI 共用同一函数。
+
+## 学习候选（学到的经验先过人工闸）
+
+```bash
+exm learn list --status pending                    # 候选清单：证据/置信度/转正落点
+exm learn approve <id>                             # 批准 → 转正进既有技能/记忆版本链
+exm learn reject <id> "证据不足"                    # 拒绝并留原因
+```
+
+批准 ≠ 生效：回执带 `promotion{ok, refId, version, error}`，转正失败时如实报错且不改动旧版本
+（裁决保留，可经版本链人工重写）。候选只有在**真实证据**（本会话文件/测试/工具回执）支持下
+才能进入；模型自述成功与敏感内容默认被拒。
 
 每次任务自动写入：会话摘要、边界决策、A/B 级证据（群体）、受阻教训（归属个体）。
 `memory.md` 是人读的基础记忆视图；`memory.enabled=false` 时切换为**文件记忆模式**——
@@ -372,7 +396,7 @@ exm agent adaptation <identifier>                    # 查看该个体的行为�
 exm agent reset-adaptation <identifier>              # 重置
 ```
 
-人设只影响说话风格、不影响职责，保存在 `agents/personas/<identifier>.md`，下一次派发即生效。
+人设只影响说话风格、不影响职责，保存在 `entities/agents/<identifier>/SOUL.md`，下一次派发即生效。
 行为改进要点由受阻教训提炼而来（版本化、可回退），注入后续派发——**只调优，不创建**。
 
 ## WebUI 控制台
@@ -383,7 +407,7 @@ exm agent reset-adaptation <identifier>              # 重置
 |------|------|
 | 对话 [CHAT] | 主交互面：切换交互目标（组 / 智能体）、实时流式输出、思维链折叠、工具执行卡、任务时间线、图片输入与朗读 |
 | 智能体 [AGENTS] / 智能体组 [GROUPS] | 智能体与组的管理：编成、主智能体、组工作区、默认模型、人设与经验优化 |
-| 智能连结 [NEXUS] | 实验性：把远程网关或本机 CLI 智能体接入编成 |
+| 智能连结 [NEXUS] | 实验性：把远程网关或本机 CLI 智能体接入编成；物理设备连接仍在实验性开发中且默认关闭，见 [设备连接](./docs/设备连接.md) |
 | 任务图 [DAG] / 三账 [LEDGER] | 任务 DAG 可视化 / 任务账·证据账·风险账 |
 | 模型 [MODELS] | 端点与密钥唯一下发处：多档案、Key 池、连通测试、全局默认、能力模型 |
 | 记忆 [MEMORY] / 事件 [EVENTS] | 记忆检索与治理 / 事件溯源与工具审计回放 |

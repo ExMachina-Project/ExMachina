@@ -5,7 +5,11 @@
 > This project is in pre-alpha. Interfaces and data formats may break without notice. Do not use in production.
 > Contracts are defined in [docs/](./docs) (Chinese, source of truth).
 
+<div align="center">
+
 ![EXMACHINA](assets/branding/logo-animated.svg)
+
+</div>
 
 <div align="center">
 
@@ -134,17 +138,20 @@ EXMACHINA gives you two interaction targets, chosen by task weight — both shar
 
 ## WebUI Console
 
-14 panels, 2 theme presets × 5 accents: Chat (target switching, streaming, images, TTS), Agents (roster, persona, adaptation), Groups (roster + default model), Nexus (experimental links), Task Graph (session-labeled DAG), Three Ledgers, Models (providers, key pools, capability models), Memory (deep db or memory.md file mode), Skills, Automations (cron / one-off / queue), Approvals, Channels, Events (timeline + tool audit), Settings (backend-schema driven).
+14 panels, 3 theme presets × 5 accents: Chat (target switching, streaming, images, TTS), Agents (roster, persona, adaptation), Groups (roster + default model), Nexus (experimental links), Task Graph (session-labeled DAG), Three Ledgers, Models (providers, key pools, capability models), Memory (deep db or memory.md file mode), Skills, Automations (cron / one-off / queue), Approvals, Channels, Events (timeline + tool audit), Settings (backend-schema driven).
 
 ## Documentation
 
 | Doc | Content |
 |-----|---------|
-| [docs/Index](./docs/README.md) | Development/design documentation and inclusion policy |
+| [Documentation index](./docs/README.md) | Maintained development and design documentation |
 | [docs/Development setup](./docs/安装指南.md) | Source builds, isolated Docker stack, configuration |
 | [docs/Architecture](./docs/架构与设计.md) | Design principles, core mechanisms |
 | [docs/Protocol](./docs/协议与契约.md) | Entity schemas, REST/WS API, extension points |
-| [PROGRESS](./PROGRESS.md) | Development log |
+| [docs/Security model](./docs/安全模型.md) | Execution identity, approvals, and defense layers |
+| [docs/Plugin guide](./docs/插件开发指南.md) | Plugin protocol and extension points |
+| [docs/Agent model routing](./docs/智能体模型分配.md) | Model routing configuration and API |
+| [docs/Device connectivity](./docs/设备连接.md) | Experimental physical-device permissions and privacy boundaries |
 
 ## Contributing
 

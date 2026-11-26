@@ -13,8 +13,13 @@ const allowed = new Set([
   "docs/元智能体.md",
   "docs/客户端兼容身份.md",
   "docs/智能体模型分配.md",
+  "docs/设备连接.md",
   "docs/command-directory.md",
   "docs/command-entry-matrix.md",
+  "docs/生产环境验证手册.md",
+  "docs/prompts/README.md",
+  "docs/prompts/AGENTS.md",
+  "docs/prompts/AGENTS.en.md",
 ]);
 const args = process.argv.slice(2);
 if (args.some((arg) => !["--staged", "--history"].includes(arg)) || args.length > 1) {

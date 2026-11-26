@@ -110,9 +110,8 @@ cp /path/to/ExMachina/deploy/docker-compose.yml .
 cp -r /path/to/ExMachina/entities .
 # .env 若在旧目录,一并拷贝
 
-# 3. 卷迁移:沿用旧命名卷(项目名不变则卷名不变)
-#    旧项目名 exmachina 的卷:exmachina_exmachina-state / exmachina_exmachina-plugins
-#    新目录项目名不同时,需显式指定或重标卷——最简单:compose 里用外部卷声明
+# 3. 卷迁移:当前仓库根开发栈使用项目名 exmachina-dev
+#    Docker 卷名为 exmachina-dev_exmachina-dev-state / exmachina-dev_exmachina-dev-plugins
 docker volume ls | grep exmachina
 
 # 4. 启动(镜像模式)
@@ -125,10 +124,10 @@ docker compose up -d
 volumes:
   exmachina-state:
     external: true
-    name: exmachina_exmachina-state
+    name: exmachina-dev_exmachina-dev-state
   exmachina-plugins:
     external: true
-    name: exmachina_exmachina-plugins
+    name: exmachina-dev_exmachina-dev-plugins
 ```
 
 ## 与开发仓库隔离

@@ -42,7 +42,7 @@ cargo run -p exm-cli --bin exm --locked -- openapi --out target/openapi.json
 
 1. **Contract first | 契约先行** — Update `docs/` contracts before changing data structures | 改动数据结构前先更新契约文档
 2. **Zero anthropomorphism | 零拟人化** — AI output follows structured statement protocol | AI 的输出遵循结构化陈述协议
-3. **Roster as data | 编制即数据** — Agent definitions live in `agents/`, not hardcoded | 智能体定义放在 `agents/` 目录
+3. **Roster as data | 编制即数据** — Agent definitions live in `entities/`, not hardcoded | 智能体定义放在 `entities/` 目录
 4. **Performance first | 性能优先** — Targets low-power devices; avoid heavy dependencies | 面向低性能设备，避免重量级依赖
 
 ## Directory Structure | 目录结构
@@ -53,9 +53,9 @@ crates/exm-gateway/   # HTTP/WS gateway (REST API + WebUI hosting) | 网关
 crates/exm-cli/       # CLI (exm / exmachina dual entry) | 命令行工具
 webui/                # WebUI (React 19 + antd 6 + Vite)
 desktop/src/          # 独立桌面编程工作区（React + TypeScript + CodeMirror）
-agents/               # Agent roster data (JSON + Markdown prompts) | 智能体编成数据
+entities/             # Agent roster, skills and group data | 智能体、技能与组数据
 docs/                 # Contract docs (single source of truth) | 契约文档
-scripts/              # Install scripts (interactive: prebuilt or source) | 安装脚本（交互式：预编译或源码）
+scripts/              # Build, validation, UI regression and install tools | 构建、验证、UI 回归与安装工具
 ```
 
 ## Submitting a Pull Request | 提交 PR

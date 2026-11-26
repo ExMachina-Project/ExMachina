@@ -54,3 +54,31 @@ CLI 顶层 SHALL 支持 `-p/--print [text]` 与 `--output-format text|json|strea
 
 - **WHEN** 运行 `exm --output-format json`（无 -p）
 - **THEN** 按无该参数的既有行为启动（TUI/panel），不报错
+
+### Requirement: TUI 聊天流视图
+TUI SHALL 提供 `/flows` 斜杠命令：列出外部通道流（通道/显示名/预览/绑定会话/未读数），选中即打开绑定会话，流内可切换会话；流状态与 WebUI/通道侧同源。
+
+#### Scenario: 流列表与切换
+- **WHEN** 用户在 TUI 输入 `/flows`
+- **THEN** 呈现流列表（含绑定与未读信息）；选中某流后进入其绑定会话，与 WebUI 操作同源生效
+
+### Requirement: 审批面板并排
+宽度 ≥120 列的终端 SHALL 以并排布局呈现消息流与审批面板；窄终端 SHALL 回落切换式。两侧操作后状态同步。
+
+#### Scenario: 并排操作同步
+- **WHEN** 用户在并排审批面板批准某单
+- **THEN** 消息流侧同步呈现审批内联结果，无需手动刷新
+
+### Requirement: 长会话渲染性能
+TUI 消息滚动 SHALL 采用渲染窗口策略（视口 ±N 条动态取）；2000 条消息会话的滚动帧渲染 SHALL <100ms（构造大会话实测计时验收）。
+
+#### Scenario: 大会话滚动
+- **WHEN** 打开含 2000 条消息的会话并连续滚动
+- **THEN** 每帧渲染耗时 <100ms，无整段重绘卡顿
+
+### Requirement: 终端能力探测与降级
+TUI 启动时 SHALL 探测终端能力（真彩色/宽字符/剪贴板），不支持时 MUST 降级（色彩档位降级/剪贴板命令回退）并正常工作。
+
+#### Scenario: 受限终端降级
+- **WHEN** 在受限终端（如 TERM=vt100）启动 TUI
+- **THEN** 色彩与剪贴板按降级策略工作，功能不缺失

@@ -83,3 +83,31 @@ The CLI test loads that artifact and asserts every built-in canonical name is
 present, so adding a built-in command without updating the matrix fails
 verification. Dynamic plugin/skill rows are intentionally runtime data and are
 reported by the live directory rather than hard-coded in this document.
+
+## Run-control commands (steer / queue / stop)
+
+The run-control family (`steer`, `queue.add`, `queue.list`, and further queue
+subcommands, `stop`) is registered in the directory with `session` scope, so a
+directory query without a session binding reports them as
+`executable: false` with `missing_scope`. Execution today goes through the
+dedicated adapters per entry, not a generic HTTP command executor:
+
+- **HTTP/REST** — `POST /api/sessions/:id/steer` (202 steering receipt),
+  `POST/GET/DELETE /api/sessions/:id/queue` plus `/:qid` edit/remove and
+  `/:qid/move` (queue CRUD), `POST /api/sessions/:id/stop`.
+- **CLI** — `exm steer <sessionId> <instruction>` (canonical
+  `admit_steering` path; idle sessions fall back to a normal chat round),
+  `exm queue add/list/edit/remove/move/clear`, `exm stop`.
+- **TUI panel** — `/steer` (canonical `admit_steering`; idle sessions are
+  reported honestly instead of silently opening a round), `/queue add|list|clear`
+  (`enqueue_scoped` with `source=tui` plus a persisted snapshot event),
+  `/stop`.
+- **Chat channels** — plain text during a run steers (never queues, never
+  cancels); `/queue <instruction>` queues; `/stop` requires channel admin.
+
+Receipts never claim completion: steering answers with
+`status=steering_accepted, interrupted=false`, queueing with
+`status=queued` plus sequence and pending state, and stop with the real
+stopped-tool count. Failure/timeout finales move remaining queued items to
+`pending_recovery`; an explicit stop keeps them `queued`. See
+`docs/协议与契约.md` § 运行中输入语义 for the full cross-entry contract.

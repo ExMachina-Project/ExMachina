@@ -12,10 +12,12 @@ Generated from `CommandRegistry::with_builtins()` and the active Clap command tr
 | `cli.agent` | `exm agent …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.agents` | `exm agents …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.approval` | `exm approval …` | `global` | read | `none` | cli | 目录允许 |
+| `cli.backend` | `exm backend …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.chat` | `exm chat …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.checkpoint` | `exm checkpoint …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.command` | `exm command …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.config` | `exm config …` | `global` | read | `none` | cli | 目录允许 |
+| `cli.context` | `exm context …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.cron` | `exm cron …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.doctor` | `exm doctor …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.gateway` | `exm gateway …` | `global` | read | `none` | cli | 目录允许 |
@@ -24,6 +26,7 @@ Generated from `CommandRegistry::with_builtins()` and the active Clap command tr
 | `cli.help` | `exm help …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.install` | `exm install …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.knowledge` | `exm knowledge …` | `global` | read | `none` | cli | 目录允许 |
+| `cli.learn` | `exm learn …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.mcp` | `exm mcp …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.memory` | `exm memory …` | `global` | read | `none` | cli | 目录允许 |
 | `cli.model` | `exm model …` | `global` | read | `none` | cli | 目录允许 |
@@ -44,6 +47,11 @@ Generated from `CommandRegistry::with_builtins()` and the active Clap command tr
 | `cli.worker` | `exm worker …` | `global` | read | `none` | cli | 目录允许 |
 | `config.show` | `config show` | `project` | read | `none` | cli, tui | 目录允许 |
 | `config.update` | `config update <key> <value>` | `project` | configure | `projectstate` | cli, tui | 目录允许 |
+| `context.detail` | `context detail <key>` | `session` | read | `none` | cli, tui | 目录拒绝（缺少所需作用域） |
+| `context.disable` | `context disable <key>` | `session` | write | `sessionstate` | cli, tui | 目录拒绝（缺少所需作用域） |
+| `context.enable` | `context enable <key>` | `session` | write | `sessionstate` | cli, tui | 目录拒绝（缺少所需作用域） |
+| `context.list` | `context list` | `session` | read | `none` | cli, tui | 目录拒绝（缺少所需作用域） |
+| `context.refresh` | `context refresh <key>` | `session` | read | `none` | cli, tui | 目录拒绝（缺少所需作用域） |
 | `cron.list` | `cron list` | `project` | read | `none` | cli, tui | 目录允许 |
 | `goal.block` | `goal block <note>` | `session` | write | `sessionstate` | cli, tui | 目录拒绝（缺少所需作用域） |
 | `goal.clear` | `goal clear` | `session` | write | `sessionstate` | cli, tui | 目录拒绝（缺少所需作用域） |
