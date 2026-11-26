@@ -1,4 +1,4 @@
-//! api/plugins.ts —— 插件域：插件清单、启停、凭据、市场索引与安装更新（codebase-refactor 7.1 拆分）。纯搬移。
+//! Plugin listing, lifecycle, credentials, and catalog APIs.
 
 import { req } from "./core";
 import type { PluginCredentials, PluginDetail, PluginIndexEntry, PluginSummary } from "./core";

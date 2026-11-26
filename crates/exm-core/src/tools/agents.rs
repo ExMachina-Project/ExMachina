@@ -1,9 +1,9 @@
-//! tools/agents.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Agent-management tools scoped to the active group and caller.
 
 use super::*;
 
 impl ToolGateway {
-    /// 智能体管理（docs/09）：仅激活组的主智能体可用；内置组默认编成受保护，
+    /// 智能体管理：仅激活组的主智能体可用；内置组默认编成受保护，
     /// 组开启「自我优化」（group-self-optimize）后主智能体可自行增删改子个体。
     /// 审计由 execute() 统一落库。
     pub(crate) fn tool_agent_manage(&self, args: &serde_json::Value) -> ToolResult {

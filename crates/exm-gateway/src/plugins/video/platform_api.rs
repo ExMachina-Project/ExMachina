@@ -1,5 +1,4 @@
-//! video 域分文件（自 mod.rs 按域拆出，纯搬移零行为变更）。
-//! 平台域：B 站 API（含扫码登录）/ YouTube API / 连通探针 / 通用小工具。
+//! Bilibili and YouTube APIs, login, and connectivity probes.
 
 use super::*;
 

@@ -1,4 +1,4 @@
-//! api/groups.ts —— 编成域：组/个体/独立智能体、人格、提示词、模板、目标与工作目录（codebase-refactor 7.1 拆分）。纯搬移。
+//! Agent groups, agents, personas, prompts, templates, and workspace APIs.
 
 import type { RequestJson } from "./core";
 import type { AgentDefinition, GroupCapabilities, GroupMeta, GroupOverview, PersonaInfo, TemplateInfo, ModelRouting } from "./core";

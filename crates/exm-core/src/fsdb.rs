@@ -1,8 +1,5 @@
-//! 纯 Rust 嵌入式文档存储（FsDb）—— 零 C 依赖、零外部服务
-//!
-//! 为什么不用 SQLite：本构建环境无 MSVC / mingw（无任何 C 编译器），
-//! `rusqlite --features bundled` 无法编译。存储层本就位于 repository 接口之后，
-//! 因此以纯 Rust 实现替代，语义等价、可随时换回 SQLite/redb（见 docs/架构与设计.md）。
+//! Filesystem-backed JSON/JSONL store used by the current Core `Store` implementation.
+//! `SqliteStore` remains a separate implementation; Core does not select it.
 //!
 //! 设计：
 //!   - 单条文档：`{root}/{collection}/{id}.json`，原子写（临时文件 + rename）

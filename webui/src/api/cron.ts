@@ -1,4 +1,4 @@
-//! api/cron.ts —— 定时任务域：cron/at/queue 任务 CRUD 与执行记录（codebase-refactor 7.1 拆分）。纯搬移。
+//! Scheduled-job CRUD and execution history APIs.
 
 import { req } from "./core";
 import type { CronJob, CronRun } from "./core";

@@ -1,7 +1,6 @@
 //! provider 域分文件（自 provider.rs 按职责拆出，纯搬移零行为变更）。
 //! 模型思考强度（reasoning effort）：进程级全局、请求级优先、token 上限。
 
-
 /// 进程级思考强度（None = 端点默认）：网关经 /api/llm/effort 设置后对全部 LLM 调用生效
 /// （指挥体规划、直答、子个体执行、工具回路共用）；请求级 `ChatRequest.reasoning` 显式值优先。
 static REASONING_EFFORT: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
@@ -44,4 +43,3 @@ pub fn set_reasoning_token_cap(v: Option<u32>) {
 pub fn reasoning_token_cap() -> Option<u32> {
     *REASONING_TOKEN_CAP.read()
 }
-

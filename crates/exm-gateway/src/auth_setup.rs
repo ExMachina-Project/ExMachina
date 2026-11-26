@@ -1,4 +1,4 @@
-//! gateway/auth_setup —— 自 lib.rs 按资源域拆出（纯搬移，零行为变更）
+//! First-run authentication setup endpoints.
 
 use super::*;
 

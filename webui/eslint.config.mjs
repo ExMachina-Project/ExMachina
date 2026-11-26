@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 import hooks from "eslint-plugin-react-hooks";
 
 // 仅静态检查 Hooks 规则（顺序/条件调用），不做风格检查——
-// 目的：拦「早退 return 之后再声明 hooks」这类白屏级缺陷（FlowRailSection 先例）。
+// 目的：拦截条件 Hooks 调用，避免组件状态顺序在运行时改变。
 export default tseslint.config(
   { ignores: ["dist", "node_modules", "public"] },
   js.configs.recommended,

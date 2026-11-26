@@ -1,4 +1,4 @@
-// channels 域文件：平台目录（表单字段/凭证判定/默认值，接新平台加一条即可；自 ChannelsView.tsx 拆出）。
+// Platform catalog for channel form fields, credential rules, and defaults.
 import type { TKey } from "../../i18n/core";
 
 /** 平台目录：表单字段、凭证判定、回复形态全部由目录驱动 —— 接新平台加一条即可 */
@@ -287,4 +287,3 @@ export function platformDefaults(kind: string): Record<string, unknown> {
   }
   return cfg;
 }
-

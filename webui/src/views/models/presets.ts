@@ -1,4 +1,4 @@
-// models 域文件：预设与 Key 池表单类型（自 ModelsView.tsx 拆出）。
+// Form types for provider presets and API-key pools.
 import type { TKey } from "../../i18n/core";
 
 export interface Preset {

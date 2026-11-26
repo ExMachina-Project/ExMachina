@@ -1,4 +1,4 @@
-//! api/limits.ts —— 用量治理域（7.1 拆分）：限流快照、消毒命中统计。纯搬移。
+//! Usage-limit and sanitization statistics APIs.
 
 import { req } from "./core";
 
@@ -25,4 +25,3 @@ export interface SanitizeStats {
 export function sanitizeStats(): Promise<SanitizeStats> {
   return req(`/config/sanitize-stats`);
 }
-

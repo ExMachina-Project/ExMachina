@@ -111,7 +111,7 @@ impl ToolGateway {
                 )
                 .await;
         }
-        // 审批闸门（docs/10）：risky 拦高危命令，always 全拦；白名单前缀放行。
+        // risky blocks high-risk commands; always blocks all commands. Allowlist prefixes pass.
         // 拦截后运行时原地等待人工决定（security.approvalWaitSecs）：
         // 批准 → 系统代执行，输出直接回灌本工具结果，模型继续干活；拒绝/超时 → 受阻回流。
         let mode = self.security.exec_approval.as_str();

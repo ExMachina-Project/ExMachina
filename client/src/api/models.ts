@@ -1,4 +1,4 @@
-//! api/models.ts —— 模型域：LLM 档案、全局槽位、供应商模型列举、能力矩阵（codebase-refactor 7.1 拆分）。纯搬移。
+//! Model profiles, provider catalogs, and capability APIs.
 
 import type { RequestJson } from "./core";
 import type { ClientIdentity, ClientIdentityPreview, LlmCapabilities, LlmProfilesInfo, ProfileModel } from "./core";

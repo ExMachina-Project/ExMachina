@@ -1,4 +1,4 @@
-//! gateway/platform/groups —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
+//! HTTP endpoints for group-scoped platform operations.
 
 use super::*;
 /// 组总览（组是交互对象）：编成 / 链路 / 会话 / 记忆 / 成员可靠性 一块仪表数据

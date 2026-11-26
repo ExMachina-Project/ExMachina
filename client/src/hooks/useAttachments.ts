@@ -1,5 +1,4 @@
-//! hooks/useAttachments.ts —— 附件输入（codebase-refactor 7.2 拆分）：
-//! 会话内图片压缩（Canvas ≤1280px / JPEG 82%）、删除、清空。
+//! Image attachment selection, compression, previews, and cleanup.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SetStateAction } from "react";

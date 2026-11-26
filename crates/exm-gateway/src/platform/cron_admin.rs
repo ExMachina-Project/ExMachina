@@ -1,4 +1,4 @@
-//! gateway/platform/cron_admin —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
+//! HTTP endpoints for scheduled-job administration.
 
 // ---------------------------------------------------------------- 定时任务与调度器
 

@@ -1,7 +1,7 @@
-//! core/approvals.rs —— Core 审批域（codebase-refactor 拆分）：审批单清单/查询/
+//! Core approval operations: request management, execution decisions,
 //! 决定执行（decide 含会话内授权档）、会话级命令前缀授权（「本会话允许」）、
 //! WebUI git 破坏性操作审批单、计划模式裁决（set_plan_mode/plan_list/
-//! plan_reject/plan_approve）。纯搬移：方法签名与实现零改动。
+//! plan_reject/plan_approve）。
 
 use super::super::Core;
 use crate::types::*;

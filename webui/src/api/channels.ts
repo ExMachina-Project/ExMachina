@@ -1,4 +1,4 @@
-//! api/channels.ts —— 通道域：通道配置、状态、流、B 站/QQ 官方配对（codebase-refactor 7.1 拆分）。纯搬移。
+//! Channel configuration, status, flows, and platform pairing APIs.
 
 import { req } from "./core";
 import type { Channel, ChannelFlow, ChannelStatus } from "./core";

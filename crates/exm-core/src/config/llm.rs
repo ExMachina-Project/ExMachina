@@ -42,7 +42,7 @@ pub struct LlmProfile {
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
-    /// 该提供商的多把 API Key：按发起方粘性负载均衡，仅限额时切换（docs/11 §1）
+    /// Multiple API keys: keep a sticky key per caller and rotate only on quota failures.
     #[serde(default)]
     pub api_keys: Vec<String>,
     /// API 协议：openai（默认）| responses | anthropic | azure | gemini。

@@ -1,4 +1,4 @@
-//! 事件触发器 —— 文件监听（7.1）与通用事件 webhook（7.2）（docs/10，design D6）
+//! File-watch and generic webhook event triggers.
 //!
 //! 边界：本层只做「事件采集 → 去抖/过滤 → 映射」，注入会话复用 Core 的事件通路
 //! （`run_event_prompt`：组切换 + 会话复用 + prompt 注入），不新建执行模型。

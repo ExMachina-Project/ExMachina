@@ -1,4 +1,4 @@
-//! api/config.ts —— 配置域：网关配置读写与 schema（codebase-refactor 7.1 拆分）。纯搬移。
+//! Gateway configuration and schema APIs.
 
 import type { RequestJson } from "./core";
 import type { ConfigSchema, GatewayConfig } from "./core";

@@ -1,4 +1,4 @@
-//! tools/result.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Shared result types returned by tools.
 
 pub struct ToolResult {
     pub ok: bool,

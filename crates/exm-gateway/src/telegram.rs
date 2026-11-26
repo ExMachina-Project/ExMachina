@@ -1,4 +1,4 @@
-//! Telegram 平台适配器（docs/11）：长轮询收消息 → 绑定组内执行 → sendMessage 回复。
+//! Telegram adapter: poll for messages, execute in the bound group, and send replies.
 //! 每个启用的 telegram 通道 = 一个账号 = 一个独立轮询任务；账号绑定组后消息在该组上下文执行。
 //! 监督循环每 5 秒对账：新增账号拉起轮询，删除/停用/token 变更的账号回收任务。
 

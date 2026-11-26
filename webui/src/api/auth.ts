@@ -1,4 +1,4 @@
-//! api/auth.ts —— 系统域：鉴权、健康、自检、审计、版本与更新（codebase-refactor 7.1 拆分）。纯搬移。
+//! Authentication, health, audit, version, and update APIs.
 
 import { req } from "./core";
 export const apiAuth = {

@@ -1,4 +1,4 @@
-//! gateway/platform/channels —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
+//! Channel configuration, routing, and shared state.
 
 // ---------------------------------------------------------------- 通道网关（webhook 通道）
 

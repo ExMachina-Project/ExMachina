@@ -1,4 +1,4 @@
-//! gateway/agents_admin —— 自 lib.rs 按资源域拆出（纯搬移，零行为变更）
+//! HTTP endpoints for agent roster management.
 
 use super::*;
 

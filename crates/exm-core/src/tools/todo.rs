@@ -1,4 +1,4 @@
-//! tools/todo.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Session task-list tools and update events.
 
 use super::*;
 

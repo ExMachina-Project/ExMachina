@@ -1,4 +1,4 @@
-//! video 域分文件（自 mod.rs 按域拆出，纯搬移零行为变更）。
+//! Persistent state for video watch sessions.
 //! 观看域：单轮 tick / 智能体调用 / 提示组装 / 文本清洗 / 候选获取。
 
 use super::*;

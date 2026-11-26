@@ -1,4 +1,4 @@
-// models 域文件：模型选择器（自 ModelsView.tsx 拆出）。
+// Model profile and capability selector.
 import React, { useState } from "react";
 import { Button, Input, Space } from "antd";
 import { useT } from "../../i18n/core";

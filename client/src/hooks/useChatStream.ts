@@ -1,6 +1,4 @@
-//! hooks/useChatStream.ts —— 聊天流跟随（codebase-refactor 7.2 拆分）：
-//! 贴底跟随（流式增量不抢滚动条）、新消息强制跟随、审批卡抢视、
-//! token 用量刷新。
+//! Streaming scroll behavior and post-response token usage refresh.
 
 import { useEffect, useRef, useState } from "react";
 import { useClientServices } from "../services";

@@ -1,4 +1,4 @@
-//! tools/sandbox.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Process sandbox configuration and execution boundaries.
 
 use super::managed_process::{capture_prefix, JobEnd, ManagedProcess, Stream};
 use super::*;

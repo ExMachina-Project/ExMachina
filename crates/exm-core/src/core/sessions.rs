@@ -360,8 +360,7 @@ impl Core {
         }) {
             Ok(input) => input,
             Err(crate::round_trace::SteeringAdmissionError::NotRunning)
-            | Err(crate::round_trace::SteeringAdmissionError::Closed)
-             => {
+            | Err(crate::round_trace::SteeringAdmissionError::Closed) => {
                 return Ok(crate::SteeringAdmission::Idle);
             }
             Err(crate::round_trace::SteeringAdmissionError::QueueFull) => {

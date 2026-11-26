@@ -1,4 +1,4 @@
-//! api/approvals.ts —— 审批域：审批单清单与裁决（codebase-refactor 7.1 拆分）。纯搬移。
+//! Approval-request listing and decision APIs.
 
 import type { RequestJson } from "./core";
 import type { ApprovalRequest } from "./core";

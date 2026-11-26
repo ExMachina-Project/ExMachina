@@ -1,4 +1,4 @@
-//! tools/browser.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Browser automation tools backed by the optional headless browser service.
 
 use super::*;
 

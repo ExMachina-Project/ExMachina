@@ -1,4 +1,4 @@
-//! tools/approval.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Approval flows for command, terminal, and computer actions.
 
 use super::*;
 

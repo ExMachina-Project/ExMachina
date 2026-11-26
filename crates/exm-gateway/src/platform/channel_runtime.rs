@@ -1,4 +1,4 @@
-//! gateway/platform/channel_runtime —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
+//! Shared channel runtime and message delivery.
 
 use super::*;
 

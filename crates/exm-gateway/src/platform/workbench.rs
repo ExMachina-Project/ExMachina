@@ -1,4 +1,4 @@
-//! gateway/platform/workbench —— 自 platform.rs 按资源域拆出（纯搬移，零行为变更）
+//! HTTP endpoints for the project workbench.
 
 use super::*;
 #[derive(Deserialize)]

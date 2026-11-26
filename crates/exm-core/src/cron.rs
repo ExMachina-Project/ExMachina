@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn 时区匹配_上海八点即utc零点() {
         let utc_0 = at(2026, 11, 12, 0, 0); // 北京时间 08:00
-        // UTC 语义下不命中（8 点才命中）
+                                            // UTC 语义下不命中（8 点才命中）
         assert!(!cron_matches("0 8 * * *", utc_0));
         // Shanghai 语义下命中
         assert!(cron_matches_in("0 8 * * *", utc_0, "Asia/Shanghai"));
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn 下次执行_时区变体() {
         let from = at(2026, 10, 7, 10, 30); // UTC = 上海 18:30
-        // 每日上海 8:00 的任务：下一次 = UTC 次日 0:00
+                                            // 每日上海 8:00 的任务：下一次 = UTC 次日 0:00
         let next = next_run_in("0 8 * * *", from, "Asia/Shanghai", 527_040).unwrap();
         assert_eq!(next, at(2026, 10, 8, 0, 0));
         // 空 = 既有 UTC 语义（每日 8:00 UTC = 次日 UTC 8:00）

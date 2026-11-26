@@ -1,4 +1,4 @@
-//! provider 域分文件（自 provider.rs 按职责拆出，纯搬移零行为变更）。
+//! Resolves configured model profiles to provider and model pairs.
 
 use super::*;
 // ---------------------------------------------------------------- 模型档案运行池

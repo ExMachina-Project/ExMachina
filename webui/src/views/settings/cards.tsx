@@ -1,4 +1,4 @@
-// settings 域文件：统计与偏好卡片（消毒/限额/通知/版本；自 SettingsView.tsx 拆出）。
+// Settings cards for sanitization, limits, notifications, and version status.
 import React, { useEffect, useState } from "react";
 import { Alert, Button, Card, InputNumber, Select, Switch, Tag, message } from "antd";
 import { CloudDownloadOutlined } from "@ant-design/icons";

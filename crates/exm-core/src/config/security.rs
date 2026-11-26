@@ -3,7 +3,7 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
-/// 安全配置：终端命令审批闸门（docs/10）
+/// Security settings, including the terminal-command approval gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityConfig {

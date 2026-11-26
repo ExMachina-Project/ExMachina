@@ -1,4 +1,4 @@
-//! api/identity.ts —— 通道身份域（7.1 拆分）：绑定清单、配对码签发/撤销、角色调整。纯搬移。
+//! Channel identity bindings, pairing codes, and role-management APIs.
 
 import { req } from "./core";
 
@@ -59,4 +59,3 @@ export function identityRevokeCode(code: string): Promise<{ ok: boolean }> {
 export function identityPurgeCodes(): Promise<{ ok: boolean; purged: number }> {
   return req(`/identity/codes/purge`, { method: "POST", body: JSON.stringify({}) });
 }
-

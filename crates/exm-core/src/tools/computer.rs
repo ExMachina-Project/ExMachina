@@ -1,4 +1,4 @@
-//! tools/computer.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Computer-use tools for desktop screenshots and input actions.
 
 use super::*;
 use serde::{Deserialize, Serialize};

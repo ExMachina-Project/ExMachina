@@ -1,4 +1,4 @@
-// settings 域文件：设置 schema 元数据（分区/字段 i18n/枚举覆盖/读取器；自 SettingsView.tsx 拆出）。
+// Settings schema metadata: sections, field labels, enum overrides, and readers.
 import type React from "react";
 import type { GatewayConfig } from "../../api";
 import type { TKey } from "../../i18n/core";

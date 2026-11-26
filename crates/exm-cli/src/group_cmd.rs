@@ -1,4 +1,4 @@
-//! `exm group` / `exm agent` —— 智能体组管理（docs/09）
+//! `exm group` and `exm agent` management commands.
 
 use crate::render::*;
 use exm_core::types::{AgentDefinition, Tier};

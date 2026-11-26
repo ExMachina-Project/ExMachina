@@ -1,4 +1,4 @@
-//! 多厂商模型档案接入层（docs/11）：档案 CRUD / 热切换 / 连通测试。
+//! Model-profile endpoints for CRUD, live switching, and connectivity tests.
 //! 所有档案都是 OpenAI 兼容端点（OpenAI/DeepSeek/通义/Kimi/智谱/Ollama/vLLM…），
 //! 切换档案 = 更新配置并 apply_config 热重建运行时。
 

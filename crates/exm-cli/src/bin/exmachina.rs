@@ -1,4 +1,4 @@
-//! `exmachina` 入口 —— 与 `exm` 同一实现、同一行为（docs/07 §2）
+//! Entry point for the `exmachina` command.
 fn main() {
     if let Err(e) = exm_cli::run() {
         eprintln!("{}", e);

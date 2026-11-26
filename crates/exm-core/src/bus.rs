@@ -1,4 +1,4 @@
-//! 全连结消息总线 —— docs/01 §2.4（集群兼容核心）
+//! In-process message bus abstraction for agent collaboration.
 //! 单体实现 InProcessBus（tokio broadcast）；分布式实现替换本 trait 即可，业务零改动。
 
 use crate::types::Envelope;

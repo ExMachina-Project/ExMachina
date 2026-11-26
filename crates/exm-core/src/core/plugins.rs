@@ -104,5 +104,4 @@ impl Core {
         self.apply_config(cfg)?;
         Ok(true)
     }
-
 }

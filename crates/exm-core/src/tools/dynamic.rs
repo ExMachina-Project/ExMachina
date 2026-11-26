@@ -1,4 +1,4 @@
-//! tools/dynamic.rs —— 自 tools.rs 按领域拆出（纯搬移，零行为变更）
+//! Dynamic tool registration and dispatch.
 
 /// 动态工具输出：文本 + 可选图像（文件路径；视觉模型经 data URL 回灌）。
 /// 既有 (bool, String) 元组语义经 From 兼容升级（images 空）。

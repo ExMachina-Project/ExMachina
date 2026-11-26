@@ -1,4 +1,4 @@
-//! provider 域分文件（自 provider.rs 按职责拆出，纯搬移零行为变更）。
+//! OpenAI-compatible provider implementation and request identity handling.
 
 use super::*;
 pub struct OpenAiCompatibleProvider {
